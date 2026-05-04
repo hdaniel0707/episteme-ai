@@ -1,8 +1,16 @@
 import sqlite3
 import json
+from pathlib import Path
+import pandas as pd
 
 
-def init_db(conn: sqlite3.Connection) -> None:
+def init_db(conn: sqlite3.Connection, delete_if_exsist=False) -> None:
+    if delete_if_exsist:
+        conn.executescript("""
+            DROP TABLE IF EXISTS paper_authors;
+            DROP TABLE IF EXISTS papers;
+            DROP TABLE IF EXISTS authors;
+        """)
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS papers (
             paper_id                    TEXT PRIMARY KEY,
@@ -64,3 +72,26 @@ def save_paper(conn: sqlite3.Connection, paper: dict) -> None:
             "INSERT OR IGNORE INTO paper_authors (paper_id, author_id) VALUES (?, ?)",
             (paper["paperId"], aid),
         )
+
+
+def load_db(path: Path) -> pd.DataFrame:
+    """Load papers + per-paper author count from one SQLite database file."""
+    conn = sqlite3.connect(path)
+    papers = pd.read_sql(
+        """
+        SELECT paper_id, title, abstract, embedding,
+               citation_count, influential_citation_count, year, venue
+        FROM papers
+        """,
+        conn,
+    )
+    author_counts = pd.read_sql(
+        "SELECT paper_id, COUNT(*) AS author_count FROM paper_authors GROUP BY paper_id",
+        conn,
+    )
+    conn.close()
+    df = papers.merge(author_counts, on="paper_id", how="left")
+    df["source_db"] = Path(path).stem
+    df = df[df["embedding"].notna()].reset_index(drop=True)
+    df["embedding"] = df["embedding"].map(json.loads)
+    return df
