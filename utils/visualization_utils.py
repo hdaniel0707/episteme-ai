@@ -20,7 +20,9 @@ def plot_pca_2d_cat(
         if names is None
         else np.asarray(names)
     )
-    labels = np.array(["default"] * n) if labels is None else np.asarray(labels)
+    labels = (
+        np.array(["default"] * n) if labels is None else np.asarray(labels, dtype=str)
+    )
 
     fig = go.Figure()
 
@@ -72,7 +74,7 @@ def plot_pca_2d_cat(
         # Ensures 1 unit on X = 1 unit on Y (important for PCA)
         xaxis=dict(scaleanchor="y", scaleratio=1),
         margin=dict(l=40, r=20, t=40, b=40),
-        legend_title_text="Researchers",
+        legend_title_text="Groups",
         hovermode="closest",
     )
 
@@ -100,7 +102,9 @@ def plot_pca_3d_cat(
         if names is None
         else np.asarray(names)
     )
-    labels = np.array(["default"] * n) if labels is None else np.asarray(labels)
+    labels = (
+        np.array(["default"] * n) if labels is None else np.asarray(labels, dtype=str)
+    )
 
     fig = go.Figure()
 
@@ -161,8 +165,182 @@ def plot_pca_3d_cat(
             aspectmode="data",
         ),
         margin=dict(l=0, r=0, b=0, t=40),  # 3D plots benefit from more space
-        legend_title_text="Subfolders",
+        legend_title_text="Groups",
         hovermode="closest",
+    )
+
+    if save_path:
+        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+        fig.write_html(save_path)
+        print(f"Interactive plot saved to {save_path}")
+
+    fig.show()
+
+
+def plot_citation_year_correlation(
+    years: np.ndarray | list,
+    citations: np.ndarray | list,
+    names: np.ndarray | list | None = None,
+    title: str = "Citation Count vs Year",
+    log1p_text: bool = False,
+    save_path: Path | None = None,
+):
+    years = np.asarray(years)
+    citations = np.asarray(citations)
+    n = len(years)
+
+    names_arr = (
+        np.array([f"point {i}" for i in range(n)])
+        if names is None
+        else np.asarray(names)
+    )
+
+    # per-year stats for the trend line
+    unique_years = np.unique(years)
+    median_citations = np.array(
+        [np.median(citations[years == y]) for y in unique_years]
+    )
+
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Scatter(
+            x=years.tolist(),
+            y=citations.tolist(),
+            mode="markers",
+            name="Articles",
+            text=names_arr.tolist(),
+            marker=dict(size=6, opacity=0.5, color="steelblue"),
+            hovertemplate=(
+                "Title: %{text}<br>"
+                "Year: %{x}<br>"
+                "Citations: %{y}<br>"
+                "<extra></extra>"
+            ),
+        )
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=unique_years.tolist(),
+            y=median_citations.tolist(),
+            mode="lines+markers",
+            name="Median per year",
+            line=dict(color="firebrick", width=2),
+            marker=dict(size=7),
+            hovertemplate="Year: %{x}<br>Median citations: %{y:.1f}<extra></extra>",
+        )
+    )
+
+    fig.update_layout(
+        title=title,
+        xaxis_title="Year",
+        yaxis_title="log1p(Citation Count)" if log1p_text else "Citation Count",
+        margin=dict(l=40, r=20, t=40, b=40),
+        hovermode="closest",
+    )
+
+    if save_path:
+        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+        fig.write_html(save_path)
+        print(f"Interactive plot saved to {save_path}")
+
+    fig.show()
+
+
+def plot_hindex_citation_correlation(
+    h_indices: np.ndarray | list,
+    citations: np.ndarray | list,
+    names: np.ndarray | list | None = None,
+    title: str = "Citation Count vs Best Author H-Index",
+    log1p_text: bool = False,
+    save_path: Path | None = None,
+):
+    h_indices = np.asarray(h_indices, dtype=float)
+    citations = np.asarray(citations, dtype=float)
+
+    valid = ~(np.isnan(h_indices) | np.isnan(citations))
+    h_valid = h_indices[valid]
+    c_valid = citations[valid]
+    names_arr = (
+        np.array([f"point {i}" for i in range(len(h_indices))])
+        if names is None
+        else np.asarray(names)
+    )
+    names_valid = names_arr[valid]
+
+    unique_h = np.unique(h_valid)
+    median_citations = np.array([np.median(c_valid[h_valid == h]) for h in unique_h])
+
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Scatter(
+            x=h_valid.tolist(),
+            y=c_valid.tolist(),
+            mode="markers",
+            name="Articles",
+            text=names_valid.tolist(),
+            marker=dict(size=6, opacity=0.5, color="steelblue"),
+            hovertemplate=(
+                "Title: %{text}<br>"
+                "Best Author H-Index: %{x}<br>"
+                "Citations: %{y}<br>"
+                "<extra></extra>"
+            ),
+        )
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=unique_h.tolist(),
+            y=median_citations.tolist(),
+            mode="lines+markers",
+            name="Median per h-index",
+            line=dict(color="firebrick", width=2),
+            marker=dict(size=7),
+            hovertemplate="H-Index: %{x}<br>Median citations: %{y:.1f}<extra></extra>",
+        )
+    )
+
+    fig.update_layout(
+        title=title,
+        xaxis_title="Best Author H-Index",
+        yaxis_title="log1p(Citation Count)" if log1p_text else "Citation Count",
+        margin=dict(l=40, r=20, t=40, b=40),
+        hovermode="closest",
+    )
+
+    if save_path:
+        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+        fig.write_html(save_path)
+        print(f"Interactive plot saved to {save_path}")
+
+    fig.show()
+
+
+def plot_year_histogram(
+    years: np.ndarray | list,
+    title: str = "Articles by Year",
+    save_path: Path | None = None,
+):
+    years = np.asarray(years)
+    unique, counts = np.unique(years, return_counts=True)
+
+    fig = go.Figure(
+        go.Bar(
+            x=unique.tolist(),
+            y=counts.tolist(),
+            hovertemplate="Year: %{x}<br>Count: %{y}<extra></extra>",
+        )
+    )
+
+    fig.update_layout(
+        title=title,
+        xaxis_title="Year",
+        yaxis_title="Number of Articles",
+        xaxis=dict(type="category"),
+        margin=dict(l=40, r=20, t=40, b=40),
     )
 
     if save_path:

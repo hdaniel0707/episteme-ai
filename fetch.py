@@ -23,13 +23,15 @@ doublecheck_pkgs(pyproject_path="pyproject.toml", verbose=True)  # check package
 
 PAPER_FIELDS = (
     "paperId,title,abstract,embedding,"
-    "authors,citationCount,influentialCitationCount,year,venue"
+    "authors.authorId,authors.name,authors.hIndex,"
+    "authors.citationCount,authors.paperCount,authors.affiliations,"
+    "citationCount,influentialCitationCount,year,venue"
 )
 
 BASE_DIR = Path(__file__).parent
 DB_DIR = BASE_DIR / "data"
-DB_PATH = DB_DIR / "sql" / "0504_B.db"
-QUERY = "curriculum learning"
+DB_PATH = DB_DIR / "sql" / "0505_A.db"
+QUERY = "reinforcement learning"
 
 
 def fetch(
