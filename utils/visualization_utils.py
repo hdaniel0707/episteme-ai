@@ -1,7 +1,10 @@
 from pathlib import Path
 
 import numpy as np
+from scipy import stats
 import plotly.graph_objects as go
+import matplotlib.pyplot as plt
+from sklearn.metrics import mean_squared_error, r2_score
 
 
 def plot_pca_2d_cat(
@@ -349,3 +352,233 @@ def plot_year_histogram(
         print(f"Interactive plot saved to {save_path}")
 
     fig.show()
+
+
+########################################################################
+# TRAIN
+########################################################################
+
+
+def plot_loss_curves(train_losses, val_losses, out: Path) -> None:
+    iters = np.arange(1, len(train_losses) + 1)
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.plot(iters, train_losses, label="Train MSE")
+    ax.plot(iters, val_losses, label="Val MSE")
+    ax.set_xlabel("Boosting iteration")
+    ax.set_ylabel("MSE  (log1p scale)")
+    ax.set_title("Training & Validation Loss")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"Saved {out}")
+
+
+def plot_loss_curves_ci(
+    all_train_losses: list[list[float]],
+    all_val_losses: list[list[float]],
+    out: Path,
+    ci: float = 0.95,
+) -> None:
+    from scipy import stats
+
+    train = np.array(all_train_losses)
+    val = np.array(all_val_losses)
+    n = train.shape[0]
+    iters = np.arange(1, train.shape[1] + 1)
+
+    t_crit = stats.t.ppf((1 + ci) / 2, df=n - 1)
+
+    def ci_bounds(arr):
+        mean = arr.mean(axis=0)
+        se = arr.std(axis=0, ddof=1) / np.sqrt(n)
+        return mean, mean - t_crit * se, mean + t_crit * se
+
+    tr_mean, tr_lo, tr_hi = ci_bounds(train)
+    vl_mean, vl_lo, vl_hi = ci_bounds(val)
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.plot(iters, tr_mean, color="steelblue", label="Train MSE (mean)")
+    ax.fill_between(
+        iters,
+        tr_lo,
+        tr_hi,
+        alpha=0.25,
+        color="steelblue",
+        label=f"Train {int(ci*100)}% CI",
+    )
+    ax.plot(iters, vl_mean, color="tomato", label="Val MSE (mean)")
+    ax.fill_between(
+        iters, vl_lo, vl_hi, alpha=0.25, color="tomato", label=f"Val {int(ci*100)}% CI"
+    )
+    ax.set_xlabel("Boosting iteration")
+    ax.set_ylabel("MSE  (log1p scale)")
+    ax.set_title(f"Training & Validation Loss  (n={n} seeds, {int(ci*100)}% CI)")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"Saved {out}")
+
+
+def plot_actual_vs_predicted(y_true, y_pred, split: str, out: Path) -> None:
+    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+    r2 = r2_score(y_true, y_pred)
+    lo = min(y_true.min(), y_pred.min())
+    hi = max(y_true.max(), y_pred.max())
+
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.scatter(y_true, y_pred, alpha=0.6, edgecolors="k", linewidths=0.4)
+    ax.plot([lo, hi], [lo, hi], "r--", lw=1.5, label="Perfect fit")
+    ax.set_xlabel("Actual  log1p(citations)")
+    ax.set_ylabel("Predicted  log1p(citations)")
+    ax.set_title(f"{split}  RMSE={rmse:.3f}  R²={r2:.3f}")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"Saved {out}")
+
+
+def plot_feature_importances(
+    importances: np.ndarray, labels: list[str], top_k: int, out: Path
+) -> None:
+    top_k = min(top_k, len(importances))
+    top_idx = np.argsort(importances)[-top_k:][::-1]
+    top_labels = [labels[i] for i in top_idx]
+    top_values = importances[top_idx]
+
+    groups = [lbl.split("[")[0] for lbl in top_labels]
+    unique_groups = list(dict.fromkeys(groups))
+    palette = ["steelblue", "tomato", "seagreen", "mediumpurple", "darkorange"]
+    group_color = {g: palette[i % len(palette)] for i, g in enumerate(unique_groups)}
+    colors = [group_color[g] for g in groups]
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.bar(range(top_k), top_values, color=colors)
+    ax.set_xticks(range(top_k))
+    ax.set_xticklabels(top_labels, rotation=45, ha="right", fontsize=8)
+    ax.set_ylabel("Feature importance")
+    ax.set_title(f"Top {top_k} features by importance")
+    from matplotlib.patches import Patch
+
+    ax.legend(handles=[Patch(color=group_color[g], label=g) for g in unique_groups])
+    fig.tight_layout()
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"Saved {out}")
+
+
+#############################################################
+# COMPARE
+#############################################################
+
+METRICS = ["test_rmse", "test_r2", "val_rmse", "val_r2"]
+METRIC_LABELS = {
+    "test_rmse": "Test RMSE",
+    "test_r2": "Test R²",
+    "val_rmse": "Val RMSE",
+    "val_r2": "Val R²",
+}
+
+
+def plot_test_metrics_ci(
+    comparison: dict, out_dir: Path, labels: list[str] | None = None
+) -> None:
+    run_ids = comparison["run_ids"]
+    display_labels = labels if labels is not None else run_ids
+    ci = comparison["ci"]
+    colors = plt.cm.tab10.colors  # type: ignore[attr-defined]
+
+    fig, axes = plt.subplots(2, 2, figsize=(11, 8))
+    axes_flat = axes.flatten()
+
+    for ax, metric in zip(axes_flat, METRICS):
+        means, lo_errs, hi_errs = [], [], []
+        for run_id in run_ids:
+            s = comparison["runs"][run_id].get(metric, {})
+            mean = s.get("mean", 0.0)
+            means.append(mean)
+            lo_errs.append(mean - s.get("ci_low", mean))
+            hi_errs.append(s.get("ci_high", mean) - mean)
+
+        x = np.arange(len(run_ids))
+        bar_colors = [colors[i % len(colors)] for i in range(len(run_ids))]
+        bars = ax.bar(
+            x,
+            means,
+            color=bar_colors,
+            alpha=0.75,
+            yerr=[lo_errs, hi_errs],
+            capsize=6,
+            ecolor="black",
+            error_kw={"lw": 1.5},
+        )
+        ax.set_xticks(x)
+        ax.set_xticklabels(display_labels, rotation=15, ha="right", fontsize=9)
+        ax.set_title(METRIC_LABELS[metric])
+        ax.set_ylabel(METRIC_LABELS[metric])
+
+        for bar, mean in zip(bars, means):
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + max(lo_errs) * 0.05,
+                f"{mean:.4f}",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+            )
+
+    fig.suptitle(f"Test & Val Metrics Comparison  ({int(ci * 100)}% CI)", fontsize=13)
+    fig.tight_layout()
+    out = out_dir / "test_metrics_ci.png"
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"Saved {out}")
+
+
+def plot_loss_curves_comparison(
+    run_ids: list[str],
+    runs_data: dict[str, list[dict]],
+    out_dir: Path,
+    ci: float,
+    labels: list[str] | None = None,
+) -> None:
+    display_labels = labels if labels is not None else run_ids
+    colors = plt.cm.tab10.colors  # type: ignore[attr-defined]
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    for i, run_id in enumerate(run_ids):
+        runs = runs_data[run_id]
+        color = colors[i % len(colors)]
+        label = display_labels[i]
+
+        all_train = np.array([r["train_losses"] for r in runs if "train_losses" in r])
+        all_val = np.array([r["val_losses"] for r in runs if "val_losses" in r])
+        if all_train.size == 0 or all_val.size == 0:
+            print(f"  Skipping loss curves for '{run_id}': no loss data")
+            continue
+
+        n = all_train.shape[0]
+        iters = np.arange(1, all_train.shape[1] + 1)
+        t_crit = stats.t.ppf((1 + ci) / 2, df=max(n - 1, 1))
+
+        for ax, arr, split in zip(axes, [all_train, all_val], ["Train", "Val"]):
+            mean = arr.mean(axis=0)
+            se = arr.std(axis=0, ddof=1) / np.sqrt(n)
+            lo, hi = mean - t_crit * se, mean + t_crit * se
+            ax.plot(iters, mean, color=color, label=label)
+            ax.fill_between(iters, lo, hi, alpha=0.2, color=color)
+
+    for ax, split in zip(axes, ["Train", "Val"]):
+        ax.set_title(f"{split} Loss  ({int(ci * 100)}% CI)")
+        ax.set_xlabel("Boosting iteration")
+        ax.set_ylabel("MSE  (log1p scale)")
+        ax.legend()
+
+    fig.suptitle("Train & Validation Loss Comparison", fontsize=13)
+    fig.tight_layout()
+    out = out_dir / "loss_curves_comparison_ci.png"
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"Saved {out}")

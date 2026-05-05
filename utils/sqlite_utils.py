@@ -143,6 +143,8 @@ def load_db(
     df = papers.merge(author_counts, on="paper_id", how="left")
     df = df.merge(best_h_index, on="paper_id", how="left")
     df["source_db"] = Path(path).stem
-    df = df[df["embedding"].notna()].reset_index(drop=True)
+    df = df[
+        df["embedding"].notna() & df["best_author_h_index"].notna() & df["year"].notna()
+    ].reset_index(drop=True)
     df["embedding"] = df["embedding"].map(json.loads)
     return df

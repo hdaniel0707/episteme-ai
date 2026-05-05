@@ -1,7 +1,9 @@
+import json
 from pathlib import Path
 
+import joblib
 import numpy as np
-import matplotlib.pyplot as plt
+
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import GradientBoostingRegressor
@@ -11,14 +13,17 @@ from utils.parquet_utils import load_parquet
 
 BASE_DIR = Path(__file__).parent
 DB_DIR = BASE_DIR / "data"
-PAQUET_PATH = DB_DIR / "paquet" / "0504_B"
-FIG_DIR = BASE_DIR / "results" / "figs" / "0504_B"
+PAQUET_PATH = DB_DIR / "paquet" / "0505_A"
+RUN_ID = "0505_A4"
+MODELS_DIR = BASE_DIR / "results" / RUN_ID / "models"
+METRICS_DIR = BASE_DIR / "results" / RUN_ID / "metrics"
 
 N_ESTIMATORS = 300
 LEARNING_RATE = 0.05
 MAX_DEPTH = 4
 SUBSAMPLE = 0.8
 SEED = 42
+N_RUNS = 3
 
 
 def build_features(
@@ -40,131 +45,132 @@ def build_features(
     return X, y, labels
 
 
-def plot_loss_curves(train_losses, val_losses, out: Path) -> None:
-    iters = np.arange(1, len(train_losses) + 1)
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.plot(iters, train_losses, label="Train MSE")
-    ax.plot(iters, val_losses, label="Val MSE")
-    ax.set_xlabel("Boosting iteration")
-    ax.set_ylabel("MSE  (log1p scale)")
-    ax.set_title("Training & Validation Loss")
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(out, dpi=150)
-    plt.close(fig)
-    print(f"Saved {out}")
-
-
-def plot_actual_vs_predicted(y_true, y_pred, split: str, out: Path) -> None:
-    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
-    r2 = r2_score(y_true, y_pred)
-    lo = min(y_true.min(), y_pred.min())
-    hi = max(y_true.max(), y_pred.max())
-
-    fig, ax = plt.subplots(figsize=(6, 6))
-    ax.scatter(y_true, y_pred, alpha=0.6, edgecolors="k", linewidths=0.4)
-    ax.plot([lo, hi], [lo, hi], "r--", lw=1.5, label="Perfect fit")
-    ax.set_xlabel("Actual  log1p(citations)")
-    ax.set_ylabel("Predicted  log1p(citations)")
-    ax.set_title(f"{split}  RMSE={rmse:.3f}  R²={r2:.3f}")
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(out, dpi=150)
-    plt.close(fig)
-    print(f"Saved {out}")
-
-
-def plot_feature_importances(
-    importances: np.ndarray, labels: list[str], top_k: int, out: Path
-) -> None:
-    top_k = min(top_k, len(importances))
-    top_idx = np.argsort(importances)[-top_k:][::-1]
-    top_labels = [labels[i] for i in top_idx]
-    top_values = importances[top_idx]
-
-    groups = [lbl.split("[")[0] for lbl in top_labels]
-    unique_groups = list(dict.fromkeys(groups))
-    palette = ["steelblue", "tomato", "seagreen", "mediumpurple", "darkorange"]
-    group_color = {g: palette[i % len(palette)] for i, g in enumerate(unique_groups)}
-    colors = [group_color[g] for g in groups]
-
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.bar(range(top_k), top_values, color=colors)
-    ax.set_xticks(range(top_k))
-    ax.set_xticklabels(top_labels, rotation=45, ha="right", fontsize=8)
-    ax.set_ylabel("Feature importance")
-    ax.set_title(f"Top {top_k} features by importance")
-    from matplotlib.patches import Patch
-
-    ax.legend(handles=[Patch(color=group_color[g], label=g) for g in unique_groups])
-    fig.tight_layout()
-    fig.savefig(out, dpi=150)
-    plt.close(fig)
-    print(f"Saved {out}")
-
-
-if __name__ == "__main__":
-    df = load_parquet(PAQUET_PATH)
-
-    FEATURES = ["embedding"]
-    X, y, feature_labels = build_features(df, FEATURES)
-    print(f"X: {X.shape}  y: {y.shape}")
-
-    # 70 / 15 / 15 split
+def train_run(X, y, seed: int):
     X_train, X_tmp, y_train, y_tmp = train_test_split(
-        X, y, test_size=0.30, random_state=SEED
+        X, y, test_size=0.30, random_state=seed
     )
     X_val, X_test, y_val, y_test = train_test_split(
-        X_tmp, y_tmp, test_size=0.50, random_state=SEED
+        X_tmp, y_tmp, test_size=0.50, random_state=seed
     )
-    print(f"Train {len(X_train)}  Val {len(X_val)}  Test {len(X_test)}")
 
-    # Standardise (fit on train only)
     scaler = StandardScaler()
     X_train = scaler.fit_transform(X_train)
     X_val = scaler.transform(X_val)
     X_test = scaler.transform(X_test)
 
-    # Train
     model = GradientBoostingRegressor(
         n_estimators=N_ESTIMATORS,
         learning_rate=LEARNING_RATE,
         max_depth=MAX_DEPTH,
         subsample=SUBSAMPLE,
-        random_state=SEED,
+        random_state=seed,
     )
     model.fit(X_train, y_train)
 
-    # Loss curves via staged predictions
     train_losses = [
         mean_squared_error(y_train, p) for p in model.staged_predict(X_train)
     ]
     val_losses = [mean_squared_error(y_val, p) for p in model.staged_predict(X_val)]
 
-    # Final metrics
-    for split, X_s, y_s in [("Val", X_val, y_val), ("Test", X_test, y_test)]:
+    metrics = {}
+    for split, X_s, y_s in [
+        ("train", X_train, y_train),
+        ("val", X_val, y_val),
+        ("test", X_test, y_test),
+    ]:
         y_pred = model.predict(X_s)
-        rmse = np.sqrt(mean_squared_error(y_s, y_pred))
-        r2 = r2_score(y_s, y_pred)
-        print(f"{split:4s}  RMSE={rmse:.4f}  R²={r2:.4f}")
+        metrics[f"{split}_rmse"] = np.sqrt(mean_squared_error(y_s, y_pred))
+        metrics[f"{split}_r2"] = r2_score(y_s, y_pred)
 
-    # Plots
-    FIG_DIR.mkdir(parents=True, exist_ok=True)
+    metrics["train_losses"] = [float(v) for v in train_losses]
+    metrics["val_losses"] = [float(v) for v in val_losses]
+    metrics["y_test"] = y_test.tolist()
+    metrics["y_pred"] = model.predict(X_test).tolist()
+    metrics["feature_importances"] = model.feature_importances_.tolist()
 
-    plot_loss_curves(
+    return (
+        model,
+        scaler,
+        X_train,
+        X_val,
+        X_test,
+        y_train,
+        y_val,
+        y_test,
         train_losses,
         val_losses,
-        FIG_DIR / "loss_curves.png",
+        metrics,
     )
-    plot_actual_vs_predicted(
-        y_test,
-        model.predict(X_test),
-        "Test set",
-        FIG_DIR / "actual_vs_predicted.png",
-    )
-    plot_feature_importances(
-        model.feature_importances_,
-        feature_labels,
-        20,
-        FIG_DIR / "feature_importances.png",
-    )
+
+
+if __name__ == "__main__":
+    df = load_parquet(PAQUET_PATH)
+
+    # FEATURES = ["embedding", "year", "best_author_h_index"]
+    FEATURES = ["best_author_h_index"]
+    X, y, feature_labels = build_features(df, FEATURES)
+    print(f"X: {X.shape}  y: {y.shape}")
+
+    all_metrics = []
+    model = scaler = train_losses = val_losses = X_test = y_test = None
+    for run in range(N_RUNS):
+        seed = SEED + run
+        (
+            model,
+            scaler,
+            X_train,
+            X_val,
+            X_test,
+            y_train,
+            y_val,
+            y_test,
+            train_losses,
+            val_losses,
+            metrics,
+        ) = train_run(X, y, seed)
+        metrics["seed"] = seed
+        metrics["feature_labels"] = feature_labels
+        all_metrics.append(metrics)
+        print(
+            f"Run {run+1:2d}/{N_RUNS}  seed={seed}  train RMSE={metrics['train_rmse']:.4f}  R²={metrics['train_r2']:.4f}  val RMSE={metrics['val_rmse']:.4f}  R²={metrics['val_r2']:.4f}  test RMSE={metrics['test_rmse']:.4f}  R²={metrics['test_r2']:.4f}"
+        )
+
+    metric_keys = [
+        "train_rmse",
+        "train_r2",
+        "val_rmse",
+        "val_r2",
+        "test_rmse",
+        "test_r2",
+    ]
+    summary = {}
+    print("\n--- Summary over {} runs ---".format(N_RUNS))
+    for key in metric_keys:
+        vals = np.array([m[key] for m in all_metrics])
+        q1, q3 = np.percentile(vals, [25, 75])
+        iqm_mask = (vals >= q1) & (vals <= q3)
+        summary[key] = {
+            "mean": float(np.mean(vals)),
+            "std": float(np.std(vals)),
+            "median": float(np.median(vals)),
+            "iqm": float(np.mean(vals[iqm_mask])),
+            "min": float(np.min(vals)),
+            "max": float(np.max(vals)),
+        }
+        print(
+            f"{key:12s}  mean={summary[key]['mean']:.4f}  std={summary[key]['std']:.4f}  min={summary[key]['min']:.4f}  max={summary[key]['max']:.4f}"
+        )
+
+    METRICS_DIR.mkdir(parents=True, exist_ok=True)
+    with open(METRICS_DIR / "runs.json", "w") as f:
+        json.dump(all_metrics, f, indent=2)
+    with open(METRICS_DIR / "summary.json", "w") as f:
+        json.dump({"n_runs": N_RUNS, "metrics": summary}, f, indent=2)
+    print(f"\nMetrics saved to {METRICS_DIR}")
+
+    # Save model + scaler from the last run
+    if model is not None and N_RUNS > 0:
+        MODELS_DIR.mkdir(parents=True, exist_ok=True)
+        joblib.dump(model, MODELS_DIR / "model.joblib")
+        joblib.dump(scaler, MODELS_DIR / "scaler.joblib")
+        print(f"Model saved to {MODELS_DIR}")
