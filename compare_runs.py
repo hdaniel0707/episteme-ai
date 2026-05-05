@@ -12,12 +12,6 @@ RESULTS_DIR = BASE_DIR / "results"
 CI = 0.95
 METRICS = ["test_rmse", "test_r2", "val_rmse", "val_r2"]
 
-#################################
-RUN_IDS = ["0505_A2", "0505_A3", "0505_A4"]
-RUN_LABELS = ["all", "only embeddings", "only h-index"]
-COMPARE_ID = "0505A2_A3_A4"
-OUT_DIR = RESULTS_DIR / "compared" / COMPARE_ID
-
 
 def load_run(run_id: str) -> list[dict]:
     path = RESULTS_DIR / run_id / "metrics" / "runs.json"
@@ -56,30 +50,43 @@ def build_comparison(
     return result
 
 
-def main() -> None:
-
-    fig_dir = OUT_DIR / "figs"
+def compare_runs(
+    run_ids: list[str],
+    run_labels: list[str],
+    compare_id: str,
+) -> None:
+    out_dir = RESULTS_DIR / "compared" / compare_id
+    fig_dir = out_dir / "figs"
     fig_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Comparing runs: {RUN_IDS}")
-    print(f"Output: {OUT_DIR}")
+    print(f"\n{'='*60}")
+    print(f"  Comparing runs: {run_ids}")
+    print(f"  Output: {out_dir}")
+    print(f"{'='*60}")
 
     runs_data: dict[str, list[dict]] = {}
-    for run_id in RUN_IDS:
+    for run_id in run_ids:
         runs_data[run_id] = load_run(run_id)
         print(f"  Loaded '{run_id}': {len(runs_data[run_id])} seeds")
 
-    comparison = build_comparison(RUN_IDS, runs_data, CI)
+    comparison = build_comparison(run_ids, runs_data, CI)
 
-    json_out = OUT_DIR / "comparison.json"
+    json_out = out_dir / "comparison.json"
     with open(json_out, "w") as f:
         json.dump(comparison, f, indent=2)
-    print(f"Saved {json_out}")
+    print(f"  Saved {json_out}")
 
-    plot_test_metrics_ci(comparison, fig_dir, labels=RUN_LABELS)
-    plot_loss_curves_comparison(RUN_IDS, runs_data, fig_dir, CI, labels=RUN_LABELS)
+    plot_test_metrics_ci(comparison, fig_dir, labels=run_labels)
+    plot_loss_curves_comparison(run_ids, runs_data, fig_dir, CI, labels=run_labels)
 
     print("Done.")
+
+
+def main():
+    run_ids = ["0505_B1", "0505_B2", "0505_B3"]
+    run_labels = ["all", "only embedding", "only h-index"]
+    compare_id = "test_0505_B1_B2_B3"
+    compare_runs(run_ids, run_labels, compare_id)
 
 
 if __name__ == "__main__":

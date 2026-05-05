@@ -1,0 +1,21 @@
+# Experiment configuration
+# run_id: unique name for this experiment — determines the output directory under results/
+# If omitted, a name is auto-generated from the config filename + timestamp.
+run_id: "0505_B1"
+run_labels: "all"
+
+data:
+  parquet_path: "data/paquet/0505_A"   # relative to the project root
+
+features:
+  - embedding
+  - year
+  - best_author_h_index
+
+model:
+  n_estimators: 300
+  learning_rate: 0.05
+  max_depth: 4
+  subsample: 0.8
+  seed: 42
+  n_runs: 3

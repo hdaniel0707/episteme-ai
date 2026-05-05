@@ -45,7 +45,15 @@ def build_features(
     return X, y, labels
 
 
-def train_run(X, y, seed: int):
+def train_run(
+    X,
+    y,
+    seed: int,
+    n_estimators: int = N_ESTIMATORS,
+    learning_rate: float = LEARNING_RATE,
+    max_depth: int = MAX_DEPTH,
+    subsample: float = SUBSAMPLE,
+):
     X_train, X_tmp, y_train, y_tmp = train_test_split(
         X, y, test_size=0.30, random_state=seed
     )
@@ -59,10 +67,10 @@ def train_run(X, y, seed: int):
     X_test = scaler.transform(X_test)
 
     model = GradientBoostingRegressor(
-        n_estimators=N_ESTIMATORS,
-        learning_rate=LEARNING_RATE,
-        max_depth=MAX_DEPTH,
-        subsample=SUBSAMPLE,
+        n_estimators=n_estimators,
+        learning_rate=learning_rate,
+        max_depth=max_depth,
+        subsample=subsample,
         random_state=seed,
     )
     model.fit(X_train, y_train)
