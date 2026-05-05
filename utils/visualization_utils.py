@@ -473,16 +473,18 @@ def plot_feature_importances(
 # COMPARE
 #############################################################
 
-METRICS = ["test_rmse", "test_r2", "val_rmse", "val_r2"]
+METRICS = ["train_rmse", "train_r2", "val_rmse", "val_r2", "test_rmse", "test_r2"]
 METRIC_LABELS = {
-    "test_rmse": "Test RMSE",
-    "test_r2": "Test R²",
+    "train_rmse": "Train RMSE",
+    "train_r2": "Train R²",
     "val_rmse": "Val RMSE",
     "val_r2": "Val R²",
+    "test_rmse": "Test RMSE",
+    "test_r2": "Test R²",
 }
 
 
-def plot_test_metrics_ci(
+def plot_metrics_ci(
     comparison: dict, out_dir: Path, labels: list[str] | None = None
 ) -> None:
     run_ids = comparison["run_ids"]
@@ -490,7 +492,7 @@ def plot_test_metrics_ci(
     ci = comparison["ci"]
     colors = plt.cm.tab10.colors  # type: ignore[attr-defined]
 
-    fig, axes = plt.subplots(2, 2, figsize=(11, 8))
+    fig, axes = plt.subplots(3, 2, figsize=(16, 8))
     axes_flat = axes.flatten()
 
     for ax, metric in zip(axes_flat, METRICS):

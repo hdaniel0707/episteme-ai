@@ -4,13 +4,13 @@ from pathlib import Path
 import numpy as np
 from scipy import stats
 
-from utils.visualization_utils import plot_loss_curves_comparison, plot_test_metrics_ci
+from utils.visualization_utils import plot_loss_curves_comparison, plot_metrics_ci
 
 BASE_DIR = Path(__file__).parent
 RESULTS_DIR = BASE_DIR / "results"
 
 CI = 0.95
-METRICS = ["test_rmse", "test_r2", "val_rmse", "val_r2"]
+METRICS = ["train_rmse", "train_r2", "val_rmse", "val_r2", "test_rmse", "test_r2"]
 
 
 def load_run(run_id: str) -> list[dict]:
@@ -76,16 +76,16 @@ def compare_runs(
         json.dump(comparison, f, indent=2)
     print(f"  Saved {json_out}")
 
-    plot_test_metrics_ci(comparison, fig_dir, labels=run_labels)
+    plot_metrics_ci(comparison, fig_dir, labels=run_labels)
     plot_loss_curves_comparison(run_ids, runs_data, fig_dir, CI, labels=run_labels)
 
     print("Done.")
 
 
 def main():
-    run_ids = ["0505_B1", "0505_B2", "0505_B3"]
-    run_labels = ["all", "only embedding", "only h-index"]
-    compare_id = "test_0505_B1_B2_B3"
+    run_ids = ["0505_C_1", "0505_C_2", "0505_C_3"]
+    run_labels = ["c1", "c2", "c3"]
+    compare_id = "test_0505_C1_C2_C3"
     compare_runs(run_ids, run_labels, compare_id)
 
 

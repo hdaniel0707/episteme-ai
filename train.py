@@ -7,6 +7,9 @@ import numpy as np
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.linear_model import LinearRegression
+from sklearn.svm import SVR
+from sklearn.neural_network import MLPRegressor
 from sklearn.metrics import mean_squared_error, r2_score
 
 from utils.parquet_utils import load_parquet
@@ -18,10 +21,7 @@ RUN_ID = "0505_A4"
 MODELS_DIR = BASE_DIR / "results" / RUN_ID / "models"
 METRICS_DIR = BASE_DIR / "results" / RUN_ID / "metrics"
 
-N_ESTIMATORS = 300
-LEARNING_RATE = 0.05
-MAX_DEPTH = 4
-SUBSAMPLE = 0.8
+ML_ALG = "gradient_boosting"  # gradient_boosting | linear | svm | mlp
 SEED = 42
 N_RUNS = 3
 
@@ -45,15 +45,25 @@ def build_features(
     return X, y, labels
 
 
-def train_run(
-    X,
-    y,
-    seed: int,
-    n_estimators: int = N_ESTIMATORS,
-    learning_rate: float = LEARNING_RATE,
-    max_depth: int = MAX_DEPTH,
-    subsample: float = SUBSAMPLE,
-):
+def _build_model(ml_alg: str, seed: int):
+    if ml_alg == "gradient_boosting":
+        return GradientBoostingRegressor(
+            random_state=seed,
+        )
+    if ml_alg == "linear":
+        return LinearRegression()
+    if ml_alg == "svm":
+        return SVR()
+    if ml_alg == "mlp":
+        return MLPRegressor(
+            hidden_layer_sizes=(516, 256, 64, 32), max_iter=100000, random_state=seed
+        )
+    raise ValueError(
+        f"Unknown ml_alg: {ml_alg!r}. Choose from: gradient_boosting, linear, svm, mlp"
+    )
+
+
+def train_run(X, y, seed: int, ml_alg: str = ML_ALG):
     X_train, X_tmp, y_train, y_tmp = train_test_split(
         X, y, test_size=0.30, random_state=seed
     )
@@ -66,19 +76,17 @@ def train_run(
     X_val = scaler.transform(X_val)
     X_test = scaler.transform(X_test)
 
-    model = GradientBoostingRegressor(
-        n_estimators=n_estimators,
-        learning_rate=learning_rate,
-        max_depth=max_depth,
-        subsample=subsample,
-        random_state=seed,
-    )
+    model = _build_model(ml_alg, seed)
     model.fit(X_train, y_train)
 
-    train_losses = [
-        mean_squared_error(y_train, p) for p in model.staged_predict(X_train)
-    ]
-    val_losses = [mean_squared_error(y_val, p) for p in model.staged_predict(X_val)]
+    if isinstance(model, GradientBoostingRegressor):
+        train_losses = [
+            mean_squared_error(y_train, p) for p in model.staged_predict(X_train)
+        ]
+        val_losses = [mean_squared_error(y_val, p) for p in model.staged_predict(X_val)]
+    else:
+        train_losses = []
+        val_losses = []
 
     metrics = {}
     for split, X_s, y_s in [
@@ -94,7 +102,11 @@ def train_run(
     metrics["val_losses"] = [float(v) for v in val_losses]
     metrics["y_test"] = y_test.tolist()
     metrics["y_pred"] = model.predict(X_test).tolist()
-    metrics["feature_importances"] = model.feature_importances_.tolist()
+    metrics["feature_importances"] = (
+        model.feature_importances_.tolist()
+        if isinstance(model, GradientBoostingRegressor)
+        else []
+    )
 
     return (
         model,

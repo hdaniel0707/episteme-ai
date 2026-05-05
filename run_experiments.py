@@ -31,7 +31,7 @@ from utils.parquet_utils import load_parquet
 BASE_DIR = Path(__file__).parent
 
 
-CFG_DIR = BASE_DIR / "cfg" / "0505"
+CFG_DIR = BASE_DIR / "cfg" / "hd" / "0505_C"
 
 # ---------------------------------------------------------------------------
 # Config loading & validation
@@ -39,14 +39,8 @@ CFG_DIR = BASE_DIR / "cfg" / "0505"
 
 REQUIRED_KEYS = {"data", "features", "model"}
 REQUIRED_DATA_KEYS = {"parquet_path"}
-REQUIRED_MODEL_KEYS = {
-    "n_estimators",
-    "learning_rate",
-    "max_depth",
-    "subsample",
-    "seed",
-    "n_runs",
-}
+REQUIRED_MODEL_KEYS = {"seed", "n_runs", "ml_alg"}
+GB_MODEL_KEYS = {"n_estimators", "learning_rate", "max_depth", "subsample"}
 
 
 def load_config(path: Path) -> dict:
@@ -61,9 +55,9 @@ def load_config(path: Path) -> dict:
     if missing_data:
         raise ValueError(f"{path}: missing data keys: {missing_data}")
 
-    missing_model = REQUIRED_MODEL_KEYS - cfg["model"].keys()
-    if missing_model:
-        raise ValueError(f"{path}: missing model keys: {missing_model}")
+    missing_data = REQUIRED_MODEL_KEYS - cfg["model"].keys()
+    if missing_data:
+        raise ValueError(f"{path}: missing data keys: {missing_data}")
 
     # Auto-generate run_id from filename + timestamp if not provided
     if not cfg.get("run_id"):
@@ -111,6 +105,7 @@ def run_experiment(cfg: dict, cfg_source_path: Path) -> dict:
     m = cfg["model"]
     n_runs: int = m["n_runs"]
     base_seed: int = m["seed"]
+    ml_alg = m["ml_alg"]
 
     all_metrics = []
     model = scaler = None
@@ -132,10 +127,7 @@ def run_experiment(cfg: dict, cfg_source_path: Path) -> dict:
             X,
             y,
             seed,
-            n_estimators=m["n_estimators"],
-            learning_rate=m["learning_rate"],
-            max_depth=m["max_depth"],
-            subsample=m["subsample"],
+            ml_alg=ml_alg,
         )
 
         metrics["seed"] = seed

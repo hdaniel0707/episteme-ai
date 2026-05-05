@@ -13,9 +13,6 @@ features:
   - best_author_h_index
 
 model:
-  n_estimators: 300
-  learning_rate: 0.05
-  max_depth: 4
-  subsample: 0.8
+  ml_alg: "gradient_boosting"  # gradient_boosting | linear | svm | mlp
   seed: 42
   n_runs: 3
