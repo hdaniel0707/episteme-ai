@@ -56,7 +56,12 @@ def _build_model(ml_alg: str, seed: int):
         return SVR()
     if ml_alg == "mlp":
         return MLPRegressor(
-            hidden_layer_sizes=(516, 256, 64, 32), max_iter=100000, random_state=seed
+            hidden_layer_sizes=(516, 64, 32),
+            activation="relu",
+            solver="adam",
+            max_iter=100,
+            warm_start=True,
+            random_state=seed,
         )
     raise ValueError(
         f"Unknown ml_alg: {ml_alg!r}. Choose from: gradient_boosting, linear, svm, mlp"
@@ -77,14 +82,15 @@ def train_run(X, y, seed: int, ml_alg: str = ML_ALG):
     X_test = scaler.transform(X_test)
 
     model = _build_model(ml_alg, seed)
-    model.fit(X_train, y_train)
 
     if isinstance(model, GradientBoostingRegressor):
+        model.fit(X_train, y_train)
         train_losses = [
             mean_squared_error(y_train, p) for p in model.staged_predict(X_train)
         ]
         val_losses = [mean_squared_error(y_val, p) for p in model.staged_predict(X_val)]
     else:
+        model.fit(X_train, y_train)
         train_losses = []
         val_losses = []
 

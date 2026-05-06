@@ -24,18 +24,25 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-from compare_runs import compare_runs
 from train import build_features, train_run
 from utils.parquet_utils import load_parquet
+from utils.visualization_utils import plot_results
+from compare_runs import compare_runs
 
 BASE_DIR = Path(__file__).parent
 
 
-CFG_DIR = BASE_DIR / "cfg" / "hd" / "0505_C"
+CFG_DIR = BASE_DIR / "cfg" / "hd" / "alma"
+ENSAMBLE_RUN_ID = "hd_" + datetime.now().strftime("%Y%m%d_%H%M%S")
 
 # ---------------------------------------------------------------------------
 # Config loading & validation
 # ---------------------------------------------------------------------------
+
+GREEN = "\033[92m"
+YELLOW = "\033[93m"
+RED = "\033[91m"
+RESET = "\033[0m"
 
 REQUIRED_KEYS = {"data", "features", "model"}
 REQUIRED_DATA_KEYS = {"parquet_path"}
@@ -82,7 +89,7 @@ def run_experiment(cfg: dict, cfg_source_path: Path) -> dict:
 
     # Resolve paths
     parquet_path = BASE_DIR / cfg["data"]["parquet_path"]
-    results_dir = BASE_DIR / "results" / run_id
+    results_dir = BASE_DIR / "results" / ENSAMBLE_RUN_ID / run_id
     metrics_dir = results_dir / "metrics"
     models_dir = results_dir / "models"
     metrics_dir.mkdir(parents=True, exist_ok=True)
@@ -244,6 +251,16 @@ def main():
 
         results.append({"config": str(cfg_path), **result})
 
+        try:
+            results_dir = BASE_DIR / "results" / ENSAMBLE_RUN_ID / result["run_id"]
+            plot_results(results_dir)
+        except Exception:
+            print(
+                f"{YELLOW}\nWARN: plotting failed for '{result['run_id']}':\n{traceback.format_exc()}{RESET}",
+                file=sys.stderr,
+            )
+            assert False
+
     # Final summary across all experiments
     print(f"\n{'='*60}")
     print("  All experiments complete")
@@ -266,7 +283,7 @@ def main():
         compare_id = (
             CFG_DIR.name + "_" + "_".join(rid.split("_")[-1] for rid in run_ids)
         )
-        compare_runs(run_ids, run_labels, compare_id)
+        compare_runs(ENSAMBLE_RUN_ID, run_ids, run_labels)
     else:
         print("\n  Skipping comparison: need at least 2 successful experiments.")
 

@@ -13,10 +13,10 @@ CI = 0.95
 METRICS = ["train_rmse", "train_r2", "val_rmse", "val_r2", "test_rmse", "test_r2"]
 
 
-def load_run(run_id: str) -> list[dict]:
-    path = RESULTS_DIR / run_id / "metrics" / "runs.json"
+def load_run(result_dir: Path) -> list[dict]:
+    path = result_dir / "metrics" / "runs.json"
     if not path.exists():
-        raise FileNotFoundError(f"No runs.json found for run '{run_id}' at {path}")
+        raise FileNotFoundError(f"No runs.json found for run '{result_dir}' at {path}")
     with open(path) as f:
         return json.load(f)
 
@@ -51,11 +51,11 @@ def build_comparison(
 
 
 def compare_runs(
+    ensemble_run_ids: Path,
     run_ids: list[str],
     run_labels: list[str],
-    compare_id: str,
 ) -> None:
-    out_dir = RESULTS_DIR / "compared" / compare_id
+    out_dir = RESULTS_DIR / ensemble_run_ids / "compared"
     fig_dir = out_dir / "figs"
     fig_dir.mkdir(parents=True, exist_ok=True)
 
@@ -66,7 +66,8 @@ def compare_runs(
 
     runs_data: dict[str, list[dict]] = {}
     for run_id in run_ids:
-        runs_data[run_id] = load_run(run_id)
+        result_dir = RESULTS_DIR / ensemble_run_ids / run_id
+        runs_data[run_id] = load_run(result_dir)
         print(f"  Loaded '{run_id}': {len(runs_data[run_id])} seeds")
 
     comparison = build_comparison(run_ids, runs_data, CI)
@@ -83,10 +84,10 @@ def compare_runs(
 
 
 def main():
+    ensemble_run_ids = RESULTS_DIR / "a"
     run_ids = ["0505_C_1", "0505_C_2", "0505_C_3"]
     run_labels = ["c1", "c2", "c3"]
-    compare_id = "test_0505_C1_C2_C3"
-    compare_runs(run_ids, run_labels, compare_id)
+    compare_runs(run_ids, run_labels)
 
 
 if __name__ == "__main__":
