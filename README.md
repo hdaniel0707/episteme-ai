@@ -12,100 +12,149 @@ This project uses [uv](https://github.com/astral-sh/uv) for Python package manag
 uv sync
 ```
 
+## Environment
+
+Copy `.env_sample` to `.env` and fill in your API keys:
+
+```bash
+cp .env_sample .env
+```
+
+The key variable used by the pipeline is `SEMANTIC_SCHOLAR_API_KEY`.
+
+---
+
+## Pipeline Overview
+
+The pipeline has four sequential stages:
+
+```
+Fetch → Analyse Data → Run Experiments → Analyse Experiments
+```
+
+### 1. Fetch (`aip/fetch.py`)
+
+Queries the Semantic Scholar API and stores results in a local SQLite database.
+
+```bash
+python -m aip.fetch
+```
+
+Fields collected per paper: title, abstract, SPECTER embedding, citation counts, year, venue, and author metadata (h-index, citation count, affiliations).
+
+Output: `data/sql/<name>.db`
+
+---
+
+### 2. Analyse Data (`aip/analyse_data.py`)
+
+Loads the SQLite database, converts it to Parquet, runs dimensionality reduction, and generates interactive EDA plots.
+
+```bash
+python -m aip.analyse_data
+```
+
+Plots saved to `results/analyse_data/<name>/`:
+- `years_histogram.html` — publication year distribution
+- `citation_year_correlation.html` — citations vs. year
+- `hindex_citation_correlation.html` — best author h-index vs. citations
+- `dimred_2d.html` — 2D PCA of SPECTER embeddings
+
+---
+
+### 3. Run Experiments (`aip/run_exp.py`)
+
+Reads YAML config files from `cfg/`, trains regression models over multiple seeds, and saves metrics and model artefacts.
+
+```bash
+python -m aip.run_exp
+```
+
+Each run:
+1. Loads features from a Parquet dataset
+2. Splits data 70 / 15 / 15 (train / val / test)
+3. Applies `StandardScaler`
+4. Trains the configured model and evaluates RMSE and R²
+5. Saves results to `results/<experiment_id>/<run_id>/<seed>/`
+
+After all runs complete, `run_exp` automatically triggers both analysis scripts.
+
+---
+
+### 4. Analyse Experiments
+
+Both analysis scripts are called automatically at the end of `run_exp.py`. They can also be run standalone by editing the `experiment_id` at the bottom of each file.
+
+#### Per-run analysis (`aip/analyse_exp.py`)
+
+Produces figures for each run, aggregated across seeds. Saved to `results/<experiment_id>/<run_id>/figs/`:
+- `loss_curves.png` — mean ± std MSE over boosting stages (gradient boosting only)
+- `feature_importance.png` — top-k features with error bars
+- `metrics_summary.png` — RMSE and R² across train/val/test splits
+
+#### Cross-run comparison (`aip/analyse_exp_compare.py`)
+
+Overlays all runs in an experiment to compare configurations. Saved to `results/<experiment_id>/figs/`:
+- `metrics_comparison.png` — grouped bar chart of RMSE and R² per run
+- `loss_curves_comparison.png` — overlaid CI loss curves (gradient boosting only)
+- `feature_importance_comparison.png` — grouped or per-run feature importances
+
+---
+
+## Configuration
+
+Experiment runs are controlled by YAML files in `cfg/`. See `cfg/example.yaml`:
+
+```yaml
+run_id: "my_run"
+run_label: "all features"
+seed: 42
+
+data:
+  parquet_path: "data/paquet/0506_B"   # relative to project root
+
+features:
+  - embedding        # SPECTER vector (768-dim)
+  - year
+  - best_author_h_index
+
+model:
+  ml_alg: "gradient_boosting"  # gradient_boosting | linear | svm | mlp
+  n_runs: 3
+```
+
+**Available features:** `embedding`, `year`, `best_author_h_index`, `h_index`, `citation_count`, `author_count`, `page_count`
+
+**Target variable:** `log1p(citation_count)`
+
 ---
 
 ## Project Structure
 
 ```
 article-impact-dataset/
-├── fetch.py              # Fetch papers + author metadata from Semantic Scholar API
-├── analyse.py            # Dimensionality reduction, EDA plots, exports to Parquet
-├── train.py              # Train a GradientBoosting model on a single feature set
-├── run_experiments.py    # Run multiple experiments from YAML config files
-├── compare_runs.py       # Compare metrics across experiment runs with confidence intervals
-├── plot_train_results.py # Plot loss curves, predictions, and feature importances for one run
-│
-├── cfg/                  # Experiment config files (YAML)
-│   └── example.yaml      # Example config showing all available options
-│
+├── aip/
+│   ├── fetch.py                  # Fetch papers from Semantic Scholar API → SQLite
+│   ├── analyse_data.py           # EDA: dimensionality reduction and correlation plots
+│   ├── run_exp.py                # Train models from YAML configs, save results
+│   ├── analyse_exp.py            # Per-run figures: loss curves, feature importance, metrics
+│   ├── analyse_exp_compare.py    # Cross-run comparison figures
+│   └── utils/
+│       ├── config_utils.py       # Load and validate YAML experiment configs
+│       ├── dimred_utils.py       # PCA, KernelPCA, UMAP wrappers
+│       ├── env_utils.py          # .env variable checking
+│       ├── parquet_utils.py      # Parquet save/load helpers
+│       ├── s2_utils.py           # Semantic Scholar API client
+│       ├── sqlite_utils.py       # SQLite schema, save, and load helpers
+│       ├── train_utils.py        # Feature assembly and model factory
+│       └── visualization_utils.py # Plotly and matplotlib plot functions
+├── cfg/
+│   └── example.yaml              # Example experiment config
 ├── data/
-│   ├── sql/              # Raw SQLite databases produced by fetch.py
-│   └── paquet/           # Processed Parquet files produced by analyse.py
-│
-├── results/              # One sub-directory per run_id
-│   └── <run_id>/
-│       ├── metrics/      # runs.json (per-seed metrics), summary.json
-│       ├── models/       # Saved model + scaler (joblib)
-│       └── figs/         # Plots for this run
-│
-└── utils/                # Shared helper modules
-    ├── s2_utils.py        # Semantic Scholar API client
-    ├── sqlite_utils.py    # DB init, save, and load helpers
-    ├── parquet_utils.py   # Parquet read/write helpers
-    ├── dimred_utils.py    # PCA / dimensionality reduction
-    ├── visualization_utils.py  # All plotting functions
-    └── env_utils.py       # .env and dependency checks
+│   ├── sql/                      # SQLite databases (one per fetch run)
+│   └── paquet/                   # Parquet datasets (one per DB)
+├── results/                      # Experiment outputs (gitignored)
+├── plot_train_results.py         # Legacy standalone plotting script
+├── pyproject.toml
+└── .env_sample                   # Environment variable template
 ```
-
----
-
-## Pipeline
-
-```
-fetch.py  →  data/sql/*.db
-                ↓
-          analyse.py  →  data/paquet/
-                              ↓
-                    run_experiments.py  ←  cfg/*.yaml
-                              ↓
-                         results/<run_id>/
-                              ↓
-                    compare_runs.py / plot_train_results.py
-```
-
-### Step-by-step
-
-1. **Fetch** — queries Semantic Scholar for papers and enriches each record with author h-index, citation counts, and paper embeddings.
-2. **Analyse** — loads the SQLite DB, reduces embeddings via PCA, generates EDA plots, and exports a Parquet dataset.
-3. **Train** — fits a `GradientBoostingRegressor` to predict `citationCount`. Supports configurable feature sets (`embedding`, `year`, `best_author_h_index`, …).
-4. **Experiment runner** — wraps `train.py` to run multiple YAML-defined experiments sequentially, saving metrics and a config snapshot for full reproducibility.
-5. **Compare / Plot** — visualise loss curves, confidence intervals, and feature importances across runs.
-
----
-
-## Configuration
-
-Experiments are defined as YAML files in `cfg/`. Example:
-
-```yaml
-run_id: "my_experiment"
-
-data:
-  parquet_path: "data/paquet/0505_A"
-
-features:
-  - embedding
-  - year
-  - best_author_h_index
-
-model:
-  n_estimators: 300
-  learning_rate: 0.05
-  max_depth: 4
-  subsample: 0.8
-  seed: 42
-  n_runs: 3
-```
-
-Run one or more configs:
-
-```bash
-python run_experiments.py cfg/example.yaml
-python run_experiments.py --cfg-dir cfg/   # run all *.yaml in the folder
-```
-
----
-
-## Environment
-
-Copy `.env_sample` to `.env` and fill in your Semantic Scholar API key before running `fetch.py`.

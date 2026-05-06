@@ -1,14 +1,3 @@
-"""
-Compare multiple RUN_DIRs within an EXP_DIR: overlay loss curves and produce
-grouped metric / feature-importance charts across runs (each aggregated over
-all seeds).
-
-Usage:
-    python -m aip.analyse_exp_compare
-    python -m aip.analyse_exp_compare --exp-dir results/exp_20260506_155747
-    python -m aip.analyse_exp_compare --top-k 20
-"""
-
 import argparse
 import json
 from pathlib import Path

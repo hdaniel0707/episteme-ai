@@ -1,13 +1,3 @@
-"""
-Analyse experiment results: produce CI loss curves and feature importance plots
-for each RUN_DIR inside an EXP_DIR.
-
-Usage:
-    python -m aip.analyse_exp
-    python -m aip.analyse_exp --exp-dir results/exp_20260506_153433
-    python -m aip.analyse_exp --top-k 30
-"""
-
 import argparse
 import json
 from pathlib import Path
