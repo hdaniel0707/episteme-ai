@@ -5,3 +5,7 @@
 results/
 data/
 cfg/hd
+
+*.egg-info/
+dist/
+build/

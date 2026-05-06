@@ -10,9 +10,9 @@ from pathlib import Path
 from tqdm import tqdm
 
 from dotenv import load_dotenv
-from utils.env_utils import doublecheck_env, doublecheck_pkgs
-from utils.sqlite_utils import init_db, save_paper
-from utils.s2_utils import _session, iter_search
+from aip.utils.env_utils import doublecheck_env, doublecheck_pkgs
+from aip.utils.sqlite_utils import init_db, save_paper
+from aip.utils.s2_utils import _session, iter_search
 
 load_dotenv()
 
@@ -28,9 +28,9 @@ PAPER_FIELDS = (
     "citationCount,influentialCitationCount,year,venue"
 )
 
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).parent.parent
 DB_DIR = BASE_DIR / "data"
-DB_PATH = DB_DIR / "sql" / "0505_A.db"
+DB_PATH = DB_DIR / "sql" / "test_0506_A.db"
 QUERY = "reinforcement learning"
 
 
@@ -69,7 +69,7 @@ def main() -> None:
             conn=conn,
             api_key=api_key,
             query=QUERY,
-            limit=500,
+            limit=100,
         )
     finally:
         conn.close()

@@ -2,26 +2,25 @@ from pathlib import Path
 
 import numpy as np
 
-from utils.sqlite_utils import load_db
-from utils.dimred_utils import reduce
-from utils.parquet_utils import save_parquet, load_parquet
-from utils.visualization_utils import (
+from aip.utils.sqlite_utils import load_db
+from aip.utils.dimred_utils import reduce
+from aip.utils.parquet_utils import save_parquet, load_parquet
+from aip.utils.visualization_utils import (
     plot_pca_2d_cat,
     plot_year_histogram,
     plot_citation_year_correlation,
     plot_hindex_citation_correlation,
 )
 
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).parent.parent
 DB_DIR = BASE_DIR / "data"
 
 
 ######################################
 LOAD_FROM_SQL = True
-DB_PATH = DB_DIR / "sql" / "0505_A.db"
-PAQUET_PATH = DB_DIR / "paquet" / "0505_A"
-FIG_DIR = BASE_DIR / "results" / "figs" / "0505_A"
-
+DB_PATH = DB_DIR / "sql" / "test_0506_A.db"
+PAQUET_PATH = DB_DIR / "paquet" / "test_0506_A"
+FIG_DIR = BASE_DIR / "results" / "analyse_data" / "test_0506_A"
 
 if __name__ == "__main__":
     if LOAD_FROM_SQL:
