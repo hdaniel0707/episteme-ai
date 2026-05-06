@@ -18,9 +18,9 @@ DB_DIR = BASE_DIR / "data"
 
 ######################################
 LOAD_FROM_SQL = True
-DB_PATH = DB_DIR / "sql" / "test_0506_A.db"
-PAQUET_PATH = DB_DIR / "paquet" / "test_0506_A"
-FIG_DIR = BASE_DIR / "results" / "analyse_data" / "test_0506_A"
+DB_PATH = DB_DIR / "sql" / "0506_B.db"
+PAQUET_PATH = DB_DIR / "paquet" / "0506_B"
+FIG_DIR = BASE_DIR / "results" / "analyse_data" / "0506_B"
 
 if __name__ == "__main__":
     if LOAD_FROM_SQL:

@@ -17,8 +17,6 @@ import numpy as np
 
 BASE_DIR = Path(__file__).parent.parent
 RESULTS_DIR = BASE_DIR / "results"
-EXP_DIR = RESULTS_DIR / "exp_20260506_155747"
-
 
 # ---------------------------------------------------------------------------
 # Loading
@@ -247,12 +245,17 @@ def analyse_run(run_dir: Path) -> None:
     print(f"  [OK]   {run_dir.name}: {len(seed_results)} seeds → {saved}")
 
 
-def main() -> None:
+def run_individual_analysis(experiment_id: str):
+    EXP_DIR = RESULTS_DIR / experiment_id
     print(f"Analysing: {EXP_DIR}")
 
     run_dirs = sorted(p for p in EXP_DIR.iterdir() if p.is_dir())
     for run_dir in run_dirs:
         analyse_run(run_dir)
+
+
+def main() -> None:
+    run_individual_analysis("exp_20260506_203629")
 
 
 if __name__ == "__main__":

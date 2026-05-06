@@ -30,8 +30,8 @@ PAPER_FIELDS = (
 
 BASE_DIR = Path(__file__).parent.parent
 DB_DIR = BASE_DIR / "data"
-DB_PATH = DB_DIR / "sql" / "test_0506_A.db"
-QUERY = "reinforcement learning"
+DB_PATH = DB_DIR / "sql" / "0506_B.db"
+QUERY = "biology"
 
 
 def fetch(
@@ -69,7 +69,7 @@ def main() -> None:
             conn=conn,
             api_key=api_key,
             query=QUERY,
-            limit=100,
+            limit=500,
         )
     finally:
         conn.close()

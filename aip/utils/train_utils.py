@@ -38,7 +38,7 @@ def build_model(ml_alg: str, base_seed: int):
             hidden_layer_sizes=(516, 64, 32),
             activation="relu",
             solver="adam",
-            max_iter=100,
+            max_iter=1000,
             warm_start=True,
             random_state=base_seed,
         )

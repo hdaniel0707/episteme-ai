@@ -14,6 +14,8 @@ from sklearn.preprocessing import StandardScaler
 from aip.utils.config_utils import collect_configs, load_config
 from aip.utils.parquet_utils import load_parquet
 from aip.utils.train_utils import build_features, build_model
+from aip.analyse_exp import run_individual_analysis
+from aip.analyse_exp_compare import run_compared_analysis
 
 BASE_DIR = Path(__file__).parent.parent
 RESULTS_DIR = BASE_DIR / "results"
@@ -22,7 +24,7 @@ RESULTS_DIR = BASE_DIR / "results"
 CFG_DIR = BASE_DIR / "cfg" / "hd" / "alma"
 
 
-def main() -> None:
+def run_experiments() -> str:
 
     # Generate Eyperiment ID
     experiment_id = "exp_" + datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -134,6 +136,13 @@ def main() -> None:
             if model is not None:
                 joblib.dump(model, SEED_MODEL_DIR / "model.joblib")
                 joblib.dump(scaler, SEED_MODEL_DIR / "scaler.joblib")
+    return experiment_id
+
+
+def main() -> None:
+    experiment_id = run_experiments()
+    run_individual_analysis(experiment_id)
+    run_compared_analysis(experiment_id)
 
 
 if __name__ == "__main__":
