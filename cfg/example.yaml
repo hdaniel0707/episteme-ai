@@ -15,5 +15,5 @@ features:
   - best_author_h_index
 
 model:
-  ml_alg: "gradient_boosting"  # gradient_boosting | linear | svm | mlp
+  ml_alg: "gradient_boosting"  # gradient_boosting | linear | svm | mlp | ae
   n_runs: 3

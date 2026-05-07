@@ -157,8 +157,8 @@ def plot_loss_curves_comparison(run_data: list[dict], fig_dir: Path) -> None:
             ax.plot(x, mean, color=color, label=rd["label"])
             ax.fill_between(x, mean - std, mean + std, color=color, alpha=0.15)
 
-        ax.set_xlabel("Boosting stage")
-        ax.set_ylabel("MSE loss")
+        ax.set_xlabel("Epochs / Boosting stage")
+        ax.set_ylabel("Loss")
         ax.set_title(title)
         ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)

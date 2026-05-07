@@ -7,6 +7,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.neural_network import MLPRegressor
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVR
+from aip.autoencoder import AERegressor
 
 
 def build_features(df, features: list[str]) -> tuple[np.ndarray, np.ndarray, list[str]]:
@@ -42,6 +43,8 @@ def build_model(ml_alg: str, base_seed: int):
             warm_start=True,
             random_state=base_seed,
         )
+    if ml_alg == "ae":
+        return AERegressor(random_state=base_seed)
     raise ValueError(
         f"Unknown ml_alg: {ml_alg!r}. Choose from: gradient_boosting, linear, svm, mlp"
     )

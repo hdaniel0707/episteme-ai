@@ -6,6 +6,7 @@ import numpy as np
 import joblib
 
 from sklearn.ensemble import GradientBoostingRegressor
+from aip.autoencoder import AERegressor
 from sklearn.metrics import mean_squared_error, r2_score
 
 from sklearn.model_selection import train_test_split
@@ -14,6 +15,7 @@ from sklearn.preprocessing import StandardScaler
 from aip.utils.config_utils import collect_configs, load_config
 from aip.utils.parquet_utils import load_parquet
 from aip.utils.train_utils import build_features, build_model
+from aip.utils.cuda_util import check_cuda
 from aip.analyse_exp import run_individual_analysis
 from aip.analyse_exp_compare import run_compared_analysis
 
@@ -21,7 +23,7 @@ BASE_DIR = Path(__file__).parent.parent
 RESULTS_DIR = BASE_DIR / "results"
 
 ### INPUTS ###############################
-CFG_DIR = BASE_DIR / "cfg" / "hd" / "alma"
+CFG_DIR = BASE_DIR / "cfg" / "hd" / "korte"
 
 
 def run_experiments() -> str:
@@ -44,6 +46,7 @@ def run_experiments() -> str:
         # Log
         print(f"\n{'='*60}")
         print(f"  Run ID: {cfg['run_id']}")
+        print(f"  ML ALG: {cfg['model']['ml_alg']}")
         print(f"{'='*60}")
 
         # Create RUN DIR
@@ -91,7 +94,10 @@ def run_experiments() -> str:
             model = build_model(ml_alg, base_seed + i)
 
             # Train model
-            model.fit(X_train, y_train)
+            if isinstance(model, AERegressor):
+                model.fit(X_train, y_train, X_val=X_val)
+            else:
+                model.fit(X_train, y_train)
 
             # Get results
             if isinstance(model, GradientBoostingRegressor):
@@ -103,6 +109,9 @@ def run_experiments() -> str:
                     float(mean_squared_error(y_val, p))
                     for p in model.staged_predict(X_val)
                 ]
+            elif isinstance(model, AERegressor):
+                train_losses = model.train_losses_
+                val_losses = model.val_losses_
             else:
                 train_losses, val_losses = [], []
 
@@ -140,6 +149,7 @@ def run_experiments() -> str:
 
 
 def main() -> None:
+    check_cuda()
     experiment_id = run_experiments()
     run_individual_analysis(experiment_id)
     run_compared_analysis(experiment_id)
