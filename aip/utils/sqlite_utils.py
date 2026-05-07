@@ -20,7 +20,8 @@ def init_db(conn: sqlite3.Connection, delete_if_exsist=False) -> None:
             citation_count              INTEGER,
             influential_citation_count  INTEGER,
             year                        INTEGER,
-            venue                       TEXT
+            venue                       TEXT,
+            queries                     TEXT           -- JSON array of search queries
         );
         CREATE TABLE IF NOT EXISTS authors (
             author_id       TEXT PRIMARY KEY,
@@ -41,19 +42,38 @@ def init_db(conn: sqlite3.Connection, delete_if_exsist=False) -> None:
     conn.commit()
 
 
-def save_paper(conn: sqlite3.Connection, paper: dict) -> None:
+def save_paper(conn: sqlite3.Connection, paper: dict, query: str | None = None) -> None:
     emb = paper.get("embedding")
     embedding_json = json.dumps(emb["vector"]) if emb else None
 
+    paper_id = paper["paperId"]
+    row = conn.execute("SELECT queries FROM papers WHERE paper_id = ?", (paper_id,)).fetchone()
+    if row and row[0]:
+        existing_queries = json.loads(row[0])
+        if query and query not in existing_queries:
+            existing_queries.append(query)
+        queries_json = json.dumps(existing_queries)
+    else:
+        queries_json = json.dumps([query]) if query else None
+
     conn.execute(
         """
-        INSERT OR REPLACE INTO papers
+        INSERT INTO papers
           (paper_id, title, abstract, embedding,
-           citation_count, influential_citation_count, year, venue)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           citation_count, influential_citation_count, year, venue, queries)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(paper_id) DO UPDATE SET
+            title                      = COALESCE(excluded.title,                      title),
+            abstract                   = COALESCE(excluded.abstract,                   abstract),
+            embedding                  = COALESCE(excluded.embedding,                  embedding),
+            citation_count             = COALESCE(excluded.citation_count,             citation_count),
+            influential_citation_count = COALESCE(excluded.influential_citation_count, influential_citation_count),
+            year                       = COALESCE(excluded.year,                       year),
+            venue                      = COALESCE(excluded.venue,                      venue),
+            queries                    = excluded.queries
         """,
         (
-            paper["paperId"],
+            paper_id,
             paper.get("title"),
             paper.get("abstract"),
             embedding_json,
@@ -61,6 +81,7 @@ def save_paper(conn: sqlite3.Connection, paper: dict) -> None:
             paper.get("influentialCitationCount"),
             paper.get("year"),
             paper.get("venue"),
+            queries_json,
         ),
     )
 
@@ -118,7 +139,7 @@ def load_db(
     papers = pd.read_sql(
         f"""
         SELECT paper_id, title, abstract, embedding,
-               citation_count, influential_citation_count, year, venue
+               citation_count, influential_citation_count, year, venue, queries
         FROM papers
         {where}
         """,
@@ -147,4 +168,5 @@ def load_db(
         df["embedding"].notna() & df["best_author_h_index"].notna() & df["year"].notna()
     ].reset_index(drop=True)
     df["embedding"] = df["embedding"].map(json.loads)
+    df["queries"] = df["queries"].map(lambda v: json.loads(v) if v else [])
     return df

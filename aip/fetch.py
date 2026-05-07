@@ -30,8 +30,17 @@ PAPER_FIELDS = (
 
 BASE_DIR = Path(__file__).parent.parent
 DB_DIR = BASE_DIR / "data"
-DB_PATH = DB_DIR / "sql" / "0506_B.db"
-QUERY = "biology"
+DB_PATH = DB_DIR / "sql" / "0507_C.db"
+QUERIES = [
+    "artificial intelligence",
+    "neuroscience",
+    "large language models",
+    "robotics",
+    "biology",
+    "physics",
+    "quantum computing",
+]
+LIMIT = 1000
 
 
 def fetch(
@@ -47,7 +56,7 @@ def fetch(
     for paper in tqdm(
         islice(papers, limit), total=limit, desc=f"{query}", unit="paper"
     ):
-        save_paper(conn, paper)
+        save_paper(conn, paper, query)
         saved += 1
 
     conn.commit()
@@ -65,12 +74,13 @@ def main() -> None:
     init_db(conn, delete_if_exsist=True)
 
     try:
-        fetch(
-            conn=conn,
-            api_key=api_key,
-            query=QUERY,
-            limit=500,
-        )
+        for query in QUERIES:
+            fetch(
+                conn=conn,
+                api_key=api_key,
+                query=query,
+                limit=LIMIT,
+            )
     finally:
         conn.close()
 

@@ -18,14 +18,15 @@ DB_DIR = BASE_DIR / "data"
 
 ######################################
 LOAD_FROM_SQL = True
-DB_PATH = DB_DIR / "sql" / "0506_B.db"
-PAQUET_PATH = DB_DIR / "paquet" / "0506_B"
-FIG_DIR = BASE_DIR / "results" / "analyse_data" / "0506_B"
+DB_ID = "0507_C"
+DB_PATH = DB_DIR / "sql" / (DB_ID + ".db")
+PAQUET_PATH = DB_DIR / "paquet" / DB_ID
+FIG_DIR = BASE_DIR / "results" / "analyse_data" / DB_ID
 
 if __name__ == "__main__":
     if LOAD_FROM_SQL:
         # LOAD SQL DATASET
-        df = load_db(BASE_DIR / DB_PATH, year_from=1900, year_to=2026)
+        df = load_db(DB_PATH, year_from=1900, year_to=2026)
 
         # SAVE PAQUET
         save_parquet(df, PAQUET_PATH)
@@ -47,7 +48,15 @@ if __name__ == "__main__":
     print(X2.shape)
 
     X_year = np.array(df["year"].tolist())
-    print(X.shape)
+    print(X_year.shape)
+
+    X_queries = np.array(
+        [
+            q[0] if (q is not None and len(q) > 0) else "unknown"
+            for q in df["queries"].tolist()
+        ]
+    )
+    print(X_queries.shape)
 
     titles = np.array(df["title"].tolist())
 
@@ -92,5 +101,13 @@ if __name__ == "__main__":
         names=titles,
         labels=X_year,
         scores=y_log1p,
-        save_path=FIG_DIR / "dimred_2d.html",
+        save_path=FIG_DIR / "dimred_2d_year.html",
+    )
+
+    plot_pca_2d_cat(
+        X2,
+        names=titles,
+        labels=X_queries,
+        scores=y_log1p,
+        save_path=FIG_DIR / "dimred_2d_year.html",
     )

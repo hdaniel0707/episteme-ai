@@ -115,6 +115,7 @@ def run_experiments() -> str:
             else:
                 train_losses, val_losses = [], []
 
+            #### NEEDS TO BE REDONE FOR AE ############################
             results: dict = {}
             for split, X_s, y_s in [
                 ("train", X_train, y_train),
@@ -136,6 +137,8 @@ def run_experiments() -> str:
                 if isinstance(model, GradientBoostingRegressor)
                 else []
             )
+
+            #### ----------------------------############################
 
             # Save results
             with open(SEED_RES_DIR / "result.json", "w") as f:
