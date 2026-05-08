@@ -1,4 +1,5 @@
 from pathlib import Path
+import random
 
 import numpy as np
 
@@ -8,6 +9,7 @@ from aip.utils.parquet_utils import save_parquet, load_parquet
 from aip.utils.visualization_utils import (
     plot_pca_2d_cat,
     plot_histogram,
+    plot_categorical_distribution,
     plot_citation_year_correlation,
     plot_hindex_citation_correlation,
 )
@@ -18,6 +20,7 @@ DB_DIR = BASE_DIR / "data"
 
 ######################################
 LOAD_FROM_SQL = True
+QUERY_MODE = "random"  # "first" | "random" | "concat"
 DB_ID = "0507_C"
 DB_PATH = DB_DIR / "sql" / (DB_ID + ".db")
 PAQUET_PATH = DB_DIR / "paquet" / DB_ID
@@ -50,17 +53,27 @@ if __name__ == "__main__":
     X_year = np.array(df["year"].tolist())
     print(X_year.shape)
 
-    X_queries = np.array(
-        [
-            q[0] if (q is not None and len(q) > 0) else "unknown"
-            for q in df["queries"].tolist()
-        ]
-    )
+    def _pick_query(q):
+        if q is None or len(q) == 0:
+            return "unknown"
+        if QUERY_MODE == "random":
+            return random.choice(q)
+        if QUERY_MODE == "concat":
+            return " + ".join(q)
+        return q[0]
+
+    X_queries = np.array([_pick_query(q) for q in df["queries"].tolist()])
     print(X_queries.shape)
 
     titles = np.array(df["title"].tolist())
 
     X_hindex = np.array(df["best_author_h_index"].tolist())
+
+    plot_categorical_distribution(
+        X_queries,
+        x_axis_title="Query",
+        save_path=FIG_DIR / "histogram" / "query_distribution.html",
+    )
 
     plot_histogram(
         X_year,

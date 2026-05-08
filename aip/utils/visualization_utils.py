@@ -365,6 +365,44 @@ def plot_histogram(
     fig.show()
 
 
+def plot_categorical_distribution(
+    values: np.ndarray | list,
+    title: str = "Categorical Distribution",
+    x_axis_title: str = "Category",
+    y_axis_title: str = "Count",
+    save_path: Path | None = None,
+):
+    values = np.asarray(values, dtype=str)
+    unique, counts = np.unique(values, return_counts=True)
+    order = np.argsort(counts)[::-1]
+    unique = unique[order]
+    counts = counts[order]
+
+    fig = go.Figure(
+        go.Bar(
+            x=unique.tolist(),
+            y=counts.tolist(),
+            hovertemplate=f"{x_axis_title}: %{{x}}<br>Count: %{{y}}<extra></extra>",
+        )
+    )
+
+    total = int(counts.sum())
+    fig.update_layout(
+        title=dict(text=f"{title}<br><sup>n = {total:,}</sup>"),
+        xaxis_title=x_axis_title,
+        yaxis_title=y_axis_title,
+        xaxis=dict(type="category"),
+        margin=dict(l=40, r=20, t=40, b=120),
+    )
+
+    if save_path:
+        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+        fig.write_html(save_path)
+        print(f"Interactive plot saved to {save_path}")
+
+    fig.show()
+
+
 ########################################################################
 # TRAIN
 ########################################################################
