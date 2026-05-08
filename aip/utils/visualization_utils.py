@@ -323,27 +323,37 @@ def plot_hindex_citation_correlation(
     fig.show()
 
 
-def plot_year_histogram(
-    years: np.ndarray | list,
-    title: str = "Articles by Year",
+def plot_histogram(
+    values: np.ndarray | list,
+    title: str = "Histogram",
+    x_axis_title: str = "Value",
+    y_axis_title: str = "Count",
+    bins: int | None = None,
     save_path: Path | None = None,
 ):
-    years = np.asarray(years)
-    unique, counts = np.unique(years, return_counts=True)
+    values = np.asarray(values)
 
-    fig = go.Figure(
-        go.Bar(
-            x=unique.tolist(),
-            y=counts.tolist(),
-            hovertemplate="Year: %{x}<br>Count: %{y}<extra></extra>",
-        )
-    )
+    if bins is not None:
+        counts, edges = np.histogram(values, bins=bins)
+        bin_labels = [f"{edges[i]:.4g}–{edges[i+1]:.4g}" for i in range(len(counts))]
+        x = bin_labels
+        y = counts.tolist()
+        hovertemplate = f"{x_axis_title}: %{{x}}<br>Count: %{{y}}<extra></extra>"
+        xaxis_type = "category"
+    else:
+        unique, counts = np.unique(values, return_counts=True)
+        x = unique.tolist()
+        y = counts.tolist()
+        hovertemplate = f"{x_axis_title}: %{{x}}<br>Count: %{{y}}<extra></extra>"
+        xaxis_type = "category"
+
+    fig = go.Figure(go.Bar(x=x, y=y, hovertemplate=hovertemplate))
 
     fig.update_layout(
         title=title,
-        xaxis_title="Year",
-        yaxis_title="Number of Articles",
-        xaxis=dict(type="category"),
+        xaxis_title=x_axis_title,
+        yaxis_title=y_axis_title,
+        xaxis=dict(type=xaxis_type),
         margin=dict(l=40, r=20, t=40, b=40),
     )
 

@@ -7,7 +7,7 @@ from aip.utils.dimred_utils import reduce
 from aip.utils.parquet_utils import save_parquet, load_parquet
 from aip.utils.visualization_utils import (
     plot_pca_2d_cat,
-    plot_year_histogram,
+    plot_histogram,
     plot_citation_year_correlation,
     plot_hindex_citation_correlation,
 )
@@ -62,14 +62,32 @@ if __name__ == "__main__":
 
     X_hindex = np.array(df["best_author_h_index"].tolist())
 
-    plot_year_histogram(X_year, save_path=FIG_DIR / "years_hostogram.html")
+    plot_histogram(
+        X_year,
+        x_axis_title="Years",
+        save_path=FIG_DIR / "histogram" / "years_histogram.html",
+    )
+
+    plot_histogram(
+        y,
+        x_axis_title="Citation",
+        bins=50,
+        save_path=FIG_DIR / "histogram" / "citation_histogram.html",
+    )
+
+    plot_histogram(
+        y_log1p,
+        x_axis_title="log(citation)",
+        bins=50,
+        save_path=FIG_DIR / "histogram" / "log_citation_histogram.html",
+    )
 
     plot_citation_year_correlation(
         X_year,
         y,
         names=titles,
         log1p_text=False,
-        save_path=FIG_DIR / "citation_year_correlation.html",
+        save_path=FIG_DIR / "correlations" / "citation_year_correlation.html",
     )
 
     plot_citation_year_correlation(
@@ -77,7 +95,7 @@ if __name__ == "__main__":
         y_log1p,
         names=titles,
         log1p_text=True,
-        save_path=FIG_DIR / "log_citation_year_correlation.html",
+        save_path=FIG_DIR / "correlations" / "log_citation_year_correlation.html",
     )
 
     plot_hindex_citation_correlation(
@@ -85,7 +103,7 @@ if __name__ == "__main__":
         y,
         names=titles,
         log1p_text=False,
-        save_path=FIG_DIR / "hindex_citation_correlation.html",
+        save_path=FIG_DIR / "correlations" / "hindex_citation_correlation.html",
     )
 
     plot_hindex_citation_correlation(
@@ -93,7 +111,7 @@ if __name__ == "__main__":
         y_log1p,
         names=titles,
         log1p_text=True,
-        save_path=FIG_DIR / "hindex_log_citation_correlation.html",
+        save_path=FIG_DIR / "correlations" / "hindex_log_citation_correlation.html",
     )
 
     plot_pca_2d_cat(
@@ -101,7 +119,7 @@ if __name__ == "__main__":
         names=titles,
         labels=X_year,
         scores=y_log1p,
-        save_path=FIG_DIR / "dimred_2d_year.html",
+        save_path=FIG_DIR / "dimreds" / "dimred_2d_year.html",
     )
 
     plot_pca_2d_cat(
@@ -109,5 +127,5 @@ if __name__ == "__main__":
         names=titles,
         labels=X_queries,
         scores=y_log1p,
-        save_path=FIG_DIR / "dimred_2d_year.html",
+        save_path=FIG_DIR / "dimreds" / "dimred_2d_query.html",
     )
