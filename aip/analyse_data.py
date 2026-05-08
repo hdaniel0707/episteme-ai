@@ -47,8 +47,11 @@ if __name__ == "__main__":
     X = np.array(df["embedding"].tolist())
     print(X.shape)
 
-    X2 = reduce(X, "pca", 2)
-    print(X2.shape)
+    X2_pca = reduce(X, "pca", 2)
+    print(X2_pca.shape)
+
+    X2_umap = reduce(X, "umap", 2)
+    print(X2_umap.shape)
 
     X_year = np.array(df["year"].tolist())
     print(X_year.shape)
@@ -128,17 +131,33 @@ if __name__ == "__main__":
     )
 
     plot_pca_2d_cat(
-        X2,
+        X2_pca,
         names=titles,
         labels=X_year,
         scores=y_log1p,
-        save_path=FIG_DIR / "dimreds" / "dimred_2d_year.html",
+        save_path=FIG_DIR / "dimreds" / "dimred_2d_pca_year.html",
     )
 
     plot_pca_2d_cat(
-        X2,
+        X2_pca,
         names=titles,
         labels=X_queries,
         scores=y_log1p,
-        save_path=FIG_DIR / "dimreds" / "dimred_2d_query.html",
+        save_path=FIG_DIR / "dimreds" / "dimred_2d_pca_query.html",
+    )
+
+    plot_pca_2d_cat(
+        X2_umap,
+        names=titles,
+        labels=X_year,
+        scores=y_log1p,
+        save_path=FIG_DIR / "dimreds" / "dimred_2d_umap_year.html",
+    )
+
+    plot_pca_2d_cat(
+        X2_umap,
+        names=titles,
+        labels=X_queries,
+        scores=y_log1p,
+        save_path=FIG_DIR / "dimreds" / "dimred_2d_umap_query.html",
     )
