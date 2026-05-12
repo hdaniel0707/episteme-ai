@@ -4,6 +4,14 @@
 
 A pipeline for fetching academic paper data from the Semantic Scholar API, analysing it, and training regression models to predict article citation impact.
 
+## Claude Code
+
+For AI-assisted development, copy the [Andrej Karpathy CLAUDE.md](https://github.com/forrestchang/andrej-karpathy-skills/blob/main/CLAUDE.md) into your global Claude config folder:
+
+```bash
+~/.claude/CLAUDE.md
+```
+
 ## Package Manager
 
 This project uses [uv](https://github.com/astral-sh/uv) for Python package management.
@@ -158,3 +166,4 @@ article-impact-dataset/
 ├── pyproject.toml
 └── .env_sample                   # Environment variable template
 ```
+
