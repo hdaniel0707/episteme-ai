@@ -21,7 +21,8 @@ def init_db(conn: sqlite3.Connection, delete_if_exsist=False) -> None:
             influential_citation_count  INTEGER,
             year                        INTEGER,
             venue                       TEXT,
-            queries                     TEXT           -- JSON array of search queries
+            queries                     TEXT,          -- JSON array of search queries
+            domains                     TEXT           -- JSON array of research domains
         );
         CREATE TABLE IF NOT EXISTS authors (
             author_id       TEXT PRIMARY KEY,
@@ -42,12 +43,12 @@ def init_db(conn: sqlite3.Connection, delete_if_exsist=False) -> None:
     conn.commit()
 
 
-def save_paper(conn: sqlite3.Connection, paper: dict, query: str | None = None) -> None:
+def save_paper(conn: sqlite3.Connection, paper: dict, query: str | None = None, domain: str | None = None) -> None:
     emb = paper.get("embedding")
     embedding_json = json.dumps(emb["vector"]) if emb else None
 
     paper_id = paper["paperId"]
-    row = conn.execute("SELECT queries FROM papers WHERE paper_id = ?", (paper_id,)).fetchone()
+    row = conn.execute("SELECT queries, domains FROM papers WHERE paper_id = ?", (paper_id,)).fetchone()
     if row and row[0]:
         existing_queries = json.loads(row[0])
         if query and query not in existing_queries:
@@ -56,12 +57,20 @@ def save_paper(conn: sqlite3.Connection, paper: dict, query: str | None = None) 
     else:
         queries_json = json.dumps([query]) if query else None
 
+    if row and row[1]:
+        existing_domains = json.loads(row[1])
+        if domain and domain not in existing_domains:
+            existing_domains.append(domain)
+        domains_json = json.dumps(existing_domains)
+    else:
+        domains_json = json.dumps([domain]) if domain else None
+
     conn.execute(
         """
         INSERT INTO papers
           (paper_id, title, abstract, embedding,
-           citation_count, influential_citation_count, year, venue, queries)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           citation_count, influential_citation_count, year, venue, queries, domains)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(paper_id) DO UPDATE SET
             title                      = COALESCE(excluded.title,                      title),
             abstract                   = COALESCE(excluded.abstract,                   abstract),
@@ -70,7 +79,8 @@ def save_paper(conn: sqlite3.Connection, paper: dict, query: str | None = None) 
             influential_citation_count = COALESCE(excluded.influential_citation_count, influential_citation_count),
             year                       = COALESCE(excluded.year,                       year),
             venue                      = COALESCE(excluded.venue,                      venue),
-            queries                    = excluded.queries
+            queries                    = excluded.queries,
+            domains                    = excluded.domains
         """,
         (
             paper_id,
@@ -82,6 +92,7 @@ def save_paper(conn: sqlite3.Connection, paper: dict, query: str | None = None) 
             paper.get("year"),
             paper.get("venue"),
             queries_json,
+            domains_json,
         ),
     )
 
@@ -139,7 +150,7 @@ def load_db(
     papers = pd.read_sql(
         f"""
         SELECT paper_id, title, abstract, embedding,
-               citation_count, influential_citation_count, year, venue, queries
+               citation_count, influential_citation_count, year, venue, queries, domains
         FROM papers
         {where}
         """,
@@ -169,4 +180,5 @@ def load_db(
     ].reset_index(drop=True)
     df["embedding"] = df["embedding"].map(json.loads)
     df["queries"] = df["queries"].map(lambda v: json.loads(v) if v else [])
+    df["domains"] = df["domains"].map(lambda v: json.loads(v) if v else [])
     return df

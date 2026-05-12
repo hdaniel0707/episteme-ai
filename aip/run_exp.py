@@ -23,7 +23,7 @@ BASE_DIR = Path(__file__).parent.parent
 RESULTS_DIR = BASE_DIR / "results"
 
 ### INPUTS ###############################
-CFG_DIR = BASE_DIR / "cfg" / "hd" / "korte"
+CFG_DIR = BASE_DIR / "cfg" / "train" / "hd" / "korte"
 
 
 def run_experiments() -> str:

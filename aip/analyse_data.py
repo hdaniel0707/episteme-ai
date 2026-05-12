@@ -21,7 +21,7 @@ DB_DIR = BASE_DIR / "data"
 ######################################
 LOAD_FROM_SQL = True
 QUERY_MODE = "random"  # "first" | "random" | "concat"
-DB_ID = "0507_C"
+DB_ID = "0512_B"
 DB_PATH = DB_DIR / "sql" / (DB_ID + ".db")
 PAQUET_PATH = DB_DIR / "paquet" / DB_ID
 FIG_DIR = BASE_DIR / "results" / "analyse_data" / DB_ID
@@ -56,7 +56,7 @@ if __name__ == "__main__":
     X_year = np.array(df["year"].tolist())
     print(X_year.shape)
 
-    def _pick_query(q):
+    def _pick_label(q):
         if q is None or len(q) == 0:
             return "unknown"
         if QUERY_MODE == "random":
@@ -65,15 +65,15 @@ if __name__ == "__main__":
             return " + ".join(q)
         return q[0]
 
-    X_queries = np.array([_pick_query(q) for q in df["queries"].tolist()])
-    print(X_queries.shape)
+    X_domains = np.array([_pick_label(q) for q in df["domains"].tolist()])
+    print(X_domains.shape)
 
     titles = np.array(df["title"].tolist())
 
     X_hindex = np.array(df["best_author_h_index"].tolist())
 
     plot_categorical_distribution(
-        X_queries,
+        X_domains,
         x_axis_title="Query",
         save_path=FIG_DIR / "histogram" / "query_distribution.html",
     )
@@ -135,15 +135,17 @@ if __name__ == "__main__":
         names=titles,
         labels=X_year,
         scores=y_log1p,
-        save_path=FIG_DIR / "dimreds" / "dimred_2d_pca_year.html",
+        title="pca y_log1p by years",
+        save_path=FIG_DIR / "dimreds" / "dimred_2d_pca_years.html",
     )
 
     plot_pca_2d_cat(
         X2_pca,
         names=titles,
-        labels=X_queries,
+        labels=X_domains,
         scores=y_log1p,
-        save_path=FIG_DIR / "dimreds" / "dimred_2d_pca_query.html",
+        title="pca y_log1p by domains",
+        save_path=FIG_DIR / "dimreds" / "dimred_2d_pca_domains.html",
     )
 
     plot_pca_2d_cat(
@@ -151,13 +153,15 @@ if __name__ == "__main__":
         names=titles,
         labels=X_year,
         scores=y_log1p,
-        save_path=FIG_DIR / "dimreds" / "dimred_2d_umap_year.html",
+        title="umap y_log1p by years",
+        save_path=FIG_DIR / "dimreds" / "dimred_2d_umap_years.html",
     )
 
     plot_pca_2d_cat(
         X2_umap,
         names=titles,
-        labels=X_queries,
+        labels=X_domains,
         scores=y_log1p,
-        save_path=FIG_DIR / "dimreds" / "dimred_2d_umap_query.html",
+        title="umap y_log1p by domains",
+        save_path=FIG_DIR / "dimreds" / "dimred_2d_umap_domains.html",
     )

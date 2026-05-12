@@ -4,7 +4,8 @@
 
 results/
 data/
-cfg/hd
+cfg/fetch/hd
+cfg/train/hd
 
 *.egg-info/
 dist/

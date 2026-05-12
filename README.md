@@ -20,6 +20,11 @@ This project uses [uv](https://github.com/astral-sh/uv) for Python package manag
 uv sync
 ```
 
+For installing the aip package run:
+```bash
+uv pip install -e .
+```
+
 ## Environment
 
 Copy `.env_sample` to `.env` and fill in your API keys:

@@ -5,6 +5,7 @@ import time
 from itertools import islice
 
 import sqlite3
+import yaml
 from pathlib import Path
 
 from tqdm import tqdm
@@ -30,23 +31,20 @@ PAPER_FIELDS = (
 
 BASE_DIR = Path(__file__).parent.parent
 DB_DIR = BASE_DIR / "data"
-DB_PATH = DB_DIR / "sql" / "0507_C.db"
-QUERIES = [
-    "artificial intelligence",
-    "neuroscience",
-    "large language models",
-    "robotics",
-    "biology",
-    "physics",
-    "quantum computing",
-]
-LIMIT = 1000
+DB_PATH = DB_DIR / "sql" / "0512_B.db"
+CFG_PATH = BASE_DIR / "cfg" / "fetch" / "hd" / "fetch_cfg.yaml"
+
+with open(CFG_PATH) as f:
+    QUERIES_DOMAINS: dict[str, list[str]] = yaml.safe_load(f)["queries_domains"]
+QUERIES = [q for qs in QUERIES_DOMAINS.values() for q in qs]
+TOPIC_LIMIT = 1
 
 
 def fetch(
     conn: sqlite3.Connection,
     api_key: str | None,
     query: str,
+    domain: str,
     limit: int = 10,
 ) -> None:
     session = _session(api_key)
@@ -56,7 +54,7 @@ def fetch(
     for paper in tqdm(
         islice(papers, limit), total=limit, desc=f"{query}", unit="paper"
     ):
-        save_paper(conn, paper, query)
+        save_paper(conn, paper, query, domain)
         saved += 1
 
     conn.commit()
@@ -74,13 +72,16 @@ def main() -> None:
     init_db(conn, delete_if_exsist=True)
 
     try:
-        for query in QUERIES:
-            fetch(
-                conn=conn,
-                api_key=api_key,
-                query=query,
-                limit=LIMIT,
-            )
+        for domain, queries in QUERIES_DOMAINS.items():
+            for query in queries:
+                query_limit = max(1, TOPIC_LIMIT // len(queries))
+                fetch(
+                    conn=conn,
+                    api_key=api_key,
+                    query=query,
+                    domain=domain,
+                    limit=query_limit,
+                )
     finally:
         conn.close()
 
