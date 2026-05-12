@@ -21,7 +21,7 @@ DB_DIR = BASE_DIR / "data"
 ######################################
 LOAD_FROM_SQL = True
 QUERY_MODE = "random"  # "first" | "random" | "concat"
-DB_ID = "0512_B"
+DB_ID = "0512_A"
 DB_PATH = DB_DIR / "sql" / (DB_ID + ".db")
 PAQUET_PATH = DB_DIR / "paquet" / DB_ID
 FIG_DIR = BASE_DIR / "results" / "analyse_data" / DB_ID
@@ -75,27 +75,27 @@ if __name__ == "__main__":
     plot_categorical_distribution(
         X_domains,
         x_axis_title="Query",
-        save_path=FIG_DIR / "histogram" / "query_distribution.html",
+        save_path=FIG_DIR / "histogram" / "query_distribution",
     )
 
     plot_histogram(
         X_year,
         x_axis_title="Years",
-        save_path=FIG_DIR / "histogram" / "years_histogram.html",
+        save_path=FIG_DIR / "histogram" / "years_histogram",
     )
 
     plot_histogram(
         y,
         x_axis_title="Citation",
         bins=50,
-        save_path=FIG_DIR / "histogram" / "citation_histogram.html",
+        save_path=FIG_DIR / "histogram" / "citation_histogram",
     )
 
     plot_histogram(
         y_log1p,
         x_axis_title="log(citation)",
         bins=50,
-        save_path=FIG_DIR / "histogram" / "log_citation_histogram.html",
+        save_path=FIG_DIR / "histogram" / "log_citation_histogram",
     )
 
     plot_citation_year_correlation(
@@ -103,7 +103,7 @@ if __name__ == "__main__":
         y,
         names=titles,
         log1p_text=False,
-        save_path=FIG_DIR / "correlations" / "citation_year_correlation.html",
+        save_path=FIG_DIR / "correlations" / "citation_year_correlation",
     )
 
     plot_citation_year_correlation(
@@ -111,7 +111,7 @@ if __name__ == "__main__":
         y_log1p,
         names=titles,
         log1p_text=True,
-        save_path=FIG_DIR / "correlations" / "log_citation_year_correlation.html",
+        save_path=FIG_DIR / "correlations" / "log_citation_year_correlation",
     )
 
     plot_hindex_citation_correlation(
@@ -119,7 +119,7 @@ if __name__ == "__main__":
         y,
         names=titles,
         log1p_text=False,
-        save_path=FIG_DIR / "correlations" / "hindex_citation_correlation.html",
+        save_path=FIG_DIR / "correlations" / "hindex_citation_correlation",
     )
 
     plot_hindex_citation_correlation(
@@ -127,7 +127,7 @@ if __name__ == "__main__":
         y_log1p,
         names=titles,
         log1p_text=True,
-        save_path=FIG_DIR / "correlations" / "hindex_log_citation_correlation.html",
+        save_path=FIG_DIR / "correlations" / "hindex_log_citation_correlation",
     )
 
     plot_pca_2d_cat(
@@ -136,7 +136,7 @@ if __name__ == "__main__":
         labels=X_year,
         scores=y_log1p,
         title="pca y_log1p by years",
-        save_path=FIG_DIR / "dimreds" / "dimred_2d_pca_years.html",
+        save_path=FIG_DIR / "dimreds" / "dimred_2d_pca_years",
     )
 
     plot_pca_2d_cat(
@@ -145,7 +145,7 @@ if __name__ == "__main__":
         labels=X_domains,
         scores=y_log1p,
         title="pca y_log1p by domains",
-        save_path=FIG_DIR / "dimreds" / "dimred_2d_pca_domains.html",
+        save_path=FIG_DIR / "dimreds" / "dimred_2d_pca_domains",
     )
 
     plot_pca_2d_cat(
@@ -154,7 +154,7 @@ if __name__ == "__main__":
         labels=X_year,
         scores=y_log1p,
         title="umap y_log1p by years",
-        save_path=FIG_DIR / "dimreds" / "dimred_2d_umap_years.html",
+        save_path=FIG_DIR / "dimreds" / "dimred_2d_umap_years",
     )
 
     plot_pca_2d_cat(
@@ -163,5 +163,5 @@ if __name__ == "__main__":
         labels=X_domains,
         scores=y_log1p,
         title="umap y_log1p by domains",
-        save_path=FIG_DIR / "dimreds" / "dimred_2d_umap_domains.html",
+        save_path=FIG_DIR / "dimreds" / "dimred_2d_umap_domains",
     )

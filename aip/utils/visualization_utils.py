@@ -84,8 +84,12 @@ def plot_pca_2d_cat(
 
     if save_path:
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-        fig.write_html(save_path)
-        print(f"Interactive plot saved to {save_path}")
+        html_path = Path(save_path).with_suffix(".html")
+        fig.write_html(html_path)
+        png_path = Path(save_path).with_suffix(".png")
+        fig.write_image(str(png_path), scale=3)
+        print(f"Interactive plot saved to {html_path}")
+        print(f"Image saved to {png_path}")
 
     fig.show()
 
@@ -175,8 +179,12 @@ def plot_pca_3d_cat(
 
     if save_path:
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-        fig.write_html(save_path)
-        print(f"Interactive plot saved to {save_path}")
+        html_path = Path(save_path).with_suffix(".html")
+        fig.write_html(html_path)
+        png_path = Path(save_path).with_suffix(".png")
+        fig.write_image(str(png_path), scale=3)
+        print(f"Interactive plot saved to {html_path}")
+        print(f"Image saved to {png_path}")
 
     fig.show()
 
@@ -246,8 +254,12 @@ def plot_citation_year_correlation(
 
     if save_path:
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-        fig.write_html(save_path)
-        print(f"Interactive plot saved to {save_path}")
+        html_path = Path(save_path).with_suffix(".html")
+        fig.write_html(html_path)
+        png_path = Path(save_path).with_suffix(".png")
+        fig.write_image(str(png_path), scale=3)
+        print(f"Interactive plot saved to {html_path}")
+        print(f"Image saved to {png_path}")
 
     fig.show()
 
@@ -317,8 +329,12 @@ def plot_hindex_citation_correlation(
 
     if save_path:
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-        fig.write_html(save_path)
-        print(f"Interactive plot saved to {save_path}")
+        html_path = Path(save_path).with_suffix(".html")
+        fig.write_html(html_path)
+        png_path = Path(save_path).with_suffix(".png")
+        fig.write_image(str(png_path), scale=3)
+        print(f"Interactive plot saved to {html_path}")
+        print(f"Image saved to {png_path}")
 
     fig.show()
 
@@ -359,8 +375,12 @@ def plot_histogram(
 
     if save_path:
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-        fig.write_html(save_path)
-        print(f"Interactive plot saved to {save_path}")
+        html_path = Path(save_path).with_suffix(".html")
+        fig.write_html(html_path)
+        png_path = Path(save_path).with_suffix(".png")
+        fig.write_image(str(png_path), scale=3)
+        print(f"Interactive plot saved to {html_path}")
+        print(f"Image saved to {png_path}")
 
     fig.show()
 
@@ -397,8 +417,12 @@ def plot_categorical_distribution(
 
     if save_path:
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-        fig.write_html(save_path)
-        print(f"Interactive plot saved to {save_path}")
+        html_path = Path(save_path).with_suffix(".html")
+        fig.write_html(html_path)
+        png_path = Path(save_path).with_suffix(".png")
+        fig.write_image(str(png_path), scale=3)
+        print(f"Interactive plot saved to {html_path}")
+        print(f"Image saved to {png_path}")
 
     fig.show()
 
@@ -471,7 +495,7 @@ def plot_loss_curves(train_losses, val_losses, out: Path) -> None:
     ax.set_title("Training & Validation Loss")
     ax.legend()
     fig.tight_layout()
-    fig.savefig(out, dpi=150)
+    fig.savefig(out, dpi=300)
     plt.close(fig)
     print(f"Saved {out}")
 
@@ -518,7 +542,7 @@ def plot_loss_curves_ci(
     ax.set_title(f"Training & Validation Loss  (n={n} seeds, {int(ci*100)}% CI)")
     ax.legend()
     fig.tight_layout()
-    fig.savefig(out, dpi=150)
+    fig.savefig(out, dpi=300)
     plt.close(fig)
     print(f"Saved {out}")
 
@@ -537,7 +561,7 @@ def plot_actual_vs_predicted(y_true, y_pred, split: str, out: Path) -> None:
     ax.set_title(f"{split}  RMSE={rmse:.3f}  R²={r2:.3f}")
     ax.legend()
     fig.tight_layout()
-    fig.savefig(out, dpi=150)
+    fig.savefig(out, dpi=300)
     plt.close(fig)
     print(f"Saved {out}")
 
@@ -566,7 +590,7 @@ def plot_feature_importances(
 
     ax.legend(handles=[Patch(color=group_color[g], label=g) for g in unique_groups])
     fig.tight_layout()
-    fig.savefig(out, dpi=150)
+    fig.savefig(out, dpi=300)
     plt.close(fig)
     print(f"Saved {out}")
 
@@ -636,7 +660,7 @@ def plot_metrics_ci(
     fig.suptitle(f"Test & Val Metrics Comparison  ({int(ci * 100)}% CI)", fontsize=13)
     fig.tight_layout()
     out = out_dir / "test_metrics_ci.png"
-    fig.savefig(out, dpi=150)
+    fig.savefig(out, dpi=300)
     plt.close(fig)
     print(f"Saved {out}")
 
@@ -683,6 +707,6 @@ def plot_loss_curves_comparison(
     fig.suptitle("Train & Validation Loss Comparison", fontsize=13)
     fig.tight_layout()
     out = out_dir / "loss_curves_comparison_ci.png"
-    fig.savefig(out, dpi=150)
+    fig.savefig(out, dpi=300)
     plt.close(fig)
     print(f"Saved {out}")

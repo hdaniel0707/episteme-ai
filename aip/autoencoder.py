@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import Optional
+from tqdm import tqdm
 
 import numpy as np
 import torch
@@ -104,7 +105,8 @@ class AERegressor:
         self.val_losses_ = []
 
         self.ae_.train()
-        for epoch in range(self.max_iter):
+        pbar = tqdm(range(self.max_iter), desc="Epochs", leave=False)
+        for epoch in pbar:
             epoch_loss = 0.0
             for (batch,) in loader:
                 x_hat, _ = self.ae_(batch)
@@ -116,6 +118,7 @@ class AERegressor:
             epoch_loss /= len(loader)
             self.train_losses_.append(epoch_loss)
 
+            val_loss = None
             if X_val_t is not None:
                 self.ae_.eval()
                 with torch.no_grad():
@@ -123,6 +126,11 @@ class AERegressor:
                     val_loss = self._reconstruction_loss(X_val_t, x_hat_val).item()
                 self.val_losses_.append(val_loss)
                 self.ae_.train()
+
+            postfix = {"train": f"{epoch_loss:.4f}"}
+            if val_loss is not None:
+                postfix["val"] = f"{val_loss:.4f}"
+            pbar.set_postfix(postfix)
 
             if best_loss - epoch_loss > self.tol:
                 best_loss = epoch_loss

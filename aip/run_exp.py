@@ -4,6 +4,7 @@ import shutil
 import json
 import numpy as np
 import joblib
+from tqdm import tqdm
 
 from sklearn.ensemble import GradientBoostingRegressor
 from aip.autoencoder import AERegressor
@@ -23,7 +24,7 @@ BASE_DIR = Path(__file__).parent.parent
 RESULTS_DIR = BASE_DIR / "results"
 
 ### INPUTS ###############################
-CFG_DIR = BASE_DIR / "cfg" / "train" / "hd" / "korte"
+CFG_DIR = BASE_DIR / "cfg" / "train" / "hd" / "alma"
 
 
 def run_experiments() -> str:
@@ -38,7 +39,7 @@ def run_experiments() -> str:
     # Load config files paths
     cfg_paths = collect_configs(CFG_DIR)
 
-    for cfg_path in cfg_paths:
+    for cfg_path in tqdm(cfg_paths, desc="Configs"):
 
         # Load config file
         cfg = load_config(cfg_path)
@@ -69,7 +70,7 @@ def run_experiments() -> str:
         n_runs: int = m["n_runs"]
         ml_alg: str = m["ml_alg"]
 
-        for i in range(n_runs):
+        for i in tqdm(range(n_runs), desc="Seeds", leave=False):
             SEED_DIR = RUN_DIR / str(i)
             SEED_DIR.mkdir(parents=True, exist_ok=True)
             SEED_MODEL_DIR = SEED_DIR / "model"
@@ -152,10 +153,10 @@ def run_experiments() -> str:
 
 
 def main() -> None:
-    check_cuda()
-    experiment_id = run_experiments()
-    run_individual_analysis(experiment_id)
-    run_compared_analysis(experiment_id)
+    if check_cuda():
+        experiment_id = run_experiments()
+        run_individual_analysis(experiment_id)
+        run_compared_analysis(experiment_id)
 
 
 if __name__ == "__main__":

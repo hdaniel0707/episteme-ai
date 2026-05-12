@@ -31,7 +31,7 @@ PAPER_FIELDS = (
 
 BASE_DIR = Path(__file__).parent.parent
 DB_DIR = BASE_DIR / "data"
-DB_PATH = DB_DIR / "sql" / "0512_B.db"
+DB_PATH = DB_DIR / "sql" / "X_0512_B.db"
 CFG_PATH = BASE_DIR / "cfg" / "fetch" / "hd" / "fetch_cfg.yaml"
 
 with open(CFG_PATH) as f:
@@ -52,7 +52,11 @@ def fetch(
     papers = iter_search(query, session, PAPER_FIELDS)
 
     for paper in tqdm(
-        islice(papers, limit), total=limit, desc=f"{query}", unit="paper"
+        islice(papers, limit),
+        total=limit,
+        desc=f"{query}",
+        unit="paper",
+        leave=False,
     ):
         save_paper(conn, paper, query, domain)
         saved += 1
@@ -72,8 +76,10 @@ def main() -> None:
     init_db(conn, delete_if_exsist=True)
 
     try:
-        for domain, queries in QUERIES_DOMAINS.items():
-            for query in queries:
+        domain_bar = tqdm(QUERIES_DOMAINS.items(), desc="domains")
+        for domain, queries in domain_bar:
+            domain_bar.set_description(f"domain: {domain}")
+            for query in tqdm(queries, desc="queries", leave=False):
                 query_limit = max(1, TOPIC_LIMIT // len(queries))
                 fetch(
                     conn=conn,
