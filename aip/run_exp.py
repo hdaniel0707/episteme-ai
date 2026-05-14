@@ -46,17 +46,17 @@ def run_experiments() -> str:
 
         # Log
         print(f"\n{'='*60}")
-        print(f"  Run ID: {cfg['run_id']}")
+        print(f"  ALG ID: {cfg['alg_id']}")
         print(f"  ML ALG: {cfg['model']['ml_alg']}")
         print(f"{'='*60}")
 
-        # Create RUN DIR
-        RUN_DIR = EXP_DIR / cfg["run_id"]
-        RUN_DIR.mkdir(parents=True, exist_ok=True)
+        # Create ALG DIR
+        ALG_DIR = EXP_DIR / cfg["alg_id"]
+        ALG_DIR.mkdir(parents=True, exist_ok=True)
 
         # Copy CFG
-        shutil.copy(cfg_path, RUN_DIR / "config.yaml")
-        with open(RUN_DIR / "config.json", "w") as f:
+        shutil.copy(cfg_path, ALG_DIR / "config.yaml")
+        with open(ALG_DIR / "config.json", "w") as f:
             json.dump(cfg, f, indent=2)
 
         # Get data and build features
@@ -71,7 +71,7 @@ def run_experiments() -> str:
         ml_alg: str = m["ml_alg"]
 
         for i in tqdm(range(n_runs), desc="Seeds", leave=False):
-            SEED_DIR = RUN_DIR / str(i)
+            SEED_DIR = ALG_DIR / str(i)
             SEED_DIR.mkdir(parents=True, exist_ok=True)
             SEED_MODEL_DIR = SEED_DIR / "model"
             SEED_MODEL_DIR.mkdir(parents=True, exist_ok=True)

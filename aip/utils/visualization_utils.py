@@ -613,8 +613,8 @@ METRIC_LABELS = {
 def plot_metrics_ci(
     comparison: dict, out_dir: Path, labels: list[str] | None = None
 ) -> None:
-    run_ids = comparison["run_ids"]
-    display_labels = labels if labels is not None else run_ids
+    alg_ids = comparison["alg_ids"]
+    display_labels = labels if labels is not None else alg_ids
     ci = comparison["ci"]
     colors = plt.cm.tab10.colors  # type: ignore[attr-defined]
 
@@ -623,15 +623,15 @@ def plot_metrics_ci(
 
     for ax, metric in zip(axes_flat, METRICS):
         means, lo_errs, hi_errs = [], [], []
-        for run_id in run_ids:
-            s = comparison["runs"][run_id].get(metric, {})
+        for alg_id in alg_ids:
+            s = comparison["runs"][alg_id].get(metric, {})
             mean = s.get("mean", 0.0)
             means.append(mean)
             lo_errs.append(mean - s.get("ci_low", mean))
             hi_errs.append(s.get("ci_high", mean) - mean)
 
-        x = np.arange(len(run_ids))
-        bar_colors = [colors[i % len(colors)] for i in range(len(run_ids))]
+        x = np.arange(len(alg_ids))
+        bar_colors = [colors[i % len(colors)] for i in range(len(alg_ids))]
         bars = ax.bar(
             x,
             means,
@@ -666,25 +666,25 @@ def plot_metrics_ci(
 
 
 def plot_loss_curves_comparison(
-    run_ids: list[str],
+    alg_ids: list[str],
     runs_data: dict[str, list[dict]],
     out_dir: Path,
     ci: float,
     labels: list[str] | None = None,
 ) -> None:
-    display_labels = labels if labels is not None else run_ids
+    display_labels = labels if labels is not None else alg_ids
     colors = plt.cm.tab10.colors  # type: ignore[attr-defined]
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
-    for i, run_id in enumerate(run_ids):
-        runs = runs_data[run_id]
+    for i, alg_id in enumerate(alg_ids):
+        runs = runs_data[alg_id]
         color = colors[i % len(colors)]
         label = display_labels[i]
 
         all_train = np.array([r["train_losses"] for r in runs if "train_losses" in r])
         all_val = np.array([r["val_losses"] for r in runs if "val_losses" in r])
         if all_train.size == 0 or all_val.size == 0:
-            print(f"  Skipping loss curves for '{run_id}': no loss data")
+            print(f"  Skipping loss curves for '{alg_id}': no loss data")
             continue
 
         n = all_train.shape[0]

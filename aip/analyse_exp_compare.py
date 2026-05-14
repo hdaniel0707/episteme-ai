@@ -23,8 +23,8 @@ _KNOWN_SCALARS = {
 # ---------------------------------------------------------------------------
 
 
-def load_seed_results(run_dir: Path) -> list[dict]:
-    seed_dirs = sorted(p for p in run_dir.iterdir() if p.is_dir() and p.name.isdigit())
+def load_seed_results(alg_dir: Path) -> list[dict]:
+    seed_dirs = sorted(p for p in alg_dir.iterdir() if p.is_dir() and p.name.isdigit())
     results = []
     for sd in seed_dirs:
         result_path = sd / "results" / "result.json"
@@ -34,8 +34,8 @@ def load_seed_results(run_dir: Path) -> list[dict]:
     return results
 
 
-def load_config(run_dir: Path) -> dict:
-    cfg_path = run_dir / "config.json"
+def load_config(alg_dir: Path) -> dict:
+    cfg_path = alg_dir / "config.json"
     if cfg_path.exists():
         with open(cfg_path) as f:
             return json.load(f)
@@ -62,8 +62,8 @@ def reconstruct_feature_labels(cfg: dict, n_features: int) -> list[str]:
     return labels
 
 
-def get_run_label(cfg: dict, run_dir: Path) -> str:
-    return cfg.get("run_label") or cfg.get("run_id") or run_dir.name
+def get_alg_label(cfg: dict, alg_dir: Path) -> str:
+    return cfg.get("alg_label") or cfg.get("alg_id") or alg_dir.name
 
 
 # ---------------------------------------------------------------------------
@@ -71,7 +71,7 @@ def get_run_label(cfg: dict, run_dir: Path) -> str:
 # ---------------------------------------------------------------------------
 
 
-def plot_metrics_comparison(run_data: list[dict], fig_dir: Path) -> None:
+def plot_results_comparison(alg_data: list[dict], fig_dir: Path) -> None:
     """Grouped bar chart: splits on x-axis, one bar per run per split."""
     metric_groups = [
         (["train_rmse", "val_rmse", "test_rmse"], "RMSE"),
@@ -84,25 +84,25 @@ def plot_metrics_comparison(run_data: list[dict], fig_dir: Path) -> None:
 
     for ax, (keys, ylabel) in zip(axes, metric_groups):
         n_splits = len(split_labels)
-        n_runs = len(run_data)
+        n_runs = len(alg_data)
         width = 0.8 / n_runs
         x = np.arange(n_splits)
 
-        for run_idx, rd in enumerate(run_data):
+        for alg_idx, rd in enumerate(alg_data):
             means, stds = [], []
             for key in keys:
                 vals = [r[key] for r in rd["seed_results"] if key in r]
                 means.append(np.mean(vals) if vals else np.nan)
                 stds.append(np.std(vals) if vals else 0.0)
 
-            offset = (run_idx - (n_runs - 1) / 2) * width
+            offset = (alg_idx - (n_runs - 1) / 2) * width
             ax.bar(
                 x + offset,
                 means,
                 width=width * 0.9,
                 yerr=stds,
                 label=rd["label"],
-                color=colors[run_idx % len(colors)],
+                color=colors[alg_idx % len(colors)],
                 alpha=0.8,
                 error_kw={"elinewidth": 1.2, "capsize": 3},
             )
@@ -112,7 +112,7 @@ def plot_metrics_comparison(run_data: list[dict], fig_dir: Path) -> None:
                 ax.scatter(
                     [x[xi] + offset] * len(seed_vals),
                     seed_vals,
-                    color=colors[run_idx % len(colors)],
+                    color=colors[alg_idx % len(colors)],
                     edgecolors="black",
                     linewidths=0.5,
                     zorder=3,
@@ -127,14 +127,14 @@ def plot_metrics_comparison(run_data: list[dict], fig_dir: Path) -> None:
         ax.legend(fontsize=8)
         ax.grid(True, axis="y", alpha=0.3)
 
-    n_seeds = "/".join(str(len(rd["seed_results"])) for rd in run_data)
-    fig.suptitle(f"Metrics comparison — {len(run_data)} runs ({n_seeds} seeds)")
+    n_seeds = "/".join(str(len(rd["seed_results"])) for rd in alg_data)
+    fig.suptitle(f"Results comparison — {len(alg_data)} algs ({n_seeds} seeds)")
     fig.tight_layout()
-    fig.savefig(fig_dir / "metrics_comparison.png", dpi=150)
+    fig.savefig(fig_dir / "results_comparison.png", dpi=150)
     plt.close(fig)
 
 
-def plot_loss_curves_comparison(run_data: list[dict], fig_dir: Path) -> None:
+def plot_loss_curves_comparison(alg_data: list[dict], fig_dir: Path) -> None:
     """Train and val loss curves for each run overlaid with CI bands."""
     colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
@@ -144,7 +144,7 @@ def plot_loss_curves_comparison(run_data: list[dict], fig_dir: Path) -> None:
         ["train_losses", "val_losses"],
         ["Train loss", "Val loss"],
     ):
-        for run_idx, rd in enumerate(run_data):
+        for alg_idx, rd in enumerate(alg_data):
             losses = [r[loss_key] for r in rd["seed_results"] if r.get(loss_key)]
             if not losses:
                 continue
@@ -153,7 +153,7 @@ def plot_loss_curves_comparison(run_data: list[dict], fig_dir: Path) -> None:
             x = np.arange(1, min_len + 1)
             mean = arr.mean(axis=0)
             std = arr.std(axis=0)
-            color = colors[run_idx % len(colors)]
+            color = colors[alg_idx % len(colors)]
             ax.plot(x, mean, color=color, label=rd["label"])
             ax.fill_between(x, mean - std, mean + std, color=color, alpha=0.15)
 
@@ -170,7 +170,7 @@ def plot_loss_curves_comparison(run_data: list[dict], fig_dir: Path) -> None:
 
 
 def plot_feature_importance_comparison(
-    run_data: list[dict], fig_dir: Path, top_k: int = 20
+    alg_data: list[dict], fig_dir: Path, top_k: int = 20
 ) -> None:
     """
     If all runs share the same feature count: single grouped horizontal bar
@@ -178,7 +178,7 @@ def plot_feature_importance_comparison(
     Otherwise: one subplot per run showing its own top-k.
     """
     fi_data = []
-    for rd in run_data:
+    for rd in alg_data:
         fi_lists = [
             r["feature_importances"]
             for r in rd["seed_results"]
@@ -194,7 +194,7 @@ def plot_feature_importance_comparison(
                 "mean": fi_arr.mean(axis=0),
                 "std": fi_arr.std(axis=0),
                 "labels": labels,
-                "run_label": rd["label"],
+                "alg_label": rd["label"],
             }
         )
 
@@ -219,17 +219,17 @@ def plot_feature_importance_comparison(
         y_pos = np.arange(len(top_idx))
 
         fig, ax = plt.subplots(figsize=(11, max(5, len(top_idx) * 0.40)))
-        for run_idx, d in enumerate(valid):
+        for alg_idx, d in enumerate(valid):
             means = d["mean"][top_idx]
             stds = d["std"][top_idx]
-            offset = (run_idx - (n_runs - 1) / 2) * width
+            offset = (alg_idx - (n_runs - 1) / 2) * width
             ax.barh(
                 y_pos + offset,
                 means[::-1],
                 height=width * 0.9,
                 xerr=stds[::-1],
-                label=d["run_label"],
-                color=colors[run_idx % len(colors)],
+                label=d["alg_label"],
+                color=colors[alg_idx % len(colors)],
                 alpha=0.8,
                 error_kw={"elinewidth": 1.0, "capsize": 2},
             )
@@ -271,7 +271,7 @@ def plot_feature_importance_comparison(
             ax.set_yticks(y_pos)
             ax.set_yticklabels(top_labels[::-1], fontsize=8)
             ax.set_xlabel("Feature importance")
-            ax.set_title(d["run_label"])
+            ax.set_title(d["alg_label"])
             ax.grid(True, axis="x", alpha=0.3)
 
         for ax in axes_flat[len(valid) :]:
@@ -308,35 +308,35 @@ def run_compared_analysis(experiment_id: str) -> None:
     exp_dir = Path(args.exp_dir) if args.exp_dir else EXP_DIR
     print(f"Comparing runs in: {exp_dir}")
 
-    run_dirs = sorted(p for p in exp_dir.iterdir() if p.is_dir() and p.name != "figs")
-    run_data = []
-    for run_dir in run_dirs:
-        seed_results = load_seed_results(run_dir)
+    alg_dirs = sorted(p for p in exp_dir.iterdir() if p.is_dir() and p.name != "figs")
+    alg_data = []
+    for alg_dir in alg_dirs:
+        seed_results = load_seed_results(alg_dir)
         if not seed_results:
-            print(f"  [SKIP] {run_dir.name}: no seed results found")
+            print(f"  [SKIP] {alg_dir.name}: no seed results found")
             continue
-        cfg = load_config(run_dir)
-        label = get_run_label(cfg, run_dir)
-        run_data.append(
+        cfg = load_config(alg_dir)
+        label = get_alg_label(cfg, alg_dir)
+        alg_data.append(
             {
                 "label": label,
-                "run_dir": run_dir,
+                "alg_dir": alg_dir,
                 "seed_results": seed_results,
                 "cfg": cfg,
             }
         )
-        print(f"  [OK]   {run_dir.name}: {len(seed_results)} seeds, label={label!r}")
+        print(f"  [OK]   {alg_dir.name}: {len(seed_results)} seeds, label={label!r}")
 
-    if len(run_data) < 2:
+    if len(alg_data) < 2:
         print("Need at least 2 runs with results to compare.")
         return
 
     fig_dir = exp_dir / "figs"
     fig_dir.mkdir(parents=True, exist_ok=True)
 
-    plot_metrics_comparison(run_data, fig_dir)
-    plot_loss_curves_comparison(run_data, fig_dir)
-    plot_feature_importance_comparison(run_data, fig_dir, top_k=args.top_k)
+    plot_results_comparison(alg_data, fig_dir)
+    plot_loss_curves_comparison(alg_data, fig_dir)
+    plot_feature_importance_comparison(alg_data, fig_dir, top_k=args.top_k)
 
     saved = sorted(p.name for p in fig_dir.glob("*.png"))
     print(f"Saved {len(saved)} figures to {fig_dir}: {saved}")

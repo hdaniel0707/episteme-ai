@@ -5,7 +5,7 @@ import yaml
 YELLOW = "\033[93m"
 RESET = "\033[0m"
 
-REQUIRED_KEYS = {"run_id", "run_label", "seed", "data", "features", "model"}
+REQUIRED_KEYS = {"alg_id", "alg_label", "seed", "data", "features", "model"}
 REQUIRED_DATA_KEYS = {"parquet_path"}
 REQUIRED_MODEL_KEYS = {"n_runs", "ml_alg"}
 METRIC_KEYS = ["train_rmse", "train_r2", "val_rmse", "val_r2", "test_rmse", "test_r2"]

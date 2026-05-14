@@ -88,7 +88,7 @@ Each run:
 2. Splits data 70 / 15 / 15 (train / val / test)
 3. Applies `StandardScaler`
 4. Trains the configured model and evaluates RMSE and R²
-5. Saves results to `results/<experiment_id>/<run_id>/<seed>/`
+5. Saves results to `results/<experiment_id>/<alg_id>/<seed>/`
 
 After all runs complete, `run_exp` automatically triggers both analysis scripts.
 
@@ -100,7 +100,7 @@ Both analysis scripts are called automatically at the end of `run_exp.py`. They 
 
 #### Per-run analysis (`aip/analyse_exp.py`)
 
-Produces figures for each run, aggregated across seeds. Saved to `results/<experiment_id>/<run_id>/figs/`:
+Produces figures for each run, aggregated across seeds. Saved to `results/<experiment_id>/<alg_id>/figs/`:
 - `loss_curves.png` — mean ± std MSE over boosting stages (gradient boosting only)
 - `feature_importance.png` — top-k features with error bars
 - `metrics_summary.png` — RMSE and R² across train/val/test splits
@@ -119,8 +119,8 @@ Overlays all runs in an experiment to compare configurations. Saved to `results/
 Experiment runs are controlled by YAML files in `cfg/`. See `cfg/example.yaml`:
 
 ```yaml
-run_id: "my_run"
-run_label: "all features"
+alg_id: "my_run"
+alg_label: "all features"
 seed: 42
 
 data:

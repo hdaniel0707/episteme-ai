@@ -1,8 +1,8 @@
 # Experiment configuration
-# run_id: unique name for this experiment — determines the output directory under results/
+# alg_id: unique name for this experiment — determines the output directory under results/
 # If omitted, a name is auto-generated from the config filename + timestamp.
-run_id: "0505_B1"
-run_label: "all"
+alg_id: "0505_B1"
+alg_label: "all"
 
 seed: 42
 

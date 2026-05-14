@@ -21,7 +21,7 @@ DB_DIR = BASE_DIR / "data"
 ######################################
 LOAD_FROM_SQL = True
 QUERY_MODE = "random"  # "first" | "random" | "concat"
-DB_ID = "0512_A"
+DB_ID = "0514_A_100"
 DB_PATH = DB_DIR / "sql" / (DB_ID + ".db")
 PAQUET_PATH = DB_DIR / "paquet" / DB_ID
 FIG_DIR = BASE_DIR / "results" / "analyse_data" / DB_ID

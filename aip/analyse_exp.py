@@ -239,9 +239,9 @@ def run_individual_analysis(experiment_id: str):
     EXP_DIR = RESULTS_DIR / experiment_id
     print(f"Analysing: {EXP_DIR}")
 
-    run_dirs = sorted(p for p in EXP_DIR.iterdir() if p.is_dir())
-    for run_dir in run_dirs:
-        analyse_run(run_dir)
+    alg_dirs = sorted(p for p in EXP_DIR.iterdir() if p.is_dir())
+    for alg_dir in alg_dirs:
+        analyse_run(alg_dir)
 
 
 def main() -> None:
