@@ -13,8 +13,8 @@ RESULTS_DIR = BASE_DIR / "results"
 # ---------------------------------------------------------------------------
 
 
-def load_seed_results(run_dir: Path) -> list[dict]:
-    seed_dirs = sorted(p for p in run_dir.iterdir() if p.is_dir() and p.name.isdigit())
+def load_seed_results(alg_dir: Path) -> list[dict]:
+    seed_dirs = sorted(p for p in alg_dir.iterdir() if p.is_dir() and p.name.isdigit())
     results = []
     for sd in seed_dirs:
         result_path = sd / "results" / "result.json"
@@ -24,8 +24,8 @@ def load_seed_results(run_dir: Path) -> list[dict]:
     return results
 
 
-def load_config(run_dir: Path) -> dict:
-    cfg_path = run_dir / "config.json"
+def load_config(alg_dir: Path) -> dict:
+    cfg_path = alg_dir / "config.json"
     if cfg_path.exists():
         with open(cfg_path) as f:
             return json.load(f)
@@ -86,7 +86,7 @@ def _ci_band(ax, x, values: np.ndarray, label: str, color: str, alpha: float = 0
     ax.fill_between(x, mean - std, mean + std, color=color, alpha=alpha)
 
 
-def plot_loss_curves(seed_results: list[dict], run_dir: Path, fig_dir: Path) -> None:
+def plot_loss_curves(seed_results: list[dict], alg_dir: Path, fig_dir: Path) -> None:
     train_losses = [r["train_losses"] for r in seed_results if r.get("train_losses")]
     val_losses = [r["val_losses"] for r in seed_results if r.get("val_losses")]
 
@@ -104,7 +104,7 @@ def plot_loss_curves(seed_results: list[dict], run_dir: Path, fig_dir: Path) -> 
     _ci_band(ax, x, val_arr, label="val (mean ± std)", color="coral")
     ax.set_xlabel("Epochs / Boosting stage")
     ax.set_ylabel("Loss")
-    ax.set_title(f"{run_dir.name} — loss curves ({len(seed_results)} seeds)")
+    ax.set_title(f"{alg_dir.name} — loss curves ({len(seed_results)} seeds)")
     ax.legend()
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
@@ -115,7 +115,7 @@ def plot_loss_curves(seed_results: list[dict], run_dir: Path, fig_dir: Path) -> 
 def plot_feature_importance(
     seed_results: list[dict],
     cfg: dict,
-    run_dir: Path,
+    alg_dir: Path,
     fig_dir: Path,
     top_k: int = 20,
 ) -> None:
@@ -150,7 +150,7 @@ def plot_feature_importance(
     ax.set_yticks(y_pos)
     ax.set_yticklabels(top_labels[::-1], fontsize=8)
     ax.set_xlabel("Feature importance (mean ± std)")
-    ax.set_title(f"{run_dir.name} — top {top_k} features ({len(fi_lists)} seeds)")
+    ax.set_title(f"{alg_dir.name} — top {top_k} features ({len(fi_lists)} seeds)")
     ax.grid(True, axis="x", alpha=0.3)
     fig.tight_layout()
     fig.savefig(fig_dir / "feature_importance.png", dpi=150)
@@ -158,7 +158,7 @@ def plot_feature_importance(
 
 
 def plot_metrics_summary(
-    seed_results: list[dict], run_dir: Path, fig_dir: Path
+    seed_results: list[dict], alg_dir: Path, fig_dir: Path
 ) -> None:
     metric_keys = [
         "train_rmse",
@@ -206,7 +206,7 @@ def plot_metrics_summary(
         ax.set_title(f"{ylabel} across splits")
         ax.grid(True, axis="y", alpha=0.3)
 
-    fig.suptitle(f"{run_dir.name} — metrics ({len(seed_results)} seeds)")
+    fig.suptitle(f"{alg_dir.name} — metrics ({len(seed_results)} seeds)")
     fig.tight_layout()
     fig.savefig(fig_dir / "metrics_summary.png", dpi=150)
     plt.close(fig)
@@ -218,21 +218,67 @@ def plot_metrics_summary(
 
 
 def analyse_run(run_dir: Path) -> None:
-    seed_results = load_seed_results(run_dir)
-    if not seed_results:
-        print(f"  [SKIP] {run_dir.name}: no seed results found")
+    result_path = run_dir / "results" / "result.json"
+    if not result_path.exists():
+        print(f"  [SKIP] {run_dir}: no result.json")
         return
 
-    cfg = load_config(run_dir)
+    with open(result_path) as f:
+        result = json.load(f)
+
+    y_test = result.get("y_test")
+    y_pred = result.get("y_pred")
+    if not y_test or not y_pred:
+        print(f"  [SKIP] {run_dir}: missing y_test/y_pred")
+        return
+
+    y_test = np.array(y_test)
+    y_pred = np.array(y_pred)
+
+    rmse = result.get("test_rmse", np.sqrt(np.mean((y_pred - y_test) ** 2)))
+    r2 = result.get(
+        "test_r2",
+        1 - np.sum((y_pred - y_test) ** 2) / np.sum((y_test - y_test.mean()) ** 2),
+    )
+
+    fig, ax = plt.subplots(figsize=(6, 6))
+    lims = [min(y_test.min(), y_pred.min()), max(y_test.max(), y_pred.max())]
+    ax.plot(lims, lims, color="black", linewidth=1, linestyle="--", label="perfect")
+    hb = ax.hexbin(y_test, y_pred, gridsize=50, cmap="viridis", bins="log", mincnt=1)
+    fig.colorbar(hb, ax=ax, label="log(count)")
+    ax.set_xlabel("Ground truth")
+    ax.set_ylabel("Predicted")
+    ax.set_title(
+        f"{run_dir.parent.name} / seed {run_dir.name}\n" f"RMSE={rmse:.3f}  R²={r2:.3f}"
+    )
+    ax.legend(fontsize=8)
+    ax.set_aspect("equal", adjustable="box")
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+
     fig_dir = run_dir / "figs"
     fig_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(fig_dir / "pred_vs_gt.png", dpi=300)
+    plt.close(fig)
+    print(f"  [OK]   {run_dir.parent.name}/{run_dir.name} → pred_vs_gt.png")
 
-    plot_loss_curves(seed_results, run_dir, fig_dir)
-    plot_feature_importance(seed_results, cfg, run_dir, fig_dir)
-    plot_metrics_summary(seed_results, run_dir, fig_dir)
+
+def analyse_runs_compared(alg_dir: Path) -> None:
+    seed_results = load_seed_results(alg_dir)
+    if not seed_results:
+        print(f"  [SKIP] {alg_dir.name}: no seed results found")
+        return
+
+    cfg = load_config(alg_dir)
+    fig_dir = alg_dir / "figs"
+    fig_dir.mkdir(parents=True, exist_ok=True)
+
+    plot_loss_curves(seed_results, alg_dir, fig_dir)
+    plot_feature_importance(seed_results, cfg, alg_dir, fig_dir)
+    plot_metrics_summary(seed_results, alg_dir, fig_dir)
 
     saved = sorted(p.name for p in fig_dir.glob("*.png"))
-    print(f"  [OK]   {run_dir.name}: {len(seed_results)} seeds → {saved}")
+    print(f"  [OK]   {alg_dir.name}: {len(seed_results)} seeds → {saved}")
 
 
 def run_individual_analysis(experiment_id: str):
@@ -241,11 +287,16 @@ def run_individual_analysis(experiment_id: str):
 
     alg_dirs = sorted(p for p in EXP_DIR.iterdir() if p.is_dir())
     for alg_dir in alg_dirs:
-        analyse_run(alg_dir)
+        analyse_runs_compared(alg_dir)
+        run_dirs = sorted(
+            p for p in alg_dir.iterdir() if p.is_dir() and p.name.isdigit()
+        )
+        for run_dir in run_dirs:
+            analyse_run(run_dir)
 
 
 def main() -> None:
-    run_individual_analysis("exp_20260506_203629")
+    run_individual_analysis("exp_20260512_171519")
 
 
 if __name__ == "__main__":

@@ -21,7 +21,7 @@ DB_DIR = BASE_DIR / "data"
 ######################################
 LOAD_FROM_SQL = True
 QUERY_MODE = "random"  # "first" | "random" | "concat"
-DB_ID = "0514_A_100"
+DB_ID = "0512_A"
 DB_PATH = DB_DIR / "sql" / (DB_ID + ".db")
 PAQUET_PATH = DB_DIR / "paquet" / DB_ID
 FIG_DIR = BASE_DIR / "results" / "analyse_data" / DB_ID
@@ -94,7 +94,7 @@ if __name__ == "__main__":
     plot_histogram(
         y_log1p,
         x_axis_title="log(citation)",
-        bins=50,
+        bins=25,
         save_path=FIG_DIR / "histogram" / "log_citation_histogram",
     )
 
@@ -103,6 +103,7 @@ if __name__ == "__main__":
         y,
         names=titles,
         log1p_text=False,
+        central_tendency="mean",
         save_path=FIG_DIR / "correlations" / "citation_year_correlation",
     )
 
@@ -111,6 +112,7 @@ if __name__ == "__main__":
         y_log1p,
         names=titles,
         log1p_text=True,
+        central_tendency="mean",
         save_path=FIG_DIR / "correlations" / "log_citation_year_correlation",
     )
 
@@ -119,6 +121,7 @@ if __name__ == "__main__":
         y,
         names=titles,
         log1p_text=False,
+        central_tendency="mean",
         save_path=FIG_DIR / "correlations" / "hindex_citation_correlation",
     )
 
@@ -127,6 +130,7 @@ if __name__ == "__main__":
         y_log1p,
         names=titles,
         log1p_text=True,
+        central_tendency="mean",
         save_path=FIG_DIR / "correlations" / "hindex_log_citation_correlation",
     )
 

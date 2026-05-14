@@ -195,8 +195,11 @@ def plot_citation_year_correlation(
     names: np.ndarray | list | None = None,
     title: str = "Citation Count vs Year",
     log1p_text: bool = False,
+    central_tendency: str = "mean",
+    smooth_mean: bool = True,
     save_path: Path | None = None,
 ):
+
     years = np.asarray(years)
     citations = np.asarray(citations)
     n = len(years)
@@ -207,11 +210,11 @@ def plot_citation_year_correlation(
         else np.asarray(names)
     )
 
-    # per-year stats for the trend line
+    agg_fn = np.mean if central_tendency == "mean" else np.median
+    agg_label = central_tendency.capitalize()
+
     unique_years = np.unique(years)
-    median_citations = np.array(
-        [np.median(citations[years == y]) for y in unique_years]
-    )
+    agg_citations = np.array([agg_fn(citations[years == y]) for y in unique_years])
 
     fig = go.Figure()
 
@@ -235,14 +238,30 @@ def plot_citation_year_correlation(
     fig.add_trace(
         go.Scatter(
             x=unique_years.tolist(),
-            y=median_citations.tolist(),
+            y=agg_citations.tolist(),
             mode="lines+markers",
-            name="Median per year",
-            line=dict(color="firebrick", width=2),
+            name=f"{agg_label} per year",
+            line=dict(color="salmon", width=2),
             marker=dict(size=7),
-            hovertemplate="Year: %{x}<br>Median citations: %{y:.1f}<extra></extra>",
+            hovertemplate=f"Year: %{{x}}<br>{agg_label} citations: %{{y:.1f}}<extra></extra>",
         )
     )
+
+    if smooth_mean and len(unique_years) >= 4:
+        window = max(3, len(unique_years) // 5)
+        pad = window // 2
+        padded = np.pad(agg_citations, pad, mode="edge")
+        ma = np.convolve(padded, np.ones(window) / window, mode="valid")
+        fig.add_trace(
+            go.Scatter(
+                x=unique_years.tolist(),
+                y=ma.tolist(),
+                mode="lines",
+                name=f"Smooth {agg_label}",
+                line=dict(color="firebrick", width=4),
+                hovertemplate=f"Year: %{{x}}<br>Smooth {agg_label}: %{{y:.1f}}<extra></extra>",
+            )
+        )
 
     fig.update_layout(
         title=title,
@@ -270,8 +289,11 @@ def plot_hindex_citation_correlation(
     names: np.ndarray | list | None = None,
     title: str = "Citation Count vs Best Author H-Index",
     log1p_text: bool = False,
+    central_tendency: str = "mean",
+    smooth_mean: bool = True,
     save_path: Path | None = None,
 ):
+
     h_indices = np.asarray(h_indices, dtype=float)
     citations = np.asarray(citations, dtype=float)
 
@@ -285,8 +307,11 @@ def plot_hindex_citation_correlation(
     )
     names_valid = names_arr[valid]
 
+    agg_fn = np.mean if central_tendency == "mean" else np.median
+    agg_label = central_tendency.capitalize()
+
     unique_h = np.unique(h_valid)
-    median_citations = np.array([np.median(c_valid[h_valid == h]) for h in unique_h])
+    agg_citations = np.array([agg_fn(c_valid[h_valid == h]) for h in unique_h])
 
     fig = go.Figure()
 
@@ -310,14 +335,30 @@ def plot_hindex_citation_correlation(
     fig.add_trace(
         go.Scatter(
             x=unique_h.tolist(),
-            y=median_citations.tolist(),
+            y=agg_citations.tolist(),
             mode="lines+markers",
-            name="Median per h-index",
-            line=dict(color="firebrick", width=2),
+            name=f"{agg_label} per h-index",
+            line=dict(color="salmon", width=2),
             marker=dict(size=7),
-            hovertemplate="H-Index: %{x}<br>Median citations: %{y:.1f}<extra></extra>",
+            hovertemplate=f"H-Index: %{{x}}<br>{agg_label} citations: %{{y:.1f}}<extra></extra>",
         )
     )
+
+    if smooth_mean and len(unique_h) >= 4:
+        window = max(3, len(unique_h) // 5)
+        pad = window // 2
+        padded = np.pad(agg_citations, pad, mode="edge")
+        ma = np.convolve(padded, np.ones(window) / window, mode="valid")
+        fig.add_trace(
+            go.Scatter(
+                x=unique_h.tolist(),
+                y=ma.tolist(),
+                mode="lines",
+                name=f"Smooth {agg_label}",
+                line=dict(color="firebrick", width=4),
+                hovertemplate=f"H-Index: %{{x}}<br>Smooth {agg_label}: %{{y:.1f}}<extra></extra>",
+            )
+        )
 
     fig.update_layout(
         title=title,
