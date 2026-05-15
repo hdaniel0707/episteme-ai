@@ -22,7 +22,8 @@ def init_db(conn: sqlite3.Connection, delete_if_exsist=False) -> None:
             year                        INTEGER,
             venue                       TEXT,
             queries                     TEXT,          -- JSON array of search queries
-            domains                     TEXT           -- JSON array of research domains
+            domains                     TEXT,          -- JSON array of research domains
+            generated_by                TEXT DEFAULT 'human'
         );
         CREATE TABLE IF NOT EXISTS authors (
             author_id       TEXT PRIMARY KEY,
@@ -43,12 +44,19 @@ def init_db(conn: sqlite3.Connection, delete_if_exsist=False) -> None:
     conn.commit()
 
 
-def save_paper(conn: sqlite3.Connection, paper: dict, query: str | None = None, domain: str | None = None) -> None:
+def save_paper(
+    conn: sqlite3.Connection,
+    paper: dict,
+    query: str | None = None,
+    domain: str | None = None,
+) -> None:
     emb = paper.get("embedding")
     embedding_json = json.dumps(emb["vector"]) if emb else None
 
     paper_id = paper["paperId"]
-    row = conn.execute("SELECT queries, domains FROM papers WHERE paper_id = ?", (paper_id,)).fetchone()
+    row = conn.execute(
+        "SELECT queries, domains FROM papers WHERE paper_id = ?", (paper_id,)
+    ).fetchone()
     if row and row[0]:
         existing_queries = json.loads(row[0])
         if query and query not in existing_queries:
@@ -132,10 +140,13 @@ def save_paper(conn: sqlite3.Connection, paper: dict, query: str | None = None, 
 
 def load_db(
     path: Path,
+    require_fields: list[str] | None = None,
     year_from: int | None = None,
     year_to: int | None = None,
 ) -> pd.DataFrame:
     """Load papers + per-paper author count and best author h-index from one SQLite database file."""
+    if require_fields is None:
+        require_fields = ["embedding", "best_author_h_index", "year"]
     conditions = []
     params: list[int] = []
     if year_from is not None:
@@ -149,9 +160,7 @@ def load_db(
     conn = sqlite3.connect(path)
     papers = pd.read_sql(
         f"""
-        SELECT paper_id, title, abstract, embedding,
-               citation_count, influential_citation_count, year, venue, queries, domains
-        FROM papers
+        SELECT * FROM papers
         {where}
         """,
         conn,
@@ -175,9 +184,11 @@ def load_db(
     df = papers.merge(author_counts, on="paper_id", how="left")
     df = df.merge(best_h_index, on="paper_id", how="left")
     df["source_db"] = Path(path).stem
-    df = df[
-        df["embedding"].notna() & df["best_author_h_index"].notna() & df["year"].notna()
-    ].reset_index(drop=True)
+    if require_fields:
+        mask = pd.Series(True, index=df.index)
+        for field in require_fields:
+            mask &= df[field].notna()
+        df = df[mask].reset_index(drop=True)
     df["embedding"] = df["embedding"].map(json.loads)
     df["queries"] = df["queries"].map(lambda v: json.loads(v) if v else [])
     df["domains"] = df["domains"].map(lambda v: json.loads(v) if v else [])

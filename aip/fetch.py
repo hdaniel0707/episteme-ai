@@ -31,8 +31,8 @@ PAPER_FIELDS = (
 
 BASE_DIR = Path(__file__).parent.parent
 DB_DIR = BASE_DIR / "data"
-DB_PATH = DB_DIR / "sql" / "0514_A_100.db"
-CFG_PATH = BASE_DIR / "cfg" / "fetch" / "hd" / "fetch_cfg.yaml"
+DB_PATH = DB_DIR / "sql" / "0515_A_500.db"
+CFG_PATH = BASE_DIR / "cfg" / "fetch" / "hd" / "fetch_cfg_reduced.yaml"
 
 with open(CFG_PATH) as f:
     QUERIES_DOMAINS: dict[str, list[str]] = yaml.safe_load(f)["queries_domains"]
