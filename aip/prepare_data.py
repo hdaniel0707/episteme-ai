@@ -26,10 +26,18 @@ if __name__ == "__main__":
 
     df = load_db(DB_PATH, require_fields=REQUIRED_FIEDLS, year_from=1900, year_to=2026)
     # DEBUG
-    df = df.head(50)
+    # df = df.head(5)
 
     if ADD_GEN_AI:
-        df, removed_article_n = add_ai_generated_data(df)
+        df, removed_article_n = add_ai_generated_data(
+            df,
+            model_prompt_pairs=[
+                ("gemini-2.5-flash-lite", "normal"),
+                ("claude-haiku-4-5-20251001", "normal"),
+                ("gpt-4o-mini", "normal"),
+                ("gpt-4o-mini", "aggressive"),
+            ],
+        )
         print(f"Removed article number: {removed_article_n}")
 
         if ADD_EMB_SPECTER2:
