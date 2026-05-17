@@ -61,6 +61,12 @@ if __name__ == "__main__":
         X_gen = np.array(df["generated_by"].tolist())
         print(X_gen.shape)
 
+        X_emb_specter2 = np.array(df["emb_specter2"].tolist())
+        print(X_emb_specter2.shape)
+
+        X2_pca = reduce(X_emb_specter2, "pca", 2)
+        print(X2_pca.shape)
+
         plot_pca_2d_cat(
             X2_pca,
             names=titles,

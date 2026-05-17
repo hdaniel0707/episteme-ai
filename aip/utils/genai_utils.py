@@ -1,3 +1,4 @@
+import anthropic
 import pandas as pd
 from openai import OpenAI
 from pydantic import BaseModel
@@ -25,42 +26,97 @@ Requirements:
 - The rewritten title should remain concise and scientifically accurate."""
 
 
-def add_ai_generated_data(
-    df: pd.DataFrame, model: str = "gpt-4o-mini", debug_n: int | None = None
-) -> tuple[pd.DataFrame, int]:
-    client = OpenAI()
+def _rephrase_openai(
+    client: OpenAI, model: str, title: str, abstract: str
+) -> RephrasedPaper | None:
+    response = client.beta.chat.completions.parse(
+        model=model,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": f"Title: {title}\n\nAbstract: {abstract}"},
+        ],
+        response_format=RephrasedPaper,
+    )
+    return response.choices[0].message.parsed
 
-    rows_df = df.head(debug_n) if debug_n is not None else df
-    new_rows = []
-    valid_indices = []
 
-    for idx, row in tqdm(rows_df.iterrows(), total=len(rows_df), desc="Generating"):
-        title = row.get("title") or ""
-        abstract = row.get("abstract") or ""
-
-        response = client.beta.chat.completions.parse(
-            model=model,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": f"Title: {title}\n\nAbstract: {abstract}",
+def _rephrase_anthropic(
+    client: anthropic.Anthropic, model: str, title: str, abstract: str
+) -> RephrasedPaper | None:
+    response = client.messages.create(
+        model=model,
+        max_tokens=1024,
+        system=SYSTEM_PROMPT,
+        tools=[
+            {
+                "name": "rephrase_paper",
+                "description": "Return the rephrased title and abstract.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "title_rephrased": {"type": "string"},
+                        "abstract_rephrased": {"type": "string"},
+                    },
+                    "required": ["title_rephrased", "abstract_rephrased"],
                 },
-            ],
-            response_format=RephrasedPaper,
-        )
+            }
+        ],
+        tool_choice={"type": "tool", "name": "rephrase_paper"},
+        messages=[
+            {"role": "user", "content": f"Title: {title}\n\nAbstract: {abstract}"}
+        ],
+    )
+    tool_block = next((b for b in response.content if b.type == "tool_use"), None)
+    if tool_block is None:
+        return None
+    inp: dict = tool_block.input  # type: ignore[assignment]
+    return RephrasedPaper(
+        title_rephrased=inp["title_rephrased"],
+        abstract_rephrased=inp["abstract_rephrased"],
+    )
 
-        result = response.choices[0].message.parsed
-        if not result or not result.title_rephrased or not result.abstract_rephrased:
-            continue
 
-        new_row = row.copy()
-        new_row["title"] = result.title_rephrased
-        new_row["abstract"] = result.abstract_rephrased
-        new_row["generated_by"] = model
-        new_rows.append(new_row)
-        valid_indices.append(idx)
+def add_ai_generated_data(
+    df: pd.DataFrame,
+    models: list[str] = [
+        "claude-haiku-4-5-20251001",
+        "gpt-4o-mini",
+    ],
+) -> tuple[pd.DataFrame, int]:
+    openai_client = OpenAI()
+    anthropic_client = anthropic.Anthropic()
 
-    dropped_indices = [i for i in rows_df.index if i not in valid_indices]
-    df_filtered = df.drop(index=dropped_indices)
-    return pd.concat([df_filtered, pd.DataFrame(new_rows)], ignore_index=True), len(dropped_indices)
+    new_rows = []
+    total_dropped = 0
+
+    for model in models:
+        valid_indices = []
+
+        for idx, row in tqdm(
+            df.iterrows(), total=len(df), desc=f"Generating [{model}]"
+        ):
+            title = row.get("title") or ""
+            abstract = row.get("abstract") or ""
+
+            if model.startswith("claude"):
+                result = _rephrase_anthropic(anthropic_client, model, title, abstract)
+            else:
+                result = _rephrase_openai(openai_client, model, title, abstract)
+
+            if (
+                not result
+                or not result.title_rephrased
+                or not result.abstract_rephrased
+            ):
+                continue
+
+            new_row = row.copy()
+            new_row["title"] = result.title_rephrased
+            new_row["abstract"] = result.abstract_rephrased
+            new_row["generated_by"] = model
+            new_rows.append(new_row)
+            valid_indices.append(idx)
+
+        total_dropped += len(df) - len(valid_indices)
+
+    return pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True), total_dropped
