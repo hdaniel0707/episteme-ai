@@ -7,6 +7,27 @@ import matplotlib.pyplot as plt
 import json
 from sklearn.metrics import mean_squared_error, r2_score
 
+# Consistent colors per LLM family across all plots
+# normal = lighter shade, aggressive = darker shade
+_LLM_COLORS: dict[str, tuple[str, str]] = {
+    "gpt":    ("#10a37f", "#076b52"),  # OpenAI green: normal / aggressive
+    "o1":     ("#10a37f", "#076b52"),
+    "o3":     ("#10a37f", "#076b52"),
+    "claude": ("#d97757", "#8b3d20"),  # Anthropic orange: normal / aggressive
+    "gemini": ("#4285f4", "#1a56c4"),  # Google blue: normal / aggressive
+    "human":  ("#888888", "#888888"),  # neutral gray (no aggressive variant)
+}
+
+
+def _llm_color(label: str) -> str | None:
+    """Return a color for known LLM labels — darker shade for aggressive prompts."""
+    lower = label.lower()
+    aggressive = "aggressive" in lower
+    for prefix, (normal_color, aggressive_color) in _LLM_COLORS.items():
+        if lower.startswith(prefix):
+            return aggressive_color if aggressive else normal_color
+    return None
+
 
 def plot_pca_2d_cat(
     X2: np.ndarray,
@@ -53,13 +74,18 @@ def plot_pca_2d_cat(
 
         score_hover = "Score: %{customdata:.3f}<br>" if sub_scores is not None else ""
 
+        color = _llm_color(label)
+        marker_kw = dict(size=sub_sizes, opacity=0.8)
+        if color is not None:
+            marker_kw["color"] = color
+
         fig.add_trace(
             go.Scatter(
                 x=sub_x,
                 y=sub_y,
                 name=label,  # This creates the legend entry
                 mode="markers",
-                marker=dict(size=sub_sizes, opacity=0.8),
+                marker=marker_kw,
                 text=sub_names,
                 customdata=sub_scores,
                 hovertemplate=(
@@ -454,6 +480,85 @@ def plot_categorical_distribution(
         yaxis_title=y_axis_title,
         xaxis=dict(type="category"),
         margin=dict(l=40, r=20, t=40, b=120),
+    )
+
+    if save_path:
+        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+        html_path = Path(save_path).with_suffix(".html")
+        fig.write_html(html_path)
+        png_path = Path(save_path).with_suffix(".png")
+        fig.write_image(str(png_path), scale=3)
+        print(f"Interactive plot saved to {html_path}")
+        print(f"Image saved to {png_path}")
+
+    fig.show()
+
+
+def plot_human_vs_llm_distance(
+    embeddings: np.ndarray,
+    paper_ids: np.ndarray | list,
+    labels: np.ndarray | list,
+    title: str = "Human vs LLM Abstract Similarity",
+    save_path: Path | None = None,
+):
+    """Bar chart of mean cosine distance between human and each LLM embedding, per paper."""
+    from collections import defaultdict
+
+    embeddings = np.asarray(embeddings, dtype=float)
+    paper_ids = np.asarray(paper_ids)
+    labels = np.asarray(labels, dtype=str)
+
+    pair_distances: dict[str, list[float]] = defaultdict(list)
+
+    for pid in np.unique(paper_ids):
+        mask = paper_ids == pid
+        embs = embeddings[mask]
+        lbls = labels[mask]
+
+        human_mask = lbls == "human"
+        if not human_mask.any():
+            continue
+        human_emb = embs[human_mask][0]
+        h_norm = np.linalg.norm(human_emb)
+        if h_norm == 0:
+            continue
+        human_unit = human_emb / h_norm
+
+        for emb, lbl in zip(embs, lbls):
+            if lbl == "human":
+                continue
+            n = np.linalg.norm(emb)
+            if n == 0:
+                continue
+            dist = 1.0 - float(np.dot(emb / n, human_unit))
+            pair_distances[f"human vs {lbl}"].append(dist)
+
+    pair_labels = sorted(pair_distances.keys())
+    means = [float(np.mean(pair_distances[lbl])) for lbl in pair_labels]
+    stds = [float(np.std(pair_distances[lbl])) for lbl in pair_labels]
+
+    # Color each bar by the LLM family ("human vs <llm-label>" → strip prefix)
+    bar_colors = [
+        _llm_color(lbl.removeprefix("human vs ")) or "#636efa"
+        for lbl in pair_labels
+    ]
+
+    fig = go.Figure(
+        go.Bar(
+            x=pair_labels,
+            y=means,
+            marker_color=bar_colors,
+            error_y=dict(type="data", array=stds, visible=True),
+            hovertemplate="%{x}<br>Mean cosine dist: %{y:.4f}<extra></extra>",
+        )
+    )
+
+    fig.update_layout(
+        title=title,
+        xaxis_title="Pair",
+        yaxis_title="Mean cosine distance (human vs LLM)",
+        xaxis=dict(type="category"),
+        margin=dict(l=40, r=20, t=40, b=100),
     )
 
     if save_path:

@@ -6,16 +6,15 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from aip.utils.sqlite_utils import load_db
-from aip.utils.genai_utils import add_ai_generated_data
 from aip.utils.dimred_utils import reduce
-from aip.utils.parquet_utils import save_parquet, load_parquet, pick_label
+from aip.utils.parquet_utils import load_parquet, pick_label
 from aip.utils.visualization_utils import (
     plot_pca_2d_cat,
     plot_histogram,
     plot_categorical_distribution,
     plot_citation_year_correlation,
     plot_hindex_citation_correlation,
+    plot_human_vs_llm_distance,
 )
 
 BASE_DIR = Path(__file__).parent.parent
@@ -23,7 +22,7 @@ DB_DIR = BASE_DIR / "data"
 
 
 ######################################
-DB_ID = "0515_A_500_AI"
+DB_ID = "0515_A_500_AI_260"
 PAQUET_PATH = DB_DIR / "paquet" / (DB_ID + ".parquet")
 FIG_DIR = BASE_DIR / "results" / "analyse_data" / DB_ID
 MODE_AI = True
@@ -74,6 +73,14 @@ if __name__ == "__main__":
             scores=y_log1p,
             title="pca y_log1p by domains",
             save_path=FIG_DIR / "dimreds" / "dimred_2d_pca_domains",
+        )
+
+        plot_human_vs_llm_distance(
+            embeddings=X_emb_specter2,
+            paper_ids=np.array(df["paper_id"].tolist()),
+            labels=X_gen,
+            title="Human vs LLM Abstract Similarity",
+            save_path=FIG_DIR / "semantic" / "human_vs_llm_distance",
         )
 
     else:
