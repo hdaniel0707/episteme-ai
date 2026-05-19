@@ -1,5 +1,6 @@
 import argparse
 import json
+from collections import defaultdict
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -132,13 +133,26 @@ def plot_feature_importance(
     mean_imp = fi_arr.mean(axis=0)
     std_imp = fi_arr.std(axis=0)
 
-    top_idx = np.argsort(mean_imp)[::-1][:top_k]
-    top_means = mean_imp[top_idx]
-    top_stds = std_imp[top_idx]
-    top_labels = [labels[i] if i < len(labels) else str(i) for i in top_idx]
+    # Sum importances of embedding dimensions into a single entry per feature
+    grouped_mean: dict[str, float] = defaultdict(float)
+    grouped_std: dict[str, float] = defaultdict(float)
+    for lbl, m, s in zip(labels, mean_imp, std_imp):
+        base = lbl.split("[")[0]
+        grouped_mean[base] += m
+        grouped_std[base] += s
 
-    fig, ax = plt.subplots(figsize=(10, max(4, top_k * 0.35)))
-    y_pos = np.arange(top_k)
+    agg_labels = list(grouped_mean.keys())
+    agg_means = np.array(list(grouped_mean.values()))
+    agg_stds = np.array(list(grouped_std.values()))
+
+    top_k_actual = min(top_k, len(agg_means))
+    top_idx = np.argsort(agg_means)[::-1][:top_k_actual]
+    top_means = agg_means[top_idx]
+    top_stds = agg_stds[top_idx]
+    top_labels = [agg_labels[i] for i in top_idx]
+
+    fig, ax = plt.subplots(figsize=(10, max(4, top_k_actual * 0.35)))
+    y_pos = np.arange(top_k_actual)
     ax.barh(
         y_pos,
         top_means[::-1],
@@ -150,7 +164,7 @@ def plot_feature_importance(
     ax.set_yticks(y_pos)
     ax.set_yticklabels(top_labels[::-1], fontsize=8)
     ax.set_xlabel("Feature importance (mean ± std)")
-    ax.set_title(f"{alg_dir.name} — top {top_k} features ({len(fi_lists)} seeds)")
+    ax.set_title(f"{alg_dir.name} — top {top_k_actual} features ({len(fi_lists)} seeds)")
     ax.grid(True, axis="x", alpha=0.3)
     fig.tight_layout()
     fig.savefig(fig_dir / "feature_importance.png", dpi=150)

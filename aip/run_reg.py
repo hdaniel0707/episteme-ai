@@ -23,7 +23,7 @@ BASE_DIR = Path(__file__).parent.parent
 RESULTS_DIR = BASE_DIR / "results" / "reg"
 
 ### INPUTS ###############################
-CFG_DIR = BASE_DIR / "cfg" / "train" / "reg" / "hd" / "alma"
+CFG_DIR = BASE_DIR / "cfg" / "train" / "reg" / "hd" / "banan"
 
 
 def run_experiments() -> str:
@@ -145,6 +145,8 @@ def run_experiments() -> str:
 def main() -> None:
     if check_cuda():
         experiment_id = run_experiments()
+        # experiment_id = "reg_20260519_160026"
+
         run_individual_analysis(RESULTS_DIR, experiment_id)
         run_compared_analysis(RESULTS_DIR, experiment_id)
 
