@@ -7,7 +7,6 @@ import joblib
 from tqdm import tqdm
 
 from sklearn.ensemble import GradientBoostingRegressor
-from aip.autoencoder import AERegressor
 from sklearn.metrics import mean_squared_error, r2_score
 
 from sklearn.model_selection import train_test_split
@@ -21,16 +20,16 @@ from aip.analyse_exp import run_individual_analysis
 from aip.analyse_exp_compare import run_compared_analysis
 
 BASE_DIR = Path(__file__).parent.parent
-RESULTS_DIR = BASE_DIR / "results"
+RESULTS_DIR = BASE_DIR / "results" / "reg"
 
 ### INPUTS ###############################
-CFG_DIR = BASE_DIR / "cfg" / "train" / "hd" / "alma"
+CFG_DIR = BASE_DIR / "cfg" / "train" / "reg" / "hd" / "alma"
 
 
 def run_experiments() -> str:
 
     # Generate Eyperiment ID
-    experiment_id = "exp_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+    experiment_id = "reg_" + datetime.now().strftime("%Y%m%d_%H%M%S")
 
     # Create results fodler
     EXP_DIR = RESULTS_DIR / experiment_id
@@ -95,10 +94,7 @@ def run_experiments() -> str:
             model = build_model(ml_alg, base_seed + i)
 
             # Train model
-            if isinstance(model, AERegressor):
-                model.fit(X_train, y_train, X_val=X_val)
-            else:
-                model.fit(X_train, y_train)
+            model.fit(X_train, y_train)
 
             # Get results
             if isinstance(model, GradientBoostingRegressor):
@@ -110,13 +106,9 @@ def run_experiments() -> str:
                     float(mean_squared_error(y_val, p))
                     for p in model.staged_predict(X_val)
                 ]
-            elif isinstance(model, AERegressor):
-                train_losses = model.train_losses_
-                val_losses = model.val_losses_
             else:
                 train_losses, val_losses = [], []
 
-            #### NEEDS TO BE REDONE FOR AE ############################
             results: dict = {}
             for split, X_s, y_s in [
                 ("train", X_train, y_train),
@@ -139,8 +131,6 @@ def run_experiments() -> str:
                 else []
             )
 
-            #### ----------------------------############################
-
             # Save results
             with open(SEED_RES_DIR / "result.json", "w") as f:
                 json.dump(results, f, indent=2)
@@ -155,8 +145,8 @@ def run_experiments() -> str:
 def main() -> None:
     if check_cuda():
         experiment_id = run_experiments()
-        run_individual_analysis(experiment_id)
-        run_compared_analysis(experiment_id)
+        run_individual_analysis(RESULTS_DIR, experiment_id)
+        run_compared_analysis(RESULTS_DIR, experiment_id)
 
 
 if __name__ == "__main__":

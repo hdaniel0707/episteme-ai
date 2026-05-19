@@ -1,19 +1,17 @@
 # Experiment configuration
 # alg_id: unique name for this experiment — determines the output directory under results/
 # If omitted, a name is auto-generated from the config filename + timestamp.
-alg_id: "0505_B1"
-alg_label: "all"
+alg_id: "A1"
+alg_label: "name_of_exp"
 
 seed: 42
 
 data:
-  parquet_path: "data/paquet/0505_A"   # relative to the project root
+  parquet_path: "data/paquet/0512_B"   # relative to the project root
 
 features:
   - embedding
-  - year
-  - best_author_h_index
 
 model:
-  ml_alg: "gradient_boosting"  # gradient_boosting | linear | svm | mlp | ae
+  ml_alg: "ae"  #  ae
   n_runs: 3

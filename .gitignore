@@ -5,7 +5,9 @@
 results/
 data/
 cfg/fetch/hd
-cfg/train/hd
+cfg/train/reg/hd
+cfg/train/repr/hd
+cfg/train/clf/hd
 
 *.egg-info/
 dist/

@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 BASE_DIR = Path(__file__).parent.parent
-RESULTS_DIR = BASE_DIR / "results"
+RESULTS_DIR = BASE_DIR / "results" / "reg"
 
 _KNOWN_SCALARS = {
     "year",
@@ -289,23 +289,8 @@ def plot_feature_importance_comparison(
 # ---------------------------------------------------------------------------
 
 
-def run_compared_analysis(experiment_id: str) -> None:
-    EXP_DIR = RESULTS_DIR / experiment_id
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--exp-dir",
-        default=None,
-        help=f"Path to experiment directory (default: {EXP_DIR})",
-    )
-    parser.add_argument(
-        "--top-k",
-        type=int,
-        default=20,
-        help="Number of top features to show (default: 20)",
-    )
-    args = parser.parse_args()
-
-    exp_dir = Path(args.exp_dir) if args.exp_dir else EXP_DIR
+def run_compared_analysis(res_dir: Path, experiment_id: str) -> None:
+    exp_dir = res_dir / experiment_id
     print(f"Comparing runs in: {exp_dir}")
 
     alg_dirs = sorted(p for p in exp_dir.iterdir() if p.is_dir() and p.name != "figs")
@@ -336,14 +321,14 @@ def run_compared_analysis(experiment_id: str) -> None:
 
     plot_results_comparison(alg_data, fig_dir)
     plot_loss_curves_comparison(alg_data, fig_dir)
-    plot_feature_importance_comparison(alg_data, fig_dir, top_k=args.top_k)
+    plot_feature_importance_comparison(alg_data, fig_dir, top_k=20)
 
     saved = sorted(p.name for p in fig_dir.glob("*.png"))
     print(f"Saved {len(saved)} figures to {fig_dir}: {saved}")
 
 
 def main() -> None:
-    run_compared_analysis("exp_20260506_203629")
+    run_compared_analysis(RESULTS_DIR, "exp_20260506_203629")
 
 
 if __name__ == "__main__":

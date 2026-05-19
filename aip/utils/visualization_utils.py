@@ -10,12 +10,12 @@ from sklearn.metrics import mean_squared_error, r2_score
 # Consistent colors per LLM family across all plots
 # normal = lighter shade, aggressive = darker shade
 _LLM_COLORS: dict[str, tuple[str, str]] = {
-    "gpt":    ("#10a37f", "#076b52"),  # OpenAI green: normal / aggressive
-    "o1":     ("#10a37f", "#076b52"),
-    "o3":     ("#10a37f", "#076b52"),
+    "gpt": ("#10a37f", "#076b52"),  # OpenAI green: normal / aggressive
+    "o1": ("#10a37f", "#076b52"),
+    "o3": ("#10a37f", "#076b52"),
     "claude": ("#d97757", "#8b3d20"),  # Anthropic orange: normal / aggressive
     "gemini": ("#4285f4", "#1a56c4"),  # Google blue: normal / aggressive
-    "human":  ("#888888", "#888888"),  # neutral gray (no aggressive variant)
+    "human": ("#888888", "#888888"),  # neutral gray (no aggressive variant)
 }
 
 
@@ -539,8 +539,7 @@ def plot_human_vs_llm_distance(
 
     # Color each bar by the LLM family ("human vs <llm-label>" → strip prefix)
     bar_colors = [
-        _llm_color(lbl.removeprefix("human vs ")) or "#636efa"
-        for lbl in pair_labels
+        _llm_color(lbl.removeprefix("human vs ")) or "#636efa" for lbl in pair_labels
     ]
 
     fig = go.Figure(
@@ -574,7 +573,165 @@ def plot_human_vs_llm_distance(
 
 
 ########################################################################
-# TRAIN
+# TRAIN - CLASSIFICATION
+########################################################################
+
+
+def plot_clf_results(exp_dir: Path) -> None:
+    from sklearn.metrics import confusion_matrix as compute_cm
+
+    alg_dirs = sorted([d for d in exp_dir.iterdir() if d.is_dir()])
+    if not alg_dirs:
+        print(f"No algorithm directories found in {exp_dir}")
+        return
+
+    with open(alg_dirs[0] / "label_mapping.json") as f:
+        label_mapping = json.load(f)
+    class_names = [label_mapping[str(i)] for i in range(len(label_mapping))]
+    n_classes = len(class_names)
+
+    alg_names = [d.name for d in alg_dirs]
+    alg_labels = []
+    for d in alg_dirs:
+        cfg_path = d / "config.json"
+        if cfg_path.exists():
+            with open(cfg_path) as f:
+                cfg = json.load(f)
+            alg_labels.append(cfg.get("alg_label", d.name))
+        else:
+            alg_labels.append(d.name)
+    data: dict = {}
+    for alg_dir in alg_dirs:
+        seeds = sorted(
+            [d.name for d in alg_dir.iterdir() if d.is_dir() and d.name.isdigit()],
+            key=int,
+        )
+        data[alg_dir.name] = []
+        for seed in seeds:
+            result_path = alg_dir / seed / "results" / "result.json"
+            if result_path.exists():
+                with open(result_path) as f:
+                    data[alg_dir.name].append(json.load(f))
+
+    splits = ["train", "val", "test"]
+    n_models = len(alg_names)
+    n_splits = len(splits)
+    tick_fs = max(6, 10 - n_classes // 3)
+
+    # Figure 1: Accuracy
+    fig, ax = plt.subplots(figsize=(max(8, n_models * 2.5), 5))
+    x = np.arange(n_models)
+    w = 0.25
+    for j, (split, color) in enumerate(
+        zip(splits, ["steelblue", "orange", "seagreen"])
+    ):
+        means, stds = [], []
+        for mn in alg_names:
+            accs = [r[f"{split}_accuracy"] for r in data[mn]]
+            means.append(float(np.mean(accs)))
+            stds.append(float(np.std(accs)))
+        ax.bar(x + j * w, means, w, label=split, color=color, yerr=stds, capsize=4)
+    ax.axhline(
+        1 / n_classes, linestyle="--", color="red", linewidth=1.2, label="random"
+    )
+    ax.set_xticks(x + w)
+    ax.set_xticklabels(alg_labels, rotation=15, ha="right")
+    ax.set_ylim(0, 1.05)
+    ax.set_ylabel("Accuracy")
+    ax.set_title("Accuracy by Model and Split")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(exp_dir / "accuracy.png", dpi=150)
+    plt.close(fig)
+
+    # Figure 2: Confusion matrices
+    fig, axes = plt.subplots(n_models, n_splits, figsize=(5 * n_splits, 4.5 * n_models))
+    axes = np.array(axes).reshape(n_models, n_splits)
+    for i, mn in enumerate(alg_names):
+        for j, split in enumerate(splits):
+            ax = axes[i, j]
+            cms = []
+            for r in data[mn]:
+                yt = r.get(f"y_{split}")
+                yp = r.get(f"y_{split}_pred")
+                if yt is not None and yp is not None:
+                    cms.append(compute_cm(yt, yp))
+            if not cms:
+                ax.text(
+                    0.5,
+                    0.5,
+                    "no predictions",
+                    ha="center",
+                    va="center",
+                    transform=ax.transAxes,
+                )
+                ax.set_title(f"{alg_labels[i]} – {split}")
+                continue
+            avg_cm = np.mean(cms, axis=0)
+            norm_cm = avg_cm / avg_cm.sum(axis=1, keepdims=True)
+            im = ax.imshow(norm_cm, vmin=0, vmax=1, cmap="Blues")
+            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            ax.set_xticks(range(n_classes))
+            ax.set_yticks(range(n_classes))
+            ax.set_xticklabels(class_names, rotation=45, ha="right", fontsize=tick_fs)
+            ax.set_yticklabels(class_names, fontsize=tick_fs)
+            for r_idx in range(n_classes):
+                for c_idx in range(n_classes):
+                    ax.text(
+                        c_idx,
+                        r_idx,
+                        f"{avg_cm[r_idx, c_idx]:.0f}",
+                        ha="center",
+                        va="center",
+                        fontsize=tick_fs,
+                        color="white" if norm_cm[r_idx, c_idx] > 0.5 else "black",
+                    )
+            ax.set_title(f"{alg_labels[i]} – {split}")
+            ax.set_xlabel("Predicted")
+            ax.set_ylabel("True")
+    fig.tight_layout()
+    fig.savefig(exp_dir / "confusion_matrices.png", dpi=150)
+    plt.close(fig)
+
+    # Figure 3: Per-class F1
+    fig, axes = plt.subplots(
+        n_models, n_splits, figsize=(max(6, n_classes) * n_splits * 0.6, 4 * n_models)
+    )
+    axes = np.array(axes).reshape(n_models, n_splits)
+    for i, mn in enumerate(alg_names):
+        for j, split in enumerate(splits):
+            ax = axes[i, j]
+            f1s = {c: [] for c in class_names}
+            for r in data[mn]:
+                for c in class_names:
+                    report = r.get(f"{split}_report", {})
+                    if c in report:
+                        f1s[c].append(report[c]["f1-score"])
+            means = [float(np.mean(f1s[c])) if f1s[c] else 0.0 for c in class_names]
+            stds = [float(np.std(f1s[c])) if f1s[c] else 0.0 for c in class_names]
+            ax.bar(range(n_classes), means, yerr=stds, capsize=4, color="steelblue")
+            ax.axhline(
+                1 / n_classes,
+                linestyle="--",
+                color="red",
+                linewidth=1.2,
+                label="random",
+            )
+            ax.set_xticks(range(n_classes))
+            ax.set_xticklabels(class_names, rotation=45, ha="right", fontsize=tick_fs)
+            ax.set_ylim(0, 1.05)
+            ax.set_ylabel("F1 Score")
+            ax.set_title(f"{alg_labels[i]} – {split}")
+            ax.legend(fontsize=7)
+    fig.tight_layout()
+    fig.savefig(exp_dir / "f1_scores.png", dpi=150)
+    plt.close(fig)
+
+    print(f"Plots saved to: {exp_dir}")
+
+
+########################################################################
+# TRAIN - REGRESSION
 ########################################################################
 
 

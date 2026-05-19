@@ -5,7 +5,7 @@ from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split
 from sklearn.neural_network import MLPRegressor
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.svm import SVR
 from aip.autoencoder import AERegressor
 
@@ -47,4 +47,41 @@ def build_model(ml_alg: str, base_seed: int):
         return AERegressor(random_state=base_seed)
     raise ValueError(
         f"Unknown ml_alg: {ml_alg!r}. Choose from: gradient_boosting, linear, svm, mlp"
+    )
+
+
+def build_clf_features(
+    df, features: list[str], drop_classes: list[str] | None = None
+) -> tuple[np.ndarray, np.ndarray, LabelEncoder]:
+    if drop_classes:
+        df = df[~df["generated_by"].isin(drop_classes)].reset_index(drop=True)
+        print(f"Dropped classes: {drop_classes}")
+    X = np.array(df[features[0]].tolist(), dtype=np.float32)
+    le = LabelEncoder()
+    y = le.fit_transform(df["generated_by"].tolist())
+    return X, y, le
+
+
+def build_clf_model(ml_alg: str, seed: int):
+    from sklearn.ensemble import GradientBoostingClassifier
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.neural_network import MLPClassifier
+    from sklearn.svm import SVC
+
+    if ml_alg == "gradient_boosting":
+        return GradientBoostingClassifier(random_state=seed)
+    if ml_alg == "logistic":
+        return LogisticRegression(max_iter=1000, random_state=seed)
+    if ml_alg == "svm":
+        return SVC(random_state=seed)
+    if ml_alg == "mlp":
+        return MLPClassifier(
+            hidden_layer_sizes=(516, 64, 32),
+            activation="relu",
+            solver="adam",
+            max_iter=1000,
+            random_state=seed,
+        )
+    raise ValueError(
+        f"Unknown ml_alg: {ml_alg!r}. Choose from: gradient_boosting, logistic, svm, mlp"
     )

@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 BASE_DIR = Path(__file__).parent.parent
-RESULTS_DIR = BASE_DIR / "results"
+RESULTS_DIR = BASE_DIR / "results" / "reg"
 
 # ---------------------------------------------------------------------------
 # Loading
@@ -281,11 +281,11 @@ def analyse_runs_compared(alg_dir: Path) -> None:
     print(f"  [OK]   {alg_dir.name}: {len(seed_results)} seeds → {saved}")
 
 
-def run_individual_analysis(experiment_id: str):
-    EXP_DIR = RESULTS_DIR / experiment_id
-    print(f"Analysing: {EXP_DIR}")
+def run_individual_analysis(res_dir: Path, experiment_id: str):
+    exp_dir = res_dir / experiment_id
+    print(f"Analysing: {exp_dir}")
 
-    alg_dirs = sorted(p for p in EXP_DIR.iterdir() if p.is_dir())
+    alg_dirs = sorted(p for p in exp_dir.iterdir() if p.is_dir())
     for alg_dir in alg_dirs:
         analyse_runs_compared(alg_dir)
         run_dirs = sorted(
@@ -296,7 +296,7 @@ def run_individual_analysis(experiment_id: str):
 
 
 def main() -> None:
-    run_individual_analysis("exp_20260512_171519")
+    run_individual_analysis(RESULTS_DIR, "exp_20260512_171519")
 
 
 if __name__ == "__main__":
