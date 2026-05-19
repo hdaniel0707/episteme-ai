@@ -577,7 +577,7 @@ def plot_human_vs_llm_distance(
 ########################################################################
 
 
-def plot_clf_results(exp_dir: Path) -> None:
+def plot_clf_results(exp_dir: Path, show_random: bool = True) -> None:
     from sklearn.metrics import confusion_matrix as compute_cm
 
     alg_dirs = sorted([d for d in exp_dir.iterdir() if d.is_dir()])
@@ -631,9 +631,10 @@ def plot_clf_results(exp_dir: Path) -> None:
             means.append(float(np.mean(accs)))
             stds.append(float(np.std(accs)))
         ax.bar(x + j * w, means, w, label=split, color=color, yerr=stds, capsize=4)
-    ax.axhline(
-        1 / n_classes, linestyle="--", color="red", linewidth=1.2, label="random"
-    )
+    if show_random:
+        ax.axhline(
+            1 / n_classes, linestyle="--", color="red", linewidth=1.2, label="random"
+        )
     ax.set_xticks(x + w)
     ax.set_xticklabels(alg_labels, rotation=15, ha="right")
     ax.set_ylim(0, 1.05)

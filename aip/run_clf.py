@@ -107,7 +107,9 @@ def run_classification() -> str:
 def main() -> None:
     experiment_id = run_classification()
     print(f"\nDone. Results saved to: {RESULTS_DIR / experiment_id}")
-    plot_clf_results(RESULTS_DIR / experiment_id)
+    plot_clf_results(RESULTS_DIR / experiment_id, show_random=False)
+
+    # plot_clf_results(RESULTS_DIR / "clf_20260519_155000", show_random=False)
 
 
 if __name__ == "__main__":
