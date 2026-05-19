@@ -72,7 +72,7 @@ The stages run sequentially. Each produces an output that the next stage consume
 [summarise_db.py]          ← optional, EDA on raw database
    ↓
 [prepare_data.py]
-   ↓  data/paquet/<id>.parquet
+   ↓  data/parquet/<id>.parquet
 [analyse_data.py]          ← optional, EDA on processed dataset
    ↓
 ┌──────────────────────────────────────┐
@@ -141,7 +141,7 @@ Edit `DB_NAME` at the top of the script to point at your database.
 ## Stage 3 — Prepare Data
 
 **Script:** `aip/prepare_data.py`  
-**Output:** `data/paquet/<id>.parquet` or `data/paquet/<id>_AI.parquet`
+**Output:** `data/parquet/<id>.parquet` or `data/parquet/<id>_AI.parquet`
 
 ```bash
 python -m aip.prepare_data
@@ -327,7 +327,7 @@ alg_label: "SPECTER + year + h-index"  # human-readable label used in plots
 seed: 42               # base random seed; run i uses seed + i
 
 data:
-  parquet_path: "data/paquet/my_dataset.parquet"  # relative to project root
+  parquet_path: "data/parquet/my_dataset.parquet"  # relative to project root
   drop_classes: []     # classification only — list classes to exclude
 
 features:
@@ -387,7 +387,7 @@ metascience/
 │           └── hd/alma/
 ├── data/
 │   ├── sql/                   # SQLite databases (one per fetch run)
-│   └── paquet/                # Parquet datasets
+│   └── parquet/                # Parquet datasets
 ├── results/                   # All experiment outputs (gitignored)
 │   ├── analyse_sql/           # summarise_db.py HTML charts
 │   ├── analyse_data/          # analyse_data.py HTML charts

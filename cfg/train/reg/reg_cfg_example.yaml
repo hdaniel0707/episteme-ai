@@ -7,7 +7,7 @@ alg_label: "name_of_exp"
 seed: 42
 
 data:
-  parquet_path: "data/paquet/0512_B"   # relative to the project root
+  parquet_path: "data/parquet/0512_B"   # relative to the project root
 
 features:
   - embedding

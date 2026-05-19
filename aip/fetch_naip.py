@@ -24,8 +24,8 @@ load_dotenv()
 BASE_DIR = Path(__file__).parent.parent
 
 ### INPUTS ############################################################
-PARQUET_IN = BASE_DIR / "data" / "paquet" / "0515_A_500_AI_260.parquet"
-PARQUET_OUT = BASE_DIR / "data" / "paquet" / "0515_A_500_AI_260_naip.parquet"
+PARQUET_IN = BASE_DIR / "data" / "parquet" / "0515_A_500_AI_260.parquet"
+PARQUET_OUT = BASE_DIR / "data" / "parquet" / "0515_A_500_AI_260_naip.parquet"
 
 MODEL_VERSION = "v2.1"  # "v1" or "v2.1"
 SLEEP_BETWEEN = 0.2  # seconds between requests — increase if rate limited

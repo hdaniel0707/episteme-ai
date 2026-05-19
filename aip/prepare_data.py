@@ -17,8 +17,8 @@ ADD_GEN_AI = True
 ADD_EMB_SPECTER2 = True
 DB_ID = "0515_A_500"
 DB_PATH = DB_DIR / "sql" / (DB_ID + ".db")
-PAQUET_PATH = DB_DIR / "paquet" / (DB_ID + ".parquet")
-AI_PAQUET_PATH = DB_DIR / "paquet" / (DB_ID + "_AI.parquet")
+PARQUET_PATH = DB_DIR / "parquet" / (DB_ID + ".parquet")
+AI_PARQUET_PATH = DB_DIR / "parquet" / (DB_ID + "_AI.parquet")
 
 REQUIRED_FIEDLS = ["embedding", "title", "abstract", "year", "best_author_h_index"]
 
@@ -43,8 +43,8 @@ if __name__ == "__main__":
         if ADD_EMB_SPECTER2:
             df = add_embedding(df, emb_type="specter2")
 
-        save_parquet(df, AI_PAQUET_PATH)
+        save_parquet(df, AI_PARQUET_PATH)
     else:
         if ADD_EMB_SPECTER2:
             df = add_embedding(df, emb_type="specter2")
-        save_parquet(df, PAQUET_PATH)
+        save_parquet(df, PARQUET_PATH)

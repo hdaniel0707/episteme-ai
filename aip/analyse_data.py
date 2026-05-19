@@ -23,13 +23,13 @@ DB_DIR = BASE_DIR / "data"
 
 ######################################
 DB_ID = "0515_A_500_AI_260"
-PAQUET_PATH = DB_DIR / "paquet" / (DB_ID + ".parquet")
+PARQUET_PATH = DB_DIR / "parquet" / (DB_ID + ".parquet")
 FIG_DIR = BASE_DIR / "results" / "analyse_data" / DB_ID
 MODE_AI = True
 
 if __name__ == "__main__":
-    # LOAD PAQUET
-    df = load_parquet(PAQUET_PATH)
+    # LOAD PARQUET
+    df = load_parquet(PARQUET_PATH)
 
     y = np.array(df["citation_count"].tolist())
     print(y.shape)
