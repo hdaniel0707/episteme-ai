@@ -1,4 +1,4 @@
-# Metascience — Article Impact & AI-Text Detection Pipeline
+# Episteme AI
 
 A research pipeline for studying academic papers at scale. It fetches papers from the [Semantic Scholar](https://www.semanticscholar.org/) API, enriches them with LLM-generated synthetic variants and scientific embeddings, optionally scores them with the [NAIP](https://huggingface.co/spaces/ssocean/Newborn_Article_Impact_Predict) impact predictor, and trains machine learning models for two tasks:
 
