@@ -11,9 +11,9 @@ from pathlib import Path
 from tqdm import tqdm
 
 from dotenv import load_dotenv
-from aip.utils.env_utils import doublecheck_env, doublecheck_pkgs
-from aip.utils.sqlite_utils import init_db, save_paper
-from aip.utils.s2_utils import _session, iter_search
+from epai.utils.env_utils import doublecheck_env, doublecheck_pkgs
+from epai.utils.sqlite_utils import init_db, save_paper
+from epai.utils.s2_utils import _session, iter_search
 
 load_dotenv()
 
@@ -31,7 +31,7 @@ PAPER_FIELDS = (
 
 BASE_DIR = Path(__file__).parent.parent
 DB_DIR = BASE_DIR / "data"
-DB_PATH = DB_DIR / "sql" / "0515_A_500.db"
+DB_PATH = DB_DIR / "sql" / "0523_A_100.db"
 CFG_PATH = BASE_DIR / "cfg" / "fetch" / "hd" / "fetch_cfg_reduced.yaml"
 
 with open(CFG_PATH) as f:

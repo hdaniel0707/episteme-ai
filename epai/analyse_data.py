@@ -6,9 +6,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from aip.utils.dimred_utils import reduce
-from aip.utils.parquet_utils import load_parquet, pick_label
-from aip.utils.visualization_utils import (
+from epai.utils.dimred_utils import reduce
+from epai.utils.parquet_utils import load_parquet, pick_label
+from epai.utils.visualization_utils import (
     plot_pca_2d_cat,
     plot_histogram,
     plot_categorical_distribution,
@@ -22,7 +22,7 @@ DB_DIR = BASE_DIR / "data"
 
 
 ######################################
-DB_ID = "0515_A_500_AI_260"
+DB_ID = "0523_A_10_AI"
 PARQUET_PATH = DB_DIR / "parquet" / (DB_ID + ".parquet")
 FIG_DIR = BASE_DIR / "results" / "analyse_data" / DB_ID
 MODE_AI = True

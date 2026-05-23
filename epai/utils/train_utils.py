@@ -7,7 +7,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.neural_network import MLPRegressor
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.svm import SVR
-from aip.autoencoder import AERegressor
+from epai.autoencoder import AERegressor
 
 
 def build_features(df, features: list[str]) -> tuple[np.ndarray, np.ndarray, list[str]]:

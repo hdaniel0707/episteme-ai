@@ -9,10 +9,10 @@ from sklearn.metrics import accuracy_score, classification_report
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 
-from aip.utils.config_utils import collect_configs, load_config
-from aip.utils.parquet_utils import load_parquet
-from aip.utils.train_utils import build_clf_features, build_clf_model
-from aip.utils.visualization_utils import plot_clf_results
+from epai.utils.config_utils import collect_configs, load_config
+from epai.utils.parquet_utils import load_parquet
+from epai.utils.train_utils import build_clf_features, build_clf_model
+from epai.utils.visualization_utils import plot_clf_results
 
 BASE_DIR = Path(__file__).parent.parent
 RESULTS_DIR = BASE_DIR / "results" / "clf"
@@ -89,7 +89,7 @@ def run_classification() -> str:
                 y_pred = model.predict(X_s)
                 results[f"{split}_accuracy"] = float(accuracy_score(y_s, y_pred))
                 results[f"{split}_report"] = classification_report(
-                    y_s, y_pred, target_names=le.classes_.tolist(), output_dict=True
+                    y_s, y_pred, target_names=le.classes_.tolist(), output_dict=True, zero_division=0
                 )
                 results[f"y_{split}"] = y_s.tolist()
                 results[f"y_{split}_pred"] = y_pred.tolist()

@@ -35,7 +35,7 @@ This project uses [uv](https://github.com/astral-sh/uv) for dependency managemen
 # Install all dependencies
 uv sync
 
-# Install the aip package in editable mode
+# Install the epai package in editable mode
 uv pip install -e .
 ```
 

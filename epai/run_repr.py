@@ -4,17 +4,17 @@ import shutil
 import json
 from tqdm import tqdm
 
-from aip.autoencoder import AERegressor
+from epai.autoencoder import AERegressor
 
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 
-from aip.utils.config_utils import collect_configs, load_config
-from aip.utils.parquet_utils import load_parquet
-from aip.utils.train_utils import build_features, build_model
-from aip.utils.cuda_util import check_cuda
-from aip.analyse_exp import run_individual_analysis
-from aip.analyse_exp_compare import run_compared_analysis
+from epai.utils.config_utils import collect_configs, load_config
+from epai.utils.parquet_utils import load_parquet
+from epai.utils.train_utils import build_features, build_model
+from epai.utils.cuda_util import check_cuda
+from epai.analyse_exp import run_individual_analysis
+from epai.analyse_exp_compare import run_compared_analysis
 
 BASE_DIR = Path(__file__).parent.parent
 RESULTS_DIR = BASE_DIR / "results" / "repr"

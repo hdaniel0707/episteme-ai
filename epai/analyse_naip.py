@@ -31,7 +31,7 @@ _LLM_COLORS: dict[str, tuple[str, str]] = {
 }
 
 BASE_DIR = Path(__file__).parent.parent
-PARQUET_PATH = BASE_DIR / "data" / "parquet" / "0515_A_500_AI_260_naip.parquet"
+PARQUET_PATH = BASE_DIR / "data" / "parquet" / "0523_A_10_AI_naip.parquet"
 FIG_DIR = BASE_DIR / "results" / "naip"
 
 SCORE_COLS = ["naip_raw_score", "naip_final_score"]

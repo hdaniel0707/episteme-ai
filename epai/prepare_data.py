@@ -4,10 +4,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from aip.utils.sqlite_utils import load_db
-from aip.utils.genai_utils import add_ai_generated_data
-from aip.utils.parquet_utils import save_parquet
-from aip.utils.embedding_utils import add_embedding
+from epai.utils.sqlite_utils import load_db
+from epai.utils.genai_utils import add_ai_generated_data
+from epai.utils.parquet_utils import save_parquet
+from epai.utils.embedding_utils import add_embedding
 
 BASE_DIR = Path(__file__).parent.parent
 DB_DIR = BASE_DIR / "data"
@@ -15,7 +15,7 @@ DB_DIR = BASE_DIR / "data"
 ######################################
 ADD_GEN_AI = True
 ADD_EMB_SPECTER2 = True
-DB_ID = "0515_A_500"
+DB_ID = "0523_A_10"
 DB_PATH = DB_DIR / "sql" / (DB_ID + ".db")
 PARQUET_PATH = DB_DIR / "parquet" / (DB_ID + ".parquet")
 AI_PARQUET_PATH = DB_DIR / "parquet" / (DB_ID + "_AI.parquet")
