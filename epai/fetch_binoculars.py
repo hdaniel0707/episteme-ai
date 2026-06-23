@@ -28,6 +28,7 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from epai.utils.cuda_util import check_cuda
 
 BASE_DIR = Path(__file__).parent.parent
 
@@ -111,6 +112,10 @@ def score_text(tokenizer, observer, performer, text):
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+
+    if check_cuda() == False:
+        return
+
     df = pd.read_parquet(PARQUET_IN)
     if DEBUG:
         df = df.head(5)
