@@ -53,6 +53,8 @@ MODEL_PAIRS = [
     # Falcon
     ("tiiuae/Falcon3-1B-Base", "tiiuae/Falcon3-1B-Instruct"),              # falcon 1b
     #("tiiuae/Falcon-H1-7B-Base", "tiiuae/Falcon-H1-7B-Instruct"),         # falcon 7b
+    ("tiiuae/falcon-7b", "tiiuae/falcon-7b-instruct"),                     # falcon 7b (original)
+
 
     # Llama
     ("meta-llama/Llama-3.2-1B", "meta-llama/Llama-3.2-1B-Instruct"),      # llama 1b
