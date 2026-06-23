@@ -33,6 +33,15 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from epai.utils.cuda_util import check_cuda
 
+from dotenv import load_dotenv
+from epai.utils.env_utils import doublecheck_env, doublecheck_pkgs
+
+load_dotenv()
+
+# Check and print results
+doublecheck_env(".env")  # check environmental variables
+doublecheck_pkgs(pyproject_path="pyproject.toml", verbose=True)  # check packages
+
 BASE_DIR = Path(__file__).parent.parent
 
 ### INPUTS ############################################################
@@ -50,17 +59,17 @@ MODEL_PAIRS = [
     #("meta-llama/Llama-3.1-8B", "meta-llama/Llama-3.1-8B-Instruct"),      # llama 8b
 
     # Gemma
-    ("google/gemma-3-1b-pt", "google/gemma-3-1b-it"),                      # gemma 1b
+    #("google/gemma-3-1b-pt", "google/gemma-3-1b-it"),                      # gemma 1b
     #("google/gemma-3-4b-pt", "google/gemma-3-4b-it"),                      # gemma 4b
 
     # Qwen
-    ("Qwen/Qwen3-1.7B", "Qwen/Qwen3-1.7B-Instruct"),                      # qwen ~1b
-    #("Qwen/Qwen3-8B", "Qwen/Qwen3-8B-Instruct"),                          # qwen 8b
+    ("Qwen/Qwen3-1.7B-Base",            "Qwen/Qwen3-1.7B"),                       # qwen ~1b  
+    #("Qwen/Qwen3-8B-Base",              "Qwen/Qwen3-8B"),                         # qwen 8b   
 ]
 
 TEXT_COLUMN = "abstract"  # column whose text gets scored
 MAX_TOKENS = 1024         # truncate long texts (falcon-rw-1b ctx = 2048)
-DEBUG = True              # if True, only process first 5 rows
+DEBUG = False              # if True, only process first 5 rows
 #######################################################################
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
