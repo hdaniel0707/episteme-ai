@@ -22,22 +22,26 @@ DB_DIR = BASE_DIR / "data"
 
 
 ######################################
-DB_ID = "0523_A_10_AI"
+DB_ID = "merged"
 PARQUET_PATH = DB_DIR / "parquet" / (DB_ID + ".parquet")
 FIG_DIR = BASE_DIR / "results" / "analyse_data" / DB_ID
 MODE_AI = True
+WITH_CITE = False
 
 if __name__ == "__main__":
     # LOAD PARQUET
     df = load_parquet(PARQUET_PATH)
 
-    y = np.array(df["citation_count"].tolist())
-    print(y.shape)
+    if WITH_CITE:
+        y = np.array(df["citation_count"].tolist())
+        print(y.shape)
+    else:
+        y = np.ones(len(df))
 
-    y_log1p = np.log1p(np.array(df["citation_count"].tolist(), dtype=np.float32))
+    y_log1p = np.log1p(df["citation_count"].to_numpy(dtype=np.float32)) if WITH_CITE else np.ones(len(df), dtype=np.float32)
     print(y_log1p.shape)
 
-    X = np.array(df["embedding"].tolist())
+    X = np.array(df["emb_specter2"].tolist())
     print(X.shape)
 
     X2_pca = reduce(X, "pca", 2)

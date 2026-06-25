@@ -16,6 +16,7 @@ _LLM_COLORS: dict[str, tuple[str, str]] = {
     "claude": ("#d97757", "#8b3d20"),  # Anthropic orange: normal / aggressive
     "gemini": ("#4285f4", "#1a56c4"),  # Google blue: normal / aggressive
     "human": ("#888888", "#888888"),  # neutral gray (no aggressive variant)
+    "denario": ("#f50bb7", "#f50bb7"),  # magenta: normal / aggressive
 }
 
 
