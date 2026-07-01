@@ -7,27 +7,9 @@ import matplotlib.pyplot as plt
 import json
 from sklearn.metrics import mean_squared_error, r2_score
 
-# Consistent colors per LLM family across all plots
-# normal = lighter shade, aggressive = darker shade
-_LLM_COLORS: dict[str, tuple[str, str]] = {
-    "gpt": ("#10a37f", "#076b52"),  # OpenAI green: normal / aggressive
-    "o1": ("#10a37f", "#076b52"),
-    "o3": ("#10a37f", "#076b52"),
-    "claude": ("#d97757", "#8b3d20"),  # Anthropic orange: normal / aggressive
-    "gemini": ("#4285f4", "#1a56c4"),  # Google blue: normal / aggressive
-    "human": ("#888888", "#888888"),  # neutral gray (no aggressive variant)
-    "denario": ("#f50bb7", "#f50bb7"),  # magenta: normal / aggressive
-}
-
-
-def _llm_color(label: str) -> str | None:
-    """Return a color for known LLM labels — darker shade for aggressive prompts."""
-    lower = label.lower()
-    aggressive = "aggressive" in lower
-    for prefix, (normal_color, aggressive_color) in _LLM_COLORS.items():
-        if lower.startswith(prefix):
-            return aggressive_color if aggressive else normal_color
-    return None
+# Consistent colors per LLM family are defined in cfg/colors.yaml and loaded via
+# color_utils so every plotting script shares one source of truth.
+from epai.utils.color_utils import llm_color as _llm_color
 
 
 def plot_pca_2d_cat(

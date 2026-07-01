@@ -21,15 +21,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-_LLM_COLORS: dict[str, tuple[str, str]] = {
-    "gpt": ("#10a37f", "#076b52"),  # OpenAI green: normal / aggressive
-    "o1": ("#10a37f", "#076b52"),
-    "o3": ("#10a37f", "#076b52"),
-    "claude": ("#d97757", "#8b3d20"),  # Anthropic orange: normal / aggressive
-    "gemini": ("#4285f4", "#1a56c4"),  # Google blue: normal / aggressive
-    "human": ("#888888", "#888888"),  # neutral gray (no aggressive variant)
-    "denario": ("#f50bb7", "#f50bb7"),  # magenta: normal / aggressive
-}
+# Colors per source / LLM family live in cfg/colors.yaml (see color_utils).
+from epai.utils.color_utils import group_color as _group_color
 
 BASE_DIR = Path(__file__).parent.parent
 PARQUET_PATH = BASE_DIR / "data" / "parquet" / "0523_A_10_AI_naip.parquet"
@@ -46,11 +39,6 @@ N_BINS = 40
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _group_color(group: str) -> str:
-    key = next((k for k in _LLM_COLORS if k in group.lower()), None)
-    return _LLM_COLORS[key][0] if key else "#aaaaaa"
 
 
 # ---------------------------------------------------------------------------

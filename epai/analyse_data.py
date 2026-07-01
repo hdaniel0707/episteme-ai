@@ -22,7 +22,7 @@ DB_DIR = BASE_DIR / "data"
 
 
 ######################################
-DB_ID = "merged"
+DB_ID = "reuter"
 PARQUET_PATH = DB_DIR / "parquet" / (DB_ID + ".parquet")
 FIG_DIR = BASE_DIR / "results" / "analyse_data" / DB_ID
 MODE_AI = True
@@ -32,62 +32,67 @@ if __name__ == "__main__":
     # LOAD PARQUET
     df = load_parquet(PARQUET_PATH)
 
-    if WITH_CITE:
-        y = np.array(df["citation_count"].tolist())
-        print(y.shape)
-    else:
-        y = np.ones(len(df))
-
-    y_log1p = np.log1p(df["citation_count"].to_numpy(dtype=np.float32)) if WITH_CITE else np.ones(len(df), dtype=np.float32)
-    print(y_log1p.shape)
-
     X = np.array(df["emb_specter2"].tolist())
     print(X.shape)
 
-    X2_pca = reduce(X, "pca", 2)
-    print(X2_pca.shape)
-
-    X2_umap = reduce(X, "umap", 2)
-    print(X2_umap.shape)
-
-    X_year = np.array(df["year"].tolist())
-    print(X_year.shape)
-
-    X_domains = np.array([pick_label(q) for q in df["domains"].tolist()])
-    print(X_domains.shape)
-
-    titles = np.array(df["title"].tolist())
-
-    X_hindex = np.array(df["best_author_h_index"].tolist())
-
     if MODE_AI:
+        # AI-text datasets (e.g. reuter) only carry id / author / text /
+        # generated_by / emb_specter2 — no title/year/domains/citation columns.
         X_gen = np.array(df["generated_by"].tolist())
         print(X_gen.shape)
 
-        X_emb_specter2 = np.array(df["emb_specter2"].tolist())
-        print(X_emb_specter2.shape)
+        # No title here: use the row id for hover, and the shared source-story
+        # id (same across human + every generated rewrite) for human-vs-LLM
+        # pairing.
+        ids = np.array(df["id"].tolist())
+        scores = np.ones(len(df), dtype=np.float32)
 
-        X2_pca = reduce(X_emb_specter2, "pca", 2)
+        X2_pca = reduce(X, "pca", 2)
         print(X2_pca.shape)
 
         plot_pca_2d_cat(
             X2_pca,
-            names=titles,
+            names=ids,
             labels=X_gen,
-            scores=y_log1p,
-            title="pca y_log1p by domains",
-            save_path=FIG_DIR / "dimreds" / "dimred_2d_pca_domains",
+            scores=scores,
+            title="pca specter2 by generated_by",
+            save_path=FIG_DIR / "dimreds" / "dimred_2d_pca_generated_by",
         )
 
         plot_human_vs_llm_distance(
-            embeddings=X_emb_specter2,
-            paper_ids=np.array(df["paper_id"].tolist()),
+            embeddings=X,
+            paper_ids=ids,
             labels=X_gen,
-            title="Human vs LLM Abstract Similarity",
+            title="Human vs LLM Text Similarity",
             save_path=FIG_DIR / "semantic" / "human_vs_llm_distance",
         )
 
     else:
+
+        if WITH_CITE:
+            y = np.array(df["citation_count"].tolist())
+            print(y.shape)
+        else:
+            y = np.ones(len(df))
+
+        y_log1p = np.log1p(df["citation_count"].to_numpy(dtype=np.float32)) if WITH_CITE else np.ones(len(df), dtype=np.float32)
+        print(y_log1p.shape)
+
+        X2_pca = reduce(X, "pca", 2)
+        print(X2_pca.shape)
+
+        X2_umap = reduce(X, "umap", 2)
+        print(X2_umap.shape)
+
+        X_year = np.array(df["year"].tolist())
+        print(X_year.shape)
+
+        X_domains = np.array([pick_label(q) for q in df["domains"].tolist()])
+        print(X_domains.shape)
+
+        titles = np.array(df["title"].tolist())
+
+        X_hindex = np.array(df["best_author_h_index"].tolist())
 
         plot_categorical_distribution(
             X_domains,

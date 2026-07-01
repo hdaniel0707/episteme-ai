@@ -1,0 +1,28 @@
+# Consistent colors per source / LLM family across all plots.
+#
+# Read by epai/utils/color_utils.py, which is used by both
+# epai/utils/visualization_utils.py and epai/analyse_naip.py.
+#
+# A label (e.g. a `generated_by` value) is matched to a family by LONGEST
+# matching prefix, so specific variants like `gpt_prompt1` win over `gpt`.
+# Each entry is [normal_color, aggressive_color]; the aggressive shade is used
+# when the label contains the word "aggressive".
+colors:
+  human: ["#888888", "#888888"]          # neutral gray (no aggressive variant)
+
+  # OpenAI / GPT family — greens. The ghostbuster-reuter corpus has several GPT
+  # variants; give each a distinct green so they are separable in the plots.
+  gpt: ["#10a37f", "#076b52"]            # plain GPT (OpenAI green)
+  gpt_prompt1: ["#7fc97f", "#4f9a4f"]    # ghostbuster: prompt 1
+  gpt_prompt2: ["#1b9e77", "#127055"]    # ghostbuster: prompt 2
+  gpt_semantic: ["#66c2a5", "#3f9a7d"]   # ghostbuster: semantic
+  gpt_writing: ["#006d2c", "#00461c"]    # ghostbuster: writing
+  o1: ["#10a37f", "#076b52"]
+  o3: ["#10a37f", "#076b52"]
+
+  claude: ["#d97757", "#8b3d20"]         # Anthropic orange
+  gemini: ["#4285f4", "#1a56c4"]         # Google blue
+  denario: ["#f50bb7", "#f50bb7"]        # magenta
+
+# Fallback color for labels that match no family above.
+default: "#aaaaaa"
