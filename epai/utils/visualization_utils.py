@@ -590,6 +590,110 @@ def plot_human_vs_llm_distance(
 ########################################################################
 
 
+def _save_clf_alg_figures(
+    out_dir: Path,
+    label: str,
+    results: list[dict],
+    class_names: list[str],
+    splits: list[str],
+    show_random: bool,
+    tick_fs: int,
+) -> None:
+    """Save accuracy / confusion-matrix / F1 figures for a single algorithm into
+    its own experiment subfolder (out_dir), one panel per split."""
+    from sklearn.metrics import confusion_matrix as compute_cm
+
+    nc = len(class_names)
+    n_splits = len(splits)
+    split_colors = ["steelblue", "orange", "seagreen"]
+
+    # Accuracy — one bar per split.
+    fig, ax = plt.subplots(figsize=(6, 5))
+    x = np.arange(n_splits)
+    means = [float(np.mean([r[f"{s}_accuracy"] for r in results])) for s in splits]
+    stds = [float(np.std([r[f"{s}_accuracy"] for r in results])) for s in splits]
+    ax.bar(x, means, 0.6, yerr=stds, capsize=4, color=split_colors[:n_splits])
+    if show_random:
+        ax.axhline(1 / nc, linestyle="--", color="red", linewidth=1.2, label="random")
+        ax.legend()
+    ax.set_xticks(x)
+    ax.set_xticklabels(splits)
+    ax.set_ylim(0, 1.05)
+    ax.set_ylabel("Accuracy")
+    ax.set_title(f"{label} – Accuracy")
+    fig.tight_layout()
+    fig.savefig(out_dir / "accuracy.png", dpi=150)
+    plt.close(fig)
+
+    # Confusion matrices — one per split.
+    fig, axes = plt.subplots(1, n_splits, figsize=(5 * n_splits, 4.5))
+    axes = np.atleast_1d(axes)
+    for j, split in enumerate(splits):
+        ax = axes[j]
+        cms = []
+        for r in results:
+            yt = r.get(f"y_{split}")
+            yp = r.get(f"y_{split}_pred")
+            if yt is not None and yp is not None:
+                cms.append(compute_cm(yt, yp, labels=range(nc)))
+        if not cms:
+            ax.text(0.5, 0.5, "no predictions", ha="center", va="center", transform=ax.transAxes)
+            ax.set_title(split)
+            continue
+        avg_cm = np.mean(cms, axis=0)
+        norm_cm = avg_cm / avg_cm.sum(axis=1, keepdims=True)
+        im = ax.imshow(norm_cm, vmin=0, vmax=1, cmap="Blues")
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        ax.set_xticks(range(nc))
+        ax.set_yticks(range(nc))
+        ax.set_xticklabels(class_names, rotation=45, ha="right", fontsize=tick_fs)
+        ax.set_yticklabels(class_names, fontsize=tick_fs)
+        for r_idx in range(nc):
+            for c_idx in range(nc):
+                ax.text(
+                    c_idx,
+                    r_idx,
+                    f"{avg_cm[r_idx, c_idx]:.0f}",
+                    ha="center",
+                    va="center",
+                    fontsize=tick_fs,
+                    color="white" if norm_cm[r_idx, c_idx] > 0.5 else "black",
+                )
+        ax.set_title(split)
+        ax.set_xlabel("Predicted")
+        ax.set_ylabel("True")
+    fig.suptitle(f"{label} – Confusion Matrix")
+    fig.tight_layout()
+    fig.savefig(out_dir / "confusion_matrices.png", dpi=150)
+    plt.close(fig)
+
+    # Per-class F1 — one panel per split.
+    fig, axes = plt.subplots(1, n_splits, figsize=(max(6, nc) * n_splits * 0.6, 4))
+    axes = np.atleast_1d(axes)
+    for j, split in enumerate(splits):
+        ax = axes[j]
+        f1s = {c: [] for c in class_names}
+        for r in results:
+            report = r.get(f"{split}_report", {})
+            for c in class_names:
+                if c in report:
+                    f1s[c].append(report[c]["f1-score"])
+        means = [float(np.mean(f1s[c])) if f1s[c] else 0.0 for c in class_names]
+        stds = [float(np.std(f1s[c])) if f1s[c] else 0.0 for c in class_names]
+        ax.bar(range(nc), means, yerr=stds, capsize=4, color="steelblue")
+        ax.axhline(1 / nc, linestyle="--", color="red", linewidth=1.2, label="random")
+        ax.set_xticks(range(nc))
+        ax.set_xticklabels(class_names, rotation=45, ha="right", fontsize=tick_fs)
+        ax.set_ylim(0, 1.05)
+        ax.set_ylabel("F1 Score")
+        ax.set_title(split)
+        ax.legend(fontsize=7)
+    fig.suptitle(f"{label} – F1 Score")
+    fig.tight_layout()
+    fig.savefig(out_dir / "f1_scores.png", dpi=150)
+    plt.close(fig)
+
+
 def plot_clf_results(exp_dir: Path, show_random: bool = True) -> None:
     from sklearn.metrics import confusion_matrix as compute_cm
 
@@ -598,10 +702,17 @@ def plot_clf_results(exp_dir: Path, show_random: bool = True) -> None:
         print(f"No algorithm directories found in {exp_dir}")
         return
 
-    with open(alg_dirs[0] / "label_mapping.json") as f:
-        label_mapping = json.load(f)
-    class_names = [label_mapping[str(i)] for i in range(len(label_mapping))]
-    n_classes = len(class_names)
+    # Each config can drop different classes, so every alg dir has its own
+    # LabelEncoder / label_mapping.json — load them per-alg instead of assuming
+    # all models share the first one's classes.
+    alg_class_names: dict[str, list[str]] = {}
+    for d in alg_dirs:
+        with open(d / "label_mapping.json") as f:
+            label_mapping = json.load(f)
+        alg_class_names[d.name] = [
+            label_mapping[str(i)] for i in range(len(label_mapping))
+        ]
+    max_classes = max(len(v) for v in alg_class_names.values())
 
     alg_names = [d.name for d in alg_dirs]
     alg_labels = []
@@ -629,7 +740,7 @@ def plot_clf_results(exp_dir: Path, show_random: bool = True) -> None:
     splits = ["train", "val", "test"]
     n_models = len(alg_names)
     n_splits = len(splits)
-    tick_fs = max(6, 10 - n_classes // 3)
+    tick_fs = max(6, 10 - max_classes // 3)
 
     # Figure 1: Accuracy
     fig, ax = plt.subplots(figsize=(max(8, n_models * 2.5), 5))
@@ -646,7 +757,7 @@ def plot_clf_results(exp_dir: Path, show_random: bool = True) -> None:
         ax.bar(x + j * w, means, w, label=split, color=color, yerr=stds, capsize=4)
     if show_random:
         ax.axhline(
-            1 / n_classes, linestyle="--", color="red", linewidth=1.2, label="random"
+            1 / max_classes, linestyle="--", color="red", linewidth=1.2, label="random"
         )
     ax.set_xticks(x + w)
     ax.set_xticklabels(alg_labels, rotation=15, ha="right")
@@ -662,6 +773,8 @@ def plot_clf_results(exp_dir: Path, show_random: bool = True) -> None:
     fig, axes = plt.subplots(n_models, n_splits, figsize=(5 * n_splits, 4.5 * n_models))
     axes = np.array(axes).reshape(n_models, n_splits)
     for i, mn in enumerate(alg_names):
+        cn = alg_class_names[mn]
+        nc = len(cn)
         for j, split in enumerate(splits):
             ax = axes[i, j]
             cms = []
@@ -669,7 +782,7 @@ def plot_clf_results(exp_dir: Path, show_random: bool = True) -> None:
                 yt = r.get(f"y_{split}")
                 yp = r.get(f"y_{split}_pred")
                 if yt is not None and yp is not None:
-                    cms.append(compute_cm(yt, yp))
+                    cms.append(compute_cm(yt, yp, labels=range(nc)))
             if not cms:
                 ax.text(
                     0.5,
@@ -685,12 +798,12 @@ def plot_clf_results(exp_dir: Path, show_random: bool = True) -> None:
             norm_cm = avg_cm / avg_cm.sum(axis=1, keepdims=True)
             im = ax.imshow(norm_cm, vmin=0, vmax=1, cmap="Blues")
             fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-            ax.set_xticks(range(n_classes))
-            ax.set_yticks(range(n_classes))
-            ax.set_xticklabels(class_names, rotation=45, ha="right", fontsize=tick_fs)
-            ax.set_yticklabels(class_names, fontsize=tick_fs)
-            for r_idx in range(n_classes):
-                for c_idx in range(n_classes):
+            ax.set_xticks(range(nc))
+            ax.set_yticks(range(nc))
+            ax.set_xticklabels(cn, rotation=45, ha="right", fontsize=tick_fs)
+            ax.set_yticklabels(cn, fontsize=tick_fs)
+            for r_idx in range(nc):
+                for c_idx in range(nc):
                     ax.text(
                         c_idx,
                         r_idx,
@@ -709,30 +822,32 @@ def plot_clf_results(exp_dir: Path, show_random: bool = True) -> None:
 
     # Figure 3: Per-class F1
     fig, axes = plt.subplots(
-        n_models, n_splits, figsize=(max(6, n_classes) * n_splits * 0.6, 4 * n_models)
+        n_models, n_splits, figsize=(max(6, max_classes) * n_splits * 0.6, 4 * n_models)
     )
     axes = np.array(axes).reshape(n_models, n_splits)
     for i, mn in enumerate(alg_names):
+        cn = alg_class_names[mn]
+        nc = len(cn)
         for j, split in enumerate(splits):
             ax = axes[i, j]
-            f1s = {c: [] for c in class_names}
+            f1s = {c: [] for c in cn}
             for r in data[mn]:
-                for c in class_names:
+                for c in cn:
                     report = r.get(f"{split}_report", {})
                     if c in report:
                         f1s[c].append(report[c]["f1-score"])
-            means = [float(np.mean(f1s[c])) if f1s[c] else 0.0 for c in class_names]
-            stds = [float(np.std(f1s[c])) if f1s[c] else 0.0 for c in class_names]
-            ax.bar(range(n_classes), means, yerr=stds, capsize=4, color="steelblue")
+            means = [float(np.mean(f1s[c])) if f1s[c] else 0.0 for c in cn]
+            stds = [float(np.std(f1s[c])) if f1s[c] else 0.0 for c in cn]
+            ax.bar(range(nc), means, yerr=stds, capsize=4, color="steelblue")
             ax.axhline(
-                1 / n_classes,
+                1 / nc,
                 linestyle="--",
                 color="red",
                 linewidth=1.2,
                 label="random",
             )
-            ax.set_xticks(range(n_classes))
-            ax.set_xticklabels(class_names, rotation=45, ha="right", fontsize=tick_fs)
+            ax.set_xticks(range(nc))
+            ax.set_xticklabels(cn, rotation=45, ha="right", fontsize=tick_fs)
             ax.set_ylim(0, 1.05)
             ax.set_ylabel("F1 Score")
             ax.set_title(f"{alg_labels[i]} – {split}")
@@ -740,6 +855,18 @@ def plot_clf_results(exp_dir: Path, show_random: bool = True) -> None:
     fig.tight_layout()
     fig.savefig(exp_dir / "f1_scores.png", dpi=150)
     plt.close(fig)
+
+    # Also save each algorithm's figures separately in its own subfolder.
+    for i, mn in enumerate(alg_names):
+        _save_clf_alg_figures(
+            alg_dirs[i],
+            alg_labels[i],
+            data[mn],
+            alg_class_names[mn],
+            splits,
+            show_random,
+            tick_fs,
+        )
 
     print(f"Plots saved to: {exp_dir}")
 
