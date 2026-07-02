@@ -1,0 +1,221 @@
+# workflow/ — Normalized Scientific Impact Prediction
+
+A **module of** episteme-ai (not a fork). It reuses the original `epai` package read-only
+(database, embeddings, autoencoder, parquet IO) and adds everything specific to
+field-normalized impact prediction. **Nothing outside `workflow/` is modified** — see
+[`CLAUDE.md`](CLAUDE.md) for the folder-scoped editing rules.
+
+This document is paired with [`WORKFLOW.drawio`](WORKFLOW.drawio) (the same architecture as
+a diagram). For the statistics/equations behind every metric and target, see
+[`mathematical_documentation.md`](mathematical_documentation.md). For the full parameter
+reference (every `config.yaml` / `.env.workflow` key), see
+[`WORKFLOW_REFERENCE.md`](WORKFLOW_REFERENCE.md).
+
+## The two-file control surface
+
+You configure everything by editing exactly **two files**:
+
+| File | Purpose | Examples |
+|---|---|---|
+| [`config.yaml`](config.yaml) | **WHAT to train** — workflow type, target, class count, model architecture, hyperparameters, and the `runs:` queue of training setups | `workflow`, `num_classes`, `model_arch`, `hidden`, `lr`, `runs:` |
+| [`.env.workflow`](.env.workflow) | **HOW this machine runs it** — parallelism, GPU batch size, cache-force flags, browser behaviour | `PARALLEL_JOBS`, `PARALLEL_LOAD_TARGET`, `EMBED_BATCH_SIZE`, `FORCE_EMBED` |
+
+Secrets (OpenAI / S2 / HF / MIRAI keys) live in the repo-root `.env` — never in either file.
+`config.yaml` is ordered most-changed-first: section 1 holds the knobs you touch every
+training (workflow, seeds, class count, target); sections 2-6 hold model, encoder, text
+transformer, features and data/split; section 7 is the `runs:` queue with a commented
+copy-paste **TEMPLATE** entry — duplicate it, rename it, and you have a new experiment.
+
+## The two entry points
+
+```bash
+python -m workflow.run_pipeline           # ONE workflow: the top-level keys of config.yaml
+python -m workflow.run_all_workflows      # EVERY entry of config.yaml's runs: queue
+```
+
+- `run_pipeline` runs the topology named by `workflow:` end-to-end (or `--from N --to N`
+  for a phase range, `--force` to ignore reuse shortcuts). `workflow: all` runs all eight
+  topologies once, sharing the common phases.
+- `run_all_workflows` expands the `runs:` queue: each entry names a `workflow` (or a list
+  of workflows sharing the same parameters) plus any per-run overrides of the top-level
+  keys. Every run gets its own auto-indexed folder (`emb_clf_1`, `emb_clf_2`, …) and its
+  own log file under `results/`. Overrides are passed as plain dicts — nothing mutates the
+  environment. `--fresh` wipes `results/` first (default keeps old runs; numbering
+  continues). Expensive shared phases are computed once and reused between runs whose
+  data/embedding parameters actually match (the label phase is always re-run because it
+  depends on the per-run class configuration).
+
+Parameter sweeps are just several `runs:` entries with different overrides — same
+mechanism, one file.
+
+## The 8 workflow topologies
+
+`WORKFLOWS` in [`src/iwf/config.py`](src/iwf/config.py) is the single table every module
+derives from — task, feature set and phase list per topology:
+
+| workflow | task | model input (features) | phases |
+|---|---|---|---|
+| `emb_clf` | classification | encoder latent `z` | 0 1 2 3 4 5 6 7 |
+| `emb_reg` | regression | `z` | 0 1 2 3 4 6 7 |
+| `emb_meta_clf` | classification | `z` + curated metadata/novelty/feasibility | 0 1 2 3 4 5 6 7 |
+| `emb_meta_reg` | regression | same | 0 1 2 3 4 6 7 |
+| `emb_all_meta_clf` | classification | `z` + **ALL** numeric columns (intentional-leakage upper bound) | 0 1 2 3 4 5 6 7 |
+| `emb_all_meta_reg` | regression | same | 0 1 2 3 4 6 7 |
+| `tfm_clf` | classification | raw title+abstract into a fine-tuned transformer | 0 1 5 6 7 |
+| `tfm_reg` | regression | same | 0 1 6 7 |
+
+The `emb_all_meta_*` pair deliberately bypasses the leakage guard (set automatically from
+the workflow type) to measure the performance ceiling when target-derived columns are fed
+to the model. The `tfm_*` pair skips embed/encode/reduce entirely — it never touches the
+encoder artifact.
+
+## Phases (ids used by `--from` / `--to`)
+
+| # | Name | Script | Reads | Writes |
+|---|---|---|---|---|
+| 0 | fetch | `src/main_fetch.py` | epai DB (primary) + OpenAlex/S2 (gap-fill) | `data/parquet/<id>_raw.parquet` |
+| 1 | prepare | `src/main_prepare.py` | `<id>_raw.parquet` | `<id>.parquet` (+ `target`, `meta_*`, `split`) |
+| 2 | embed | `src/main_embed.py` | `<id>.parquet` | `<id>_emb.parquet` (`emb_*` cols) |
+| 3 | encoder | `src/main_encoder.py` | `<id>_emb.parquet` | `models/<id>_encoder.pt` + `.json` (k\*) |
+| 4 | reduce | `src/main_reduce.py` | `<id>_emb.parquet` + encoder | `<id>_z.parquet` (col `z`) |
+| 5 | label | `src/main_label.py` | `<id>_z.parquet` | `+ class_label` |
+| 6 | train | `src/main_train.py` (emb) / `src/main_train_tfm.py` (tfm) | `<id>_z.parquet` / `<id>.parquet` | `results/<wf>_N/seed_<i>/` |
+| 7 | finalize | `iwf/workflow_results.finalize_workflow` | `seed_<i>/result.json` | `aggregate/` (metrics + all plots + description) |
+
+Phase 6 is ONE script for all embedding workflows: `main_train.py` derives task
+(clf/reg) and feature set (z / meta / all_meta) from the workflow type and calls the
+shared `run_experiment`. Text workflows use `main_train_tfm.py` (pretokenized fp16
+fine-tune with warmup + grad accumulation).
+
+One more standalone script is not part of any phase list:
+`src/main_predict_generated.py` scores LLM-generated papers (MIRAI/ADP) with the newest
+trained z-only regressor and compares their predicted-impact distribution to the human
+test split.
+
+## Layout
+
+```
+workflow/
+├── config.yaml            WHAT to train (single training config + runs: queue)
+├── .env.workflow          HOW the machine runs it (parallelism, GPU, force flags)
+├── run_pipeline.py        entry point: one workflow
+├── run_all_workflows.py   entry point: the runs: queue
+├── README.md (this), WORKFLOW.drawio, WORKFLOW_REFERENCE.md,
+│   mathematical_documentation.md, CLAUDE.md
+├── data/, models/, results/     generated artifacts (safe to delete + regenerate)
+└── src/
+    ├── main_fetch.py … main_train.py, main_train_tfm.py, main_predict_generated.py
+    ├── iwf/                     the shared library
+    │   ├── config.py            Settings + config.yaml loading + the WORKFLOWS table
+    │   ├── paths.py             every filesystem location
+    │   ├── registry.py          embedder/encoder/model/text-arch lookup by name
+    │   ├── parallel.py          worker/GPU budget (reads .env.workflow)
+    │   ├── progress.py          live multi-run terminal display
+    │   ├── targets.py           the 4 impact targets + class binning
+    │   ├── workflow_results.py  per-run folders, aggregation, model description, comparison
+    │   ├── data/                identity, parquet IO + THE shared split, corpus sources
+    │   ├── embedding/           frozen embedders (epai + scincl/e5)
+    │   ├── encoder/             AE/PCA/UMAP/identity + latent-dim (k*) selection
+    │   ├── features/            metadata, novelty/feasibility, feature_builder (+ leakage guard)
+    │   ├── models/              architectures (mlp/resmlp/ft_transformer), heads,
+    │   │                        text_transformers (all 4 backbones in one module)
+    │   ├── training/            trainer (torch loop), experiment (multi-seed),
+    │   │                        text_trainer (transformer fine-tune)
+    │   └── evaluation/          metrics.py (the ONE metric implementation),
+    │                            plots.py (the ONE plot module, all figures)
+    └── tests/smoke.py           offline smoke suite (26 checks, no keys/downloads)
+```
+
+Deliberately centralized (one implementation, used everywhere):
+
+- **`evaluation/metrics.py`** — both the MLP heads and the text trainer report through the
+  same two functions, so every seed of every workflow has identical metric keys.
+- **`evaluation/plots.py`** — every figure in the project lives here; classification and
+  regression get the same suite with only the task-appropriate variants.
+- **`training/experiment.py`** — the one multi-seed loop for all six embedding workflows;
+  seeds run in parallel under the `.env.workflow` machine budget.
+- **Uniform results layout** — every workflow (emb and tfm alike) writes
+  `results/<wf>_N/seed_<i>/result.json` in the same format; aggregation and plotting never
+  special-case a workflow type.
+
+## Install / prerequisites
+
+No new dependencies. Everything used (`torch`, `scikit-learn`, `scipy`, `transformers`,
+`umap-learn`, `requests`, `pandas`, `pyarrow`, `matplotlib`, `plotly`, `dotenv`; `peft`
+only for the LoRA arches) is in the repo `pyproject.toml`. Run from the repo root (where
+`epai` is importable). The expensive stages (fetch, ~1h embed) are skipped when their
+output already exists (`FORCE_FETCH` / `FORCE_EMBED` in `.env.workflow` to rebuild).
+
+## Offline test (no API keys, no model downloads)
+
+```bash
+uv run python -m workflow.src.tests.smoke      # exit 0 = all 26 checks passed
+```
+
+Exercises config loading + per-run overrides + the class-count knobs, identity, the shared
+split, all targets, class binning, metadata, feature builder + neutral scaler + leakage
+guard (incl. the intentional bypass), intrinsic-dim, encoders, dim selection, the torch
+heads for every registered architecture, metrics, novelty, full `run_experiment` runs for
+reg/meta/clf (save + reload), the workflow table, the registry, the progress display, a
+mocked text-transformer run, and the aggregation pipeline. All outputs go to a throwaway
+temp dir.
+
+## Results layout (identical for every workflow)
+
+```
+results/<wf_type>_N/
+├── run_config.json          exact Settings snapshot of the run
+├── experiment.json          feature list / leakage-guard state (emb workflows)
+├── seed_<i>/
+│   ├── result.json          flat test metrics + per-split y_true/y_pred + history
+│   ├── model/               model.joblib + scaler.joblib (emb) — or —
+│   └── checkpoint/          HF checkpoint + head.pt (tfm)
+└── aggregate/
+    ├── metrics_summary.json mean ± std ± min/max of every scalar metric across seeds
+    ├── description_<wf>.md  auto-generated model card (most-important params first)
+    └── *.png / *.html       the full plot suite (below)
+results/cross_workflow_comparison.{json,png}   scan of every aggregate, reg + clf panels
+results/<wf_type>_N.log                        full per-run log (run_all_workflows)
+```
+
+## Evaluation plots (phase 7, identical suite for every workflow)
+
+All filenames are suffixed with the workflow type, so results never collide:
+
+| File | What it shows | Task |
+|---|---|---|
+| `correctness_bars_<wf>.png` | % correct per split (train/val/test), olive shades, item counts in labels; regression is binned by the same class thresholds as the classifier | both |
+| `learning_curve_<wf>.png` | Training loss + validation metric vs epoch, one merged legend | both |
+| `confusion_matrix_<wf>_<seed>.png` | Predicted vs actual impact class (regression binned identically) — auto-adjusts to any class count | both |
+| `class_boxplot_<wf>.png` | Per-class F1 spread across seeds | clf |
+| `spearman_distribution.png`, `predicted_vs_actual.png`, `mse_bars.png` | Seed spread, calibration scatter, split MSE | reg |
+| `umap3d_correctness_<wf>.{html,png}`, `umap3d_classes_<wf>.{html,png}` | 3-D UMAP of `z`: gold=correct/purple=wrong; colour per class | clf |
+| `umap3d_error_<wf>.{html,png}` | 3-D UMAP, continuous gold→purple by per-sample error | reg |
+| `umap3d_domain_*_<wf>.{html,png}` | The same, split per research domain (grid PNG + one HTML per domain) | both |
+| `nn_weights_<wf>.{html,png}` | MLP connection-strength diagram (metadata inputs red, z inputs blue); only weights above 15% of the layer max are drawn | both (MLP/ResMLP) |
+| `description_<wf>.md` | Auto-generated model card: run summary → architecture (incl. actually-trained layer sizes) → encoder → hyperparameters → data/split → features → full snapshot | both |
+
+See `mathematical_documentation.md` Part 4 for the equations behind each figure.
+
+## Key engineering guarantees
+
+- **One shared split** for every stage: computed once in phase 1 (seeded, stratified),
+  stored as the `split` column, read by all later phases. Change `split_seed` to
+  regenerate a different-but-shared split.
+- **Encoder** trains on `train + val` (unsupervised); every head trains on `train`,
+  early-stops on `val`, and `test` is only ever used for output/statistics.
+- **Identity & joins:** every artifact carries a canonical `paper_id`; all cross-table
+  combination is a keyed join on it (never row order). The epai DB is the **primary**
+  paper source (read-only); OpenAlex/S2 fill gaps.
+- **Class balancing:** the classifier loss supports `class_weight: balanced`
+  (inverse-frequency) and `effective` (Cui 2019 class-balanced) — automatic no-ops when
+  the configured class distribution is even, plus optional focal loss.
+- **Class count is one knob:** `num_classes` / `class_distribution` / `class_thresholds`
+  in config.yaml (2..25 classes); labels, training and every plot auto-adjust.
+- **Robust missing data:** any absent feature becomes a neutral `0.0` (standardized mean)
+  plus a `<feature>_missing` mask bit, so training never breaks on incomplete rows.
+- **Leakage guard:** `year`/`citation_count`/`influential_citation_count`/`domains` build
+  the target and are rejected as features — except in the `emb_all_meta_*` workflows,
+  where the bypass is set automatically as the intentional upper-bound test.
+- **No hidden state between runs:** per-run overrides travel as dicts into `Settings`;
+  the OS environment is never mutated, so queued runs cannot contaminate each other.
