@@ -45,19 +45,53 @@ doublecheck_pkgs(pyproject_path="pyproject.toml", verbose=True)  # check package
 BASE_DIR = Path(__file__).parent.parent.parent
 
 ### INPUTS ############################################################
-PARQUET_IN = BASE_DIR / "data" / "parquet" / "0515_A_500_AI_260_naip.parquet"
-PARQUET_OUT = BASE_DIR / "data" / "parquet" / "0515_A_500_AI_260_naip_binox.parquet"
+# Per-dataset schema + file names. Datasets differ only in which column holds
+# the text to score and which column is the unique row key; the scoring math is
+# identical. Add a new entry here to support another dataset.
+DATASETS = {
+    "naip": {
+        "in": "0515_A_500_AI_260_naip.parquet",
+        "out": "0515_A_500_AI_260_naip_binox.parquet",
+        "text_col": "abstract",
+        "key_col": "paper_id",
+    },
+    "wp": {
+        "in": "wp.parquet",
+        "out": "wp_binox.parquet",
+        "text_col": "text",
+        "key_col": "id",
+    },
+    "reuter": {
+        "in": "reuter.parquet",
+        "out": "reuter_binox.parquet",
+        "text_col": "text",
+        "key_col": "id",
+    },
+    "essay": {
+        "in": "essay.parquet",
+        "out": "essay_binox.parquet",
+        "text_col": "text",
+        "key_col": "id",
+    },
+}
+
+DATASET = "wp"  # <-- edit this to pick which dataset to score
+
+_cfg = DATASETS[DATASET]
+_PARQUET_DIR = BASE_DIR / "data" / "parquet"
+PARQUET_IN = _PARQUET_DIR / _cfg["in"]
+PARQUET_OUT = _PARQUET_DIR / _cfg["out"]
 
 # (observer, performer) pairs — one score column is produced per pair.
 MODEL_PAIRS = [
     # Falcon
     ("tiiuae/Falcon3-1B-Base", "tiiuae/Falcon3-1B-Instruct"),              # falcon 1b
     #("tiiuae/Falcon-H1-7B-Base", "tiiuae/Falcon-H1-7B-Instruct"),         # falcon 7b
-    ("tiiuae/falcon-7b", "tiiuae/falcon-7b-instruct"),                     # falcon 7b (original)
+    #("tiiuae/falcon-7b", "tiiuae/falcon-7b-instruct"),                     # falcon 7b (original)
 
 
     # Llama
-    ("meta-llama/Llama-3.2-1B", "meta-llama/Llama-3.2-1B-Instruct"),      # llama 1b
+    #("meta-llama/Llama-3.2-1B", "meta-llama/Llama-3.2-1B-Instruct"),      # llama 1b
     #("meta-llama/Llama-3.1-8B", "meta-llama/Llama-3.1-8B-Instruct"),      # llama 8b
 
     # Gemma
@@ -65,11 +99,12 @@ MODEL_PAIRS = [
     #("google/gemma-3-4b-pt", "google/gemma-3-4b-it"),                      # gemma 4b
 
     # Qwen
-    ("Qwen/Qwen3-1.7B-Base",            "Qwen/Qwen3-1.7B"),                       # qwen ~1b  
+    #("Qwen/Qwen3-1.7B-Base",            "Qwen/Qwen3-1.7B"),                       # qwen ~1b  
     #("Qwen/Qwen3-8B-Base",              "Qwen/Qwen3-8B"),                         # qwen 8b   
 ]
 
-TEXT_COLUMN = "abstract"  # column whose text gets scored
+TEXT_COLUMN = _cfg["text_col"]  # column whose text gets scored
+KEY_COLUMN = _cfg["key_col"]    # unique row id, used for resume-merge + logging
 MAX_TOKENS = 1024         # truncate long texts (falcon-rw-1b ctx = 2048)
 DEBUG = False              # if True, only process first 5 rows
 #######################################################################
@@ -204,7 +239,7 @@ def run_pair(df: pd.DataFrame, observer_model: str, performer_model: str) -> Non
         try:
             score = score_text(tokenizer, observer, performer, row.get(TEXT_COLUMN))
         except Exception as e:  # noqa: BLE001 — keep going on per-row failures
-            tqdm.write(f"  [ERROR] {row.get('paper_id')}: {e}")
+            tqdm.write(f"  [ERROR] {row.get(KEY_COLUMN)}: {e}")
             score = None
 
         df.at[idx, col] = score
@@ -223,8 +258,8 @@ def run_pair(df: pd.DataFrame, observer_model: str, performer_model: str) -> Non
 
 
 def merge_existing_scores(df: pd.DataFrame, prev: pd.DataFrame) -> pd.DataFrame:
-    """Carry score columns from a previous output back onto df (keyed by paper)."""
-    key = ["paper_id", "generated_by"]
+    """Carry score columns from a previous output back onto df (keyed by row id)."""
+    key = [KEY_COLUMN, "generated_by"]
     score_cols = [
         c for c in prev.columns if c.startswith("binoculars_") and c not in df.columns
     ]
