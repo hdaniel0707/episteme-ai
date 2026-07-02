@@ -17,12 +17,12 @@ from epai.utils.visualization_utils import (
     plot_human_vs_llm_distance,
 )
 
-BASE_DIR = Path(__file__).parent.parent
+BASE_DIR = Path(__file__).parent.parent.parent
 DB_DIR = BASE_DIR / "data"
 
 
 ######################################
-DB_ID = "wp"
+DB_ID = "reuter"
 PARQUET_PATH = DB_DIR / "parquet" / (DB_ID + ".parquet")
 FIG_DIR = BASE_DIR / "results" / "analyse_data" / DB_ID
 MODE_AI = True
@@ -57,6 +57,7 @@ if __name__ == "__main__":
             scores=scores,
             title="pca specter2 by generated_by",
             save_path=FIG_DIR / "dimreds" / "dimred_2d_pca_generated_by",
+            show_centroids=True,
         )
 
         plot_human_vs_llm_distance(

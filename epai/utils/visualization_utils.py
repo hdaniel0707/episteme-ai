@@ -19,6 +19,7 @@ def plot_pca_2d_cat(
     scores: np.ndarray | list | None = None,
     title: str = "",
     save_path: Path | None = None,
+    show_centroids: bool = False,
 ):
     X2 = np.asarray(X2)
     n = len(X2)
@@ -45,6 +46,8 @@ def plot_pca_2d_cat(
         normalized = 6 + 14 * (scores_arr - s_min) / denom
     else:
         normalized = None
+
+    centroids = []  # (label, cx, cy, color) collected to draw on top after the loop
 
     for label in unique_labels:
         mask = labels == label
@@ -74,6 +77,33 @@ def plot_pca_2d_cat(
                 hovertemplate=(
                     "<b>Group: " + label + "</b><br>"
                     "Title: %{text}<br>" + score_hover + "Dim 1: %{x:.3f}<br>"
+                    "Dim 2: %{y:.3f}<br>"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+        if show_centroids:
+            centroids.append(
+                (label, float(np.mean(sub_x)), float(np.mean(sub_y)), color)
+            )
+
+    # Draw the centroid stars after every group's points so all stars sit on
+    # top of all points, not just the points of their own group.
+    for label, cx, cy, color in centroids:
+        centroid_kw = dict(size=20, symbol="star", line=dict(width=1, color="black"))
+        if color is not None:
+            centroid_kw["color"] = color
+        fig.add_trace(
+            go.Scatter(
+                x=[cx],
+                y=[cy],
+                mode="markers",
+                marker=centroid_kw,
+                showlegend=False,
+                hovertemplate=(
+                    "<b>Centroid: " + label + "</b><br>"
+                    "Dim 1: %{x:.3f}<br>"
                     "Dim 2: %{y:.3f}<br>"
                     "<extra></extra>"
                 ),
