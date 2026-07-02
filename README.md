@@ -43,6 +43,19 @@ uv sync
 uv pip install -e .
 ```
 
+For the compute server you will need to add this at the end of your `pyproject.toml`:
+```
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu124" }
+torchvision = { index = "pytorch-cu124" }
+torchaudio = { index = "pytorch-cu124" }
+```
+
 You need Python 3.12 or newer.
 
 ---
