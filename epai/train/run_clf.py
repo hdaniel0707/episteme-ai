@@ -18,7 +18,7 @@ BASE_DIR = Path(__file__).parent.parent.parent
 RESULTS_DIR = BASE_DIR / "results" / "clf"
 
 ### INPUTS ###############################
-CFG_DIR = BASE_DIR / "cfg" / "train" / "clf" / "hd" / "alma"
+CFG_DIR = BASE_DIR / "cfg" / "train" / "clf" / "hd" / "wp2"
 ##########################################
 
 
@@ -32,10 +32,10 @@ def run_classification() -> str:
     for cfg_path in tqdm(cfg_paths, desc="Configs"):
         cfg = load_config(cfg_path)
 
-        print(f"\n{'='*60}")
-        print(f"  ALG ID: {cfg['alg_id']}")
-        print(f"  ML ALG: {cfg['model']['ml_alg']}")
-        print(f"{'='*60}")
+        tqdm.write(f"\n{'='*60}")
+        tqdm.write(f"  ALG ID: {cfg['alg_id']}")
+        tqdm.write(f"  ML ALG: {cfg['model']['ml_alg']}")
+        tqdm.write(f"  {'-'*30}")
 
         ALG_DIR = EXP_DIR / cfg["alg_id"]
         ALG_DIR.mkdir(parents=True, exist_ok=True)
@@ -51,7 +51,11 @@ def run_classification() -> str:
         drop_classes = cfg["data"].get("drop_classes", [])
         X, y, le = build_clf_features(df, cfg["features"], drop_classes)
 
-        print(f"Classes: {le.classes_.tolist()}")
+        tqdm.write(f"  {'-'*30}")
+        tqdm.write(f"  FEATURES: {cfg['features']}")
+        tqdm.write(f"  CLASSES: {le.classes_.tolist()}")
+        tqdm.write(f"{'='*60}")
+
         with open(ALG_DIR / "label_mapping.json", "w") as f:
             json.dump({i: c for i, c in enumerate(le.classes_.tolist())}, f, indent=2)
 

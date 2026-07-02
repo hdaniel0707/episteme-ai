@@ -7,6 +7,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.neural_network import MLPRegressor
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.svm import SVR
+from tqdm import tqdm
 from epai.train.autoencoder import AERegressor
 
 
@@ -55,7 +56,7 @@ def build_clf_features(
 ) -> tuple[np.ndarray, np.ndarray, LabelEncoder]:
     if drop_classes:
         df = df[~df["generated_by"].isin(drop_classes)].reset_index(drop=True)
-        print(f"Dropped classes: {drop_classes}")
+        tqdm.write(f"  Dropped classes: {drop_classes}")
     X = np.array(df[features[0]].tolist(), dtype=np.float32)
     le = LabelEncoder()
     y = le.fit_transform(df["generated_by"].tolist())
