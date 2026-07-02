@@ -10,7 +10,7 @@ from plotly.subplots import make_subplots
 
 DB_NAME = "0512_A"
 
-BASE_DIR = Path(__file__).parent.parent
+BASE_DIR = Path(__file__).parent.parent.parent
 DB_DIR = BASE_DIR / "data"
 DB_PATH = DB_DIR / "sql" / (DB_NAME + ".db")
 RES_DIR = BASE_DIR / "results" / "analyse_sql" / DB_NAME

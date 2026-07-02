@@ -18,7 +18,7 @@ import pandas as pd
 
 from epai.utils.parquet_utils import load_parquet, save_parquet
 
-BASE_DIR = Path(__file__).parent.parent
+BASE_DIR = Path(__file__).parent.parent.parent
 INPUTS = [
     BASE_DIR / "data" / "parquet" / "0515_A_500_AI_260.parquet",
     BASE_DIR / "data" / "parquet" / "denario_papers.parquet",

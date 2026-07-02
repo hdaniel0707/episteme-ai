@@ -37,7 +37,7 @@ import pandas as pd
 from epai.utils.embedding_utils import add_embedding
 from epai.utils.parquet_utils import save_parquet
 
-BASE_DIR = Path(__file__).parent.parent
+BASE_DIR = Path(__file__).parent.parent.parent
 DATA_DIR = BASE_DIR / "data"
 
 ######################################

@@ -19,7 +19,7 @@ from epai.utils.cuda_util import check_cuda
 from epai.analyse.analyse_exp import run_individual_analysis
 from epai.analyse.analyse_exp_compare import run_compared_analysis
 
-BASE_DIR = Path(__file__).parent.parent
+BASE_DIR = Path(__file__).parent.parent.parent
 RESULTS_DIR = BASE_DIR / "results" / "reg"
 
 ### INPUTS ###############################

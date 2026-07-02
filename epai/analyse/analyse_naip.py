@@ -24,7 +24,7 @@ import pandas as pd
 # Colors per source / LLM family live in cfg/colors.yaml (see color_utils).
 from epai.utils.color_utils import group_color as _group_color
 
-BASE_DIR = Path(__file__).parent.parent
+BASE_DIR = Path(__file__).parent.parent.parent
 PARQUET_PATH = BASE_DIR / "data" / "parquet" / "0523_A_10_AI_naip.parquet"
 FIG_DIR = BASE_DIR / "results" / "naip"
 

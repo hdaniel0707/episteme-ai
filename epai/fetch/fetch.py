@@ -29,7 +29,7 @@ PAPER_FIELDS = (
     "citationCount,influentialCitationCount,year,venue"
 )
 
-BASE_DIR = Path(__file__).parent.parent
+BASE_DIR = Path(__file__).parent.parent.parent
 DB_DIR = BASE_DIR / "data"
 DB_PATH = DB_DIR / "sql" / "0523_A_100.db"
 CFG_PATH = BASE_DIR / "cfg" / "fetch" / "hd" / "fetch_cfg_reduced.yaml"

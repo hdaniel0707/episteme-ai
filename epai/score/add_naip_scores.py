@@ -21,7 +21,7 @@ from tqdm import tqdm
 
 load_dotenv()
 
-BASE_DIR = Path(__file__).parent.parent
+BASE_DIR = Path(__file__).parent.parent.parent
 
 ### INPUTS ############################################################
 PARQUET_IN = BASE_DIR / "data" / "parquet" / "0523_A_10_AI.parquet"

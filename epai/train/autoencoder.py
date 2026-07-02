@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from sklearn.linear_model import Ridge
 from torch.utils.data import DataLoader, TensorDataset
 
-BASE_DIR = Path(__file__).parent.parent
+BASE_DIR = Path(__file__).parent.parent.parent
 
 
 class AE(nn.Module):

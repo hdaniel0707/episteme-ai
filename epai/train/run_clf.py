@@ -14,7 +14,7 @@ from epai.utils.parquet_utils import load_parquet
 from epai.utils.train_utils import build_clf_features, build_clf_model
 from epai.utils.visualization_utils import plot_clf_results
 
-BASE_DIR = Path(__file__).parent.parent
+BASE_DIR = Path(__file__).parent.parent.parent
 RESULTS_DIR = BASE_DIR / "results" / "clf"
 
 ### INPUTS ###############################

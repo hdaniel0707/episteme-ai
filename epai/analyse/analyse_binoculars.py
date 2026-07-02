@@ -39,7 +39,7 @@ from sklearn.metrics import (
     roc_curve,
 )
 
-BASE_DIR = Path(__file__).parent.parent
+BASE_DIR = Path(__file__).parent.parent.parent
 
 ### INPUTS ############################################################
 PARQUET_PATH = BASE_DIR / "data" / "parquet" / "0515_A_500_AI_260_naip_binox.parquet"

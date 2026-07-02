@@ -28,7 +28,7 @@ from pathlib import Path
 README_RAW = "https://raw.githubusercontent.com/AstroPilot-AI/DenarioExamplePapers/main/README.md"
 HEADERS = {"User-Agent": "denario-fetch/1.0"}
 
-BASE_DIR = Path(__file__).parent.parent
+BASE_DIR = Path(__file__).parent.parent.parent
 DB_PATH = BASE_DIR / "data" / "sql" / "denario_papers.db"
 PAPERS_DIR = BASE_DIR / "data" / "papers" / "denario"
 

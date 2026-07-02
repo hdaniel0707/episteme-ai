@@ -9,7 +9,7 @@ from epai.utils.genai_utils import add_ai_generated_data
 from epai.utils.parquet_utils import save_parquet
 from epai.utils.embedding_utils import add_embedding
 
-BASE_DIR = Path(__file__).parent.parent
+BASE_DIR = Path(__file__).parent.parent.parent
 DB_DIR = BASE_DIR / "data"
 
 ######################################
