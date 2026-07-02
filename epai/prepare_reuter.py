@@ -39,7 +39,7 @@ BASE_DIR = Path(__file__).parent.parent
 DATA_DIR = BASE_DIR / "data"
 
 ######################################
-REUTER_DIR = DATA_DIR / "reuter"
+REUTER_DIR = DATA_DIR / "ghostbuster-data" / "reuter"
 PARQUET_PATH = DATA_DIR / "parquet" / "reuter.parquet"
 
 # Subdirectories inside each author folder that are not articles.
