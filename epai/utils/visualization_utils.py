@@ -612,13 +612,16 @@ def _save_clf_alg_figures(
     x = np.arange(n_splits)
     means = [float(np.mean([r[f"{s}_accuracy"] for r in results])) for s in splits]
     stds = [float(np.std([r[f"{s}_accuracy"] for r in results])) for s in splits]
-    ax.bar(x, means, 0.6, yerr=stds, capsize=4, color=split_colors[:n_splits])
+    bars = ax.bar(x, means, 0.6, yerr=stds, capsize=4, color=split_colors[:n_splits])
+    ax.bar_label(
+        bars, fmt="%.3f", label_type="edge", fontsize=11, padding=2, color="black"
+    )
     if show_random:
         ax.axhline(1 / nc, linestyle="--", color="red", linewidth=1.2, label="random")
         ax.legend()
     ax.set_xticks(x)
     ax.set_xticklabels(splits)
-    ax.set_ylim(0, 1.05)
+    ax.set_ylim(0, 1.15)
     ax.set_ylabel("Accuracy")
     ax.set_title(f"{label} – Accuracy")
     fig.tight_layout()
@@ -680,11 +683,14 @@ def _save_clf_alg_figures(
                     f1s[c].append(report[c]["f1-score"])
         means = [float(np.mean(f1s[c])) if f1s[c] else 0.0 for c in class_names]
         stds = [float(np.std(f1s[c])) if f1s[c] else 0.0 for c in class_names]
-        ax.bar(range(nc), means, yerr=stds, capsize=4, color="steelblue")
+        bars = ax.bar(range(nc), means, yerr=stds, capsize=4, color="steelblue")
+        ax.bar_label(
+            bars, fmt="%.3f", label_type="edge", fontsize=11, padding=2, color="black"
+        )
         ax.axhline(1 / nc, linestyle="--", color="red", linewidth=1.2, label="random")
         ax.set_xticks(range(nc))
         ax.set_xticklabels(class_names, rotation=45, ha="right", fontsize=tick_fs)
-        ax.set_ylim(0, 1.05)
+        ax.set_ylim(0, 1.15)
         ax.set_ylabel("F1 Score")
         ax.set_title(split)
         ax.legend(fontsize=7)
@@ -754,14 +760,17 @@ def plot_clf_results(exp_dir: Path, show_random: bool = True) -> None:
             accs = [r[f"{split}_accuracy"] for r in data[mn]]
             means.append(float(np.mean(accs)))
             stds.append(float(np.std(accs)))
-        ax.bar(x + j * w, means, w, label=split, color=color, yerr=stds, capsize=4)
+        bars = ax.bar(x + j * w, means, w, label=split, color=color, yerr=stds, capsize=4)
+        ax.bar_label(
+            bars, fmt="%.3f", label_type="edge", fontsize=11, padding=2, color="black"
+        )
     if show_random:
         ax.axhline(
             1 / max_classes, linestyle="--", color="red", linewidth=1.2, label="random"
         )
     ax.set_xticks(x + w)
     ax.set_xticklabels(alg_labels, rotation=15, ha="right")
-    ax.set_ylim(0, 1.05)
+    ax.set_ylim(0, 1.15)
     ax.set_ylabel("Accuracy")
     ax.set_title("Accuracy by Model and Split")
     ax.legend()
@@ -838,7 +847,10 @@ def plot_clf_results(exp_dir: Path, show_random: bool = True) -> None:
                         f1s[c].append(report[c]["f1-score"])
             means = [float(np.mean(f1s[c])) if f1s[c] else 0.0 for c in cn]
             stds = [float(np.std(f1s[c])) if f1s[c] else 0.0 for c in cn]
-            ax.bar(range(nc), means, yerr=stds, capsize=4, color="steelblue")
+            bars = ax.bar(range(nc), means, yerr=stds, capsize=4, color="steelblue")
+            ax.bar_label(
+                bars, fmt="%.3f", label_type="edge", fontsize=11, padding=2, color="black"
+            )
             ax.axhline(
                 1 / nc,
                 linestyle="--",
@@ -848,7 +860,7 @@ def plot_clf_results(exp_dir: Path, show_random: bool = True) -> None:
             )
             ax.set_xticks(range(nc))
             ax.set_xticklabels(cn, rotation=45, ha="right", fontsize=tick_fs)
-            ax.set_ylim(0, 1.05)
+            ax.set_ylim(0, 1.15)
             ax.set_ylabel("F1 Score")
             ax.set_title(f"{alg_labels[i]} – {split}")
             ax.legend(fontsize=7)
