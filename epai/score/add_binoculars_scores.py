@@ -14,13 +14,25 @@ named after the model pair, e.g. ``binoculars_falcon_rw_1b`` (or
 
 Usage:
     python -m epai.score.add_binoculars_scores
+    python -m epai.score.add_binoculars_scores --gpu 1
+    python -m epai.score.add_binoculars_scores --dataset reuter
 """
 
+import argparse
 import os
 
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")  # use GPU 0 only
-os.environ.setdefault("OMP_NUM_THREADS", "4")
-os.environ.setdefault("MKL_NUM_THREADS", "4")
+_arg_parser = argparse.ArgumentParser(description=__doc__)
+_arg_parser.add_argument(
+    "--gpu", default="0", help="value for CUDA_VISIBLE_DEVICES (which GPU(s) to use)"
+)
+_arg_parser.add_argument(
+    "--dataset", default="wp", help="which dataset to score (key into DATASETS)"
+)
+_args, _ = _arg_parser.parse_known_args()
+
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", _args.gpu)
+os.environ.setdefault("OMP_NUM_THREADS", "16")
+os.environ.setdefault("MKL_NUM_THREADS", "16")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 import re
@@ -75,7 +87,12 @@ DATASETS = {
     },
 }
 
-DATASET = "wp"  # <-- edit this to pick which dataset to score
+DATASET = _args.dataset  # which dataset to score, set via --dataset
+
+if DATASET not in DATASETS:
+    raise SystemExit(
+        f"Unknown --dataset {DATASET!r}. Choose from: {', '.join(DATASETS)}"
+    )
 
 _cfg = DATASETS[DATASET]
 _PARQUET_DIR = BASE_DIR / "data" / "parquet"
@@ -85,9 +102,9 @@ PARQUET_OUT = _PARQUET_DIR / _cfg["out"]
 # (observer, performer) pairs — one score column is produced per pair.
 MODEL_PAIRS = [
     # Falcon
-    ("tiiuae/Falcon3-1B-Base", "tiiuae/Falcon3-1B-Instruct"),              # falcon 1b
+    #("tiiuae/Falcon3-1B-Base", "tiiuae/Falcon3-1B-Instruct"),              # falcon 1b
     #("tiiuae/Falcon-H1-7B-Base", "tiiuae/Falcon-H1-7B-Instruct"),         # falcon 7b
-    #("tiiuae/falcon-7b", "tiiuae/falcon-7b-instruct"),                     # falcon 7b (original)
+    ("tiiuae/falcon-7b", "tiiuae/falcon-7b-instruct"),                     # falcon 7b (original)
 
 
     # Llama
