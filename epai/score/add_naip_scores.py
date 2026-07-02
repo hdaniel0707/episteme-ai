@@ -7,7 +7,7 @@ Output: a new Parquet file with two extra columns:
     naip_final_score — normalised TNCSI_sp score (0–1)
 
 Usage:
-    python -m aip.fetch_naip
+    python -m epai.score.add_naip_scores
 """
 
 import os

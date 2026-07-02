@@ -13,7 +13,7 @@ named after the model pair, e.g. ``binoculars_falcon_rw_1b`` (or
             (below ~THRESHOLD → AI-generated, above → human)
 
 Usage:
-    python -m epai.add_binoculars_scores
+    python -m epai.score.add_binoculars_scores
 """
 
 import os

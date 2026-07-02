@@ -19,7 +19,7 @@ Figures + tables saved to results/binoculars/<parquet_stem>/:
   - per_generator_auc.csv       — predictor × generator AUC (human vs each generator)
 
 Usage:
-    python -m epai.analyse_binoculars
+    python -m epai.analyse.analyse_binoculars
 """
 
 from pathlib import Path

@@ -14,7 +14,7 @@ All remaining columns (embedding, citation_count, year, venue, queries,
 author_count, best_author_h_index, emb_specter2) are Null.
 
 Run:
-    python -m epai.prepare_denario
+    python -m epai.prepare.prepare_denario
 """
 
 import hashlib

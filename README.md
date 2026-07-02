@@ -95,7 +95,7 @@ cp .env_sample .env
 | `OPENAI_API_KEY` | `prepare_data.py`, `embedding_utils.py` | GPT-4o-mini rephrasing and OpenAI embeddings |
 | `ANTHROPIC_API_KEY` | `prepare_data.py` | Claude Haiku abstract rephrasing |
 | `GOOGLE_API_KEY` | `prepare_data.py` | Gemini abstract rephrasing |
-| `HF_TOKEN` | `fetch_naip.py` | HuggingFace token for the NAIP Gradio API (optional but avoids rate limits) |
+| `HF_TOKEN` | `add_naip_scores.py` | HuggingFace token for the NAIP Gradio API (optional but avoids rate limits) |
 
 The Semantic Scholar key is optional but strongly recommended — without it you will be heavily rate-limited. The LLM keys are only needed if you enable the `ADD_GEN_AI` flag in `prepare_data.py`.
 
@@ -112,7 +112,7 @@ The stages run sequentially. Stages 2, 4, 5, and 6 are optional analysis or enri
    ↓
 [prepare_data.py]
    ↓  data/parquet/<id>.parquet  or  <id>_AI.parquet
-[fetch_naip.py]                ← optional: add NAIP impact scores
+[add_naip_scores.py]           ← optional: add NAIP impact scores
    ↓  data/parquet/<id>_naip.parquet
 [analyse_data.py]              ← optional: EDA on processed Parquet
 [analyse_naip.py]              ← optional: EDA on NAIP scores
@@ -131,11 +131,11 @@ The stages run sequentially. Stages 2, 4, 5, and 6 are optional analysis or enri
 
 ## Stage 1 — Fetch
 
-**Script:** `epai/fetch.py`
+**Script:** `epai/fetch/fetch.py`
 **Output:** `data/sql/<id>.db`
 
 ```bash
-python -m epai.fetch
+python -m epai.fetch.fetch
 ```
 
 Queries the Semantic Scholar bulk-search API for each (domain, query) pair defined in a fetch config YAML. For every paper found it stores:
@@ -160,11 +160,11 @@ The fetch config maps domains to a list of search queries (see `cfg/fetch/fetch_
 
 ## Stage 2 — Summarise DB
 
-**Script:** `epai/summarise_db.py`
+**Script:** `epai/db/summarise_db.py`
 **Output:** `results/analyse_sql/<id>/*.html`
 
 ```bash
-python -m epai.summarise_db
+python -m epai.db.summarise_db
 ```
 
 An optional exploratory step. Loads the raw SQLite database, prints descriptive statistics to the terminal, and saves a set of interactive Plotly HTML charts:
@@ -182,11 +182,11 @@ Edit `DB_NAME` at the top of the script to point at your database.
 
 ## Stage 3 — Prepare Data
 
-**Script:** `epai/prepare_data.py`
+**Script:** `epai/prepare/prepare_data.py`
 **Output:** `data/parquet/<id>.parquet` or `data/parquet/<id>_AI.parquet`
 
 ```bash
-python -m epai.prepare_data
+python -m epai.prepare.prepare_data
 ```
 
 Converts the SQLite database to a Parquet file (a columnar format that loads much faster for ML) and optionally enriches the dataset in two ways:
@@ -216,12 +216,12 @@ Other supported embedding models (see `embedding_utils.py`): `specter2`, `sciber
 
 ## Stage 4 — Fetch NAIP Scores
 
-**Script:** `epai/fetch_naip.py`
+**Script:** `epai/score/add_naip_scores.py`
 **Input:** `data/parquet/<id>_AI.parquet`
 **Output:** `data/parquet/<id>_AI_naip.parquet`
 
 ```bash
-python -m epai.fetch_naip
+python -m epai.score.add_naip_scores
 ```
 
 An optional enrichment step. Queries the [NAIP](https://huggingface.co/spaces/ssocean/Newborn_Article_Impact_Predict) (Newborn Article Impact Predictor) Gradio API on HuggingFace for each row in the dataset and adds two columns:
@@ -233,7 +233,7 @@ An optional enrichment step. Queries the [NAIP](https://huggingface.co/spaces/ss
 
 The script is resume-safe: if the output file already exists, previously scored rows are loaded from it and skipped. This means you can interrupt and re-run without re-querying the API.
 
-**Configuration** — edit the constants at the top of `fetch_naip.py`:
+**Configuration** — edit the constants at the top of `add_naip_scores.py`:
 
 ```python
 PARQUET_IN  = ...   # input Parquet (AI-augmented)
@@ -248,11 +248,11 @@ A `HF_TOKEN` in `.env` is optional but recommended to avoid rate limits on the p
 
 ## Stage 5 — Analyse Data
 
-**Script:** `epai/analyse_data.py`
+**Script:** `epai/analyse/analyse_data.py`
 **Output:** `results/analyse_data/<id>/`
 
 ```bash
-python -m epai.analyse_data
+python -m epai.analyse.analyse_data
 ```
 
 Exploratory data analysis on the processed Parquet file. Edit `DB_ID` and `MODE_AI` at the top.
@@ -273,12 +273,12 @@ All plots are saved as interactive `.html` files (Plotly).
 
 ## Stage 6 — Analyse NAIP
 
-**Script:** `epai/analyse_naip.py`
+**Script:** `epai/analyse/analyse_naip.py`
 **Input:** `data/parquet/<id>_naip.parquet`
 **Output:** `results/naip/<parquet_stem>/`
 
 ```bash
-python -m epai.analyse_naip
+python -m epai.analyse.analyse_naip
 ```
 
 An optional analysis step for datasets that have been enriched with NAIP scores (Stage 4). Produces:
@@ -307,7 +307,7 @@ All three training scripts follow the same pattern:
 **Output:** `results/reg/<experiment_id>/`
 
 ```bash
-python -m epai.run_reg
+python -m epai.train.run_reg
 ```
 
 Predicts `log1p(citation_count)` from paper features. Metrics saved per seed: RMSE and R² on train, val, and test splits.
@@ -340,10 +340,10 @@ Multiple features can be combined — they are concatenated column-wise before t
 **Output:** `results/repr/<experiment_id>/`
 
 ```bash
-python -m epai.run_repr
+python -m epai.train.run_repr
 ```
 
-Trains the **Autoencoder Regressor** defined in `epai/autoencoder.py`. This is a two-stage model:
+Trains the **Autoencoder Regressor** defined in `epai/train/autoencoder.py`. This is a two-stage model:
 
 1. A deep autoencoder is trained to reconstruct the input embedding (768 → 512 → 256 → **128** → 256 → 512 → 768). The loss is a weighted sum of MSE and cosine similarity.
 2. A Ridge regression head is fitted on the compressed 128-dimensional **latent space** to predict `log1p(citation_count)`.
@@ -355,7 +355,7 @@ This lets you study what structure emerges in a compressed embedding space and w
 **Output:** `results/clf/<experiment_id>/`
 
 ```bash
-python -m epai.run_clf
+python -m epai.train.run_clf
 ```
 
 Classifies whether an abstract is human-written or generated by a specific model/style, based on the `generated_by` label column. The feature is the `emb_specter2` embedding. Metrics: accuracy and a per-class classification report (precision, recall, F1).
@@ -379,7 +379,7 @@ You can exclude specific classes from training using `drop_classes` in the confi
 
 These two scripts are called automatically at the end of each training script. They can also be run standalone by editing the `experiment_id` variable at the bottom of each file.
 
-### Per-run analysis (`epai/analyse_exp.py`)
+### Per-run analysis (`epai/analyse/analyse_exp.py`)
 
 For each algorithm in an experiment, produces figures aggregated across all seeds. Saved to `results/<task>/<experiment_id>/<alg_id>/figs/`:
 
@@ -388,7 +388,7 @@ For each algorithm in an experiment, produces figures aggregated across all seed
 - `metrics_summary.png` — RMSE and R² across train/val/test splits with per-seed dots
 - `pred_vs_gt.png` — hexbin scatter of predicted vs. ground truth citations per seed
 
-### Cross-run comparison (`epai/analyse_exp_compare.py`)
+### Cross-run comparison (`epai/analyse/analyse_exp_compare.py`)
 
 Overlays all algorithm configs within one experiment. Saved to `results/<task>/<experiment_id>/figs/`:
 
@@ -445,18 +445,32 @@ Place multiple YAML files in a directory and point `CFG_DIR` in the training scr
 ```
 episteme-ai/
 ├── epai/
-│   ├── fetch.py               # Stage 1: fetch papers from Semantic Scholar → SQLite
-│   ├── summarise_db.py        # Stage 2: EDA on raw SQLite database
-│   ├── prepare_data.py        # Stage 3: SQLite → Parquet, LLM rephrases & embeddings
-│   ├── fetch_naip.py          # Stage 4: add NAIP impact scores to a Parquet file
-│   ├── analyse_data.py        # Stage 5: EDA on processed Parquet dataset
-│   ├── analyse_naip.py        # Stage 6: EDA on NAIP impact scores
-│   ├── run_reg.py             # Stage 7a: regression — predict citation count
-│   ├── run_repr.py            # Stage 7b: representation learning via autoencoder
-│   ├── run_clf.py             # Stage 7c: classification — human vs. AI-generated abstract
-│   ├── analyse_exp.py         # Stage 8a: per-algorithm plots aggregated across seeds
-│   ├── analyse_exp_compare.py # Stage 8b: cross-algorithm comparison plots
-│   ├── autoencoder.py         # AERegressor: PyTorch autoencoder + Ridge regression head
+│   ├── fetch/                     # Data acquisition
+│   │   ├── fetch.py               #   Stage 1: fetch papers from Semantic Scholar → SQLite
+│   │   └── fetch_denario.py       #   fetch Denario papers
+│   ├── prepare/                   # Raw data → Parquet
+│   │   ├── prepare_data.py        #   Stage 3: SQLite → Parquet, LLM rephrases & embeddings
+│   │   ├── prepare_denario.py     #   Denario papers → Parquet
+│   │   ├── prepare_reuter.py      #   Ghostbuster Reuters corpus → Parquet
+│   │   ├── prepare_wp.py          #   Ghostbuster creative-writing (wp) corpus → Parquet
+│   │   ├── prepare_essay.py       #   Ghostbuster essay corpus → Parquet
+│   │   └── merge_parquets.py      #   concatenate multiple Parquet files
+│   ├── score/                     # Enrich Parquet with detector/impact scores
+│   │   ├── add_naip_scores.py     #   Stage 4: add NAIP impact scores
+│   │   └── add_binoculars_scores.py  # add Binoculars AI-detector scores
+│   ├── analyse/                   # Analysis (standalone scripts + shared lib)
+│   │   ├── analyse_data.py        #   Stage 5: EDA on processed Parquet dataset
+│   │   ├── analyse_naip.py        #   Stage 6: EDA on NAIP impact scores
+│   │   ├── analyse_binoculars.py  #   EDA on Binoculars scores
+│   │   ├── analyse_exp.py         #   Stage 8a: per-algorithm plots (lib, called by train/)
+│   │   └── analyse_exp_compare.py #   Stage 8b: cross-algorithm comparison plots (lib)
+│   ├── train/                     # Experiment runners + model
+│   │   ├── run_reg.py             #   Stage 7a: regression — predict citation count
+│   │   ├── run_repr.py            #   Stage 7b: representation learning via autoencoder
+│   │   ├── run_clf.py             #   Stage 7c: classification — human vs. AI-generated abstract
+│   │   └── autoencoder.py         #   AERegressor: PyTorch autoencoder + Ridge regression head
+│   ├── db/
+│   │   └── summarise_db.py        #   Stage 2: EDA on raw SQLite database
 │   └── utils/
 │       ├── config_utils.py       # Load and collect YAML experiment configs
 │       ├── cuda_util.py          # Check CUDA availability
@@ -513,7 +527,7 @@ SPECTER and its successor SPECTER2 are transformer models trained specifically o
 
 ### What does the autoencoder do?
 
-The `AERegressor` in `epai/autoencoder.py` learns a **compressed representation** of the 768-dim input embeddings. The encoder network progressively reduces dimensionality (768 → 512 → 256 → 128); the decoder reconstructs the original vector from this 128-dim bottleneck. After training on reconstruction alone, the bottleneck layer (the latent space) is used as input to a simple Ridge regression that predicts `log1p(citation_count)`.
+The `AERegressor` in `epai/train/autoencoder.py` learns a **compressed representation** of the 768-dim input embeddings. The encoder network progressively reduces dimensionality (768 → 512 → 256 → 128); the decoder reconstructs the original vector from this 128-dim bottleneck. After training on reconstruction alone, the bottleneck layer (the latent space) is used as input to a simple Ridge regression that predicts `log1p(citation_count)`.
 
 The motivation is that forcing the model to compress information may discard noise and retain only the structure that is predictive of citation impact. The reconstruction loss combines MSE (to match magnitudes) and cosine similarity (to match directions) so the latent space preserves both the magnitude and orientation of the original embeddings.
 

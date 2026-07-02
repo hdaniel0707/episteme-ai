@@ -25,7 +25,7 @@ generated_by) — mirroring how paper_id links human/LLM rows in the other
 datasets, which downstream analyses (e.g. human-vs-LLM distance) rely on.
 
 Run:
-    python -m epai.prepare_reuter
+    python -m epai.prepare.prepare_reuter
 """
 
 from pathlib import Path

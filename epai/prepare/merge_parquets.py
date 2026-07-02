@@ -4,11 +4,11 @@ Parquet file. Columns are unioned across inputs; any column missing from a given
 input is filled with Null in the result.
 
 Run:
-    python -m epai.merge_parquets data/parquet/0515_A_500_AI_260.parquet \
+    python -m epai.prepare.merge_parquets data/parquet/0515_A_500_AI_260.parquet \
         data/parquet/denario_papers.parquet -o data/parquet/merged.parquet
 
     # default output is data/parquet/merged.parquet
-    python -m epai.merge_parquets a.parquet b.parquet c.parquet
+    python -m epai.prepare.merge_parquets a.parquet b.parquet c.parquet
 """
 
 import argparse
