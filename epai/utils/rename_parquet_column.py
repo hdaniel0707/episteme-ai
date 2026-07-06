@@ -2,10 +2,10 @@
 
 Example:
     uv run python epai/utils/rename_parquet_column.py \
-        data/parquet/wp_binox.parquet \
+        data/parquet/reuter_binox.parquet \
         binoculars_falcon_7b_x_falcon_7b_instruct \
         binoculars_score \
-        --output data/parquet/wp_binox1.parquet
+        --output data/parquet/reuter_binox1.parquet
 """
 
 from __future__ import annotations
