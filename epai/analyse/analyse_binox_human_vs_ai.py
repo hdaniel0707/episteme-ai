@@ -28,6 +28,7 @@ omitted, so every file can be compared against a different generator.
 Figures + tables saved to results/binox_human_vs_ai/<parquet_stems>/:
   - human_vs_ai_distance_violin.png    — |human − g| per parquet, MSE annotated
   - human_vs_ai_signed_diff_violin.png — signed human − g (which side scores higher)
+  - human_vs_ai_score_distributions.png — per parquet: human vs AI score histograms
   - human_vs_ai_summary.csv            — per-parquet n, skipped, dist stats, signed mean, MSE
   - human_vs_ai_summary.log            — full text summary incl. skipped-pair details
 
@@ -107,6 +108,8 @@ class PairResult:
         self.n_only_target = 0  # ids with a target row but no human row
         self.distances = np.empty(0)  # Euclidean / |human-g| — magnitude only
         self.signed_diffs = np.empty(0)  # human - g (mean over cols) — keeps sign
+        self.human_scores = np.empty(0)  # human score per valid pair (mean over cols)
+        self.target_scores = np.empty(0)  # target score per valid pair (mean over cols)
         self.mse = float("nan")
         self.skipped: list[dict] = []  # id + raw values of skipped pairs
 
@@ -182,9 +185,12 @@ def compute_for_spec(path: Path, target: str, out: Tee) -> PairResult:
             }
         )
 
-    diff = a[valid] - b[valid]  # (n_valid, k)
+    av, bv = a[valid], b[valid]
+    diff = av - bv  # (n_valid, k)
     res.distances = np.sqrt((diff**2).sum(axis=1))  # Euclidean; |human-g| for k=1
     res.signed_diffs = diff.mean(axis=1)  # signed; == human - g for k=1
+    res.human_scores = av.mean(axis=1)  # == human score for k=1
+    res.target_scores = bv.mean(axis=1)  # == target score for k=1
     res.mse = float((diff**2).mean()) if diff.size else float("nan")
     return res
 
@@ -279,6 +285,54 @@ def plot_violins(results: list[PairResult], fig_dir: Path) -> None:
         fname="human_vs_ai_signed_diff_violin.png",
         fig_dir=fig_dir,
     )
+
+
+def plot_distributions(results: list[PairResult], fig_dir: Path) -> None:
+    """Per parquet, overlay the human and AI Binoculars score distributions."""
+    usable = [r for r in results if r.n_valid > 0]
+    if not usable:
+        print("  [skip] no valid pairs for any parquet — no distributions to plot")
+        return
+
+    ncols = min(3, len(usable))
+    nrows = int(np.ceil(len(usable) / ncols))
+    fig, axes = plt.subplots(
+        nrows, ncols, figsize=(5.2 * ncols, 4.2 * nrows), squeeze=False
+    )
+    flat = axes.flatten()
+
+    for ax, r in zip(flat, usable):
+        both = np.concatenate([r.human_scores, r.target_scores])
+        lo, hi = np.percentile(both, [1, 99])
+        if lo == hi:  # degenerate range guard
+            lo, hi = both.min(), both.max() or 1.0
+        bins = np.linspace(lo, hi, 40)
+        ax.hist(
+            r.human_scores, bins=bins, color="#4c72b0", alpha=0.6, density=True,
+            label=f"human (n={r.human_scores.size})",
+        )
+        ax.hist(
+            r.target_scores, bins=bins, color="#d1495b", alpha=0.6, density=True,
+            label=f"{r.target} (n={r.target_scores.size})",
+        )
+        ax.axvline(r.human_scores.mean(), color="#4c72b0", linestyle="--", linewidth=1.2)
+        ax.axvline(r.target_scores.mean(), color="#d1495b", linestyle="--", linewidth=1.2)
+        ax.set_title(f"{r.parquet}\nhuman vs {r.target}", fontsize=10)
+        ax.set_xlabel("Binoculars score")
+        ax.set_ylabel("Density")
+        ax.legend(fontsize=8)
+        ax.grid(True, axis="y", alpha=0.3)
+
+    for ax in flat[len(usable):]:  # hide unused axes
+        ax.axis("off")
+
+    fig.suptitle("Human vs AI Binoculars score distributions", fontsize=13)
+    fig.tight_layout()
+    fig_dir.mkdir(parents=True, exist_ok=True)
+    fname = "human_vs_ai_score_distributions.png"
+    fig.savefig(fig_dir / fname, dpi=150)
+    plt.close(fig)
+    print(f"  [OK] {fname}")
 
 
 # ---------------------------------------------------------------------------
@@ -415,6 +469,7 @@ def main() -> None:
     fig_dir = RESULTS_DIR / "__".join(stems)
     print()
     plot_violins(results, fig_dir)
+    plot_distributions(results, fig_dir)
     report(results, fig_dir, out)
 
     out.save(fig_dir / "human_vs_ai_summary.log")
