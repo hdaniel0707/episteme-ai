@@ -29,18 +29,37 @@ Figures + tables saved to results/binox_human_vs_ai/<parquet_stems>/:
   - human_vs_ai_distance_violin.png    — |human − g| per parquet, MSE annotated
   - human_vs_ai_signed_diff_violin.png — signed human − g (which side scores higher)
   - human_vs_ai_score_distributions.png — per parquet: human vs AI score histograms
-  - human_vs_ai_summary.csv            — per-parquet n, skipped, dist stats, signed mean, MSE
+  - human_vs_ai_roc.png                — ROC per parquet overlaid, AUC in legend
+  - human_vs_ai_pr.png                 — precision–recall per parquet overlaid, AP in legend
+  - human_vs_ai_confusion.png          — per-parquet 2×2 confusion matrix at best threshold
+  - human_vs_ai_summary.csv            — per-parquet dist stats + AUC/AP/acc/F1/confusion
   - human_vs_ai_summary.log            — full text summary incl. skipped-pair details
+
+Classification framing
+----------------------
+Two classes: positive = AI (target), negative = human. Binoculars scores are
+lower for AI, so the rule is "predict AI when score <= threshold" (equivalently
+decision score = -score). The operating threshold is Youden's J optimum on the
+ROC curve. Classes are balanced (paired), so the PR chance baseline is 0.5.
 
 Usage:
     uv run python epai/analyse/analyse_binox_human_vs_ai.py data/parquet/wp_binox0.parquet
     uv run python epai/analyse/analyse_binox_human_vs_ai.py \
+        data/parquet/wp_binox1.parquet:gpt \
+        data/parquet/essay_binox1.parquet:gpt \
+        data/parquet/reuter_binox1.parquet:gpt \
+        data/parquet/wp_binox0.parquet:gpt \
+        data/parquet/essay_binox0.parquet:gpt \
+        data/parquet/reuter_binox0.parquet:gpt
+
+    
+    uv run python epai/analyse/analyse_binox_human_vs_ai.py \
         data/parquet/wp_binox0.parquet:gpt \
         data/parquet/essay_binox0.parquet:gpt \
         data/parquet/reuter_binox0.parquet:gpt \
-        data/parquet/wp_binox1.parquet:gpt \
-        data/parquet/essay_binox1.parquet:gpt \
-        data/parquet/reuter_binox1.parquet:gpt 
+        data/parquet/wp2_binox0.parquet:gpt_plain \
+        data/parquet/essay2_binox0.parquet:gpt_plain \
+        data/parquet/reuter2_binox0.parquet:gpt_plain
 """
 
 from __future__ import annotations
@@ -56,6 +75,14 @@ matplotlib.use("Agg")  # headless: write files, never open a window
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from sklearn.metrics import (
+    average_precision_score,
+    confusion_matrix,
+    f1_score,
+    precision_recall_curve,
+    roc_auc_score,
+    roc_curve,
+)
 
 BASE_DIR = Path(__file__).parent.parent.parent
 RESULTS_DIR = BASE_DIR / "results" / "binox_human_vs_ai"
@@ -112,6 +139,19 @@ class PairResult:
         self.target_scores = np.empty(0)  # target score per valid pair (mean over cols)
         self.mse = float("nan")
         self.skipped: list[dict] = []  # id + raw values of skipped pairs
+
+        # --- classification (human vs AI, positive = AI, AI ⇔ score < threshold) ---
+        self.has_clf = False
+        self.roc_fpr = np.empty(0)
+        self.roc_tpr = np.empty(0)
+        self.roc_auc = float("nan")
+        self.pr_precision = np.empty(0)
+        self.pr_recall = np.empty(0)
+        self.avg_precision = float("nan")
+        self.clf_threshold = float("nan")  # Binoculars score cut; score < cut ⇒ AI
+        self.accuracy = float("nan")
+        self.f1 = float("nan")
+        self.cm = np.zeros((2, 2), int)  # [[TN, FP], [FN, TP]] over [human, AI]
 
     @property
     def label(self) -> str:
@@ -192,7 +232,42 @@ def compute_for_spec(path: Path, target: str, out: Tee) -> PairResult:
     res.human_scores = av.mean(axis=1)  # == human score for k=1
     res.target_scores = bv.mean(axis=1)  # == target score for k=1
     res.mse = float((diff**2).mean()) if diff.size else float("nan")
+
+    compute_classification(res)
     return res
+
+
+def compute_classification(res: PairResult) -> None:
+    """Score human-vs-AI classification from the paired Binoculars scores.
+
+    Positive class = AI (the target generator). A *low* Binoculars score means
+    AI, so the model is "predict AI when score < threshold"; equivalently the
+    decision score fed to sklearn is ``-score`` (higher ⇒ more AI-like). The
+    operating threshold is Youden's J optimum on the ROC curve.
+    """
+    if res.human_scores.size == 0 or res.target_scores.size == 0:
+        return
+
+    scores = np.concatenate([res.human_scores, res.target_scores])
+    y = np.concatenate(
+        [np.zeros(res.human_scores.size, int), np.ones(res.target_scores.size, int)]
+    )
+    decision = -scores  # higher ⇒ more AI-like
+
+    res.roc_fpr, res.roc_tpr, thr = roc_curve(y, decision)
+    res.roc_auc = float(roc_auc_score(y, decision))
+    res.pr_precision, res.pr_recall, _ = precision_recall_curve(y, decision)
+    res.avg_precision = float(average_precision_score(y, decision))
+
+    # Youden's J optimal operating point → threshold on the raw Binoculars score.
+    j = res.roc_tpr - res.roc_fpr
+    best_decision_thr = thr[int(np.argmax(j))]
+    res.clf_threshold = float(-best_decision_thr)  # predict AI when score <= this
+    y_pred = (scores <= res.clf_threshold).astype(int)
+    res.accuracy = float((y_pred == y).mean())
+    res.f1 = float(f1_score(y, y_pred, zero_division=0))
+    res.cm = confusion_matrix(y, y_pred, labels=[0, 1])
+    res.has_clf = True
 
 
 # ---------------------------------------------------------------------------
@@ -335,6 +410,107 @@ def plot_distributions(results: list[PairResult], fig_dir: Path) -> None:
     print(f"  [OK] {fname}")
 
 
+def plot_roc(results: list[PairResult], fig_dir: Path) -> None:
+    """Overlay the human-vs-AI ROC curve of every parquet, AUC in the legend."""
+    usable = [r for r in results if r.has_clf]
+    if not usable:
+        print("  [skip] no classifiable parquet — no ROC to plot")
+        return
+    colors = plt.cm.tab10.colors  # type: ignore[attr-defined]
+    fig, ax = plt.subplots(figsize=(7, 7))
+    for i, r in enumerate(usable):
+        ax.plot(
+            r.roc_fpr, r.roc_tpr, color=colors[i % len(colors)], linewidth=2,
+            label=f"{r.parquet} vs {r.target}  (AUC={r.roc_auc:.3f})",
+        )
+    ax.plot([0, 1], [0, 1], "k--", linewidth=1, alpha=0.6, label="chance (AUC=0.5)")
+    ax.set_xlabel("False positive rate  (human classified as AI)")
+    ax.set_ylabel("True positive rate  (AI detected)")
+    ax.set_title("Human vs AI detection ROC (Binoculars score)")
+    ax.legend(fontsize=8, loc="lower right")
+    ax.grid(True, alpha=0.3)
+    ax.set_aspect("equal")
+    fig.tight_layout()
+    fig_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(fig_dir / "human_vs_ai_roc.png", dpi=150)
+    plt.close(fig)
+    print("  [OK] human_vs_ai_roc.png")
+
+
+def plot_pr(results: list[PairResult], fig_dir: Path) -> None:
+    """Overlay the human-vs-AI precision–recall curve of every parquet, AP in legend."""
+    usable = [r for r in results if r.has_clf]
+    if not usable:
+        print("  [skip] no classifiable parquet — no PR curve to plot")
+        return
+    colors = plt.cm.tab10.colors  # type: ignore[attr-defined]
+    fig, ax = plt.subplots(figsize=(7, 7))
+    for i, r in enumerate(usable):
+        ax.plot(
+            r.pr_recall, r.pr_precision, color=colors[i % len(colors)], linewidth=2,
+            label=f"{r.parquet} vs {r.target}  (AP={r.avg_precision:.3f})",
+        )
+    # Classes are balanced (paired), so chance precision = 0.5.
+    ax.axhline(0.5, color="k", linestyle="--", linewidth=1, alpha=0.6, label="chance (AP=0.5)")
+    ax.set_xlabel("Recall  (AI detected)")
+    ax.set_ylabel("Precision")
+    ax.set_title("Human vs AI detection precision–recall (Binoculars score)")
+    ax.legend(fontsize=8, loc="lower left")
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(fig_dir / "human_vs_ai_pr.png", dpi=150)
+    plt.close(fig)
+    print("  [OK] human_vs_ai_pr.png")
+
+
+def plot_confusion(results: list[PairResult], fig_dir: Path) -> None:
+    """Per parquet, the 2×2 confusion matrix at its Youden-optimal threshold."""
+    usable = [r for r in results if r.has_clf]
+    if not usable:
+        print("  [skip] no classifiable parquet — no confusion matrices to plot")
+        return
+
+    ncols = min(3, len(usable))
+    nrows = int(np.ceil(len(usable) / ncols))
+    fig, axes = plt.subplots(
+        nrows, ncols, figsize=(4.4 * ncols, 4.0 * nrows), squeeze=False
+    )
+    flat = axes.flatten()
+    ticks = ["human", "AI"]
+
+    for ax, r in zip(flat, usable):
+        cm = r.cm
+        im = ax.imshow(cm, cmap="Blues", vmin=0)
+        thresh = cm.max() / 2 if cm.max() else 0
+        for row in range(2):
+            for col in range(2):
+                ax.text(
+                    col, row, f"{cm[row, col]}", ha="center", va="center",
+                    fontsize=12,
+                    color="white" if cm[row, col] > thresh else "black",
+                )
+        ax.set_xticks([0, 1], labels=ticks)
+        ax.set_yticks([0, 1], labels=ticks)
+        ax.set_xlabel("Predicted")
+        ax.set_ylabel("Actual")
+        ax.set_title(
+            f"{r.parquet} vs {r.target}\n"
+            f"score<{r.clf_threshold:.3f}⇒AI  acc={r.accuracy:.3f}  F1={r.f1:.3f}",
+            fontsize=9,
+        )
+
+    for ax in flat[len(usable):]:  # hide unused axes
+        ax.axis("off")
+
+    fig.suptitle("Human vs AI confusion matrices (Youden-optimal threshold)", fontsize=13)
+    fig.tight_layout()
+    fig_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(fig_dir / "human_vs_ai_confusion.png", dpi=150)
+    plt.close(fig)
+    print("  [OK] human_vs_ai_confusion.png")
+
+
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
@@ -378,6 +554,15 @@ def report(results: list[PairResult], fig_dir: Path, out: Tee) -> None:
         )
         out.print(f"  mean signed diff (human - {r.target})={mean_signed:+.4g}  → {larger}")
         out.print(f"  MSE={r.mse:.6g}")
+        tn, fp, fn, tp = r.cm.ravel()
+        out.print(
+            f"  classification (AI positive): ROC-AUC={r.roc_auc:.3f}  "
+            f"AP={r.avg_precision:.3f}  acc={r.accuracy:.3f}  F1={r.f1:.3f}"
+        )
+        out.print(
+            f"    threshold: score<={r.clf_threshold:.4g} ⇒ AI   "
+            f"confusion  TP={tp} FP={fp} FN={fn} TN={tn}"
+        )
         rows.append(
             {
                 "parquet": r.parquet,
@@ -395,6 +580,15 @@ def report(results: list[PairResult], fig_dir: Path, out: Tee) -> None:
                 "dist_max": s["max"],
                 "mean_signed_diff": mean_signed,
                 "mse": r.mse,
+                "roc_auc": r.roc_auc,
+                "avg_precision": r.avg_precision,
+                "clf_threshold": r.clf_threshold,
+                "accuracy": r.accuracy,
+                "f1": r.f1,
+                "tp": int(tp),
+                "fp": int(fp),
+                "fn": int(fn),
+                "tn": int(tn),
             }
         )
 
@@ -470,6 +664,9 @@ def main() -> None:
     print()
     plot_violins(results, fig_dir)
     plot_distributions(results, fig_dir)
+    plot_roc(results, fig_dir)
+    plot_pr(results, fig_dir)
+    plot_confusion(results, fig_dir)
     report(results, fig_dir, out)
 
     out.save(fig_dir / "human_vs_ai_summary.log")
