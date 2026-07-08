@@ -1,0 +1,12 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Project folders
+data/
+models/
+results/
+
+# Environment file
+.env.workflow
