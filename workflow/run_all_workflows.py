@@ -2,7 +2,9 @@
 
     python -m workflow.run_all_workflows                    # workflow/config.yaml
     python -m workflow.run_all_workflows --config other.yaml
-    python -m workflow.run_all_workflows --fresh            # wipe results/ first
+
+ALWAYS wipes workflow/results/ first (after a short countdown), so every queue session
+starts fresh; a single `python -m workflow.run_pipeline` never wipes anything.
 
 Each ``runs:`` entry names one training setup: a ``workflow`` (or a list of workflows to
 run with the same parameters) plus any overrides of the top-level config.yaml keys. Every
@@ -94,9 +96,12 @@ def _embed_key(s: Settings, wf: str) -> tuple | None:
 # ===================================================================== orchestrator
 
 def _reset_results() -> None:
-    print(f"[run_all] WARNING: --fresh DELETES and recreates {paths.RESULTS_DIR}.")
+    """Wipe workflow/results so every run_all_workflows session starts fresh (a session's
+    figures/aggregates must never mix with a previous session's folders)."""
+    print(f"[run_all] wiping {paths.RESULTS_DIR} for a fresh session "
+          "(single `run_pipeline` runs never wipe).")
     for k in range(COUNTDOWN_SECONDS, 0, -1):
-        print(f"[run_all]   wiping results in {k}...", flush=True)
+        print(f"[run_all]   wiping results in {k}... (Ctrl+C to abort)", flush=True)
         time.sleep(1)
     if paths.RESULTS_DIR.exists():
         shutil.rmtree(paths.RESULTS_DIR, ignore_errors=True)
@@ -107,18 +112,13 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Run every training in config.yaml's runs queue.")
     ap.add_argument("--config", default=None,
                     help="alternate config.yaml (default: workflow/config.yaml)")
-    ap.add_argument("--fresh", action="store_true",
-                    help="delete workflow/results before starting (default: keep, "
-                    "new runs get new numbered folders)")
     args = ap.parse_args()
 
     cfg = load_config_yaml(args.config)
     all_runs = expand_runs(cfg, args.config)
     n_total = len(all_runs)
 
-    if args.fresh:
-        _reset_results()
-    paths.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    _reset_results()   # ALWAYS start from an empty results/ — essential fresh restart
     print(f"[run_all] {n_total} runs from {len(cfg.get('runs', []))} config entries.")
     if args.config:
         print(f"[run_all] config: {args.config}")
@@ -182,6 +182,18 @@ def main() -> int:
         progress.stop()
 
     comparison = workflow_results.cross_workflow_comparison()
+
+    # cross-run baseline leaderboard + novelty/feasibility ablation (both best-effort)
+    try:
+        from workflow.src.iwf.evaluation.baseline_compare import baseline_leaderboard
+        baseline_leaderboard(paths.RESULTS_DIR)
+    except Exception as e:
+        print(f"[run_all] baseline leaderboard skipped ({e})", file=sys.stderr)
+    try:
+        from workflow.src.iwf.evaluation.nf_analysis import nf_ablation
+        nf_ablation(paths.RESULTS_DIR)
+    except Exception as e:
+        print(f"[run_all] nf ablation figure skipped ({e})", file=sys.stderr)
 
     print(f"\n[run_all] summary ({n_total} runs):")
     print(f"  {'FOLDER':<25s} {'CONFIG':<25s} {'STATUS':<10s} {'METRIC'}")

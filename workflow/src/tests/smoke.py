@@ -541,6 +541,172 @@ def t_tfm_mock():
     assert "confusion" in m_clf     # shared metrics give tfm seeds a confusion matrix too
 
 
+def t_novelty_kinds():
+    """Spherical novelty is percentile-uniform [0,1]; legacy kind + dispatcher work."""
+    from workflow.src.iwf.features.novelty import compute_novelty, novelty_spherical
+    Z = np.random.RandomState(1).normal(size=(90, 12)).astype(np.float32)
+    nov = novelty_spherical(Z, k=6)
+    assert nov.shape == (90,) and (nov >= 0).all() and (nov <= 1).all()
+    assert 0.4 < float(np.mean(nov)) < 0.6          # percentile transform => ~uniform
+    legacy = compute_novelty(Z, k=6, kind="cosine_max")
+    assert legacy.shape == (90,) and np.isfinite(legacy).all()
+    try:
+        compute_novelty(Z, kind="bogus")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("compute_novelty should reject an unknown kind")
+
+
+def t_feasibility_composite():
+    """Composite feasibility is uniform [0,1]; year-less rows and n<=2 are safe."""
+    from workflow.src.iwf.features.feasibility import feasibility
+    rng = np.random.RandomState(2)
+    Z = rng.normal(size=(100, 10)).astype(np.float32)
+    years = rng.randint(2005, 2024, size=100).astype(float)
+    years[:7] = np.nan
+    f = feasibility(Z, years, k=6)
+    assert f.shape == (100,) and (f >= 0).all() and (f <= 1).all()
+    assert 0.4 < float(np.mean(f)) < 0.6
+    assert feasibility(Z[:2], years[:2]).shape == (2,)
+    f2 = feasibility(Z, None, k=6)                   # no years at all -> still valid
+    assert np.isfinite(f2).all()
+
+
+def t_baseline_metrics_and_plots():
+    """baseline_compare: metrics table + both figures render from synthetic scores."""
+    from workflow.src.iwf.evaluation.baseline_compare import (
+        baseline_metrics, plot_baseline_agreement, plot_baseline_correlation,
+    )
+    rng = np.random.RandomState(3)
+    y = rng.rand(200)
+    scores = {
+        "ours": np.clip(y + 0.1 * rng.randn(200), 0, 1),
+        "naip": np.clip(y + 0.25 * rng.randn(200), 0, 1),
+        "venue_ais": rng.rand(200),                   # uninformative baseline
+    }
+    thresholds = [0.25, 0.5, 0.75]
+    m = baseline_metrics(y, scores, thresholds)
+    assert set(m["scorer"]) == set(scores)
+    ours = m.set_index("scorer")
+    assert ours.loc["ours", "spearman"] > ours.loc["venue_ais", "spearman"]
+    assert 0 <= ours.loc["ours", "exact_class_pct"] <= 100
+    with tempfile.TemporaryDirectory() as d:
+        plot_baseline_agreement(m, 4, "smoke_wf", Path(d) / "agree.png")
+        frame = pd.DataFrame({"target": y, **scores})
+        plot_baseline_correlation(frame, None, "smoke_wf", Path(d) / "corr.png")
+        assert (Path(d) / "agree.png").is_file() and (Path(d) / "corr.png").is_file()
+
+
+def t_nf_analysis():
+    """nf_analysis: correlation matrix + binned-impact figures from a baselines frame."""
+    from workflow.src.iwf.evaluation.nf_analysis import (
+        nf_binned_impact, nf_correlation_matrix, partial_spearman,
+    )
+    rng = np.random.RandomState(4)
+    n = 300
+    target = rng.rand(n)
+    df = pd.DataFrame({
+        "target": target,
+        "novelty": np.clip(target + 0.4 * rng.randn(n), 0, 1),
+        "feasibility": rng.rand(n),
+        "meta_h_index": rng.rand(n) * 40,
+        "meta_venue_freq": rng.rand(n) * 100,
+    })
+    with tempfile.TemporaryDirectory() as d:
+        stats = nf_correlation_matrix(df, "smoke_wf", Path(d) / "m.png")
+        assert "novelty" in stats["columns"] and (Path(d) / "m.png").is_file()
+        assert abs(stats["partial_vs_target"]["novelty"]) > 0.2   # real signal survives
+        binned = nf_binned_impact(df, "smoke_wf", Path(d) / "b.png")
+        assert "novelty" in binned and (Path(d) / "b.png").is_file()
+    x = rng.rand(100)
+    assert abs(partial_spearman(x, x, rng.rand(100, 2))) > 0.95
+
+
+def t_external_model_registry():
+    """All six external scorers resolve; unknown names raise; the kNN baseline scores."""
+    from workflow.src.iwf.features.external_impact import (
+        Specter2KnnBaseline, get_external_models, known_external_models,
+    )
+    assert {"naip", "specter2_knn", "llm_judge", "venue_ais"} <= set(known_external_models())
+    models = get_external_models(["specter2_knn"])
+    assert models[0].name == "specter2_knn"
+    try:
+        get_external_models(["nope"])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("unknown external model must raise")
+    df = make_corpus(n=80)
+    df["target"] = df["citation_normalized_percentile"]
+    df["split"] = ["train"] * 60 + ["val"] * 10 + ["test"] * 10
+    with tempfile.TemporaryDirectory() as d:
+        s = Specter2KnnBaseline(k=5).score_dataframe(df, Path(d) / "c.json")
+    assert s.notna().all() and s.between(0, 1).all()
+    # the retrieval baseline must carry real signal on this correlated corpus
+    from scipy.stats import spearmanr
+    assert spearmanr(df["target"], s).correlation > 0.15
+
+
+def t_fetchers_offline():
+    """Extended-DB schema, insert/dedup, OpenAlex row mapping — all offline."""
+    from workflow.src.iwf.fetchers import base as fbase
+    from workflow.src.iwf.fetchers.openalex import reconstruct_abstract, work_to_row
+    from workflow.src.iwf.fetchers.uefiscdi import normalize_journal
+
+    inv = {"impact": [2], "Predicting": [0], "paper": [1]}
+    assert reconstruct_abstract(inv) == "Predicting paper impact"
+    assert reconstruct_abstract(None) is None
+
+    work = {
+        "id": "https://openalex.org/W123", "doi": "https://doi.org/10.1/AbC",
+        "title": "T", "publication_year": 2020, "cited_by_count": 7, "fwci": 1.5,
+        "abstract_inverted_index": inv,
+        "citation_normalized_percentile": {"value": 0.9, "is_in_top_1_percent": False,
+                                           "is_in_top_10_percent": True},
+        "primary_location": {"source": {"display_name": "VenueX", "issn": ["1234-5678"]}},
+        "primary_topic": {"domain": {"display_name": "Physical Sciences"},
+                          "field": {"display_name": "Computer Science"},
+                          "subfield": {"display_name": "AI"}},
+        "authorships": [{"author": {"id": "https://openalex.org/A9", "display_name": "N"}}],
+    }
+    row = work_to_row(work)
+    assert row["paper_id"] == "OA:W123" and row["doi"] == "10.1/abc"
+    assert row["abstract"] == "Predicting paper impact" and row["venue"] == "VenueX"
+    assert row["citation_normalized_percentile"] == 0.9
+    assert row["authors"][0]["author_id"] == "A9"
+
+    with tempfile.TemporaryDirectory() as d:
+        conn = fbase.open_db(Path(d) / "x.db")
+        dedup = fbase.Deduper(conn)
+        assert not dedup.seen(row)
+        fbase.insert_paper(conn, row)
+        dedup.add(row)
+        assert dedup.seen(row)
+        assert dedup.seen({"paper_id": "other", "doi": "10.1/ABC"})     # DOI dedup
+        assert dedup.seen({"paper_id": "other2", "title": "T", "year": 2020})
+        n = conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
+        assert n == 1
+        fbase.set_cursor(conn, "openalex:all", "abc", 42)
+        assert fbase.get_cursor(conn, "openalex:all") == "abc"
+        conn.close()
+    # parenthetical qualifiers like "(Print)"/"(Online)" are dropped on purpose
+    assert normalize_journal("The Journal of AI-Systems (Print)") == "journal of ai systems"
+
+
+def t_generated_sources_file():
+    """generated_sources loads a local export and normalizes columns + paper ids."""
+    from workflow.src.iwf.data import generated_sources
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "gen.csv"
+        pd.DataFrame({"paper_title": ["G1", "G2"],
+                      "summary": ["a1", "a2"]}).to_csv(p, index=False)
+        gen = generated_sources.load_from_file(p, source="mirai")
+    assert list(gen["title"]) == ["G1", "G2"]
+    assert (gen["source"] == "mirai").all()
+    assert gen["paper_id"].is_unique
+
+
 def t_workflow_results_aggregate():
     """Per-workflow aggregate + cross-workflow comparison are produced from result.json."""
     from workflow.src.iwf import paths, workflow_results
@@ -604,6 +770,13 @@ def _run_all() -> int:
         ("architectures", t_architectures),
         ("metrics", t_metrics),
         ("novelty", t_novelty),
+        ("novelty_kinds", t_novelty_kinds),
+        ("feasibility_composite", t_feasibility_composite),
+        ("baseline_metrics_and_plots", t_baseline_metrics_and_plots),
+        ("nf_analysis", t_nf_analysis),
+        ("external_model_registry", t_external_model_registry),
+        ("fetchers_offline", t_fetchers_offline),
+        ("generated_sources_file", t_generated_sources_file),
         ("experiment_reg", t_experiment_reg),
         ("experiment_meta_and_clf", t_experiment_meta_and_clf),
         ("saved_model_predicts", t_saved_model_predicts),

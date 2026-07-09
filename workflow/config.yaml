@@ -104,9 +104,19 @@ text_transformer_lora_dropout: 0.1
 # ---------------------------------------------------------------------------
 use_metadata: true
 metadata_fields: [best_author_h_index, author_count, venue]
-use_novelty: true      # embedding-neighbourhood novelty score
-use_feasibility: true  # embedding-neighbourhood feasibility score
-external_impact: []    # external scorers to fuse: naip | forecite | cited_potential
+use_novelty: true        # embedding novelty score (see novelty_kind)
+use_feasibility: true    # precedent/density/maturity feasibility composite (0-1)
+novelty_kind: spherical  # spherical (geodesic kNN distance, percentile 0-1) | cosine_max (legacy)
+novelty_k: 10            # kNN size for the novelty/feasibility geometry
+# Frozen external baseline scorers, fused as features AND dumped to
+# results/<run>/baselines.parquet for the comparison plots (phase 7):
+#   naip | specter2_knn | llm_judge | venue_ais | forecite | cited_potential
+# llm_judge needs an API key (LLM_JUDGE_PROVIDER/MODEL in .env.workflow, key in .env);
+# venue_ais needs the UEFISCDI xlsx lists under workflow/data/uefiscdi/.
+# specter2_knn requires emb_specter2 column (SPECTER2 embeddings) in the papers table.
+# Recommended for emb_meta_* runs: [naip, specter2_knn, llm_judge, venue_ais]
+# Default: empty (disable all baselines; enable selectively as they become available)
+external_impact: []
 
 # ---------------------------------------------------------------------------
 # 6. DATA & SPLIT  (rarely changed — changing these invalidates cached parquets)
@@ -118,6 +128,24 @@ target_min_refset: 30              # min (field x year) papers before pooling
 # year_from: 2015                  # optional corpus filters
 # year_to: 2023
 # max_papers: 2000                 # cap corpus size for quick tests
+
+# ---------------------------------------------------------------------------
+# 6b. DATA EXTENSION  (python -m workflow.src.main_extend_db — plan §4)
+# ---------------------------------------------------------------------------
+# Grows the workflow-owned extended DB (workflow/data/sql/extended.db) toward
+# fetch_target_rows real papers from OpenAlex + UEFISCDI journal seeds; the
+# professor's store/ DBs are read-only. Point the pipeline at the result with
+# EPAI_DB=extended in workflow/.env.workflow.
+fetch_target_rows: 100000
+# fetch_year_from: 2010
+# fetch_year_to: 2024
+fetch_per_journal_cap: 300     # max papers per UEFISCDI red/yellow journal
+# OpenAlex domain balance: one filter string per bucket (empty list = no bucketing).
+# Field ids: https://api.openalex.org/fields  (e.g. computer science=17, medicine=27)
+fetch_domains: []
+# fetch_domains:
+#   - primary_topic.field.id:fields/17
+#   - primary_topic.field.id:fields/27
 
 # ============================================================================
 # 7. RUNS — the training queue for `python -m workflow.run_all_workflows`
@@ -150,37 +178,185 @@ target_min_refset: 30              # min (field x year) papers before pooling
 
 runs:
   # 1-4: specter2 embedding — encoder x head-architecture grid
+  # Deeper (gradual decrease)
+  - name: specter2_ae_mlp_deep
+    workflow: [emb_clf, emb_reg]
+    embedder: specter2
+    encoder_kind: autoencoder
+    model_arch: mlp
+    hidden: [1024,896,768,640,512,384,256,192,128,96,64,32]
+    patience: 40
+
+  # Medium-deep
+  - name: specter2_ae_mlp_medium
+    workflow: [emb_clf, emb_reg]
+    embedder: specter2
+    encoder_kind: autoencoder
+    model_arch: mlp
+    hidden: [1024,768,512,384,256,192,128,64,32]
+    patience: 40
+
+  # Original
   - name: specter2_ae_mlp
     workflow: [emb_clf, emb_reg]
     embedder: specter2
     encoder_kind: autoencoder
     model_arch: mlp
     hidden: [1024,512,256,128,64,32]
-    patience: 80
+    patience: 40
 
+  # Shallower
+  - name: specter2_ae_mlp_shallow
+    workflow: [emb_clf, emb_reg]
+    embedder: specter2
+    encoder_kind: autoencoder
+    model_arch: mlp
+    hidden: [1024,512,128,32]
+    patience: 40
+
+  # Very shallow
+  - name: specter2_ae_mlp_very_shallow
+    workflow: [emb_clf, emb_reg]
+    embedder: specter2
+    encoder_kind: autoencoder
+    model_arch: mlp
+    hidden: [1024,256,32]
+    patience: 40
+
+  # Deeper (gradual decrease)
+  - name: specter2_id_mlp_deep
+    workflow: [emb_clf, emb_reg]
+    embedder: specter2
+    encoder_kind: identity
+    model_arch: mlp
+    hidden: [1024,896,768,640,512,384,256,192,128,96,64,32]
+    patience: 40
+
+  # Medium-deep
+  - name: specter2_id_mlp_medium
+    workflow: [emb_clf, emb_reg]
+    embedder: specter2
+    encoder_kind: identity
+    model_arch: mlp
+    hidden: [1024,768,512,384,256,192,128,64,32]
+    patience: 40
+
+  # Original
   - name: specter2_id_mlp
     workflow: [emb_clf, emb_reg]
     embedder: specter2
     encoder_kind: identity
     model_arch: mlp
     hidden: [1024,512,256,128,64,32]
-    patience: 80
+    patience: 40
 
+  # Shallower
+  - name: specter2_id_mlp_shallow
+    workflow: [emb_clf, emb_reg]
+    embedder: specter2
+    encoder_kind: identity
+    model_arch: mlp
+    hidden: [1024,512,128,32]
+    patience: 40
+
+  # Very shallow
+  - name: specter2_id_mlp_very_shallow
+    workflow: [emb_clf, emb_reg]
+    embedder: specter2
+    encoder_kind: identity
+    model_arch: mlp
+    hidden: [1024,256,32]
+    patience: 40
+
+  # Deeper (gradual decrease)
+  - name: specter2_ae_resmlp_deep
+    workflow: [emb_clf, emb_reg]
+    embedder: specter2
+    encoder_kind: autoencoder
+    model_arch: resmlp
+    hidden: [1024,896,768,640,512,384,256,192,128,96,64,32]
+    patience: 40
+
+  # Medium-deep
+  - name: specter2_ae_resmlp_medium
+    workflow: [emb_clf, emb_reg]
+    embedder: specter2
+    encoder_kind: autoencoder
+    model_arch: resmlp
+    hidden: [1024,768,512,384,256,192,128,64,32]
+    patience: 40
+
+  # Original
   - name: specter2_ae_resmlp
     workflow: [emb_clf, emb_reg]
     embedder: specter2
     encoder_kind: autoencoder
     model_arch: resmlp
     hidden: [1024,512,256,128,64,32]
-    patience: 80
+    patience: 40
 
+  # Shallower
+  - name: specter2_ae_resmlp_shallow
+    workflow: [emb_clf, emb_reg]
+    embedder: specter2
+    encoder_kind: autoencoder
+    model_arch: resmlp
+    hidden: [1024,512,128,32]
+    patience: 40
+
+  # Very shallow
+  - name: specter2_ae_resmlp_very_shallow
+    workflow: [emb_clf, emb_reg]
+    embedder: specter2
+    encoder_kind: autoencoder
+    model_arch: resmlp
+    hidden: [1024,256,32]
+    patience: 40
+
+  # Deeper (gradual decrease)
+  - name: specter2_id_resmlp_deep
+    workflow: [emb_clf, emb_reg]
+    embedder: specter2
+    encoder_kind: identity
+    model_arch: resmlp
+    hidden: [1024,896,768,640,512,384,256,192,128,96,64,32]
+    patience: 40
+
+  # Medium-deep
+  - name: specter2_id_resmlp_medium
+    workflow: [emb_clf, emb_reg]
+    embedder: specter2
+    encoder_kind: identity
+    model_arch: resmlp
+    hidden: [1024,768,512,384,256,192,128,64,32]
+    patience: 40
+
+  # Original
   - name: specter2_id_resmlp
     workflow: [emb_clf, emb_reg]
     embedder: specter2
     encoder_kind: identity
     model_arch: resmlp
     hidden: [1024,512,256,128,64,32]
-    patience: 80
+    patience: 40
+
+  # Shallower
+  - name: specter2_id_resmlp_shallow
+    workflow: [emb_clf, emb_reg]
+    embedder: specter2
+    encoder_kind: identity
+    model_arch: resmlp
+    hidden: [1024,512,128,32]
+    patience: 40
+
+  # Very shallow
+  - name: specter2_id_resmlp_very_shallow
+    workflow: [emb_clf, emb_reg]
+    embedder: specter2
+    encoder_kind: identity
+    model_arch: resmlp
+    hidden: [1024,256,32]
+    patience: 40
 
   # 5-8: same grid with scibert embedding
   - name: scibert_ae_mlp
@@ -188,40 +364,40 @@ runs:
     embedder: scibert
     encoder_kind: autoencoder
     model_arch: mlp
-    hidden: [512,128,32]
-    patience: 80
+    hidden: [1024,512,256,128,64,32]
+    patience: 40
 
   - name: scibert_id_mlp
     workflow: [emb_clf, emb_reg]
     embedder: scibert
     encoder_kind: identity
     model_arch: mlp
-    hidden: [512,128,32]
-    patience: 80
+    hidden: [1024,512,256,128,64,32]
+    patience: 40
 
   - name: scibert_ae_resmlp
     workflow: [emb_clf, emb_reg]
     embedder: scibert
     encoder_kind: autoencoder
     model_arch: resmlp
-    hidden: [512,128,32]
-    patience: 80
+    hidden: [1024,512,256,128,64,32]
+    patience: 40
 
   - name: scibert_id_resmlp
     workflow: [emb_clf, emb_reg]
     embedder: scibert
     encoder_kind: identity
     model_arch: resmlp
-    hidden: [512,128,32]
-    patience: 80
+    hidden: [1024,512,256,128,64,32]
+    patience: 40
 
   # 9: fine-tune the SPECTER2 backbone directly on the text
   - name: tfm_specter2ft
     workflow: [tfm_clf, tfm_reg]
     text_transformer_arch: specter2_ft
-    text_transformer_freeze_layers: 5
-    text_transformer_max_len: 512
-    text_transformer_epochs: 5
+    text_transformer_freeze_layers: 10
+    text_transformer_max_len: 1024
+    text_transformer_epochs: 35
 
   # 10: embedding + curated metadata features
   - name: specter2_id_mlp_meta
@@ -230,7 +406,7 @@ runs:
     encoder_kind: identity
     model_arch: mlp
     hidden: [1024,512,256,128,64,32]
-    patience: 80
+    patience: 40
     use_novelty: false
     use_feasibility: false
 
@@ -241,4 +417,4 @@ runs:
     encoder_kind: identity
     model_arch: mlp
     hidden: [512,128,32]
-    patience: 80
+    patience: 40

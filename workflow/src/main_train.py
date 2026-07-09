@@ -38,20 +38,43 @@ def _ensure_class_label(df, s: Settings, path) -> None:
 
 
 def _ensure_fused_columns(df, s: Settings):
-    """Compute novelty/feasibility and external-impact scores if not already present."""
+    """Compute novelty/feasibility and external-impact scores for this run.
+
+    Novelty/feasibility are recomputed EVERY run (cheap kNN geometry): the reduced
+    parquet is shared between queued runs, so a stale column from a run with different
+    novelty settings must never leak into this one; with the flags off the columns are
+    dropped for the same reason. External scores are frozen + deterministic, so their
+    cached columns are safe to reuse.
+    """
     from workflow.src.iwf.features.external_impact import get_external_models
-    from workflow.src.iwf.features.novelty import novelty_feasibility
+    from workflow.src.iwf.features.feasibility import feasibility as feasibility_composite
+    from workflow.src.iwf.features.novelty import compute_novelty
 
     Z = np.array(df["z"].tolist(), dtype=np.float32)
-    if (s.use_novelty or s.use_feasibility) and "novelty" not in df.columns:
-        nov, feas = novelty_feasibility(Z, k=NN_NEIGHBORS)
-        df["novelty"] = nov
-        df["feasibility"] = feas
+    k = int(getattr(s, "novelty_k", NN_NEIGHBORS) or NN_NEIGHBORS)
+    df = df.drop(columns=[c for c in ("novelty", "feasibility") if c in df.columns])
+    if s.use_novelty:
+        df["novelty"] = compute_novelty(Z, k=k, kind=getattr(s, "novelty_kind", "spherical"))
+    if s.use_feasibility:
+        years = df["year"].to_numpy() if "year" in df.columns else None
+        df["feasibility"] = feasibility_composite(Z, years, k=k)
     for model in get_external_models(s.external_impact):
         if model.name not in df.columns:
             cache = paths.CACHE_DIR / f"{model.name}_cache.json"
             df[model.name] = model.score_dataframe(df, cache)
     return df
+
+
+def _dump_baselines(df, s: Settings, wf_dir: Path) -> None:
+    """Persist per-paper baseline/feature scores next to the run for the comparison
+    plots (evaluation.baseline_compare): paper_id, split, target + every score column."""
+    cols = ["paper_id", "split", "target", "class_label", "novelty", "feasibility",
+            "meta_h_index", "meta_venue_freq", *s.external_impact]
+    keep = [c for c in cols if c in df.columns]
+    score_cols = [c for c in keep if c in s.external_impact]
+    if not score_cols and "novelty" not in keep:
+        return
+    save_parquet(df[keep], wf_dir / "baselines.parquet")
 
 
 def main(settings: Settings | None = None, *, workflow_type: str | None = None,
@@ -90,6 +113,12 @@ def main(settings: Settings | None = None, *, workflow_type: str | None = None,
     if wf_dir is None:
         wf_dir = workflow_results.next_workflow_dir(wf)
         wf_dir.mkdir(parents=True, exist_ok=True)
+
+    if features != "z":
+        try:
+            _dump_baselines(df, s, wf_dir)
+        except Exception as e:  # the dump is auxiliary; it must never block training
+            print(f"[train] baselines.parquet dump skipped ({e})")
 
     label = f"{features} features -> " + ("impact class" if task == "clf"
                                           else "normalized impact")

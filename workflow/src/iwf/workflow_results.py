@@ -378,6 +378,18 @@ def finalize_workflow(wf_type: str, settings, wf_dir: Path) -> dict | None:
     except Exception as e:
         print(f"[results] {wf_type}: evaluation plots failed ({e})")
 
+    try:
+        from workflow.src.iwf.evaluation.baseline_compare import generate_baseline_plots
+        generate_baseline_plots(wf_type, task, wf_dir, settings)
+    except Exception as e:
+        print(f"[results] {wf_type}: baseline comparison skipped ({e})")
+
+    try:
+        from workflow.src.iwf.evaluation.nf_analysis import generate_nf_analysis
+        generate_nf_analysis(wf_type, wf_dir, settings)
+    except Exception as e:
+        print(f"[results] {wf_type}: novelty/feasibility analysis skipped ({e})")
+
     if summary is not None:
         try:
             write_model_description(wf_type, task, settings, wf_dir,

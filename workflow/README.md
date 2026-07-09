@@ -219,3 +219,39 @@ See `mathematical_documentation.md` Part 4 for the equations behind each figure.
   where the bypass is set automatically as the intentional upper-bound test.
 - **No hidden state between runs:** per-run overrides travel as dicts into `Settings`;
   the OS environment is never mutated, so queued runs cannot contaminate each other.
+
+## Extensions (baselines, novelty/feasibility, data extension)
+
+### Frozen baseline scorers (`external_impact:` in config.yaml)
+`naip` (NAID v2.1 HF Space), `specter2_knn` (frozen SPECTER2 + kNN percentile transfer
+from TRAIN), `llm_judge` (pinned zero-shot LLM 0-100 rating, prompt v1, temperature 0),
+`venue_ais` (UEFISCDI/JCR Article Influence Score of the venue), plus the `forecite` /
+`cited_potential` REST stubs. Every configured scorer is (a) fused as a metadata feature
+in the `emb_meta_*` / `emb_all_meta_*` workflows and (b) dumped to
+`results/<run>/baselines.parquet` for phase 7, which renders per run:
+`aggregate/baselines/baseline_agreement_<run>.png` (% exact / ±1 class agreement with
+the true class + weighted kappa), `baseline_correlation_<run>.png` (pairwise Spearman
+heatmap + ours-vs-NAIP scatter) and `baseline_metrics.csv`. After a `run_all_workflows`
+queue, `results/summary/baseline_leaderboard.png` compares every trained model against
+every baseline in one figure.
+
+### Novelty & feasibility (plan §3)
+`novelty_kind: spherical` (default) is the geodesic kNN distance on the unit hypersphere
+(Shibayama-style), percentile-ranked to uniform [0,1]; `cosine_max` is the legacy metric.
+Feasibility is a precedent/density/maturity composite over the latent space + years
+(literature-supported-claim proxy), also uniform [0,1]. Phase 7 writes
+`aggregate/nf/nf_correlation_matrix.png` (Spearman + significance stars + partial
+correlations controlling for venue/h-index) and `nf_binned_impact.png` (mean impact per
+decile, the inverted-U check); a queue additionally gets
+`results/summary/nf_ablation_delta.png` comparing runs with/without these features.
+
+### Extended database (`python -m workflow.src.main_extend_db`)
+Grows the workflow-owned `workflow/data/sql/extended.db` (professor's exact schema +
+nullable impact/provenance columns; `store/` stays read-only) toward
+`fetch_target_rows` (default 100k) real papers: copy of the original DB, UEFISCDI
+red/yellow-zone journal seeds (drop the yearly AIS xlsx lists into
+`workflow/data/uefiscdi/`; run with `--uefiscdi-hints` for the download pages), a
+domain-balanced OpenAlex crawl (abstracts reconstructed from the inverted index; fwci +
+citation_normalized_percentile arrive as free impact labels), and an S2 gap-fill of
+influential citations + SPECTER embeddings by DOI. All phases are cursor-resumable.
+Point the pipeline at the result with `EPAI_DB=extended` in `.env.workflow`.

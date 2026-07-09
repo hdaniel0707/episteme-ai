@@ -20,7 +20,8 @@ Z_COL = "z"
 # Candidate scalar feature columns, in a fixed order (only those present are used).
 # meta_year is intentionally absent: year is a target input, not a feature (see below).
 METADATA_COLS = ["meta_h_index", "meta_author_count", "meta_venue_freq"]
-EXTERNAL_COLS = ["naip", "forecite", "cited_potential"]
+EXTERNAL_COLS = ["naip", "specter2_knn", "llm_judge", "venue_ais",
+                 "forecite", "cited_potential"]
 
 # Leakage guard (plan §4.5): every impact target is a deterministic function of these
 # columns, so feeding any of them as a feature would let the model reconstruct the target

@@ -199,6 +199,8 @@ class Settings:
     use_metadata: bool = True
     use_novelty: bool = True
     use_feasibility: bool = True
+    novelty_kind: str = "spherical"          # spherical | cosine_max (legacy)
+    novelty_k: int = 10                      # kNN size for novelty/feasibility geometry
     external_impact: list[str] = field(default_factory=list)
     metadata_fields: list[str] = field(
         default_factory=lambda: ["best_author_h_index", "author_count", "venue"]
@@ -310,6 +312,20 @@ class Settings:
 
         if self.n_runs < 1:
             errors.append(f"n_runs must be >= 1 (got {self.n_runs}).")
+
+        if (self.novelty_kind or "").lower() not in ("spherical", "cosine_max"):
+            errors.append(f"novelty_kind={self.novelty_kind!r} is invalid; choose "
+                          "spherical or cosine_max.")
+
+        try:
+            from workflow.src.iwf.features.external_impact import known_external_models
+            unknown = [m for m in self.external_impact
+                       if m.lower() not in known_external_models()]
+            if unknown:
+                errors.append(f"external_impact contains unknown model(s) {unknown}; "
+                              f"choose from {known_external_models()}.")
+        except Exception:
+            pass  # never let an import problem make validation unusable
 
         if self.use_metadata and not self.bypass_leakage_guard:
             offending = sorted(RESERVED_METADATA_FIELDS.intersection(
