@@ -176,6 +176,7 @@ class Settings:
     # shared split (ONE split for ALL stages)
     split_seed: int = 42
     split_ratios: list[float] = field(default_factory=lambda: [0.70, 0.15, 0.15])
+    domain_holdout: str = ""  # leave-one-domain-out: domain name to exclude from training
 
     # target
     target_kind: str = "field_year_percentile"
@@ -205,6 +206,7 @@ class Settings:
     metadata_fields: list[str] = field(
         default_factory=lambda: ["best_author_h_index", "author_count", "venue"]
     )
+    benchmarks: list[str] = field(default_factory=list)  # benchmark names to evaluate on
     # True only for emb_all_meta_* (set automatically from the workflow type): include ALL
     # numeric columns as features, incl. target inputs — the intentional upper-bound test.
     bypass_leakage_guard: bool = False

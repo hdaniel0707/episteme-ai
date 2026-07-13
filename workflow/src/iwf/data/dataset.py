@@ -79,13 +79,29 @@ def make_split(n: int, seed: int, ratios: list[float],
 
 
 def add_split_column(df: pd.DataFrame, seed: int, ratios: list[float],
-                     stratify_col: str | None = None) -> pd.DataFrame:
-    """Return a copy of ``df`` with the seeded (optionally stratified) ``split`` column."""
+                     stratify_col: str | None = None, domain_holdout: str = "") -> pd.DataFrame:
+    """Return a copy of ``df`` with the seeded (optionally stratified) ``split`` column.
+
+    If domain_holdout is set, that domain is excluded from training set.
+    """
     df = df.copy()
     stratify = None
     if stratify_col and stratify_col in df.columns:
         stratify = df[stratify_col].to_numpy()
     df[SPLIT_COL] = make_split(len(df), seed, ratios, stratify=stratify)
+
+    # LODO: exclude domain_holdout from training
+    if domain_holdout and "domains" in df.columns:
+        from workflow.src.iwf.evaluation import plots
+        domains = plots._get_domain(df)
+        holdout_mask = domains == domain_holdout
+        train_mask = df[SPLIT_COL] == "train"
+        n_moved = (holdout_mask & train_mask).sum()
+        df.loc[holdout_mask & train_mask, SPLIT_COL] = "test"
+        if n_moved > 0:
+            print(f"[dataset] LODO: moved {n_moved} papers from domain '{domain_holdout}' "
+                  f"out of training set to test")
+
     return df
 
 

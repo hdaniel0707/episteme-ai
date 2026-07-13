@@ -77,7 +77,7 @@ def main(settings: Settings | None = None) -> None:
 
     # 4) THE shared split (computed once; seeded; stratified)
     df = add_split_column(df, seed=s.split_seed, ratios=s.split_ratios,
-                          stratify_col="strat_label")
+                          stratify_col="strat_label", domain_holdout=s.domain_holdout)
     counts = df["split"].value_counts().to_dict()
     print(f"[prepare] split (seed={s.split_seed}): {counts}")
 

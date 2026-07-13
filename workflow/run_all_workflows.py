@@ -80,7 +80,7 @@ def _data_key(s: Settings) -> tuple:
     """Everything that determines the fetch/prepare outputs (phases 0-1)."""
     return (s.dataset_id, s.year_from, s.year_to, s.max_papers, s.target_kind,
             s.target_min_refset, s.split_seed, tuple(s.split_ratios),
-            tuple(s.metadata_fields))
+            tuple(s.metadata_fields), s.domain_holdout)
 
 
 def _embed_key(s: Settings, wf: str) -> tuple | None:
