@@ -1260,3 +1260,139 @@ def plot_abstract_length_hist(lengths: pd.Series, path: Path) -> None:
     fig.tight_layout()
     fig.savefig(path, dpi=120)
     plt.close(fig)
+
+
+# ===================================================================== benchmark plots
+
+def plot_benchmark_run(metrics: pd.DataFrame, bench_name: str, run_name: str,
+                       path: Path) -> None:
+    """Grouped bars: one group per metric, bar per scorer (ours first, then alpha)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    palette.apply_style()
+
+    all_metrics = metrics[metrics["domain"] == "ALL"]
+    if all_metrics.empty:
+        return
+
+    metric_names = sorted(all_metrics["metric"].unique())
+    scorers = sorted(all_metrics["scorer"].unique())
+    # Sort so "ours" comes first
+    if "ours" in scorers:
+        scorers.remove("ours")
+        scorers = ["ours"] + sorted(scorers)
+
+    n_metrics = len(metric_names)
+    n_scorers = len(scorers)
+    fig, ax = plt.subplots(figsize=(max(8, n_metrics * 1.5), 5))
+
+    x = np.arange(n_metrics)
+    bar_width = 0.8 / max(1, n_scorers)
+
+    for i, scorer in enumerate(scorers):
+        values = []
+        for metric_name in metric_names:
+            row = all_metrics[(all_metrics["scorer"] == scorer) & (all_metrics["metric"] == metric_name)]
+            if not row.empty:
+                values.append(row.iloc[0]["value"])
+            else:
+                values.append(np.nan)
+
+        color = palette.color_for(scorer if scorer != "ours" else run_name)
+        bars = ax.bar(x + (i - (n_scorers - 1) / 2) * bar_width, values, bar_width,
+                      label=scorer, color=color, alpha=0.85, edgecolor=palette.INK, linewidth=0.5)
+
+        # Add value labels
+        for bar in bars:
+            height = bar.get_height()
+            if not np.isnan(height):
+                ax.text(bar.get_x() + bar.get_width() / 2, height,
+                        f"{height:.2f}", ha="center", va="bottom", fontsize=8)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(metric_names)
+    ax.set_ylabel("Metric Value")
+    ax.set_title(f"Benchmark: {bench_name} ({run_name})")
+    ax.legend(fontsize=9)
+    ax.grid(axis="y", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+
+
+def plot_benchmark_overview(all_metrics: pd.DataFrame, path: Path) -> None:
+    """Lollipop chart: all runs sorted by spearman (domain=ALL)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    palette.apply_style()
+
+    all_domain = all_metrics[all_metrics["domain"] == "ALL"]
+    if all_domain.empty:
+        return
+
+    # Filter to one metric (primary)
+    metric_df = all_domain[all_domain["metric"] == "spearman"]
+    if metric_df.empty:
+        metric_df = all_domain  # fallback to any metric
+
+    # Sort by value
+    metric_df = metric_df.sort_values("value")
+
+    fig, ax = plt.subplots(figsize=(10, max(6, len(metric_df) * 0.3)))
+
+    y_pos = np.arange(len(metric_df))
+    x_vals = metric_df["value"].values
+    labels = [f"{row['run']}:{row['scorer']}" for _, row in metric_df.iterrows()]
+    colors = [palette.color_for(row["scorer"]) for _, row in metric_df.iterrows()]
+
+    # Lollipop chart
+    ax.hlines(y_pos, 0, x_vals, colors=palette.GRAY, alpha=0.3, linewidth=1)
+    ax.scatter(x_vals, y_pos, c=colors, s=60, alpha=0.85, edgecolors=palette.INK, linewidth=0.5, zorder=3)
+
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(labels, fontsize=8)
+    ax.set_xlabel("Spearman ρ")
+    ax.set_title("Benchmark Overview - All Runs")
+    ax.grid(axis="x", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+
+
+def plot_benchmark_heatmap(all_metrics: pd.DataFrame, path: Path) -> None:
+    """Heatmap: rows=models, cols=(benchmark, metric), values=score."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    palette.apply_style()
+
+    all_domain = all_metrics[all_metrics["domain"] == "ALL"]
+    if all_domain.empty:
+        return
+
+    # Create pivot: rows=run:scorer, cols=benchmark:metric
+    all_domain["model"] = all_domain["run"] + ":" + all_domain["scorer"]
+    all_domain["bench_metric"] = all_domain["benchmark"] + "\n" + all_domain["metric"]
+
+    pivot = all_domain.pivot_table(index="model", columns="bench_metric", values="value")
+
+    fig, ax = plt.subplots(figsize=(max(10, pivot.shape[1] * 0.6), max(8, pivot.shape[0] * 0.3)))
+
+    im = ax.imshow(pivot.values, cmap=palette.register_olive_seq(), aspect="auto")
+    ax.set_xticks(np.arange(pivot.shape[1]))
+    ax.set_yticks(np.arange(pivot.shape[0]))
+    ax.set_xticklabels(pivot.columns, rotation=45, ha="right", fontsize=8)
+    ax.set_yticklabels(pivot.index, fontsize=8)
+
+    # Annotate with values
+    for i in range(pivot.shape[0]):
+        for j in range(pivot.shape[1]):
+            val = pivot.iloc[i, j]
+            if not np.isnan(val):
+                ax.text(j, i, f"{val:.2f}", ha="center", va="center", fontsize=7, color="white")
+
+    ax.set_title("Benchmark Heatmap: Model x Benchmark-Metric")
+    cbar = plt.colorbar(im, ax=ax)
+    cbar.set_label("Score")
+    fig.tight_layout()
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
