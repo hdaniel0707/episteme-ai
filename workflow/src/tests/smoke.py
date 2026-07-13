@@ -15,6 +15,7 @@ Exit code 0 = all passed.
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import traceback
@@ -737,6 +738,141 @@ def t_auto_increment():
     assert d_other == paths.RESULTS_DIR / "other_wf_1"
 
 
+# ---------------------------------------------------------------- benchmarks / cross-domain
+def t_benchmark_metrics_hand_cases() -> None:
+    """Hand-computed exact values for the 3 benchmark metrics (Stage 5)."""
+    from workflow.src.iwf.evaluation.metrics import (
+        ndcg_at_frac, pairwise_accuracy, top_frac_auc,
+    )
+
+    # ndcg_at_frac: n=5, frac=0.4 -> k=2. Top-2 by score = indices [0,1] -> gains [1,0].
+    # Ideal top-2 gains = [1,1]. dcg([1,0])=1, dcg([1,1])=1+1/log2(3)=1.6309297535714573.
+    y_true = np.array([1, 0, 1, 0, 0], dtype=float)
+    y_score = np.array([3, 2, 1, 0, -1], dtype=float)
+    got = ndcg_at_frac(y_true, y_score, frac=0.4)
+    expected = 1.0 / (1.0 + 1.0 / np.log2(3))
+    assert abs(got - expected) < 1e-9, f"ndcg_at_frac: got {got}, expected {expected}"
+
+    # top_frac_auc: perfectly correlated score/label -> AUC = 1.0
+    y_true2 = np.array([10, 20, 30, 40, 50], dtype=float)
+    y_score2 = np.array([1, 2, 3, 4, 5], dtype=float)
+    got2 = top_frac_auc(y_true2, y_score2, frac=0.2)
+    assert abs(got2 - 1.0) < 1e-9, f"top_frac_auc: got {got2}, expected 1.0"
+
+    # pairwise_accuracy: pred=[T,F,F] vs label=[1,0,0] -> all correct except one tie (0.5)
+    score_a = np.array([3, 1, 2], dtype=float)
+    score_b = np.array([1, 1, 3], dtype=float)
+    label = np.array([1, 0, 0], dtype=float)
+    got3 = pairwise_accuracy(score_a, score_b, label)
+    assert abs(got3 - (2.5 / 3)) < 1e-9, f"pairwise_accuracy: got {got3}, expected {2.5/3}"
+
+
+def t_benchmark_registry() -> None:
+    """BENCHMARK_REGISTRY sanity + available_benchmarks() construction (Stage 5)."""
+    from workflow.src.iwf.evaluation.benchmarks import (
+        BENCHMARK_REGISTRY, available_benchmarks,
+    )
+    assert "holdout_extended" in BENCHMARK_REGISTRY
+    for name, spec in BENCHMARK_REGISTRY.items():
+        assert spec["kind"] in ("regression", "pairwise"), \
+            f"{name}: kind={spec['kind']!r} must be 'regression' or 'pairwise'"
+        assert "target_col" in spec
+    # must not crash even when no benchmark data has been built yet
+    specs = available_benchmarks()
+    assert isinstance(specs, list)
+
+
+def t_external_registry_naip_local() -> None:
+    """naip_local resolves in the registry and degrades to None without peft (Stage 5)."""
+    from workflow.src.iwf.features.external_impact import (
+        NAIPLocalModel, get_external_models, known_external_models,
+    )
+    assert "naip_local" in known_external_models()
+    models = get_external_models(["naip_local"])
+    assert isinstance(models[0], NAIPLocalModel)
+    # no NAIP_WEIGHTS_DIR configured in the test env -> must degrade, never raise
+    assert models[0].score("Some Title", "Some abstract text.") is None
+
+
+def t_data_key_domain_holdout() -> None:
+    """_data_key differentiates runs by domain_holdout (Stage 6) — without this, LODO
+    runs would wrongly share a cached prepared-data split with non-LODO runs."""
+    from workflow.run_all_workflows import _data_key
+    from workflow.src.iwf.config import load_settings
+
+    s1 = load_settings(overrides={"workflow": "emb_clf"})
+    s2 = load_settings(overrides={"workflow": "emb_clf", "domain_holdout": "Physics"})
+    assert _data_key(s1) != _data_key(s2)
+
+
+def t_per_domain_metrics_fixture() -> None:
+    """per_domain_metrics on a synthetic wf_dir fixture (Stage 6)."""
+    from workflow.src.iwf import paths
+    from workflow.src.iwf.config import load_settings
+    from workflow.src.iwf.evaluation.cross_domain import per_domain_metrics
+
+    with tempfile.TemporaryDirectory() as d:
+        wf_dir = Path(d) / "emb_reg_1"
+        seed_dir = wf_dir / "seed_0"
+        seed_dir.mkdir(parents=True)
+
+        rng = np.random.RandomState(0)
+        n = 50
+        y_true = rng.uniform(0, 1, n)
+        y_pred = y_true + rng.normal(0, 0.05, n)  # correlated -> nontrivial spearman
+        (seed_dir / "result.json").write_text(json.dumps({
+            "spearman": 0.9,
+            "test": {"y_true": y_true.tolist(), "y_pred": y_pred.tolist()},
+        }))
+
+        domains = ["Physics"] * 25 + ["Chemistry"] * 25
+        prepared = pd.DataFrame({
+            "split": ["test"] * n,
+            "domains": [json.dumps([dm]) for dm in domains],
+            "subfield": [None] * n,
+            "title": ["t"] * n,
+            "year": [2020] * n,
+        })
+        dataset_id = "smoke_xdom_fixture"
+        prepared_path = paths.prepared_parquet(dataset_id)
+        prepared_path.parent.mkdir(parents=True, exist_ok=True)
+        prepared.to_parquet(prepared_path, index=False)
+        try:
+            s = load_settings(overrides={"workflow": "emb_reg", "dataset_id": dataset_id})
+            df = per_domain_metrics(wf_dir, s, task="reg")
+            assert set(df.columns) == {"domain", "n", "metric", "value"}
+            assert set(df["domain"]) == {"Physics", "Chemistry", "ALL"}
+            assert (df["metric"] == "spearman").all()
+            all_row = df[df["domain"] == "ALL"].iloc[0]
+            assert all_row["n"] == n
+        finally:
+            prepared_path.unlink(missing_ok=True)
+
+
+def t_domains_json_normalize() -> None:
+    """Regression test for the domains double-JSON-encoding bug: insert_paper() used to
+    re-encode an already-JSON-encoded TEXT column when copying rows between DBs (e.g.
+    raw.db -> extended.db), producing '"[\\"Physics\\"]"' instead of '["Physics"]'.
+    _normalize_domains / _get_domain / _domain_series must all unwrap this correctly."""
+    from workflow.src.iwf.evaluation.data_analysis import _domain_series
+    from workflow.src.iwf.evaluation.plots import _get_domain
+    from workflow.src.iwf.fetchers.base import _normalize_domains
+
+    assert _normalize_domains(["Physics"]) == ["Physics"]
+    assert _normalize_domains('["Physics"]') == ["Physics"]
+    assert _normalize_domains('"[\\"Physics\\"]"') == ["Physics"]  # double-encoded
+    assert _normalize_domains(None) == []
+    assert _normalize_domains("") == []
+
+    df = pd.DataFrame({"domains": ['["Physics"]', '"[\\"Chemistry\\"]"', None, "[]"]})
+    got = _get_domain(df).tolist()
+    assert got == ["Physics", "Chemistry", "unknown", "unknown"], got
+
+    df2 = pd.DataFrame({"domains": ['["Physics"]', '"[\\"Chemistry\\"]"', None]})
+    got2 = _domain_series(df2).tolist()
+    assert got2 == ["Physics", "Chemistry", "Unknown"], got2
+
+
 # ---------------------------------------------------------------- palette
 def t_palette_category_of() -> None:
     from workflow.src.iwf.evaluation import palette
@@ -842,6 +978,12 @@ def _run_all() -> int:
         ("tfm_mock", t_tfm_mock),
         ("workflow_results_aggregate", t_workflow_results_aggregate),
         ("auto_increment", t_auto_increment),
+        ("benchmark_metrics_hand_cases", t_benchmark_metrics_hand_cases),
+        ("benchmark_registry", t_benchmark_registry),
+        ("external_registry_naip_local", t_external_registry_naip_local),
+        ("data_key_domain_holdout", t_data_key_domain_holdout),
+        ("per_domain_metrics_fixture", t_per_domain_metrics_fixture),
+        ("domains_json_normalize", t_domains_json_normalize),
         ("palette_category_of", t_palette_category_of),
         ("palette_colors", t_palette_colors),
     ]:

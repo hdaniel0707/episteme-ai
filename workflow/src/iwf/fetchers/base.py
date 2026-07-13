@@ -147,6 +147,31 @@ class Deduper:
             self.title_hashes.add(th)
 
 
+def _normalize_domains(v) -> list:
+    """Coerce a fetcher's ``domains`` value (list) OR a copied row's already-JSON-encoded
+    TEXT column (str) into a plain Python list, so re-serializing is always idempotent
+    and never double-encodes (which previously produced values like '"[\\"Physics\\"]"')."""
+    if v is None:
+        return []
+    if isinstance(v, (list, tuple)):
+        return list(v)
+    if isinstance(v, str):
+        s = v
+        for _ in range(2):  # unwrap at most one accidental extra encoding layer
+            try:
+                decoded = json.loads(s)
+            except (json.JSONDecodeError, TypeError):
+                return [s] if s else []
+            if isinstance(decoded, list):
+                return decoded
+            if isinstance(decoded, str):
+                s = decoded
+                continue
+            break
+        return [s] if s else []
+    return []
+
+
 def insert_paper(conn: sqlite3.Connection, row: dict) -> None:
     """Insert one normalized dict (paper + authors + links). No commit here."""
     conn.execute(
@@ -162,7 +187,7 @@ def insert_paper(conn: sqlite3.Connection, row: dict) -> None:
             str(row["paper_id"]), row.get("title"), row.get("abstract"),
             row.get("citation_count"), row.get("influential_citation_count"),
             row.get("year"), row.get("venue"),
-            json.dumps(row.get("domains") or []),
+            json.dumps(_normalize_domains(row.get("domains"))),
             normalize_doi(row.get("doi")), row.get("source"),
             row.get("fwci"), row.get("citation_normalized_percentile"),
             _int_or_none(row.get("is_in_top_1_percent")),

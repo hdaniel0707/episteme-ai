@@ -311,8 +311,110 @@ class VenueAISBaseline(ExternalImpactModel):
                          index=df.index, name=self.name, dtype="float64")
 
 
+NAIP_LOCAL_PROMPT_TEMPLATE = (
+    "Given a research paper, Title: {title}\nAbstract: {abstract}\n"
+    "Evaluate the quality of this paper:"
+)   # verbatim from ssocean/NAIP demo_v2.py (AAAI'25, arXiv 2408.03934)
+
+
+class NAIPLocalModel(ExternalImpactModel):
+    """Local NAIP v2 LoRA adapter (ssocean/NAIPv2 on HuggingFace) — a sequence-
+    classification regression head over a (gated) Llama-3 backbone, run locally instead
+    of the rate-limited HF Space that :class:`NAIPModel` calls.
+
+    Needs the ``peft`` package (not installed by default; ask before adding it) and the
+    adapter weights downloaded via
+    ``workflow.src.iwf.fetchers.model_weights.download_naip_weights()`` (user-run only).
+    Any missing piece degrades to None scores (feature_builder masks them to neutral-0);
+    a warning prints exactly once per process.
+    """
+
+    name = "naip_local"
+    MAX_LENGTH = 512  # verified: ssocean/NAIP demo_v2.py
+
+    def __init__(self, weights_dir: str | None = None):
+        self.weights_dir = weights_dir or config.get_str("NAIP_WEIGHTS_DIR", "")
+        self._model = None
+        self._tokenizer = None
+        self._warned = False
+        self._unavailable = False
+
+    def _get_model(self):
+        if self._model is not None:
+            return self._model
+        if self._unavailable:
+            return None
+        if not self.weights_dir or not Path(self.weights_dir).is_dir():
+            if not self._warned:
+                print(f"[{self.name}] NAIP_WEIGHTS_DIR not set or not found "
+                      f"({self.weights_dir!r}); run "
+                      "workflow.src.iwf.fetchers.model_weights.download_naip_weights() "
+                      "first. Scores will be None until then.")
+                self._warned = True
+            self._unavailable = True
+            return None
+        try:
+            import torch
+            from peft import AutoPeftModelForSequenceClassification
+            from transformers import AutoTokenizer
+        except ImportError as e:
+            if not self._warned:
+                print(f"[{self.name}] missing dependency ({e}); `pip install peft` "
+                      "(ask before installing). Scores will be None.")
+                self._warned = True
+            self._unavailable = True
+            return None
+        try:
+            use_8bit = torch.cuda.is_available()
+            if use_8bit:
+                try:
+                    import bitsandbytes  # noqa: F401
+                except ImportError:
+                    use_8bit = False
+            self._tokenizer = AutoTokenizer.from_pretrained(self.weights_dir)
+            if self._tokenizer.pad_token is None:
+                self._tokenizer.pad_token = self._tokenizer.eos_token
+            self._model = AutoPeftModelForSequenceClassification.from_pretrained(
+                self.weights_dir, num_labels=1,
+                load_in_8bit=use_8bit,
+                device_map="auto" if torch.cuda.is_available() else None,
+            )
+            self._model.eval()
+        except Exception as e:
+            if not self._warned:
+                print(f"[{self.name}] model load failed ({e}). Scores will be None.")
+                self._warned = True
+            self._unavailable = True
+            self._model = None
+            return None
+        return self._model
+
+    def score(self, title: str, abstract: str) -> float | None:
+        if not title and not abstract:
+            return None
+        model = self._get_model()
+        if model is None:
+            return None
+        try:
+            import torch
+            prompt = NAIP_LOCAL_PROMPT_TEMPLATE.format(title=title, abstract=abstract)
+            inputs = self._tokenizer(prompt, return_tensors="pt", truncation=True,
+                                     max_length=self.MAX_LENGTH)
+            inputs = {k: v.to(model.device) for k, v in inputs.items()}
+            with torch.no_grad():
+                logits = model(**inputs).logits
+            raw = float(logits.view(-1).item())
+            return float(min(1.0, max(0.0, raw)))  # TNCSI_SP is defined on [0,1]
+        except Exception as e:
+            if not self._warned:
+                print(f"[{self.name}] inference failed ({e}). Scores will be None.")
+                self._warned = True
+            return None
+
+
 _REGISTRY = {
     "naip": NAIPModel,
+    "naip_local": NAIPLocalModel,
     "specter2_knn": Specter2KnnBaseline,
     "llm_judge": LLMJudgeBaseline,
     "venue_ais": VenueAISBaseline,

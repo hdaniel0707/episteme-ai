@@ -31,12 +31,22 @@ def _domain_series(df: pd.DataFrame) -> pd.Series:
     def extract_domain(domains_json):
         if not domains_json:
             return "Unknown"
-        try:
-            domains = json.loads(domains_json) if isinstance(domains_json, str) else domains_json
-            if isinstance(domains, list) and len(domains) > 0:
-                return domains[0]
-        except (json.JSONDecodeError, TypeError):
-            pass
+        if isinstance(domains_json, list):
+            return domains_json[0] if domains_json else "Unknown"
+        v = domains_json
+        # domains is stored as a JSON-array string (occasionally double-encoded by a
+        # stray json.dumps on a copy path) — unwrap up to two layers before giving up.
+        for _ in range(2):
+            try:
+                decoded = json.loads(v)
+            except (json.JSONDecodeError, TypeError):
+                return "Unknown"
+            if isinstance(decoded, list):
+                return decoded[0] if decoded else "Unknown"
+            if isinstance(decoded, str):
+                v = decoded
+                continue
+            return "Unknown"
         return "Unknown"
 
     return df["domains"].apply(extract_domain)

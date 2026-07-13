@@ -113,7 +113,23 @@ def _get_domain(df: pd.DataFrame) -> pd.Series:
         if v is None or (isinstance(v, float) and np.isnan(v)):
             return "unknown"
         s = str(v)
-        return s if s and s.lower() != "nan" else "unknown"
+        if not s or s.lower() == "nan":
+            return "unknown"
+        # domains from SQLite arrives as a JSON-array string (occasionally
+        # double-encoded by a stray json.dumps on a copy path) — unwrap up to
+        # two layers before falling back to the raw string.
+        for _ in range(2):
+            try:
+                decoded = json.loads(s)
+            except (json.JSONDecodeError, TypeError):
+                break
+            if isinstance(decoded, list):
+                return str(decoded[0]) if decoded else "unknown"
+            if isinstance(decoded, str):
+                s = decoded
+                continue
+            break
+        return s
 
     if "domains" in df.columns:
         return df["domains"].map(first)
@@ -1399,7 +1415,7 @@ def plot_benchmark_heatmap(all_metrics: pd.DataFrame, path: Path) -> None:
 
 
 def plot_per_domain_bars(metrics_df: pd.DataFrame, run_name: str, path: Path) -> None:
-    """Per-domain metrics bar chart."""
+    """Per-domain metrics bar chart: bars = domains (desc by value), vline = ALL-domain value."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     palette.apply_style()
@@ -1407,20 +1423,34 @@ def plot_per_domain_bars(metrics_df: pd.DataFrame, run_name: str, path: Path) ->
     if metrics_df.empty:
         return
 
-    fig, ax = plt.subplots(figsize=(10, max(6, len(metrics_df) * 0.3)))
+    all_row = metrics_df[metrics_df["domain"] == "ALL"]
+    bars_df = metrics_df[metrics_df["domain"] != "ALL"]
+    if bars_df.empty:
+        return
 
-    # Sort by value descending
-    metrics_df = metrics_df.sort_values("value", ascending=True)
+    # Sorted so the strongest domain renders at the top of a horizontal bar chart
+    bars_df = bars_df.sort_values("value", ascending=True)
 
-    y_pos = np.arange(len(metrics_df))
-    colors = [palette.SAGE if v >= 0.5 else palette.SAND for v in metrics_df["value"]]
+    fig, ax = plt.subplots(figsize=(10, max(6, len(bars_df) * 0.35)))
 
-    ax.barh(y_pos, metrics_df["value"], color=colors, alpha=0.85, edgecolor=palette.INK, linewidth=0.5)
+    y_pos = np.arange(len(bars_df))
+    color = palette.color_for(run_name)
+
+    ax.barh(y_pos, bars_df["value"], color=color, alpha=0.85, edgecolor=palette.INK, linewidth=0.5)
     ax.set_yticks(y_pos)
-    ax.set_yticklabels(metrics_df["domain"], fontsize=8)
-    ax.set_xlabel(metrics_df.iloc[0]["metric"])
+    ax.set_yticklabels([f"{d} (n={n})" for d, n in zip(bars_df["domain"], bars_df["n"])], fontsize=8)
+    ax.set_xlabel(bars_df.iloc[0]["metric"])
     ax.set_title(f"Per-Domain Metrics - {run_name}")
-    ax.set_xlim([0, 1])
+
+    lo = min(0.0, float(bars_df["value"].min()))
+    hi = max(1.0, float(bars_df["value"].max()))
+    ax.set_xlim([lo, hi])
+
+    if not all_row.empty:
+        ax.axvline(float(all_row.iloc[0]["value"]), color=palette.INK, linestyle="--",
+                   linewidth=1, alpha=0.7, label=f"ALL (n={int(all_row.iloc[0]['n'])})")
+        ax.legend(loc="lower right", fontsize=8)
+
     ax.grid(axis="x", alpha=0.3)
     fig.tight_layout()
     fig.savefig(path, dpi=120)

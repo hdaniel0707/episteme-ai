@@ -122,22 +122,55 @@ def build_holdout_benchmark(db_path: Path, out_path: Path | None = None,
     return out_path / "data.parquet"
 
 
+# None of these three have a stable, directly-downloadable file URL (verified by
+# checking the repos/homepages directly — see the messages below). Each needs a manual
+# step; once you have the raw file, drop it at BENCHMARKS_DIR/<name>/data.parquet with
+# a matching columns per BENCHMARK_REGISTRY[<name>] and a manifest.json (see
+# build_holdout_benchmark for the manifest shape) and available_benchmarks() will pick
+# it up automatically.
+_MANUAL_DOWNLOAD_INSTRUCTIONS = {
+    "naip12k": (
+        "No public direct-download link for the NAIP evaluation set (NAID_train/test_"
+        "extrainfo.csv) is published in the ssocean/NAIP repo — the README notes the "
+        "dataset is intentionally decoupled from the code. Options: (1) email the "
+        "author at oceanytech@gmail.com, (2) check https://github.com/ssocean/NAIP for "
+        "an updated dataset link, (3) check the HuggingFace model cards at "
+        "https://huggingface.co/ssocean/NAIPv2 and https://huggingface.co/ssocean/NAIP "
+        "for linked data files."
+    ),
+    "sciimpact_pairs": (
+        "Data + code repo: https://github.com/FlyPig23/SciImpact (linked from "
+        "https://flypig23.github.io/sciimpact-homepage/, arXiv 2604.17141). Clone it and "
+        "locate the pairwise CSV/JSON there; no single direct-download file URL is "
+        "published on the homepage itself."
+    ),
+    "dblp_v14_sample": (
+        "Official source: https://www.aminer.org/citation (DBLP-Citation-network V14, "
+        "~17 GB json). A Kaggle mirror also exists: "
+        "https://www.kaggle.com/datasets/meichen1120/dblp-v14-citation-network-dataset "
+        "(needs a Kaggle account + `pip install kaggle` + API token — ask before "
+        "installing). Given the size, stream-parse and subsample rather than loading it "
+        "whole; pass max_rows to cap the sample once you have the raw file."
+    ),
+}
+
+
 def download_benchmark(name: str, yes: bool = False, max_rows: int | None = None) -> Path:
-    """Download benchmark from URL. Requires user confirmation for size > 200 MB."""
-    spec_dict = BENCHMARK_REGISTRY.get(name)
-    if not spec_dict or not spec_dict.get("url"):
-        raise ValueError(f"Benchmark {name} has no URL or not in registry")
+    """Download benchmark from URL. Requires user confirmation for size > 200 MB.
 
-    out_dir = BENCHMARKS_DIR / name
-    out_dir.mkdir(parents=True, exist_ok=True)
-    data_path = out_dir / "data.parquet"
+    None of the three network benchmarks have a stable, scriptable URL (verified by
+    checking each source directly); this always raises with the real manual-download
+    pointer for ``name`` rather than guessing a URL.
+    """
+    if name not in BENCHMARK_REGISTRY:
+        raise ValueError(f"Unknown benchmark {name!r}; choose from {list(BENCHMARK_REGISTRY)}.")
 
-    # TODO: implement download logic with size check
-    # For now, raise with instructions
-    raise NotImplementedError(
-        f"Download for {name} not yet implemented. "
-        "See PLAN Stage 5 for manual download instructions."
-    )
+    instructions = _MANUAL_DOWNLOAD_INSTRUCTIONS.get(name)
+    if instructions is None:
+        raise ValueError(f"Benchmark {name!r} is local-only (built via build_holdout_benchmark, "
+                         "not downloaded).")
+
+    raise NotImplementedError(f"No scriptable download for {name!r}. {instructions}")
 
 
 def score_with_run_model(wf_dir: Path, settings, texts_df: pd.DataFrame) -> np.ndarray | None:

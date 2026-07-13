@@ -433,16 +433,21 @@ runs:
     external_impact: [naip, specter2_knn]     # external baseline scorers for comparison
 
   # 13: Leave-one-domain-out (LODO) validation (Stage 6)
-  #     Trains on all domains except one; tests on that domain alone
+  #     Trains on all domains except one; tests on that domain alone.
+  #     domain_holdout must match a value from _get_domain() over your corpus —
+  #     for the current extended.db that is one of: Astronomy, Computer Science,
+  #     Sociology, Neuroscience, Physics, Materials Science, Earth Sciences,
+  #     Medicine, Chemistry, Ecology, Psychology, Biology, Economics,
+  #     Mathematics, Anthropology. Re-check after re-extending the corpus.
   #     Creates cross-domain generalization matrix
-  - name: specter2_id_mlp_lodo_cv
+  - name: specter2_id_mlp_lodo_cs
     workflow: emb_clf
     embedder: specter2
     encoder_kind: identity
     model_arch: mlp
     hidden: [1024,512,256,128,64,32]
     patience: 40
-    domain_holdout: cv                     # exclude computer vision from training
+    domain_holdout: Computer Science       # exclude CS from training; test on CS only
     benchmarks: [holdout_extended]         # per-domain metrics written to aggregate/cross_domain/
 
   # 14: Combination — benchmarks + LODO (both Stage 5 and Stage 6)
@@ -453,6 +458,6 @@ runs:
     model_arch: mlp
     hidden: [1024,512,256,128,64,32]
     patience: 40
-    domain_holdout: ai
+    domain_holdout: Medicine
     benchmarks: [holdout_extended, naip12k]
     external_impact: [naip]

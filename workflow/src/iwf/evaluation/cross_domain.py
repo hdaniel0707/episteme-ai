@@ -18,10 +18,13 @@ from workflow.src.iwf.evaluation.metrics import regression_metrics, classificati
 from workflow.src.iwf.evaluation import plots
 
 
-def per_domain_metrics(wf_dir: Path, settings) -> pd.DataFrame:
-    """Compute per-domain metrics on test split for an existing run."""
-    task = settings.target_kind
+def per_domain_metrics(wf_dir: Path, settings, task: str) -> pd.DataFrame:
+    """Compute per-domain metrics on test split for an existing run.
 
+    ``task`` must be "reg" or "clf" (workflow_results.task_of(wf_type)) — NOT
+    settings.target_kind, which names the *impact target* (e.g.
+    "field_year_percentile") and is never equal to "reg"/"clf".
+    """
     # Get best-seed test predictions
     preds = _best_seed_test_preds(wf_dir)
     if preds is None:
@@ -64,8 +67,7 @@ def per_domain_metrics(wf_dir: Path, settings) -> pd.DataFrame:
             metric_name = "spearman"
             value = metrics_dict.get(metric_name, np.nan)
         else:  # clf
-            class_names = [str(i) for i in range(len(settings.class_names))]
-            metrics_dict = classification_metrics(y_true_domain, y_pred_domain, class_names)
+            metrics_dict = classification_metrics(y_true_domain, y_pred_domain, settings.class_names)
             metric_name = "macro_f1"
             value = metrics_dict.get(metric_name, np.nan)
 
@@ -76,6 +78,16 @@ def per_domain_metrics(wf_dir: Path, settings) -> pd.DataFrame:
             "value": float(value),
         })
 
+    # ALL-domain aggregate row (whole test split, unfiltered) — reference line for the plot
+    if rows:
+        if task == "reg":
+            all_value = regression_metrics(y_true, y_pred).get("spearman", np.nan)
+            all_metric = "spearman"
+        else:
+            all_value = classification_metrics(y_true, y_pred, settings.class_names).get("macro_f1", np.nan)
+            all_metric = "macro_f1"
+        rows.append({"domain": "ALL", "n": int(len(y_true)), "metric": all_metric, "value": float(all_value)})
+
     return pd.DataFrame(rows)
 
 
@@ -84,7 +96,7 @@ def generate_cross_domain(wf_type: str, task: str, wf_dir: Path, settings) -> No
     wf_dir = Path(wf_dir)
 
     try:
-        metrics_df = per_domain_metrics(wf_dir, settings)
+        metrics_df = per_domain_metrics(wf_dir, settings, task)
         if metrics_df.empty:
             return
 
@@ -132,6 +144,7 @@ def cross_domain_matrix(results_dir: Path) -> None:
         metrics_path = run_dir / "aggregate" / "cross_domain" / "per_domain_metrics.csv"
         if metrics_path.is_file():
             metrics_df = pd.read_csv(metrics_path)
+            metrics_df = metrics_df[metrics_df["domain"] != "ALL"]  # exclude aggregate row from the matrix
             for _, row in metrics_df.iterrows():
                 rows.append({
                     "run": run_dir.name,

@@ -226,13 +226,33 @@ def cmd_extend(args) -> int:
                 # Copy from raw.db if it exists
                 if fbase.raw_db_path().exists():
                     raw_conn = sqlite3.connect(fbase.raw_db_path())
+                    raw_conn.row_factory = sqlite3.Row
                     dedup = fbase.Deduper(conn)
+
+                    # author_id -> {name,h_index,citation_count,paper_count} + paper_id -> [author_id,...]
+                    authors_by_id: dict[str, dict] = {}
+                    for a in raw_conn.execute(
+                        "SELECT author_id, name, h_index, citation_count, paper_count FROM authors"
+                    ):
+                        authors_by_id[a["author_id"]] = dict(a)
+                    paper_author_ids: dict[str, list[str]] = {}
+                    for pa in raw_conn.execute("SELECT paper_id, author_id FROM paper_authors"):
+                        paper_author_ids.setdefault(pa["paper_id"], []).append(pa["author_id"])
+
+                    n_copied = 0
                     for row in raw_conn.execute("SELECT * FROM papers"):
-                        if not dedup.seen({"paper_id": row["paper_id"]}):
-                            fbase.insert_paper(conn, dict(row))
-                            dedup.add({"paper_id": row["paper_id"]})
+                        pid = row["paper_id"]
+                        if not dedup.seen({"paper_id": pid}):
+                            row_dict = dict(row)
+                            row_dict["authors"] = [
+                                authors_by_id[aid] for aid in paper_author_ids.get(pid, [])
+                                if aid in authors_by_id
+                            ]
+                            fbase.insert_paper(conn, row_dict)
+                            dedup.add({"paper_id": pid})
+                            n_copied += 1
                     raw_conn.close()
-                    print("[extend] Copied raw.db to extended.db")
+                    print(f"[extend] Copied {n_copied} papers (+ author records) from raw.db to extended.db")
 
                 # Copy from legacy/professor DBs (no filtering)
                 # This is a minimal version; full implementation would iterate legacy paths
