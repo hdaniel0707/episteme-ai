@@ -194,6 +194,16 @@ def main() -> int:
         nf_ablation(paths.RESULTS_DIR)
     except Exception as e:
         print(f"[run_all] nf ablation figure skipped ({e})", file=sys.stderr)
+    try:
+        from workflow.src.iwf.evaluation.benchmarks import benchmark_overview
+        benchmark_overview(paths.RESULTS_DIR)
+    except Exception as e:
+        print(f"[run_all] benchmark overview skipped ({e})", file=sys.stderr)
+    try:
+        from workflow.src.iwf.evaluation.cross_domain import cross_domain_matrix
+        cross_domain_matrix(paths.RESULTS_DIR)
+    except Exception as e:
+        print(f"[run_all] cross-domain matrix skipped ({e})", file=sys.stderr)
 
     print(f"\n[run_all] summary ({n_total} runs):")
     print(f"  {'FOLDER':<25s} {'CONFIG':<25s} {'STATUS':<10s} {'METRIC'}")

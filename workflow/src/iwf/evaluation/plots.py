@@ -1396,3 +1396,64 @@ def plot_benchmark_heatmap(all_metrics: pd.DataFrame, path: Path) -> None:
     fig.tight_layout()
     fig.savefig(path, dpi=120)
     plt.close(fig)
+
+
+def plot_per_domain_bars(metrics_df: pd.DataFrame, run_name: str, path: Path) -> None:
+    """Per-domain metrics bar chart."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    palette.apply_style()
+
+    if metrics_df.empty:
+        return
+
+    fig, ax = plt.subplots(figsize=(10, max(6, len(metrics_df) * 0.3)))
+
+    # Sort by value descending
+    metrics_df = metrics_df.sort_values("value", ascending=True)
+
+    y_pos = np.arange(len(metrics_df))
+    colors = [palette.SAGE if v >= 0.5 else palette.SAND for v in metrics_df["value"]]
+
+    ax.barh(y_pos, metrics_df["value"], color=colors, alpha=0.85, edgecolor=palette.INK, linewidth=0.5)
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(metrics_df["domain"], fontsize=8)
+    ax.set_xlabel(metrics_df.iloc[0]["metric"])
+    ax.set_title(f"Per-Domain Metrics - {run_name}")
+    ax.set_xlim([0, 1])
+    ax.grid(axis="x", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+
+
+def plot_cross_domain_matrix(matrix: pd.DataFrame, path: Path) -> None:
+    """LODO matrix: runs vs domains heatmap."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    palette.apply_style()
+
+    if matrix.empty:
+        return
+
+    fig, ax = plt.subplots(figsize=(max(10, matrix.shape[1] * 0.5), max(8, matrix.shape[0] * 0.3)))
+
+    im = ax.imshow(matrix.values, cmap=palette.register_olive_seq(), aspect="auto")
+    ax.set_xticks(np.arange(matrix.shape[1]))
+    ax.set_yticks(np.arange(matrix.shape[0]))
+    ax.set_xticklabels(matrix.columns, rotation=45, ha="right", fontsize=8)
+    ax.set_yticklabels(matrix.index, fontsize=8)
+
+    # Annotate with values
+    for i in range(matrix.shape[0]):
+        for j in range(matrix.shape[1]):
+            val = matrix.iloc[i, j]
+            if not np.isnan(val):
+                ax.text(j, i, f"{val:.2f}", ha="center", va="center", fontsize=7, color="white")
+
+    ax.set_title("Cross-Domain Matrix: Run x Domain")
+    cbar = plt.colorbar(im, ax=ax)
+    cbar.set_label("Metric Value")
+    fig.tight_layout()
+    fig.savefig(path, dpi=120)
+    plt.close(fig)

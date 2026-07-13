@@ -393,6 +393,18 @@ def finalize_workflow(wf_type: str, settings, wf_dir: Path) -> dict | None:
     except Exception as e:
         print(f"[results] {wf_type}: novelty/feasibility analysis skipped ({e})")
 
+    try:
+        from workflow.src.iwf.evaluation.cross_domain import generate_cross_domain
+        generate_cross_domain(wf_type, task, wf_dir, settings)
+    except Exception as e:
+        print(f"[results] {wf_type}: cross-domain analysis skipped ({e})")
+
+    try:
+        from workflow.src.iwf.evaluation.benchmarks import run_benchmarks
+        run_benchmarks(wf_dir, settings)
+    except Exception as e:
+        print(f"[results] {wf_type}: benchmark evaluation skipped ({e})")
+
     if summary is not None:
         try:
             write_model_description(wf_type, task, settings, wf_dir,
