@@ -63,10 +63,12 @@ def latest_model_dir(task: str = "reg", features: str = "z") -> Path | None:
     for d in paths.RESULTS_DIR.iterdir():
         if not d.is_dir():
             continue
-        m = re.match(r"^([a-z_]+)_(\d+)$", d.name)
-        if not m:
+        # Split on last underscore to handle workflow names with digits
+        parts = d.name.rsplit("_", 1)
+        if len(parts) != 2 or not parts[1].isdigit():
             continue
-        spec = WORKFLOWS.get(m.group(1))
+        wf_type, run_num = parts
+        spec = WORKFLOWS.get(wf_type)
         if not spec or spec["task"] != task or spec["features"] != features:
             continue
         if any((sd / "model" / "model.joblib").is_file() for sd in d.glob("seed_*")):
@@ -419,11 +421,13 @@ def cross_workflow_comparison() -> dict:
             except (json.JSONDecodeError, OSError):
                 continue
 
-    out_json = paths.RESULTS_DIR / "cross_workflow_comparison.json"
+    summary_dir = paths.RESULTS_DIR / "summary"
+    summary_dir.mkdir(parents=True, exist_ok=True)
+    out_json = summary_dir / "cross_workflow_comparison.json"
     out_json.write_text(json.dumps(comparison, indent=2), encoding="utf-8")
     if comparison:
         try:
-            _plot_cross_workflow(comparison)
+            _plot_cross_workflow(comparison, summary_dir)
         except Exception as e:
             print(f"[results] cross-workflow figure skipped ({e})")
     return comparison
@@ -450,7 +454,9 @@ def _panel(ax, wf_names, comparison, metric, title):
     ax.set_title(title)
 
 
-def _plot_cross_workflow(comparison: dict) -> None:
+def _plot_cross_workflow(comparison: dict, summary_dir: Path | None = None) -> None:
+    if summary_dir is None:
+        summary_dir = paths.RESULTS_DIR / "summary"
     reg_wfs = sorted(k for k, v in comparison.items() if v.get("task") == "reg")
     clf_wfs = sorted(k for k, v in comparison.items() if v.get("task") == "clf")
     width = max(12, (len(reg_wfs) + len(clf_wfs)) * 0.8)
@@ -460,5 +466,5 @@ def _plot_cross_workflow(comparison: dict) -> None:
     _panel(ax2, clf_wfs, comparison, "macro_f1", "Classification (macro-F1)")
     fig.suptitle("Cross-workflow comparison (mean ± std across seeds)")
     fig.tight_layout()
-    fig.savefig(paths.RESULTS_DIR / "cross_workflow_comparison.png", dpi=120)
+    fig.savefig(summary_dir / "cross_workflow_comparison.png", dpi=120)
     plt.close(fig)

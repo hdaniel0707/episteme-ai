@@ -718,7 +718,7 @@ def t_workflow_results_aggregate():
     assert summary_t is not None and summary_t["n_seeds"] == 1
     comparison = workflow_results.cross_workflow_comparison()
     assert "emb_reg_1" in comparison and "tfm_reg_1" in comparison
-    assert (paths.RESULTS_DIR / "cross_workflow_comparison.json").is_file()
+    assert (paths.RESULTS_DIR / "summary" / "cross_workflow_comparison.json").is_file()
 
 
 def t_auto_increment():

@@ -111,7 +111,7 @@ def run_workflow(wf_type: str, settings: Settings, *, start: int = 0, end: int =
     print(f"\n{'#' * 70}\n# WORKFLOW {wf_type}  -> {wf_dir.name}  "
           f"phases={[PHASE_NAMES[p] for p in active]}\n{'#' * 70}")
     if progress is not None:
-        progress.update(pid, phase=(active[0] if active else 0, max(phases)), percent=0.0)
+        progress.update(pid, phase=(active[0] if active else 0, len(phases)), percent=0.0)
 
     n = len(active)
     for i, num in enumerate(active):

@@ -221,7 +221,7 @@ def main() -> int:
                 print(f"  {run_id} -> {log}")
         return 1
     print(f"\n[run_all] all {n_total} runs completed.")
-    print(f"[run_all] comparison -> {paths.RESULTS_DIR / 'cross_workflow_comparison.png'}")
+    print(f"[run_all] comparison -> {paths.RESULTS_DIR / 'summary' / 'cross_workflow_comparison.png'}")
     print(f"[run_all] per-run logs -> {paths.RESULTS_DIR}/*.log")
     return 0
 

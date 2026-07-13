@@ -65,6 +65,7 @@ class NAIPModel(ExternalImpactModel):
     def __init__(self, model_version: str = "v2.1"):
         self.model_version = model_version
         self._client = None
+        self._warned = False
 
     def _get_client(self):
         if self._client is None:
@@ -84,7 +85,18 @@ class NAIPModel(ExternalImpactModel):
                 model_version=self.model_version, api_name="/predict",
             )
             data = result.get("data", []) if isinstance(result, dict) else result
-            return float(data[1][1]) if len(data) > 1 else None  # normalized TNCSI_sp
+            # Explicit bounds checking for result schema
+            if not isinstance(data, (list, tuple)) or len(data) < 2:
+                if not self._warned:
+                    tqdm.write(f"  [naip] unexpected response format: {type(data)}")
+                    self._warned = True
+                return None
+            if not isinstance(data[1], (list, tuple)) or len(data[1]) < 2:
+                if not self._warned:
+                    tqdm.write(f"  [naip] unexpected response format at [1]: {type(data[1])}")
+                    self._warned = True
+                return None
+            return float(data[1][1])  # normalized TNCSI_sp
         except Exception as e:  # pragma: no cover - network dependent
             tqdm.write(f"  [naip] {e}")
             return None

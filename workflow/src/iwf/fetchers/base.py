@@ -20,6 +20,14 @@ from typing import Iterator
 from workflow.src.iwf import paths
 from workflow.src.iwf.data.identity import normalize_doi
 
+
+class QuotaExhausted(Exception):
+    """Raised when a fetcher's quota is exhausted (HTTP 429 with long retry-after).
+
+    Retrying per-row would burn hours for zero benefit; better to checkpoint and
+    resume later."""
+
+
 # The one dict contract every fetcher produces (missing keys are stored as NULL).
 NORMALIZED_KEYS = (
     "paper_id", "doi", "title", "abstract", "year", "venue", "venue_issn",
@@ -214,25 +222,34 @@ class BaseFetcher(ABC):
     def rows(self, conn: sqlite3.Connection) -> Iterator[dict]:
         ...
 
-    def run(self, conn: sqlite3.Connection, limit: int | None = None) -> int:
+    def run(self, conn: sqlite3.Connection, limit: int | None = None,
+            keep_incomplete: bool = False) -> int:
         from tqdm import tqdm
 
         dedup = Deduper(conn)
         inserted = 0
         bar = tqdm(desc=f"[{self.name}]", unit="paper", total=limit)
-        for row in self.rows(conn):
-            if limit is not None and inserted >= limit:
-                break
-            if not row.get("abstract") or not str(row.get("abstract")).strip():
-                continue  # real, usable records only
-            if not row.get("paper_id") or dedup.seen(row):
-                continue
-            insert_paper(conn, row)
-            dedup.add(row)
-            inserted += 1
-            bar.update(1)
-            if inserted % 500 == 0:
-                conn.commit()
+        try:
+            for row in self.rows(conn):
+                if limit is not None and inserted >= limit:
+                    break
+                if not keep_incomplete and (not row.get("abstract") or not str(row.get("abstract")).strip()):
+                    continue  # real, usable records only
+                if not row.get("paper_id") or dedup.seen(row):
+                    continue
+                insert_paper(conn, row)
+                dedup.add(row)
+                inserted += 1
+                bar.update(1)
+                if inserted % 500 == 0:
+                    conn.commit()
+        except QuotaExhausted as e:
+            set_cursor(conn, self.name, None, inserted)
+            conn.commit()
+            print(f"[{self.name}] quota exhausted — checkpointed, resume later")
+            bar.close()
+            print(f"[{self.name}] inserted {inserted} papers (quota hit)")
+            return inserted
         conn.commit()
         bar.close()
         print(f"[{self.name}] inserted {inserted} new papers")

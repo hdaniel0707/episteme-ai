@@ -18,7 +18,9 @@ import requests
 
 from workflow.src.iwf import config
 from workflow.src.iwf.data.identity import normalize_doi
-from workflow.src.iwf.fetchers.base import BaseFetcher, get_cursor, set_cursor
+from workflow.src.iwf.fetchers.base import BaseFetcher, QuotaExhausted, get_cursor, set_cursor
+
+_QUOTA_RETRY_AFTER_S = 60
 
 WORKS_URL = "https://api.openalex.org/works"
 AUTHORS_URL = "https://api.openalex.org/authors"
@@ -37,6 +39,10 @@ def _get(url: str, params: dict) -> dict | None:
         try:
             r = requests.get(url, params={**params, **_mailto()}, timeout=60)
             if r.status_code == 429:
+                retry_after = int(r.headers.get("retry-after", 0) or 0)
+                if retry_after > _QUOTA_RETRY_AFTER_S:
+                    raise QuotaExhausted(
+                        f"OpenAlex quota exhausted (retry-after={retry_after}s)")
                 time.sleep(3.0 * (attempt + 1))
                 continue
             if r.ok:
