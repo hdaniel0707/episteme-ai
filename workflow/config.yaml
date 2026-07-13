@@ -418,3 +418,41 @@ runs:
     model_arch: mlp
     hidden: [512,128,32]
     patience: 40
+
+  # 12: Benchmark evaluation (Stage 5)
+  #     Evaluates trained model on external benchmarks; requires available_benchmarks()
+  #     Build benchmarks with: python -m workflow.src.main_extend_db
+  - name: specter2_id_mlp_benchmark
+    workflow: emb_clf
+    embedder: specter2
+    encoder_kind: identity
+    model_arch: mlp
+    hidden: [1024,512,256,128,64,32]
+    patience: 40
+    benchmarks: [holdout_extended, naip12k]  # benchmark names to evaluate on
+    external_impact: [naip, specter2_knn]     # external baseline scorers for comparison
+
+  # 13: Leave-one-domain-out (LODO) validation (Stage 6)
+  #     Trains on all domains except one; tests on that domain alone
+  #     Creates cross-domain generalization matrix
+  - name: specter2_id_mlp_lodo_cv
+    workflow: emb_clf
+    embedder: specter2
+    encoder_kind: identity
+    model_arch: mlp
+    hidden: [1024,512,256,128,64,32]
+    patience: 40
+    domain_holdout: cv                     # exclude computer vision from training
+    benchmarks: [holdout_extended]         # per-domain metrics written to aggregate/cross_domain/
+
+  # 14: Combination — benchmarks + LODO (both Stage 5 and Stage 6)
+  - name: specter2_id_mlp_benchmark_lodo
+    workflow: emb_clf
+    embedder: specter2
+    encoder_kind: identity
+    model_arch: mlp
+    hidden: [1024,512,256,128,64,32]
+    patience: 40
+    domain_holdout: ai
+    benchmarks: [holdout_extended, naip12k]
+    external_impact: [naip]
