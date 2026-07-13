@@ -1129,3 +1129,134 @@ def plot_tfm_loss_lr(history: dict, path: Path,
     fig.tight_layout()
     fig.savefig(path, dpi=120)
     plt.close(fig)
+
+
+# ===================================================================== dataset analysis plots
+
+def plot_counts_year(counts: pd.DataFrame, path: Path) -> None:
+    """Bar chart: papers per year."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    palette.apply_style()
+    fig, ax = plt.subplots(figsize=(12, 4))
+    ax.bar(counts["year"], counts["n"], color=palette.OLIVE, alpha=0.85, edgecolor=palette.INK, linewidth=0.5)
+    ax.set_xlabel("Year")
+    ax.set_ylabel("Number of Papers")
+    ax.set_title("Papers per Year")
+    ax.grid(axis="y", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+
+
+def plot_counts_domain(counts: pd.DataFrame, path: Path) -> None:
+    """Horizontal bar chart: papers per domain (top N, sorted descending)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    palette.apply_style()
+    fig, ax = plt.subplots(figsize=(8, max(5, len(counts) * 0.2)))
+    # Sort by count descending (already done in data_analysis.py)
+    y_pos = np.arange(len(counts))
+    ax.barh(y_pos, counts["n"], color=palette.SAGE, alpha=0.85, edgecolor=palette.INK, linewidth=0.5)
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(counts["domain"], fontsize=9)
+    ax.set_xlabel("Number of Papers")
+    ax.set_title("Papers per Domain (Top Domains)")
+    ax.invert_yaxis()
+    ax.grid(axis="x", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+
+
+def plot_year_domain_heatmap(pivot: pd.DataFrame, path: Path) -> None:
+    """Heatmap: years × domains."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    palette.apply_style()
+    # Limit size for readability
+    max_size = 25
+    if pivot.shape[0] > max_size or pivot.shape[1] > max_size:
+        pivot = pivot.iloc[:max_size, :max_size]
+    fig, ax = plt.subplots(figsize=(max(8, pivot.shape[1] * 0.5), max(6, pivot.shape[0] * 0.4)))
+    im = ax.imshow(pivot.values, cmap=palette.register_olive_seq(), aspect="auto")
+    ax.set_xticks(np.arange(pivot.shape[1]))
+    ax.set_yticks(np.arange(pivot.shape[0]))
+    ax.set_xticklabels(pivot.columns, rotation=45, ha="right", fontsize=8)
+    ax.set_yticklabels(pivot.index, fontsize=8)
+    ax.set_xlabel("Domain")
+    ax.set_ylabel("Year")
+    ax.set_title("Papers: Year × Domain Heatmap")
+    # Annotate if small enough
+    if pivot.shape[0] <= 25 and pivot.shape[1] <= 25:
+        for i in range(pivot.shape[0]):
+            for j in range(pivot.shape[1]):
+                val = pivot.iloc[i, j]
+                if val > 0:
+                    ax.text(j, i, str(int(val)), ha="center", va="center", fontsize=7, color="white")
+    cbar = plt.colorbar(im, ax=ax)
+    cbar.set_label("Count")
+    fig.tight_layout()
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+
+
+def plot_completeness(comp: pd.DataFrame, path: Path) -> None:
+    """Horizontal bars: completeness % per field."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    palette.apply_style()
+    fig, ax = plt.subplots(figsize=(10, len(comp) * 0.3))
+    y_pos = np.arange(len(comp))
+    colors = palette.ordinal_colors(len(comp))
+    ax.barh(y_pos, comp["pct_nonnull"], color=colors, alpha=0.85, edgecolor=palette.INK, linewidth=0.5)
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(comp["field"], fontsize=9)
+    ax.set_xlabel("Completeness (%)")
+    ax.set_title("Field Completeness")
+    ax.set_xlim(0, 105)
+    ax.invert_yaxis()
+    ax.grid(axis="x", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+
+
+def plot_completeness_by_year(pivot_pct: pd.DataFrame, path: Path) -> None:
+    """Heatmap: field × year completeness %."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    palette.apply_style()
+    fig, ax = plt.subplots(figsize=(max(10, pivot_pct.shape[1] * 0.4), max(8, pivot_pct.shape[0] * 0.3)))
+    im = ax.imshow(pivot_pct.values, cmap=palette.register_olive_seq(), aspect="auto", vmin=0, vmax=100)
+    ax.set_xticks(np.arange(pivot_pct.shape[1]))
+    ax.set_yticks(np.arange(pivot_pct.shape[0]))
+    ax.set_xticklabels(pivot_pct.columns, rotation=45, ha="right", fontsize=8)
+    ax.set_yticklabels(pivot_pct.index, fontsize=8)
+    ax.set_xlabel("Year")
+    ax.set_ylabel("Field")
+    ax.set_title("Field Completeness (%) by Year")
+    cbar = plt.colorbar(im, ax=ax)
+    cbar.set_label("Completeness (%)")
+    fig.tight_layout()
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+
+
+def plot_abstract_length_hist(lengths: pd.Series, path: Path) -> None:
+    """Histogram: abstract character lengths with median vline."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    palette.apply_style()
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.hist(lengths, bins=50, color=palette.SAND, alpha=0.75, edgecolor=palette.INK, linewidth=0.5)
+    median_val = lengths.median()
+    ax.axvline(median_val, color=palette.OLIVE, linestyle="--", linewidth=2, label=f"Median: {median_val:.0f} chars")
+    ax.set_xlabel("Abstract Length (characters)")
+    ax.set_ylabel("Frequency")
+    ax.set_title("Abstract Length Distribution")
+    ax.legend()
+    ax.grid(axis="y", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
