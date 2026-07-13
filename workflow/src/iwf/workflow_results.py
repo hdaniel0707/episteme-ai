@@ -25,6 +25,7 @@ import numpy as np  # noqa: E402
 
 from workflow.src.iwf import paths  # noqa: E402
 from workflow.src.iwf.config import WORKFLOWS  # noqa: E402
+from workflow.src.iwf.evaluation import palette  # noqa: E402
 
 PRIMARY_METRIC = {"reg": "spearman", "clf": "macro_f1"}
 
@@ -442,7 +443,7 @@ def _panel(ax, wf_names, comparison, metric, title):
         stds.append(m["std"])
     if labels:
         y = np.arange(len(labels))
-        ax.barh(y, means, xerr=stds, color="tab:green", alpha=0.8, capsize=4)
+        ax.barh(y, means, xerr=stds, color=palette.OLIVE, alpha=0.8, capsize=4)
         ax.set_yticks(y)
         ax.set_yticklabels(labels, fontsize=max(6, 10 - len(labels) // 4))
         ax.set_xlabel(metric)

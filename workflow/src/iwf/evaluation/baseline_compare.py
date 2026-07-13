@@ -26,6 +26,8 @@ import pandas as pd  # noqa: E402
 from scipy.stats import kendalltau, pearsonr, spearmanr  # noqa: E402
 from sklearn.metrics import cohen_kappa_score  # noqa: E402
 
+from . import palette
+
 OURS = "ours"
 
 
@@ -89,10 +91,14 @@ def plot_baseline_agreement(metrics: pd.DataFrame, n_classes: int, wf_name: str,
     x = np.arange(len(scorers))
     w = 0.38
     fig, ax = plt.subplots(figsize=(max(7, len(scorers) * 1.6), 5))
-    b1 = ax.bar(x - w / 2, metrics["exact_class_pct"], w, color="tab:blue",
+    palette.apply_style()
+
+    # Per-scorer colors: exact = full alpha, ±1 = reduced alpha
+    colors_exact = [palette.color_for(s) for s in scorers]
+    b1 = ax.bar(x - w / 2, metrics["exact_class_pct"], w, color=colors_exact,
                 alpha=0.85, label="exact same class")
-    b2 = ax.bar(x + w / 2, metrics["within1_class_pct"], w, color="tab:cyan",
-                alpha=0.85, label="within ±1 class")
+    b2 = ax.bar(x + w / 2, metrics["within1_class_pct"], w, color=colors_exact,
+                alpha=0.45, label="within ±1 class")
     for bars in (b1, b2):
         for rect in bars:
             ax.text(rect.get_x() + rect.get_width() / 2, rect.get_height() + 0.8,
@@ -134,7 +140,7 @@ def plot_baseline_correlation(scores: pd.DataFrame, class_labels: np.ndarray | N
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5.5),
                                    gridspec_kw={"width_ratios": [1.15, 1]})
-    im = ax1.imshow(corr, cmap="RdBu_r", vmin=-1, vmax=1)
+    im = ax1.imshow(corr, cmap=palette.DIVERGING_CMAP, vmin=-1, vmax=1)
     for i in range(len(cols)):
         for j in range(len(cols)):
             if np.isfinite(corr[i, j]):
@@ -165,7 +171,7 @@ def plot_baseline_correlation(scores: pd.DataFrame, class_labels: np.ndarray | N
             ax2.legend(title="true class", fontsize=8)
         else:
             ax2.scatter(sub.loc[m, OURS], sub.loc[m, best], s=14, alpha=0.55,
-                        color="tab:blue")
+                        color=palette.DUSK_BLUE)
         lim = [0, 1]
         ax2.plot(lim, lim, color="gray", ls="--", lw=1)
         ax2.set_xlabel(f"our model score ({wf_name})")
@@ -276,13 +282,13 @@ def baseline_leaderboard(results_dir: Path) -> None:
     x = np.arange(len(runs))
     w = 0.8 / max(1, len(scorers))
     fig, ax = plt.subplots(figsize=(max(8, len(runs) * 1.8), 5.5))
-    cmap = plt.get_cmap("tab10")
+    palette.apply_style()
     for si, scorer in enumerate(scorers):
         vals = [float(m.loc[m["scorer"] == scorer, "spearman"].iloc[0])
                 if (m["scorer"] == scorer).any() else np.nan
                 for m in runs.values()]
         ax.bar(x + (si - (len(scorers) - 1) / 2) * w, vals, w,
-               color=cmap(si % 10), alpha=0.85, label=scorer)
+               color=palette.color_for(scorer), alpha=0.85, label=scorer)
     ax.set_xticks(x)
     ax.set_xticklabels(list(runs), rotation=20, ha="right", fontsize=9)
     ax.set_ylabel("Spearman ρ with the true impact target (test split)")

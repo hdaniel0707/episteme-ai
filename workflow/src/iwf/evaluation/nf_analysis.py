@@ -27,6 +27,8 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 from scipy.stats import rankdata, spearmanr  # noqa: E402
 
+from . import palette
+
 CANDIDATE_COLS = ["target", "novelty", "feasibility", "naip", "specter2_knn",
                   "llm_judge", "venue_ais", "meta_h_index", "meta_venue_freq"]
 
@@ -75,7 +77,7 @@ def nf_correlation_matrix(df: pd.DataFrame, wf_name: str, path: Path) -> dict:
                 rho[i, j], pval[i, j] = r.correlation, r.pvalue
 
     fig, ax = plt.subplots(figsize=(1.1 * n + 3, 1.0 * n + 2))
-    im = ax.imshow(rho, cmap="RdBu_r", vmin=-1, vmax=1)
+    im = ax.imshow(rho, cmap=palette.DIVERGING_CMAP, vmin=-1, vmax=1)
     for i in range(n):
         for j in range(n):
             if np.isfinite(rho[i, j]):
@@ -131,7 +133,7 @@ def nf_binned_impact(df: pd.DataFrame, wf_name: str, path: Path,
             centers.append((b + 0.5) / n_bins)
             means.append(float(vals.mean()))
             cis.append(1.96 * float(vals.std()) / max(1.0, np.sqrt(len(vals))))
-        ax.errorbar(centers, means, yerr=cis, fmt="o-", color="tab:blue", capsize=3)
+        ax.errorbar(centers, means, yerr=cis, fmt="o-", color=palette.DUSK_BLUE, capsize=3)
         ax.set_xlabel(f"{feat} decile (0-1)")
         ax.set_ylabel("mean impact target (95% CI)")
         ax.set_title(f"Impact vs {feat}")

@@ -737,6 +737,61 @@ def t_auto_increment():
     assert d_other == paths.RESULTS_DIR / "other_wf_1"
 
 
+# ---------------------------------------------------------------- palette
+def t_palette_category_of() -> None:
+    from workflow.src.iwf.evaluation import palette
+
+    cases = [
+        ("target", "target"),
+        ("ours", "target"),
+        ("emb_clf", "emb_clf"),
+        ("emb_clf_3", "emb_clf"),
+        ("emb_reg_12", "emb_reg"),
+        ("tfm_clf", "tfm_clf"),
+        ("tfm_reg_5", "tfm_reg"),
+        ("emb_meta_1", "meta"),
+        ("emb_all_meta_2", "meta"),
+        ("naip", "external"),
+        ("naip_local", "external"),
+        ("specter2_knn", "external"),
+        ("llm_judge", "external"),
+        ("venue_ais", "external"),
+        ("forecite", "external"),
+        ("cited_potential", "external"),
+        ("unknown_model", "external"),
+    ]
+    for name, expected in cases:
+        result = palette.category_of(name)
+        assert result == expected, f"category_of('{name}') = '{result}', expected '{expected}'"
+
+
+def t_palette_colors() -> None:
+    from workflow.src.iwf.evaluation import palette
+
+    # Test color_for returns hex
+    for name in ["emb_clf", "emb_reg", "meta", "external", "target", "naip", "ours"]:
+        color = palette.color_for(name)
+        assert isinstance(color, str) and color.startswith("#"), \
+            f"color_for('{name}') = {color}, expected hex string"
+
+    # Test ordinal_colors
+    for n in [1, 3, 6, 10]:
+        colors = palette.ordinal_colors(n)
+        assert len(colors) == n, f"ordinal_colors({n}) returned {len(colors)} colors"
+        for c in colors:
+            assert isinstance(c, str) and c.startswith("#"), f"Got non-hex color: {c}"
+
+    # Test register_olive_seq
+    name = palette.register_olive_seq()
+    assert name == "olive_seq", f"Expected 'olive_seq', got '{name}'"
+
+    # Test constants are hex
+    for const in ["OLIVE", "SAGE", "SAND", "INK", "TERRACOTTA", "DUSK_BLUE", "MAUVE", "GOLD", "GRAY"]:
+        color = getattr(palette, const)
+        assert isinstance(color, str) and color.startswith("#"), \
+            f"{const} = {color}, expected hex string"
+
+
 def main() -> int:
     import shutil
     from workflow.src.iwf import paths
@@ -787,6 +842,8 @@ def _run_all() -> int:
         ("tfm_mock", t_tfm_mock),
         ("workflow_results_aggregate", t_workflow_results_aggregate),
         ("auto_increment", t_auto_increment),
+        ("palette_category_of", t_palette_category_of),
+        ("palette_colors", t_palette_colors),
     ]:
         check(name, fn)
 

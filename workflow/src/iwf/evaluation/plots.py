@@ -35,18 +35,16 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401,E402  (registers the '3d' projection)
 
+from . import palette
+
 MAX_UMAP_POINTS = 6000
-_ORDINAL_PALETTE = ["#d62728", "#ff7f0e", "#f2c744", "#2ca02c", "#1f77b4", "#9467bd"]
 
-# Correct / wrong colour pair used across correctness + error plots (gold=accurate,
-# purple=inaccurate — legible together and colour-blind safe).
-CORRECT_COLOR = "#E8B923"
-WRONG_COLOR = "#8E44AD"
-ERROR_COLORSCALE = [[0, "#F2C744"], [1, "#8E44AD"]]   # plotly: low error -> high error
-ERROR_CMAP = "plasma_r"                               # matplotlib equivalent
-
-# Train / val / test bar shades: one olive hue, darkest -> palest.
-SPLIT_SHADES = {"train": "#556B2F", "val": "#8FA35E", "test": "#D3DEB8"}
+# Re-export palette constants for backwards compatibility
+CORRECT_COLOR = palette.CORRECT_COLOR
+WRONG_COLOR = palette.WRONG_COLOR
+ERROR_COLORSCALE = palette.ERROR_COLORSCALE_PLOTLY
+ERROR_CMAP = palette.ERROR_CMAP_MATPLOTLIB
+SPLIT_SHADES = palette.SPLIT_SHADES
 
 # Weights below this fraction of a layer's max |weight| are not drawn (keeps the
 # NN-weight HTML responsive; near-zero connections add nothing but lag).
@@ -65,10 +63,8 @@ def umap_3d(Z: np.ndarray, seed: int = 42) -> np.ndarray:
 
 
 def _ordinal_color(idx: int, total: int) -> str:
-    if total <= len(_ORDINAL_PALETTE):
-        return _ORDINAL_PALETTE[idx]
-    pos = int(round(idx / max(total - 1, 1) * (len(_ORDINAL_PALETTE) - 1)))
-    return _ORDINAL_PALETTE[pos]
+    colors = palette.ordinal_colors(total)
+    return colors[min(idx, len(colors) - 1)]
 
 
 def _impact_sizes(values, lo=2.0, hi=6.5):
@@ -211,7 +207,7 @@ def _correctness_pct_bars(splits: list[str], correct: list[int], totals: list[in
     x = np.arange(len(splits))
     colors = [SPLIT_SHADES.get(sp, "#8FA35E") for sp in splits]
     fig, ax = plt.subplots(figsize=(6, 4.5))
-    ax.bar(x, pct, color=colors, edgecolor="#3d4a1f", linewidth=0.6)
+    ax.bar(x, pct, color=colors, edgecolor=palette.INK, linewidth=0.6)
     for i, p in enumerate(pct):
         ax.text(i, p + 2, f"{p:.2f}%", ha="center", fontsize=9)
     ax.set_xticks(x)
@@ -256,7 +252,7 @@ def mse_bars(split_preds: dict, agg: Path, wf_type: str) -> None:
             for sp in splits]
     colors = [SPLIT_SHADES.get(sp, "#8FA35E") for sp in splits]
     fig, ax = plt.subplots(figsize=(5, 4))
-    bars = ax.bar(splits, mses, color=colors, edgecolor="#3d4a1f", linewidth=0.6)
+    bars = ax.bar(splits, mses, color=colors, edgecolor=palette.INK, linewidth=0.6)
     for b, v in zip(bars, mses):
         ax.text(b.get_x() + b.get_width() / 2, v, f"{v:.4f}", ha="center", va="bottom",
                 fontsize=9)
@@ -284,16 +280,16 @@ def learning_curve(history: dict, agg: Path, wf_type: str, task: str) -> None:
         tl = [float(np.mean(sl[i * chunk:(i + 1) * chunk])) for i in range(epochs)]
     fig, ax1 = plt.subplots(figsize=(7, 4))
     if tl:
-        ax1.plot(range(1, len(tl) + 1), tl, color="tab:blue",
+        ax1.plot(range(1, len(tl) + 1), tl, color=palette.DUSK_BLUE,
                  label="Training loss (lower=better)")
     ax1.set_xlabel("Epoch")
-    ax1.set_ylabel("Training loss", color="tab:blue")
+    ax1.set_ylabel("Training loss", color=palette.DUSK_BLUE)
     ax2 = ax1.twinx()
     if vm:
-        ax2.plot(range(1, len(vm) + 1), vm, color="tab:green", label=metric_label)
+        ax2.plot(range(1, len(vm) + 1), vm, color=palette.OLIVE, label=metric_label)
         best = int(np.argmax(vm))
         ax2.axvline(best + 1, color="gray", ls=":", label=f"Best epoch ({best + 1})")
-    ax2.set_ylabel(metric_label, color="tab:green")
+    ax2.set_ylabel(metric_label, color=palette.OLIVE)
     # twinx legends don't combine automatically — merge the handles of both axes
     l1, lab1 = ax1.get_legend_handles_labels()
     l2, lab2 = ax2.get_legend_handles_labels()
@@ -313,7 +309,7 @@ def _render_confusion_matrix(cm: np.ndarray, class_names: list[str], seed_label:
     n = cm.shape[0]
     ticks = class_names if len(class_names) == n else [str(i) for i in range(n)]
     fig, ax = plt.subplots(figsize=(5, 4.5))
-    im = ax.imshow(cm, cmap="Blues")
+    im = ax.imshow(cm, cmap=palette.register_olive_seq())
     for i in range(cm.shape[0]):
         for j in range(cm.shape[1]):
             ax.text(j, i, int(cm[i, j]), ha="center", va="center", fontsize=8)
@@ -338,7 +334,7 @@ def plot_seed_spread_figures(wf_type: str, task: str, seeds: list[dict], agg: Pa
         rhos = [s.get("spearman") for s in seeds if isinstance(s.get("spearman"), (int, float))]
         if rhos:
             fig, ax = plt.subplots(figsize=(5, 4))
-            ax.hist(rhos, bins=min(10, max(3, len(rhos))), color="tab:blue", alpha=0.8)
+            ax.hist(rhos, bins=min(10, max(3, len(rhos))), color=palette.DUSK_BLUE, alpha=0.8)
             ax.axvline(float(np.mean(rhos)), color="red", ls="--",
                        label=f"mean={np.mean(rhos):.3f}")
             ax.set_xlabel("Spearman rho (test)")
@@ -378,11 +374,11 @@ def plot_seed_spread_figures(wf_type: str, task: str, seeds: list[dict], agg: Pa
                       else [f"class {j}" for j in range(width)])
             fig, ax = plt.subplots(figsize=(max(6, width * 1.1), 4))
             bp = ax.boxplot(cols, tick_labels=labels, patch_artist=True, showmeans=True,
-                            medianprops=dict(color="#3d4a1f"),
-                            meanprops=dict(marker="D", markerfacecolor="#556B2F",
+                            medianprops=dict(color=palette.INK),
+                            meanprops=dict(marker="D", markerfacecolor=palette.OLIVE,
                                            markeredgecolor="white", markersize=5))
             for patch in bp["boxes"]:
-                patch.set_facecolor("#C7D4A0")
+                patch.set_facecolor(palette.SAND)
                 patch.set_alpha(0.85)
             ax.set_ylabel("F1 Score (0-1)")
             ax.set_ylim(0, 1.02)
@@ -671,7 +667,7 @@ def _build_nn_html(weights: list[np.ndarray], layer_sizes: list[int], n_z: int) 
             y2 = neuron_y(li + 1, nj_d)
             lines_svg.append(
                 f'<line x1="{x1}" y1="{y1:.1f}" x2="{x2}" y2="{y2:.1f}" '
-                f'stroke="#00008B" stroke-opacity="{alpha:.3f}" stroke-width="0.6"/>'
+                f'stroke="{palette.INK}" stroke-opacity="{alpha:.3f}" stroke-width="0.6"/>'
             )
 
     circles_svg: list[str] = []
@@ -681,9 +677,9 @@ def _build_nn_html(weights: list[np.ndarray], layer_sizes: list[int], n_z: int) 
             x = xs[li]
             if li == 0:
                 n_meta_disp = display_n[0] - min(n_z, display_n[0])
-                fill = "#CC4444" if ni < max(n_meta_disp, 0) else "#4444CC"
+                fill = palette.TERRACOTTA if ni < max(n_meta_disp, 0) else palette.DUSK_BLUE
             else:
-                fill = "#333333"
+                fill = palette.GRAY
             circles_svg.append(f'<circle cx="{x}" cy="{y:.1f}" r="{RADIUS}" fill="{fill}"/>')
 
     labels_svg: list[str] = []
@@ -699,13 +695,13 @@ def _build_nn_html(weights: list[np.ndarray], layer_sizes: list[int], n_z: int) 
             y_mid_meta = (neuron_y(0, 0) + neuron_y(0, n_meta_disp - 1)) / 2
             labels_svg.append(
                 f'<text x="{xs[0] - RADIUS - 6}" y="{y_mid_meta + 4}" '
-                f'text-anchor="end" font-size="10" fill="#CC4444">metadata</text>'
+                f'text-anchor="end" font-size="10" fill="{palette.TERRACOTTA}">metadata</text>'
             )
         n_z_disp = min(n_z, display_n[0])
         y_mid_z = (neuron_y(0, n_meta_disp) + neuron_y(0, n_meta_disp + n_z_disp - 1)) / 2
         labels_svg.append(
             f'<text x="{xs[0] - RADIUS - 6}" y="{y_mid_z + 4}" '
-            f'text-anchor="end" font-size="10" fill="#4444CC">z-emb.</text>'
+            f'text-anchor="end" font-size="10" fill="{palette.DUSK_BLUE}">z-emb.</text>'
         )
 
     svg_body = "\n".join(lines_svg + circles_svg + labels_svg)
@@ -730,9 +726,9 @@ button{{padding:4px 10px;cursor:pointer}}
   <button onclick="zoom(0.67)">−</button>
   <button onclick="resetView()">Reset</button>
   <small>scroll=zoom &nbsp; drag=pan &nbsp;
-         <span style="color:#CC4444">&#9632;</span>metadata &nbsp;
-         <span style="color:#4444CC">&#9632;</span>z-embedding &nbsp;
-         <span style="color:#00008B">&#8212;</span>connection strength (opacity)</small>
+         <span style="color:{palette.TERRACOTTA}">&#9632;</span>metadata &nbsp;
+         <span style="color:{palette.DUSK_BLUE}">&#9632;</span>z-embedding &nbsp;
+         <span style="color:{palette.INK}">&#8212;</span>connection strength (opacity)</small>
 </div>
 <div id="container">
 <svg id="nn" viewBox="0 0 {total_w} {total_h}" width="{total_w}" height="{total_h}"
@@ -825,9 +821,9 @@ def _save_nn_png(weights: list[np.ndarray], layer_sizes: list[int],
             x, y = pos(li, ni)
             if li == 0:
                 n_meta_d = display_n[0] - min(n_z, display_n[0])
-                c = "#CC4444" if ni < max(n_meta_d, 0) else "#4444CC"
+                c = palette.TERRACOTTA if ni < max(n_meta_d, 0) else palette.DUSK_BLUE
             else:
-                c = "#333333"
+                c = palette.GRAY
             ax.plot(x, y, "o", ms=max(1.5, N_SP * 5), color=c, zorder=3)
 
     layer_names = ["Input"] + [f"H{i + 1}" for i in range(n_layers - 2)] + ["Output"]
@@ -838,9 +834,9 @@ def _save_nn_png(weights: list[np.ndarray], layer_sizes: list[int],
         n_meta_d = display_n[0] - min(n_z, display_n[0])
         if n_meta_d > 0:
             _, ym = pos(0, n_meta_d // 2)
-            ax.text(-0.15, ym, "meta", ha="right", va="center", fontsize=7, color="#CC4444")
+            ax.text(-0.15, ym, "meta", ha="right", va="center", fontsize=7, color=palette.TERRACOTTA)
         _, yz = pos(0, n_meta_d + min(n_z, display_n[0]) // 2)
-        ax.text(-0.15, yz, "z-emb", ha="right", va="center", fontsize=7, color="#4444CC")
+        ax.text(-0.15, yz, "z-emb", ha="right", va="center", fontsize=7, color=palette.DUSK_BLUE)
 
     ax.set_title("Neural Network Connection Strengths\n"
                  f"(dark blue=strong, transparent=weak  |  "
@@ -1091,7 +1087,7 @@ def plot_tfm_training_curve(history: dict, path: Path,
     best_epoch = int(history.get("best_epoch", 0) or 0)
     fig, ax = plt.subplots(figsize=(7, 4))
     if vm:
-        ax.plot(range(1, len(vm) + 1), vm, "o-", color="tab:green", label="val metric")
+        ax.plot(range(1, len(vm) + 1), vm, "o-", color=palette.OLIVE, label="val metric")
         if best_epoch:
             ax.axvline(best_epoch, color="gray", ls=":", label=f"best @ epoch {best_epoch}")
     ax.set_xlabel("epoch")
@@ -1122,13 +1118,13 @@ def plot_tfm_loss_lr(history: dict, path: Path,
     fig, ax1 = plt.subplots(figsize=(7, 4))
     if loss:
         sm = _smooth(loss)
-        ax1.plot(range(1, len(sm) + 1), sm, color="tab:blue", label="train loss (smoothed)")
+        ax1.plot(range(1, len(sm) + 1), sm, color=palette.DUSK_BLUE, label="train loss (smoothed)")
     ax1.set_xlabel("optimizer step")
-    ax1.set_ylabel("train loss", color="tab:blue")
+    ax1.set_ylabel("train loss", color=palette.DUSK_BLUE)
     ax2 = ax1.twinx()
     if lr:
-        ax2.plot(range(1, len(lr) + 1), lr, color="tab:orange", lw=1, label="learning rate")
-    ax2.set_ylabel("learning rate", color="tab:orange")
+        ax2.plot(range(1, len(lr) + 1), lr, color=palette.GOLD, lw=1, label="learning rate")
+    ax2.set_ylabel("learning rate", color=palette.GOLD)
     ax1.set_title(title)
     fig.tight_layout()
     fig.savefig(path, dpi=120)

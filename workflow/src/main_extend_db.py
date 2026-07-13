@@ -158,6 +158,7 @@ def report(conn: sqlite3.Connection, out_png: Path) -> None:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import pandas as pd
+    from workflow.src.iwf.evaluation import palette
 
     total = conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
     by_source = pd.read_sql(
@@ -174,11 +175,12 @@ def report(conn: sqlite3.Connection, out_png: Path) -> None:
           f"fwci: {with_fwci}")
     print(by_source.to_string(index=False))
 
+    palette.apply_style()
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4.5))
-    ax1.bar(by_source["source"], by_source["n"], color="tab:blue", alpha=0.85)
+    ax1.bar(by_source["source"], by_source["n"], color=palette.DUSK_BLUE, alpha=0.85)
     ax1.set_title("papers per source")
     ax1.tick_params(axis="x", rotation=20)
-    ax2.bar(by_year["year"], by_year["n"], color="tab:green", alpha=0.85)
+    ax2.bar(by_year["year"], by_year["n"], color=palette.OLIVE, alpha=0.85)
     ax2.set_title("papers per year")
     fig.suptitle(f"extended.db — {total} papers")
     fig.tight_layout()
