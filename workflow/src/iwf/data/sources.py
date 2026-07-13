@@ -41,8 +41,11 @@ def resolve_db_path() -> Path:
     """The SQLite DB to read (see module docstring for the selection order)."""
     name = config.get_str("EPAI_DB", "")
     if name:
-        if name.strip().lower() == "extended":
+        name_lower = name.strip().lower()
+        if name_lower == "extended":
             return paths.SQL_DIR / "extended.db"
+        if name_lower == "training":
+            return paths.SQL_DIR / "training.db"
         p = Path(name)
         if not p.is_absolute():
             p = paths.EPAI_SQL_DIR / name

@@ -88,6 +88,10 @@ CREATE INDEX IF NOT EXISTS idx_papers_source ON papers(source);
 """
 
 
+def raw_db_path() -> Path:
+    return paths.SQL_DIR / "raw.db"
+
+
 def extended_db_path() -> Path:
     return paths.SQL_DIR / "extended.db"
 
