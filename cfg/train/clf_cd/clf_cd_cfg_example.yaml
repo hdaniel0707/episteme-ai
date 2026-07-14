@@ -1,0 +1,44 @@
+# Cross-domain (transfer) classification experiment.
+#
+# Every dataset below is trained on in turn and evaluated on ALL of them,
+# producing a source x target matrix:
+#   diagonal     -> in-domain, held-out grouped test split
+#   off-diagonal -> transfer: the model never saw this corpus / this generator
+#
+# alg_id: unique name for this experiment — determines the output directory under
+# results/clf_cd/<experiment_id>/<alg_id>/
+alg_id: "A1"
+alg_label: "name_of_exp"
+
+seed: 42
+
+data:
+  # Labels are binarised to human vs machine: `human_label` -> 0, every other
+  # class -> 1. The corpora do not agree on generator names (`gpt` here,
+  # `gpt_plain` there), so only this binary view is comparable across them.
+  human_label: "human"
+
+  # Column whose rows must stay in the SAME split. In the Ghostbuster corpora the
+  # human original and every LLM rewrite of a source document share one `id`.
+  # It also guards transfer: `essay` and `essay_gpt54mini` are built from the
+  # same human sources and share their ids, so target rows whose group was seen
+  # during training are excluded from the evaluation (and the count is reported).
+  group_col: "id"
+
+  datasets:
+    - name: "essay"                                     # short key used in the matrix
+      label: "Essay"                                    # optional, shown on the figures
+      parquet_path: "data/parquet/essay_binox0.parquet" # relative to the project root
+      drop_classes: []                                  # e.g. ["claude", "gpt_prompt1"]
+    - name: "essay_gpt54mini"
+      label: "Essay (gpt54mini)"
+      parquet_path: "data/parquet/essay_gpt54mini_binox0.parquet"
+      drop_classes: []
+
+features:
+  - emb_specter2
+
+model:
+  ml_alg: "logistic"  # gradient_boosting | logistic | svm | mlp
+  n_runs: 3
+  test_size: 0.30     # held-out fraction; used for the in-domain diagonal

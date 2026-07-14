@@ -11,6 +11,7 @@ todo.md
 /cfg/train/repr/hd
 /cfg/train/clf/hd
 /cfg/train/clf/hd2
+/cfg/train/clf_cd/hd2
 
 *.egg-info/
 dist/

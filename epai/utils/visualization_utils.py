@@ -884,6 +884,195 @@ def plot_clf_results(exp_dir: Path, show_random: bool = True) -> None:
 
 
 ########################################################################
+# TRAIN - CROSS-DOMAIN CLASSIFICATION
+########################################################################
+
+# Chance level of the binarised human-vs-machine problem. Both classes are
+# balanced, so 0.50 is the meaningful midpoint every figure is anchored to.
+CD_CHANCE = 0.5
+
+
+def _cd_matrix(summary: dict, names: list[str], key: str) -> np.ndarray:
+    """Source x target matrix of one metric; rows = trained on, cols = tested on."""
+    return np.array(
+        [[summary[s][t][key] for t in names] for s in names], dtype=float
+    )
+
+
+def _plot_cd_matrix(
+    ax,
+    mat: np.ndarray,
+    std: np.ndarray,
+    counts: np.ndarray,
+    labels: list[str],
+    title: str,
+    cbar_label: str,
+    fig,
+) -> None:
+    """One annotated source x target heatmap.
+
+    Diverging map anchored at chance: red = below chance, white = chance,
+    blue = above. The in-domain diagonal is boxed, because those cells answer a
+    different question (held-out same-corpus) than the off-diagonal ones.
+    """
+    n = len(labels)
+    im = ax.imshow(mat, vmin=0.0, vmax=1.0, cmap="RdBu")
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label(cbar_label)
+    cbar.ax.axhline(CD_CHANCE, color="black", linewidth=1.2, linestyle="--")
+
+    ax.set_xticks(range(n))
+    ax.set_yticks(range(n))
+    ax.set_xticklabels(labels, rotation=35, ha="right")
+    ax.set_yticklabels(labels)
+    ax.set_xlabel("TESTED ON  (test set)", fontweight="bold", labelpad=10)
+    ax.set_ylabel("TRAINED ON  (train set)", fontweight="bold", labelpad=10)
+    ax.set_title(title, pad=12)
+
+    # 2px surface gap between cells so adjacent fills never touch.
+    ax.set_xticks(np.arange(-0.5, n, 1), minor=True)
+    ax.set_yticks(np.arange(-0.5, n, 1), minor=True)
+    ax.grid(which="minor", color="white", linewidth=2)
+    ax.tick_params(which="minor", length=0)
+
+    for i in range(n):
+        for j in range(n):
+            # Ink stays readable on both poles of the diverging ramp.
+            strong = abs(mat[i, j] - CD_CHANCE) > 0.32
+            color = "white" if strong else "black"
+            ax.text(
+                j,
+                i,
+                f"{mat[i, j]*100:.1f}\n±{std[i, j]*100:.1f}\nn={int(counts[i, j])}",
+                ha="center",
+                va="center",
+                fontsize=8,
+                linespacing=1.4,
+                color=color,
+            )
+        ax.add_patch(
+            plt.Rectangle(
+                (i - 0.5, i - 0.5), 1, 1, fill=False, edgecolor="black", linewidth=2.5
+            )
+        )
+
+
+def _save_clf_cd_figures(out_dir: Path, payload: dict) -> None:
+    """Save the transfer matrices and the in-domain vs transfer summary bars."""
+    names: list[str] = payload["dataset_names"]
+    label_of: dict = payload.get("dataset_labels", {})
+    labels = [label_of.get(n, n) for n in names]
+    summary = payload["summary"]
+    cfg = payload["config"]
+    alg_label = payload.get("alg_label", payload.get("alg_id", out_dir.name))
+
+    n_runs = cfg["model"]["n_runs"]
+    subtitle = (
+        f"{cfg['model']['ml_alg']} · {', '.join(cfg['features'])} · "
+        f"{n_runs} seeds · grouped by {cfg['data']['group_col']!r} · "
+        f"chance = {CD_CHANCE*100:.0f}%"
+    )
+
+    acc = _cd_matrix(summary, names, "accuracy_mean")
+    acc_std = _cd_matrix(summary, names, "accuracy_std")
+    f1 = _cd_matrix(summary, names, "macro_f1_mean")
+    f1_std = _cd_matrix(summary, names, "macro_f1_std")
+    counts = _cd_matrix(summary, names, "n")
+
+    size = max(7.0, 1.6 * len(names) + 3.0)
+
+    # Figure 1: accuracy matrix.
+    fig, ax = plt.subplots(figsize=(size, size * 0.85))
+    _plot_cd_matrix(
+        ax, acc, acc_std, counts, labels,
+        f"{alg_label} — cross-domain accuracy (%)\n{subtitle}",
+        "Accuracy (dashed = chance)", fig,
+    )
+    fig.text(
+        0.01, 0.01,
+        "Boxed diagonal = in-domain (held-out grouped test split of the SAME corpus). "
+        "Off-diagonal = transfer to an unseen corpus.\n"
+        "Cells show mean ± std over seeds; n = test rows. Target rows whose group was "
+        "seen in training are excluded.",
+        fontsize=7.5, color="dimgray",
+    )
+    fig.tight_layout(rect=(0, 0.06, 1, 1))
+    fig.savefig(out_dir / "cross_domain_accuracy.png", dpi=150)
+    plt.close(fig)
+
+    # Figure 2: macro-F1 matrix — accuracy alone hides a model that predicts one
+    # class on an unseen corpus.
+    fig, ax = plt.subplots(figsize=(size, size * 0.85))
+    _plot_cd_matrix(
+        ax, f1, f1_std, counts, labels,
+        f"{alg_label} — cross-domain macro F1 (%)\n{subtitle}",
+        "Macro F1 (dashed = chance)", fig,
+    )
+    fig.tight_layout(rect=(0, 0.03, 1, 1))
+    fig.savefig(out_dir / "cross_domain_macro_f1.png", dpi=150)
+    plt.close(fig)
+
+    # Figure 3: in-domain vs transfer, per train set and per test set.
+    diag = np.diag(acc)
+    off_mask = ~np.eye(len(names), dtype=bool)
+    out_mean = np.array(
+        [acc[i][off_mask[i]].mean() for i in range(len(names))]
+    )  # trained here, tested elsewhere
+    in_mean = np.array(
+        [acc[:, j][off_mask[:, j]].mean() for j in range(len(names))]
+    )  # trained elsewhere, tested here
+
+    fig, axes = plt.subplots(1, 2, figsize=(max(11.0, 2.0 * len(names) + 6), 5.2))
+    x = np.arange(len(names))
+    w = 0.38
+
+    b1 = axes[0].bar(x - w / 2, diag, w, label="in-domain (tested on itself)", color="steelblue")
+    b2 = axes[0].bar(x + w / 2, out_mean, w, label="transfer out (mean of other test sets)", color="orange")
+    axes[0].bar_label(b1, fmt="%.3f", fontsize=8, padding=2)
+    axes[0].bar_label(b2, fmt="%.3f", fontsize=8, padding=2)
+    axes[0].set_xticks(x)
+    axes[0].set_xticklabels(labels, rotation=25, ha="right")
+    axes[0].set_xlabel("TRAINED ON  (train set)", fontweight="bold")
+    axes[0].set_ylabel("Accuracy")
+    axes[0].set_title("Per train set: does it survive leaving its corpus?")
+
+    b3 = axes[1].bar(x, in_mean, w * 1.6, color="seagreen")
+    axes[1].bar_label(b3, fmt="%.3f", fontsize=8, padding=2)
+    axes[1].set_xticks(x)
+    axes[1].set_xticklabels(labels, rotation=25, ha="right")
+    axes[1].set_xlabel("TESTED ON  (test set)", fontweight="bold")
+    axes[1].set_ylabel("Accuracy")
+    axes[1].set_title("Per test set: transfer in (mean of models trained elsewhere)")
+
+    for ax in axes:
+        ax.axhline(CD_CHANCE, linestyle="--", color="red", linewidth=1.2, label="chance")
+        ax.set_ylim(0, 1.15)
+        ax.legend(fontsize=8, loc="upper right")
+
+    fig.suptitle(f"{alg_label} — in-domain vs transfer\n{subtitle}")
+    fig.tight_layout()
+    fig.savefig(out_dir / "cross_domain_summary.png", dpi=150)
+    plt.close(fig)
+
+
+def plot_clf_cd_results(exp_dir: Path) -> None:
+    """Plot every cross-domain config in an experiment directory."""
+    alg_dirs = sorted(
+        d for d in exp_dir.iterdir() if d.is_dir() and (d / "cross_domain.json").exists()
+    )
+    if not alg_dirs:
+        print(f"No cross-domain results found in {exp_dir}")
+        return
+
+    for alg_dir in alg_dirs:
+        with open(alg_dir / "cross_domain.json") as f:
+            payload = json.load(f)
+        _save_clf_cd_figures(alg_dir, payload)
+
+    print(f"Plots saved to: {exp_dir}")
+
+
+########################################################################
 # TRAIN - REGRESSION
 ########################################################################
 
