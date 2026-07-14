@@ -41,8 +41,8 @@ BASE_DIR = Path(__file__).parent.parent.parent
 DATA_DIR = BASE_DIR / "data"
 
 ######################################
-WP_DIR = DATA_DIR / "ghostbuster-data" / "wp"
-PARQUET_PATH = DATA_DIR / "parquet" / "wp.parquet"
+WP_DIR = DATA_DIR / "ghostbuster-data-gpt54" / "wp"
+PARQUET_PATH = DATA_DIR / "parquet" / "wp_gpt54mini.parquet"
 
 # Top-level directories that are not text generators.
 IGNORE_GENERATORS = {"prompts"}

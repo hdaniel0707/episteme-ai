@@ -18,7 +18,7 @@ BASE_DIR = Path(__file__).parent.parent.parent
 RESULTS_DIR = BASE_DIR / "results" / "clf"
 
 ### INPUTS ###############################
-CFG_DIR = BASE_DIR / "cfg" / "train" / "clf" / "hd" / "wp2"
+CFG_DIR = BASE_DIR / "cfg" / "train" / "clf" / "hd2"
 ##########################################
 
 

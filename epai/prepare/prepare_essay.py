@@ -42,8 +42,8 @@ BASE_DIR = Path(__file__).parent.parent.parent
 DATA_DIR = BASE_DIR / "data"
 
 ######################################
-ESSAY_DIR = DATA_DIR / "ghostbuster-data" / "essay"
-PARQUET_PATH = DATA_DIR / "parquet" / "essay.parquet"
+ESSAY_DIR = DATA_DIR / "ghostbuster-data-gpt54" / "essay"
+PARQUET_PATH = DATA_DIR / "parquet" / "essay_gpt54mini.parquet"
 
 # Top-level directories that are not text generators.
 IGNORE_GENERATORS = {"prompts"}

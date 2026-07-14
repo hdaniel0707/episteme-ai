@@ -22,7 +22,7 @@ DB_DIR = BASE_DIR / "data"
 
 
 ######################################
-DB_ID = "reuter"
+DB_ID = "essay2"
 PARQUET_PATH = DB_DIR / "parquet" / (DB_ID + ".parquet")
 FIG_DIR = BASE_DIR / "results" / "analyse_data" / DB_ID
 MODE_AI = True
