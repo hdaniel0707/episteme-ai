@@ -57,9 +57,9 @@ Usage:
         data/parquet/wp_binox0.parquet:gpt \
         data/parquet/essay_binox0.parquet:gpt \
         data/parquet/reuter_binox0.parquet:gpt \
-        data/parquet/wp2_binox0.parquet:gpt_plain \
-        data/parquet/essay2_binox0.parquet:gpt_plain \
-        data/parquet/reuter2_binox0.parquet:gpt_plain
+        data/parquet/wp_gpt54mini_binox0.parquet:gpt_plain \
+        data/parquet/essay_gpt54mini_binox0.parquet:gpt_plain \
+        data/parquet/reuter_gpt54mini_binox0.parquet:gpt_plain
 """
 
 from __future__ import annotations
