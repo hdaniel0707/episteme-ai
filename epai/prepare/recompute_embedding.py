@@ -26,6 +26,10 @@ Rows where the old value was Null, or had a different dimension, are counted
 separately since there is nothing meaningful to compare against.
 
 Run:
+    uv run python epai/prepare/recompute_embedding.py data/parquet/essay_binox0.parquet
+    uv run python epai/prepare/recompute_embedding.py data/parquet/reuter_binox0.parquet
+    uv run python epai/prepare/recompute_embedding.py data/parquet/wp_binox0.parquet
+
     uv run python epai/prepare/recompute_embedding.py data/parquet/essay_gpt54mini_binox0.parquet
     uv run python epai/prepare/recompute_embedding.py data/parquet/reuter_gpt54mini_binox0.parquet
     uv run python epai/prepare/recompute_embedding.py data/parquet/wp_gpt54mini_binox0.parquet
