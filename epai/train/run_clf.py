@@ -11,7 +11,12 @@ from sklearn.preprocessing import StandardScaler
 
 from epai.utils.config_utils import collect_configs, load_config
 from epai.utils.parquet_utils import load_parquet
-from epai.utils.train_utils import build_clf_features, build_clf_model
+from epai.utils.train_utils import (
+    CLF_TARGET_COL,
+    build_clf_features,
+    build_clf_model,
+    drop_missing_rows,
+)
 from epai.utils.visualization_utils import plot_clf_results
 
 BASE_DIR = Path(__file__).parent.parent.parent
@@ -47,6 +52,7 @@ def run_classification() -> str:
         base_seed: int = cfg["seed"]
         parquet_path = BASE_DIR / cfg["data"]["parquet_path"]
         df = load_parquet(parquet_path)
+        df = drop_missing_rows(df, list(cfg["features"]) + [CLF_TARGET_COL])
 
         drop_classes = cfg["data"].get("drop_classes", [])
         X, y, le = build_clf_features(df, cfg["features"], drop_classes)

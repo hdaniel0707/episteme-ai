@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 from pathlib import Path
 from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.linear_model import LinearRegression
@@ -9,6 +10,61 @@ from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.svm import SVR
 from tqdm import tqdm
 from epai.train.autoencoder import AERegressor
+from epai.utils.config_utils import YELLOW, RESET
+
+CLF_TARGET_COL = "generated_by"
+
+
+def is_missing(value) -> bool:
+    """True if a cell is null, empty, or holds a non-finite (NaN/inf) vector entry."""
+    if value is None:
+        return True
+    if isinstance(value, (list, tuple, np.ndarray, pd.Series)):
+        try:
+            arr = np.asarray(value, dtype=np.float64)
+        except (TypeError, ValueError):
+            return True
+        return arr.size == 0 or not np.isfinite(arr).all()
+    if isinstance(value, str):
+        return not value.strip()
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def drop_missing_rows(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    """Return a copy of df without rows missing any of `columns`.
+
+    Operates purely in memory: the parquet file on disk is never rewritten.
+    """
+    missing_cols = [c for c in columns if c not in df.columns]
+    if missing_cols:
+        raise KeyError(f"Columns not found in dataframe: {missing_cols}")
+
+    mask = pd.Series(False, index=df.index)
+    per_col: dict[str, int] = {}
+    for col in columns:
+        col_mask = df[col].map(is_missing)
+        n_col = int(col_mask.sum())
+        if n_col:
+            per_col[col] = n_col
+        mask |= col_mask
+
+    n_dropped = int(mask.sum())
+    if n_dropped:
+        detail = ", ".join(f"{c}={n}" for c, n in per_col.items())
+        tqdm.write(
+            f"{YELLOW}  ⚠️  Skipping {n_dropped}/{len(df)} rows with missing values "
+            f"({detail}). The parquet file is left untouched.{RESET}"
+        )
+
+    clean = df[~mask].reset_index(drop=True)
+    if clean.empty:
+        raise ValueError(
+            f"All {len(df)} rows were dropped because of missing values in {columns}."
+        )
+    return clean
 
 
 def build_features(df, features: list[str]) -> tuple[np.ndarray, np.ndarray, list[str]]:
@@ -55,11 +111,11 @@ def build_clf_features(
     df, features: list[str], drop_classes: list[str] | None = None
 ) -> tuple[np.ndarray, np.ndarray, LabelEncoder]:
     if drop_classes:
-        df = df[~df["generated_by"].isin(drop_classes)].reset_index(drop=True)
+        df = df[~df[CLF_TARGET_COL].isin(drop_classes)].reset_index(drop=True)
         tqdm.write(f"  Dropped classes: {drop_classes}")
     X = np.array(df[features[0]].tolist(), dtype=np.float32)
     le = LabelEncoder()
-    y = le.fit_transform(df["generated_by"].tolist())
+    y = le.fit_transform(df[CLF_TARGET_COL].tolist())
     return X, y, le
 
 
