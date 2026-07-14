@@ -3,19 +3,20 @@ from pathlib import Path
 import shutil
 import json
 import joblib
+import numpy as np
 from tqdm import tqdm
 
 from sklearn.metrics import accuracy_score, classification_report
-from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 
-from epai.utils.config_utils import collect_configs, load_config
+from epai.utils.config_utils import RESET, YELLOW, collect_configs, load_config
 from epai.utils.parquet_utils import load_parquet
 from epai.utils.train_utils import (
     CLF_TARGET_COL,
     build_clf_features,
     build_clf_model,
     drop_missing_rows,
+    split_train_val_test,
 )
 from epai.utils.visualization_utils import plot_clf_results
 
@@ -52,14 +53,35 @@ def run_classification() -> str:
         base_seed: int = cfg["seed"]
         parquet_path = BASE_DIR / cfg["data"]["parquet_path"]
         df = load_parquet(parquet_path)
-        df = drop_missing_rows(df, list(cfg["features"]) + [CLF_TARGET_COL])
+
+        # Rows sharing a group_col value (for the Ghostbuster corpora: the human
+        # original and every LLM rewrite of the same source document share one
+        # `id`) must land in the same split, or the test set contains rewrites of
+        # documents the model already saw. Set data.group_col: null to opt out.
+        group_col = cfg["data"].get("group_col")
+        required = list(cfg["features"]) + [CLF_TARGET_COL]
+        if group_col:
+            required.append(group_col)
+        df = drop_missing_rows(df, required, group_col=group_col)
 
         drop_classes = cfg["data"].get("drop_classes", [])
-        X, y, le = build_clf_features(df, cfg["features"], drop_classes)
+        X, y, le, groups, feature_labels = build_clf_features(
+            df, cfg["features"], drop_classes, group_col
+        )
 
         tqdm.write(f"  {'-'*30}")
-        tqdm.write(f"  FEATURES: {cfg['features']}")
+        tqdm.write(f"  FEATURES: {cfg['features']} ({X.shape[1]} dims)")
         tqdm.write(f"  CLASSES: {le.classes_.tolist()}")
+        if groups is None:
+            tqdm.write(
+                f"{YELLOW}  SPLIT: random (ungrouped) — paraphrase pairs may "
+                f"straddle train/test{RESET}"
+            )
+        else:
+            tqdm.write(
+                f"  SPLIT: grouped by {group_col!r} "
+                f"({len(set(groups))} groups over {len(y)} rows)"
+            )
         tqdm.write(f"{'='*60}")
 
         with open(ALG_DIR / "label_mapping.json", "w") as f:
@@ -75,11 +97,8 @@ def run_classification() -> str:
             SEED_MODEL_DIR.mkdir(parents=True, exist_ok=True)
             SEED_RES_DIR.mkdir(parents=True, exist_ok=True)
 
-            X_train, X_tmp, y_train, y_tmp = train_test_split(
-                X, y, test_size=0.30, random_state=base_seed + i, stratify=y
-            )
-            X_val, X_test, y_val, y_test = train_test_split(
-                X_tmp, y_tmp, test_size=0.50, random_state=base_seed + i, stratify=y_tmp
+            X_train, X_val, X_test, y_train, y_val, y_test = split_train_val_test(
+                X, y, seed=base_seed + i, groups=groups
             )
 
             scaler = StandardScaler()
@@ -90,7 +109,26 @@ def run_classification() -> str:
             model = build_clf_model(ml_alg, base_seed + i)
             model.fit(X_train, y_train)
 
-            results: dict = {}
+            results: dict = {
+                "split_scheme": f"grouped:{group_col}" if groups is not None else "random",
+                "split_sizes": {
+                    "train": int(len(y_train)),
+                    "val": int(len(y_val)),
+                    "test": int(len(y_test)),
+                },
+                # The grouped split cannot stratify — check these stay balanced.
+                "class_balance": {
+                    split: {
+                        le.classes_[c]: int(n)
+                        for c, n in zip(*np.unique(y_s, return_counts=True))
+                    }
+                    for split, y_s in [
+                        ("train", y_train),
+                        ("val", y_val),
+                        ("test", y_test),
+                    ]
+                },
+            }
             for split, X_s, y_s in [
                 ("train", X_train, y_train),
                 ("val", X_val, y_val),
