@@ -55,7 +55,8 @@ target_kind: field_year_percentile
 # 2. MODEL & TRAINING  (the impact-predictor head; ignored by tfm_* workflows)
 # ---------------------------------------------------------------------------
 model_arch: mlp        # mlp | resmlp | ft_transformer
-hidden: [256, 128]     # hidden sizes (mlp) / width+depth (resmlp: hidden[0]=width, len=blocks)
+hidden: [256, 128]     # hidden sizes per layer (mlp AND resmlp honor the full list;
+                       # resmlp: one residual block per entry, projections between widths)
 activation: gelu       # relu | gelu | tanh | htanh | sigmoid | leaky_relu | elu | silu | mish
 dropout: 0.5
 lr: 0.0005
@@ -110,13 +111,19 @@ novelty_kind: spherical  # spherical (geodesic kNN distance, percentile 0-1) | c
 novelty_k: 10            # kNN size for the novelty/feasibility geometry
 # Frozen external baseline scorers, fused as features AND dumped to
 # results/<run>/baselines.parquet for the comparison plots (phase 7):
-#   naip | specter2_knn | llm_judge | venue_ais | forecite | cited_potential
+#   naip | naip_local | specter2_knn | llm_judge | venue_ais | forecite | cited_potential
 # llm_judge needs an API key (LLM_JUDGE_PROVIDER/MODEL in .env.workflow, key in .env);
-# venue_ais needs the UEFISCDI xlsx lists under workflow/data/uefiscdi/.
-# specter2_knn requires emb_specter2 column (SPECTER2 embeddings) in the papers table.
-# Recommended for emb_meta_* runs: [naip, specter2_knn, llm_judge, venue_ais]
-# Default: empty (disable all baselines; enable selectively as they become available)
-external_impact: []
+# venue_ais needs the UEFISCDI xlsx/pdf lists under workflow/data/;
+# naip_local needs weights (python -m workflow.src.setup_external_models) + peft;
+# every scorer degrades to None gracefully when unavailable, runs never crash.
+# Default ON: the two fully-offline scorers (cached per paper_id, cheap after run 1).
+external_impact: [specter2_knn, venue_ais]
+
+# Benchmark suites evaluated for every run at phase 7 (aggregate/benchmarks/):
+#   holdout_extended  local, built by `main_extend_db extend` — no network needed
+#   naip12k           downloaded NAIP dataset (evaluation.benchmarks.download_benchmark)
+#   sciimpact_pairs | dblp_v14_sample   optional, download first
+benchmarks: [holdout_extended]
 
 # ---------------------------------------------------------------------------
 # 6. DATA & SPLIT  (rarely changed — changing these invalidates cached parquets)
@@ -177,18 +184,21 @@ fetch_domains: []
 # -----------------------------------------------------------------------------
 
 runs:
-  # 1-4: specter2 embedding — encoder x head-architecture grid
-  # Deeper (gradual decrease)
-  - name: specter2_ae_mlp_deep
-    workflow: [emb_clf, emb_reg]
-    embedder: specter2
-    encoder_kind: autoencoder
-    model_arch: mlp
-    hidden: [1024,896,768,640,512,384,256,192,128,96,64,32]
-    patience: 40
+  # ==========================================================================
+  # FINAL 8-HOUR QUEUE (sized for one 16 GB-VRAM GPU, ~4-6 h expected + margin).
+  # Data collection runs SEPARATELY BEFORE this queue:
+  #   1. python -m workflow.src.main_extend_db bootstrap --target-rows 100000
+  #   2. python -m workflow.src.main_extend_db extend
+  #      (builds extended.db -> training.db -> holdout benchmark; set
+  #       EPAI_DB=training in .env.workflow afterwards)
+  #   3. optional: python -m workflow.src.setup_external_models   (NAIP weights)
+  #   4. optional: download naip12k benchmark for the flagship entry
+  # Every run gets baselines (specter2_knn, venue_ais) + the holdout benchmark
+  # automatically from the top-level keys above.
+  # ==========================================================================
 
-  # Medium-deep
-  - name: specter2_ae_mlp_medium
+  # -- 1-6: specter2 grid — encoder {autoencoder, identity} x depth {deep, mid, shallow}
+  - name: specter2_ae_mlp_deep
     workflow: [emb_clf, emb_reg]
     embedder: specter2
     encoder_kind: autoencoder
@@ -196,7 +206,6 @@ runs:
     hidden: [1024,768,512,384,256,192,128,64,32]
     patience: 40
 
-  # Original
   - name: specter2_ae_mlp
     workflow: [emb_clf, emb_reg]
     embedder: specter2
@@ -205,17 +214,7 @@ runs:
     hidden: [1024,512,256,128,64,32]
     patience: 40
 
-  # Shallower
   - name: specter2_ae_mlp_shallow
-    workflow: [emb_clf, emb_reg]
-    embedder: specter2
-    encoder_kind: autoencoder
-    model_arch: mlp
-    hidden: [1024,512,128,32]
-    patience: 40
-
-  # Very shallow
-  - name: specter2_ae_mlp_very_shallow
     workflow: [emb_clf, emb_reg]
     embedder: specter2
     encoder_kind: autoencoder
@@ -223,17 +222,7 @@ runs:
     hidden: [1024,256,32]
     patience: 40
 
-  # Deeper (gradual decrease)
   - name: specter2_id_mlp_deep
-    workflow: [emb_clf, emb_reg]
-    embedder: specter2
-    encoder_kind: identity
-    model_arch: mlp
-    hidden: [1024,896,768,640,512,384,256,192,128,96,64,32]
-    patience: 40
-
-  # Medium-deep
-  - name: specter2_id_mlp_medium
     workflow: [emb_clf, emb_reg]
     embedder: specter2
     encoder_kind: identity
@@ -241,7 +230,6 @@ runs:
     hidden: [1024,768,512,384,256,192,128,64,32]
     patience: 40
 
-  # Original
   - name: specter2_id_mlp
     workflow: [emb_clf, emb_reg]
     embedder: specter2
@@ -250,17 +238,7 @@ runs:
     hidden: [1024,512,256,128,64,32]
     patience: 40
 
-  # Shallower
   - name: specter2_id_mlp_shallow
-    workflow: [emb_clf, emb_reg]
-    embedder: specter2
-    encoder_kind: identity
-    model_arch: mlp
-    hidden: [1024,512,128,32]
-    patience: 40
-
-  # Very shallow
-  - name: specter2_id_mlp_very_shallow
     workflow: [emb_clf, emb_reg]
     embedder: specter2
     encoder_kind: identity
@@ -268,25 +246,7 @@ runs:
     hidden: [1024,256,32]
     patience: 40
 
-  # Deeper (gradual decrease)
-  - name: specter2_ae_resmlp_deep
-    workflow: [emb_clf, emb_reg]
-    embedder: specter2
-    encoder_kind: autoencoder
-    model_arch: resmlp
-    hidden: [1024,896,768,640,512,384,256,192,128,96,64,32]
-    patience: 40
-
-  # Medium-deep
-  - name: specter2_ae_resmlp_medium
-    workflow: [emb_clf, emb_reg]
-    embedder: specter2
-    encoder_kind: autoencoder
-    model_arch: resmlp
-    hidden: [1024,768,512,384,256,192,128,64,32]
-    patience: 40
-
-  # Original
+  # -- 7-8: residual MLP (true shrinking pyramid since the resmlp fix)
   - name: specter2_ae_resmlp
     workflow: [emb_clf, emb_reg]
     embedder: specter2
@@ -295,43 +255,6 @@ runs:
     hidden: [1024,512,256,128,64,32]
     patience: 40
 
-  # Shallower
-  - name: specter2_ae_resmlp_shallow
-    workflow: [emb_clf, emb_reg]
-    embedder: specter2
-    encoder_kind: autoencoder
-    model_arch: resmlp
-    hidden: [1024,512,128,32]
-    patience: 40
-
-  # Very shallow
-  - name: specter2_ae_resmlp_very_shallow
-    workflow: [emb_clf, emb_reg]
-    embedder: specter2
-    encoder_kind: autoencoder
-    model_arch: resmlp
-    hidden: [1024,256,32]
-    patience: 40
-
-  # Deeper (gradual decrease)
-  - name: specter2_id_resmlp_deep
-    workflow: [emb_clf, emb_reg]
-    embedder: specter2
-    encoder_kind: identity
-    model_arch: resmlp
-    hidden: [1024,896,768,640,512,384,256,192,128,96,64,32]
-    patience: 40
-
-  # Medium-deep
-  - name: specter2_id_resmlp_medium
-    workflow: [emb_clf, emb_reg]
-    embedder: specter2
-    encoder_kind: identity
-    model_arch: resmlp
-    hidden: [1024,768,512,384,256,192,128,64,32]
-    patience: 40
-
-  # Original
   - name: specter2_id_resmlp
     workflow: [emb_clf, emb_reg]
     embedder: specter2
@@ -340,33 +263,7 @@ runs:
     hidden: [1024,512,256,128,64,32]
     patience: 40
 
-  # Shallower
-  - name: specter2_id_resmlp_shallow
-    workflow: [emb_clf, emb_reg]
-    embedder: specter2
-    encoder_kind: identity
-    model_arch: resmlp
-    hidden: [1024,512,128,32]
-    patience: 40
-
-  # Very shallow
-  - name: specter2_id_resmlp_very_shallow
-    workflow: [emb_clf, emb_reg]
-    embedder: specter2
-    encoder_kind: identity
-    model_arch: resmlp
-    hidden: [1024,256,32]
-    patience: 40
-
-  # 5-8: same grid with scibert embedding
-  - name: scibert_ae_mlp
-    workflow: [emb_clf, emb_reg]
-    embedder: scibert
-    encoder_kind: autoencoder
-    model_arch: mlp
-    hidden: [1024,512,256,128,64,32]
-    patience: 40
-
+  # -- 9-10: scibert embedding comparison
   - name: scibert_id_mlp
     workflow: [emb_clf, emb_reg]
     embedder: scibert
@@ -375,31 +272,25 @@ runs:
     hidden: [1024,512,256,128,64,32]
     patience: 40
 
-  - name: scibert_ae_resmlp
+  - name: scibert_ae_mlp
     workflow: [emb_clf, emb_reg]
     embedder: scibert
     encoder_kind: autoencoder
-    model_arch: resmlp
+    model_arch: mlp
     hidden: [1024,512,256,128,64,32]
     patience: 40
 
-  - name: scibert_id_resmlp
-    workflow: [emb_clf, emb_reg]
-    embedder: scibert
-    encoder_kind: identity
-    model_arch: resmlp
-    hidden: [1024,512,256,128,64,32]
-    patience: 40
-
-  # 9: fine-tune the SPECTER2 backbone directly on the text
+  # -- 11: fine-tune the SPECTER2 backbone on the text (the GPU-heavy entry).
+  #    max_len 512 = the model's positional-embedding limit (1024 would crash).
   - name: tfm_specter2ft
     workflow: [tfm_clf, tfm_reg]
     text_transformer_arch: specter2_ft
     text_transformer_freeze_layers: 10
-    text_transformer_max_len: 1024
-    text_transformer_epochs: 35
+    text_transformer_max_len: 512
+    text_transformer_epochs: 25
+    text_transformer_batch_size: 24
 
-  # 10: embedding + curated metadata features
+  # -- 12-13: metadata-fused and leakage-upper-bound variants
   - name: specter2_id_mlp_meta
     workflow: [emb_meta_clf, emb_meta_reg]
     embedder: specter2
@@ -407,10 +298,7 @@ runs:
     model_arch: mlp
     hidden: [1024,512,256,128,64,32]
     patience: 40
-    use_novelty: false
-    use_feasibility: false
 
-  # 11: ALL metadata incl. target inputs (intentional-leakage upper bound)
   - name: specter2_id_mlp_all_meta
     workflow: [emb_all_meta_clf, emb_all_meta_reg]
     embedder: specter2
@@ -419,45 +307,43 @@ runs:
     hidden: [512,128,32]
     patience: 40
 
-  # 12: Benchmark evaluation (Stage 5)
-  #     Evaluates trained model on external benchmarks; requires available_benchmarks()
-  #     Build benchmarks with: python -m workflow.src.main_extend_db
-  - name: specter2_id_mlp_benchmark
-    workflow: emb_clf
+  # -- 14: flagship benchmark entry — full external-model comparison. naip12k and
+  #    naip_local activate only when downloaded/installed; otherwise they skip.
+  - name: specter2_benchmark_flagship
+    workflow: [emb_clf, emb_reg]
     embedder: specter2
     encoder_kind: identity
     model_arch: mlp
     hidden: [1024,512,256,128,64,32]
     patience: 40
-    benchmarks: [holdout_extended, naip12k]  # benchmark names to evaluate on
-    external_impact: [naip, specter2_knn]     # external baseline scorers for comparison
+    benchmarks: [holdout_extended, naip12k]
+    external_impact: [naip_local, specter2_knn, venue_ais]
 
-  # 13: Leave-one-domain-out (LODO) validation (Stage 6)
-  #     Trains on all domains except one; tests on that domain alone.
-  #     domain_holdout must match a value from _get_domain() over your corpus —
-  #     for the current extended.db that is one of: Astronomy, Computer Science,
-  #     Sociology, Neuroscience, Physics, Materials Science, Earth Sciences,
-  #     Medicine, Chemistry, Ecology, Psychology, Biology, Economics,
-  #     Mathematics, Anthropology. Re-check after re-extending the corpus.
-  #     Creates cross-domain generalization matrix
-  - name: specter2_id_mlp_lodo_cs
-    workflow: emb_clf
+  # -- 15-17: leave-one-domain-out cross-domain validation (matrix in summary/).
+  #    domain_holdout must match a _get_domain() value of the current corpus.
+  - name: lodo_computer_science
+    workflow: emb_reg
     embedder: specter2
     encoder_kind: identity
     model_arch: mlp
     hidden: [1024,512,256,128,64,32]
     patience: 40
-    domain_holdout: Computer Science       # exclude CS from training; test on CS only
-    benchmarks: [holdout_extended]         # per-domain metrics written to aggregate/cross_domain/
+    domain_holdout: Computer Science
 
-  # 14: Combination — benchmarks + LODO (both Stage 5 and Stage 6)
-  - name: specter2_id_mlp_benchmark_lodo
-    workflow: emb_clf
+  - name: lodo_medicine
+    workflow: emb_reg
     embedder: specter2
     encoder_kind: identity
     model_arch: mlp
     hidden: [1024,512,256,128,64,32]
     patience: 40
     domain_holdout: Medicine
-    benchmarks: [holdout_extended, naip12k]
-    external_impact: [naip]
+
+  - name: lodo_physics
+    workflow: emb_reg
+    embedder: specter2
+    encoder_kind: identity
+    model_arch: mlp
+    hidden: [1024,512,256,128,64,32]
+    patience: 40
+    domain_holdout: Physics

@@ -121,7 +121,9 @@ def completeness_table(df: pd.DataFrame) -> pd.DataFrame:
 def completeness_by_year(df: pd.DataFrame) -> pd.DataFrame:
     """Completeness per field × year."""
     fields = COLUMNS_OF_INTEREST
-    year_groups = df.dropna(subset=["year"]).groupby(df["year"].astype(int))
+    with_year = df[pd.to_numeric(df["year"], errors="coerce").notna()]
+    year_groups = with_year.groupby(
+        pd.to_numeric(with_year["year"], errors="coerce").astype(int))
 
     rows_dict = {}
     for field in fields:
@@ -174,6 +176,92 @@ def quality_summary(df: pd.DataFrame) -> pd.DataFrame:
     }])
 
 
+def _training_mask(df: pd.DataFrame) -> pd.Series:
+    """Rows usable for training: title+abstract non-empty, year + citation_count set."""
+    return (
+        (df["title"].notna()) & (df["title"].astype(str).str.strip().ne("")) &
+        (df["abstract"].notna()) & (df["abstract"].astype(str).str.strip().ne("")) &
+        (df["year"].notna()) &
+        (df["citation_count"].notna())
+    )
+
+
+def source_productivity(df: pd.DataFrame) -> pd.DataFrame:
+    """Per data source (openalex, s2, crossref, arxiv, pdf, uefiscdi, …): how many
+    records it contributed and how many of those are usable for training — the
+    'which source was most productive' table."""
+    if "source" not in df.columns:
+        return pd.DataFrame(columns=["source", "n_total", "n_usable", "pct_usable"])
+    usable = _training_mask(df)
+    src = df["source"].fillna("unknown").astype(str).str.strip().replace("", "unknown")
+    out = (pd.DataFrame({"source": src, "usable": usable})
+           .groupby("source")
+           .agg(n_total=("usable", "size"), n_usable=("usable", "sum"))
+           .reset_index()
+           .sort_values("n_total", ascending=False))
+    out["n_usable"] = out["n_usable"].astype(int)
+    out["pct_usable"] = (100.0 * out["n_usable"] / out["n_total"].clip(lower=1)).round(1)
+    return out
+
+
+# numeric columns entering the correlation analysis (abstract_len derived on the fly)
+CORRELATION_COLUMNS = (
+    "year", "citation_count", "influential_citation_count", "fwci",
+    "citation_normalized_percentile", "venue_ais", "abstract_len",
+)
+
+
+def numeric_correlations(df: pd.DataFrame) -> pd.DataFrame:
+    """Pairwise Spearman correlation matrix of the numeric metadata columns
+    (plus derived abstract length). NaNs are pairwise-dropped by pandas."""
+    num = pd.DataFrame(index=df.index)
+    for col in CORRELATION_COLUMNS:
+        if col == "abstract_len":
+            num[col] = df["abstract"].astype(str).str.len().where(df["abstract"].notna())
+        elif col in df.columns:
+            num[col] = pd.to_numeric(df[col], errors="coerce")
+    num = num.dropna(axis=1, how="all")
+    if num.shape[1] < 2:
+        return pd.DataFrame()
+    return num.corr(method="spearman").round(3)
+
+
+def target_distribution(df: pd.DataFrame, min_refset: int = 30) -> pd.DataFrame:
+    """The training target (field_year_percentile) computed on the usable subset,
+    plus raw citation counts — the score-distribution inputs for the plots.
+
+    Returns one row per usable paper: target, citation_count, fwci (NaN allowed)."""
+    from workflow.src.iwf.targets import compute_target
+
+    sub = df[_training_mask(df)].reset_index(drop=True)
+    if sub.empty:
+        return pd.DataFrame(columns=["target", "citation_count", "fwci"])
+    try:
+        target = compute_target("field_year_percentile", sub, min_refset)
+    except Exception as e:
+        print(f"[analyse] target computation failed ({e}); score plots use citations only")
+        target = pd.Series(np.nan, index=sub.index)
+    return pd.DataFrame({
+        "target": pd.to_numeric(target, errors="coerce"),
+        "citation_count": pd.to_numeric(sub.get("citation_count"), errors="coerce"),
+        "fwci": pd.to_numeric(sub.get("fwci"), errors="coerce")
+        if "fwci" in sub.columns else np.nan,
+    })
+
+
+def _md_table(df: pd.DataFrame, index: bool = False) -> str:
+    """Pipe-style markdown table without the optional ``tabulate`` dependency."""
+    d = df.reset_index() if index else df
+    headers = [str(c) for c in d.columns]
+    lines = ["| " + " | ".join(headers) + " |",
+             "|" + "|".join(["---"] * len(headers)) + "|"]
+    for _, row in d.iterrows():
+        cells = ["" if pd.isna(v) else (f"{v:g}" if isinstance(v, float) else str(v))
+                 for v in row]
+        lines.append("| " + " | ".join(c.replace("|", "\\|") for c in cells) + " |")
+    return "\n".join(lines)
+
+
 def write_report_md(out_dir: Path, tables: dict[str, pd.DataFrame]) -> Path:
     """Write a markdown report with all the tables and summary stats."""
     out_dir = Path(out_dir)
@@ -199,15 +287,23 @@ def write_report_md(out_dir: Path, tables: dict[str, pd.DataFrame]) -> Path:
     # Tables sections
     lines.append("\n## Counts per Year")
     if "counts_year" in tables:
-        lines.append("\n" + tables["counts_year"].to_markdown(index=False))
+        lines.append("\n" + _md_table(tables["counts_year"]))
 
     lines.append("\n## Top 20 Domains")
     if "counts_domain" in tables:
-        lines.append("\n" + tables["counts_domain"].head(20).to_markdown(index=False))
+        lines.append("\n" + _md_table(tables["counts_domain"].head(20)))
 
     lines.append("\n## Completeness by Field")
     if "completeness" in tables:
-        lines.append("\n" + tables["completeness"].to_markdown(index=False))
+        lines.append("\n" + _md_table(tables["completeness"]))
+
+    lines.append("\n## Source Productivity (records contributed / usable for training)")
+    if "source_productivity" in tables and not tables["source_productivity"].empty:
+        lines.append("\n" + _md_table(tables["source_productivity"]))
+
+    lines.append("\n## Numeric Correlations (Spearman)")
+    if "correlations" in tables and not tables["correlations"].empty:
+        lines.append("\n" + _md_table(tables["correlations"], index=True))
 
     lines.append("\n\n---\n*End of report*\n")
     report_path.write_text("\n".join(lines), encoding="utf-8")
@@ -231,6 +327,9 @@ def analyse(db_path: Path, out_dir: Path) -> dict:
     completeness = completeness_table(df)
     completeness_y = completeness_by_year(df)
     quality = quality_summary(df)
+    sources = source_productivity(df)
+    correlations = numeric_correlations(df)
+    scores = target_distribution(df)
 
     tables = {
         "counts_year": counts_y,
@@ -239,6 +338,8 @@ def analyse(db_path: Path, out_dir: Path) -> dict:
         "completeness": completeness,
         "completeness_by_year": completeness_y,
         "quality_summary": quality,
+        "source_productivity": sources,
+        "correlations": correlations,
     }
 
     # Write CSVs
@@ -248,6 +349,9 @@ def analyse(db_path: Path, out_dir: Path) -> dict:
     counts_yd.to_csv(out_dir / "counts_year_domain.csv", index=False)
     completeness.to_csv(out_dir / "completeness.csv", index=False)
     quality.to_csv(out_dir / "quality_summary.csv", index=False)
+    sources.to_csv(out_dir / "counts_source.csv", index=False)
+    if not correlations.empty:
+        correlations.to_csv(out_dir / "correlations.csv")
 
     # Write report
     print("[analyse] writing report...")
@@ -262,6 +366,9 @@ def analyse(db_path: Path, out_dir: Path) -> dict:
         plot_completeness,
         plot_completeness_by_year,
         plot_abstract_length_hist,
+        plot_source_productivity,
+        plot_correlation_heatmap,
+        plot_score_distributions,
     )
 
     plot_counts_year(counts_y, out_dir / "papers_per_year.png")
@@ -269,6 +376,12 @@ def analyse(db_path: Path, out_dir: Path) -> dict:
     plot_year_domain_heatmap(counts_yd, out_dir / "year_domain_heatmap.png")
     plot_completeness(completeness, out_dir / "completeness_matrix.png")
     plot_completeness_by_year(completeness_y, out_dir / "completeness_by_year.png")
+    if not sources.empty:
+        plot_source_productivity(sources, out_dir / "source_productivity.png")
+    if not correlations.empty:
+        plot_correlation_heatmap(correlations, out_dir / "correlation_heatmap.png")
+    if not scores.empty:
+        plot_score_distributions(scores, out_dir / "score_distributions.png")
 
     # Abstract length histogram
     abstract_lens = df["abstract"].astype(str).str.len()

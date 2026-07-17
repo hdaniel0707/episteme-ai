@@ -4,7 +4,8 @@ Every block maps a flat feature vector [B, in_dim] -> [B, out_dim] raw outputs (
 clf; the regressor applies its own sigmoid). Three architectures are registered:
 
   * mlp            plain Linear stack (hidden sizes = ``hidden``)
-  * resmlp         pre-norm residual MLP: width = hidden[0], depth = len(hidden)
+  * resmlp         pre-norm residual MLP: one block per ``hidden`` entry at that width,
+                   LayerNorm+Linear transitions between differing widths
   * ft_transformer scalar features -> learned feature tokens + CLS -> TransformerEncoder
 """
 
@@ -47,19 +48,40 @@ class _ResBlock(nn.Module):
         return x + self.fc2(self.drop(self.act(self.fc1(self.norm(x)))))
 
 
+class _Transition(nn.Module):
+    """Width change between residual stages: LayerNorm -> Linear projection."""
+
+    def __init__(self, in_width: int, out_width: int):
+        super().__init__()
+        self.norm = nn.LayerNorm(in_width)
+        self.proj = nn.Linear(in_width, out_width)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.proj(self.norm(x))
+
+
 class _ResMLP(nn.Module):
-    """Pre-norm residual MLP; ``hidden[0]`` = width, ``len(hidden)`` = block count."""
+    """Pre-norm residual MLP honoring the FULL ``hidden`` width list: one residual
+    block per entry, with a LayerNorm+Linear transition wherever consecutive widths
+    differ. ``[1024, 512, 128]`` = a 1024-block, a 512-block and a 128-block joined
+    by projections; a constant list like ``[256, 256, 256]`` behaves like the
+    classic fixed-width ResMLP."""
 
     def __init__(self, in_dim: int, out_dim: int, hidden: list[int], dropout: float,
                  activation: str):
         super().__init__()
-        width = int(hidden[0]) if hidden else 128
-        blocks = max(1, len(hidden))
-        self.inp = nn.Linear(in_dim, width)
-        self.blocks = nn.ModuleList(
-            _ResBlock(width, dropout, activation) for _ in range(blocks))
-        self.norm = nn.LayerNorm(width)
-        self.out = nn.Linear(width, out_dim)
+        widths = [int(h) for h in hidden] or [128]
+        self.inp = nn.Linear(in_dim, widths[0])
+        stages: list[nn.Module] = []
+        prev = widths[0]
+        for w in widths:
+            if w != prev:
+                stages.append(_Transition(prev, w))
+            stages.append(_ResBlock(w, dropout, activation))
+            prev = w
+        self.blocks = nn.ModuleList(stages)
+        self.norm = nn.LayerNorm(prev)
+        self.out = nn.Linear(prev, out_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.inp(x)

@@ -9,6 +9,9 @@ __pycache__/
 /models/
 /results/
 
+# Downloaded external impact-prediction systems (setup_external_models.py)
+/external/
+
 # Generated PDFs
 *.pdf
 

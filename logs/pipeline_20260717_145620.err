@@ -1,0 +1,8 @@
+[bootstrap] raw.db exists with 6599 papers; use --fresh to rebuild
+bootstrap failed
+At C:\Users\extre\Git\EpistemeAI\logs\pipeline_20260717_145620.ps1:13 char:28
++ if ($LASTEXITCODE -ne 0) { throw "bootstrap failed" }
++                            ~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : OperationStopped: (bootstrap failed:String) [], RuntimeException
+    + FullyQualifiedErrorId : bootstrap failed
+ 

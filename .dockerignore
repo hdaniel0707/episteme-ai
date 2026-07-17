@@ -1,0 +1,15 @@
+.git
+.venv
+**/__pycache__
+*.log
+
+# volumes, not image layers
+store/data/
+workflow/data/
+workflow/models/
+workflow/results/
+workflow/external/
+
+# secrets — pass at runtime via --env-file, never bake into the image
+.env
+workflow/.env.workflow

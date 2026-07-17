@@ -1,13 +1,27 @@
-"""Extended DB pipeline: bootstrap (raw.db) and extend (extended.db → training.db).
+"""Extended DB pipeline: bootstrap (raw.db) and extend (extended.db -> training.db).
 
-Bootstrap phase (fresh start only):
+Bootstrap phase — fresh start, fetch from every free source, KEEP incomplete rows:
     python -m workflow.src.main_extend_db bootstrap --target-rows 100000
+    sources: openalex, crossref, arxiv, s2   ->  workflow/data/sql/raw.db
 
-Extend phase (incremental):
+Extend phase — build the two DBs from raw.db + legacy DBs:
     python -m workflow.src.main_extend_db extend --target-rows 100000
+    steps (each skippable via --sources):
+      copy      raw.db + every legacy store/data/sql/*.db  -> extended.db (dedup only,
+                incomplete rows KEPT; provenance in the `source` column)
+      pdf       UEFISCDI/JCR PDF extraction -> journal_data table (AIS/quartiles)
+      uefiscdi  red/yellow-zone journal paper seeding (OpenAlex ISSN queries)
+      openalex  domain-balanced fill toward --target-rows
+      s2        influential-citation + SPECTER gap-fill by DOI
+      fill      metadata gap-fill of incomplete rows (OpenAlex+S2 title search) —
+                runs BEFORE training.db derivation to maximise usable rows
+    then always: report + derive training.db (strict: title+abstract+year+citations).
 
 Legacy (backward compat):
     python -m workflow.src.main_extend_db  # behaves as extend
+
+Point the pipeline at the result with ``EPAI_DB=training`` (or ``extended``) in
+workflow/.env.workflow.
 """
 
 from __future__ import annotations
@@ -97,53 +111,144 @@ def report(conn: sqlite3.Connection, out_png: Path) -> None:
 
 
 def derive_training(ext_path: Path, out_path: Path) -> tuple[int, int]:
-    """Create training.db: strict filter (title+abstract+year+citations) from extended.db."""
-    ext_conn = sqlite3.connect(ext_path)
+    """Create training.db: strict filter (title+abstract+year+citations) from extended.db.
+
+    Rebuilt from scratch every time (pure function of extended.db, so idempotent).
+    Reads extended.db via ATTACH; only the column intersection is copied, so an
+    extended.db built by an older schema version still derives cleanly.
+    """
+    out_path = Path(out_path)
+    out_path.unlink(missing_ok=True)          # always a fresh derivation
     out_conn = fbase.open_db(out_path)
+    out_conn.execute("ATTACH DATABASE ? AS ext", (str(ext_path),))
 
-    # Copy matching papers + authors + links
-    n_ext = ext_conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
+    n_ext = out_conn.execute("SELECT COUNT(*) FROM ext.papers").fetchone()[0]
 
-    # Insert papers with title+abstract+year+citation_count
-    inserted = out_conn.execute("""
-        INSERT INTO papers
-        SELECT * FROM (
-            SELECT * FROM papers
-            WHERE title IS NOT NULL AND TRIM(title) != ''
-              AND abstract IS NOT NULL AND TRIM(abstract) != ''
-              AND year IS NOT NULL
-              AND citation_count IS NOT NULL
-        )
+    ext_cols = [r[1] for r in out_conn.execute("PRAGMA ext.table_info(papers)")]
+    tr_cols = [r[1] for r in out_conn.execute("PRAGMA table_info(papers)")]
+    cols = ", ".join(c for c in tr_cols if c in ext_cols)
+    inserted = out_conn.execute(f"""
+        INSERT OR IGNORE INTO papers ({cols})
+        SELECT {cols} FROM ext.papers
+        WHERE title IS NOT NULL AND TRIM(title) != ''
+          AND abstract IS NOT NULL AND TRIM(abstract) != ''
+          AND year IS NOT NULL
+          AND citation_count IS NOT NULL
     """).rowcount
 
-    # Copy matching authors and paper_authors
-    # First, find papers we kept
-    kept_ids = {r[0] for r in out_conn.execute("SELECT paper_id FROM papers")}
-
-    # Copy authors of kept papers
     try:
-        for author_id, name, h_idx, cit_cnt, pap_cnt in ext_conn.execute(
-            "SELECT author_id, name, h_index, citation_count, paper_count FROM authors"
-        ):
-            out_conn.execute(
-                "INSERT OR IGNORE INTO authors VALUES (?, ?, ?, ?, ?, ?)",
-                (author_id, name, h_idx, cit_cnt, pap_cnt, None)
-            )
-        # Copy paper_authors for kept papers only
-        for pid, aid in ext_conn.execute("SELECT paper_id, author_id FROM paper_authors"):
-            if pid in kept_ids:
-                out_conn.execute(
-                    "INSERT OR IGNORE INTO paper_authors VALUES (?, ?)", (pid, aid)
-                )
+        a_ext = [r[1] for r in out_conn.execute("PRAGMA ext.table_info(authors)")]
+        a_tr = [r[1] for r in out_conn.execute("PRAGMA table_info(authors)")]
+        a_cols = ", ".join(c for c in a_tr if c in a_ext)
+        if a_cols:
+            out_conn.execute(f"INSERT OR IGNORE INTO authors ({a_cols}) "
+                             f"SELECT {a_cols} FROM ext.authors")
+        out_conn.execute("""
+            INSERT OR IGNORE INTO paper_authors (paper_id, author_id)
+            SELECT pa.paper_id, pa.author_id FROM ext.paper_authors pa
+            WHERE pa.paper_id IN (SELECT paper_id FROM papers)
+        """)
     except sqlite3.OperationalError:
-        pass  # tables may not exist
+        pass  # author tables may not exist in older extended.db files
 
     out_conn.commit()
-    ext_conn.close()
+    out_conn.execute("DETACH DATABASE ext")
     out_conn.close()
 
-    print(f"[derive] extended.db: {n_ext} papers → training.db: {inserted} papers (strict filter)")
+    print(f"[derive] extended.db: {n_ext} papers -> training.db: {inserted} papers (strict filter)")
     return n_ext, inserted
+
+
+def copy_legacy_dbs(conn: sqlite3.Connection) -> int:
+    """Copy papers/authors/links from every legacy DB under store/data/sql into
+    extended.db — KEEPING incomplete rows (the huge archive stores everything that
+    is not a duplicate; completeness filtering happens only in derive_training).
+
+    Rows lacking BOTH title and abstract are skipped (no identity can be derived).
+    Provenance label: source = 's2_original_<dbname>'.
+    """
+    from workflow.src.iwf.data.identity import stable_text_id
+
+    total = 0
+    legacy = sorted(paths.EPAI_SQL_DIR.glob("*.db")) if paths.EPAI_SQL_DIR.is_dir() else []
+    if not legacy:
+        print(f"[copy] no legacy DBs under {paths.EPAI_SQL_DIR}; skipping")
+        return 0
+    for src_db in legacy:
+        src = sqlite3.connect(f"file:{src_db.as_posix()}?mode=ro", uri=True)
+        dedup = fbase.Deduper(conn)
+        copied = skipped = 0
+        try:
+            try:
+                cur = src.execute("SELECT * FROM papers")
+            except sqlite3.OperationalError:
+                print(f"[copy] {src_db.name}: no papers table; skipping")
+                continue
+            cols = [d[0] for d in cur.description]
+            for values in cur:
+                try:
+                    row = dict(zip(cols, values))
+                    title = str(row.get("title") or "").strip()
+                    abstract = str(row.get("abstract") or "").strip()
+                    if not title and not abstract:
+                        skipped += 1          # no identity derivable — truly unusable
+                        continue
+                    pid = str(row.get("paper_id") or "").strip()
+                    if not pid:
+                        pid = stable_text_id(title, abstract, salt=str(row.get("year") or ""))
+                    if dedup.seen({"paper_id": pid, "title": title,
+                                   "year": row.get("year"), "doi": row.get("doi")}):
+                        continue
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO papers
+                          (paper_id, title, abstract, embedding, citation_count,
+                           influential_citation_count, year, venue, queries, domains,
+                           generated_by, doi, source)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (pid, title or None, abstract or None,
+                         row.get("embedding"), row.get("citation_count"),
+                         row.get("influential_citation_count"), row.get("year"),
+                         row.get("venue"), row.get("queries"), row.get("domains"),
+                         row.get("generated_by", "human"), row.get("doi"),
+                         f"s2_original_{src_db.stem}"))
+                    dedup.add({"paper_id": pid, "title": title,
+                               "year": row.get("year"), "doi": row.get("doi")})
+                    copied += 1
+                except Exception:
+                    skipped += 1
+                    continue
+            conn.commit()
+            # authors + links (attach for a fast bulk copy; skip if tables absent)
+            try:
+                conn.execute("ATTACH DATABASE ? AS src", (str(src_db),))
+                try:
+                    src.execute("SELECT 1 FROM authors LIMIT 1")
+                    src.execute("SELECT 1 FROM paper_authors LIMIT 1")
+                    conn.execute("""INSERT OR IGNORE INTO authors
+                        (author_id, name, h_index, citation_count, paper_count, affiliations)
+                        SELECT author_id, name, h_index, citation_count, paper_count,
+                               affiliations FROM src.authors WHERE author_id IS NOT NULL""")
+                    conn.execute("""INSERT OR IGNORE INTO paper_authors
+                        SELECT paper_id, author_id FROM src.paper_authors
+                        WHERE paper_id IS NOT NULL AND author_id IS NOT NULL""")
+                    conn.commit()
+                except sqlite3.OperationalError:
+                    pass
+                finally:
+                    try:
+                        conn.execute("DETACH DATABASE src")
+                    except sqlite3.OperationalError:
+                        pass
+            except sqlite3.OperationalError:
+                pass
+        finally:
+            src.close()
+        print(f"[copy] {src_db.name}: {copied} copied, {skipped} skipped (no identity)")
+        total += copied
+    conn.commit()
+    return total
 
 
 def cmd_bootstrap(args) -> int:
@@ -170,23 +275,24 @@ def cmd_bootstrap(args) -> int:
 
     try:
         if "openalex" in sources:
-            print("[bootstrap] OpenAlex → raw.db (timeout: 3600s)")
+            print("[bootstrap] OpenAlex -> raw.db (timeout: 3600s)")
             with phase_timeout("openalex", 3600):
                 OpenAlexFetcher(year_from, year_to).run(conn, limit=per_source, keep_incomplete=True)
                 fill_author_h_index(conn)
 
         if "crossref" in sources:
-            print("[bootstrap] Crossref → raw.db (timeout: 3600s)")
+            print("[bootstrap] Crossref -> raw.db (timeout: 3600s)")
             with phase_timeout("crossref", 3600):
-                CrossrefFetcher(year_from, year_to).run(conn, limit=per_source, keep_incomplete=True)
+                CrossrefFetcher(year_from=year_from, year_to=year_to).run(
+                    conn, limit=per_source, keep_incomplete=True)
 
         if "arxiv" in sources:
-            print("[bootstrap] arXiv → raw.db (timeout: 3600s)")
+            print("[bootstrap] arXiv -> raw.db (timeout: 3600s)")
             with phase_timeout("arxiv", 3600):
                 ArxivFetcher().run(conn, limit=per_source, keep_incomplete=True)
 
         if "s2" in sources:
-            print("[bootstrap] S2 bulk → raw.db (timeout: 1800s)")
+            print("[bootstrap] S2 bulk -> raw.db (timeout: 1800s)")
             with phase_timeout("s2", 1800):
                 fill_from_s2(conn)
 
@@ -202,7 +308,7 @@ def cmd_bootstrap(args) -> int:
 
 
 def cmd_extend(args) -> int:
-    """Extend phase: raw.db + legacy → extended.db → training.db."""
+    """Extend phase: raw.db + legacy -> extended.db -> training.db."""
     cfg = load_config_yaml()
     year_from = cfg.get("fetch_year_from")
     year_to = cfg.get("fetch_year_to")
@@ -210,7 +316,8 @@ def cmd_extend(args) -> int:
     domain_filters = list(cfg.get("fetch_domains") or [""])
     per_journal_cap = int(cfg.get("fetch_per_journal_cap") or 300)
 
-    sources = {s.strip().lower() for s in (args.sources or "copy,openalex,s2").split(",")}
+    sources = {s.strip().lower()
+               for s in (args.sources or "copy,pdf,uefiscdi,openalex,s2,fill").split(",")}
     paths.ensure_dirs()
 
     # Open/create extended.db
@@ -254,9 +361,17 @@ def cmd_extend(args) -> int:
                     raw_conn.close()
                     print(f"[extend] Copied {n_copied} papers (+ author records) from raw.db to extended.db")
 
-                # Copy from legacy/professor DBs (no filtering)
-                # This is a minimal version; full implementation would iterate legacy paths
-                conn.commit()
+                # Copy from every legacy/professor DB (kept incomplete; dedup only)
+                copy_legacy_dbs(conn)
+
+        # Phase 1b: PDF journal-data extraction (UEFISCDI/JCR lists -> journal_data
+        # table; feeds venue_ais + the uefiscdi journal seeding below)
+        if "pdf" in sources:
+            print("[extend] PDF journal extraction (timeout: 600s)")
+            with phase_timeout("pdf", 600):
+                from workflow.src.iwf.fetchers.uefiscdi_pdf import import_journal_data
+                n_pdf = import_journal_data(conn)
+                print(f"[pdf] {n_pdf} journal rows imported from workflow/data/pdf/")
 
         # Phase 2: Enrichment (openalex, s2, uefiscdi)
         if "uefiscdi" in sources:
@@ -283,6 +398,16 @@ def cmd_extend(args) -> int:
             with phase_timeout("s2", 1800):
                 fill_from_s2(conn)
 
+        # Phase 2b: metadata gap-fill — BEFORE deriving training.db, so as many
+        # incomplete archive rows as possible become training-usable (missing
+        # DOI/citations/year filled via OpenAlex + S2 title search).
+        if "fill" in sources:
+            print("[extend] Gap-fill incomplete papers (timeout: 3600s)")
+            with phase_timeout("fill", 3600):
+                from workflow.src.iwf.fetchers.enrich_metadata import enrich_incomplete_papers
+                n_filled = enrich_incomplete_papers(conn)
+                print(f"[fill] {n_filled} papers enriched")
+
         # Phase 3: Report
         print("[extend] Report (timeout: 300s)")
         with phase_timeout("report", 300):
@@ -295,6 +420,13 @@ def cmd_extend(args) -> int:
     print("[extend] Derive training.db (timeout: 300s)")
     with phase_timeout("training", 300):
         n_ext, n_train = derive_training(ext_path, fbase.extended_db_path().parent / "training.db")
+
+    # Phase 5: Build the local holdout benchmark from the fresh training DB, so the
+    # training session later needs no network for benchmark evaluation.
+    print("[extend] Build holdout benchmark (timeout: 600s)")
+    with phase_timeout("benchmark", 600):
+        from workflow.src.iwf.evaluation.benchmarks import build_holdout_benchmark
+        build_holdout_benchmark(fbase.extended_db_path().parent / "training.db")
 
     print(f"\n[extend] complete: extended={n_ext}, training={n_train}")
     return 0

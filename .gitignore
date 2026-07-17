@@ -12,3 +12,10 @@
 *.egg-info/
 dist/
 build/
+# session logs (two old ones are still tracked — see README push checklist)
+*.log
+workflow/logs/
+
+# large local data — never add new files from here to git (GitHub rejects >100MB;
+# store/data currently has tracked 571MB DBs that must be git rm --cached'd before push)
+store/data/

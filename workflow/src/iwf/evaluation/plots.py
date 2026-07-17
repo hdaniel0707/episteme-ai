@@ -46,10 +46,40 @@ ERROR_COLORSCALE = palette.ERROR_COLORSCALE_PLOTLY
 ERROR_CMAP = palette.ERROR_CMAP_MATPLOTLIB
 SPLIT_SHADES = palette.SPLIT_SHADES
 
-# Weights below this fraction of a layer's max |weight| are not drawn (keeps the
-# NN-weight HTML responsive; near-zero connections add nothing but lag).
-NN_WEIGHT_DISPLAY_THRESHOLD = 0.15
-NN_MAX_HTML_LINES_PER_LAYER = 4000
+# NN-weight diagram sparsity: a connection is drawn only when it is BOTH above this
+# fraction of the layer's max |weight| AND among the strongest NN_TOP_K_PER_NEURON
+# incoming connections of its target neuron. This keeps only the genuinely important
+# connections visible instead of a uniform hairball.
+NN_WEIGHT_DISPLAY_THRESHOLD = 0.35
+NN_TOP_K_PER_NEURON = 3
+NN_MAX_HTML_LINES_PER_LAYER = 1200
+
+
+def _select_important_connections(w: np.ndarray, dn_in: int, dn_out: int
+                                  ) -> list[tuple[float, float, int, int]]:
+    """Pick the connections worth drawing for one weight matrix ``w`` [out, in].
+
+    Returns (rel_strength 0..1, signed_weight, in_display_idx, out_display_idx),
+    weakest first. Selection: per displayed OUTPUT neuron keep its top-K strongest
+    incoming displayed connections, then drop any below the global threshold."""
+    out_n, in_n = w.shape
+    step_in = max(1, in_n // dn_in)
+    step_out = max(1, out_n // dn_out)
+    sub = w[::step_out, ::step_in][:dn_out, :dn_in]          # displayed submatrix
+    max_w = float(np.abs(sub).max())
+    if max_w < 1e-9:
+        return []
+    thr = NN_WEIGHT_DISPLAY_THRESHOLD * max_w
+    pairs: list[tuple[float, float, int, int]] = []
+    k = NN_TOP_K_PER_NEURON
+    for nj in range(sub.shape[0]):
+        row = np.abs(sub[nj])
+        top = np.argsort(row)[-k:] if len(row) > k else np.arange(len(row))
+        for ni in top:
+            if row[ni] >= thr:
+                pairs.append((row[ni] / max_w, float(sub[nj, ni]), int(ni), nj))
+    pairs.sort(key=lambda t: t[0])   # weakest first so strong ones draw on top
+    return pairs
 
 
 # ===================================================================== shared helpers
@@ -282,10 +312,12 @@ def mse_bars(split_preds: dict, agg: Path, wf_type: str) -> None:
 # ===================================================================== learning curve
 
 def learning_curve(history: dict, agg: Path, wf_type: str, task: str) -> None:
-    """Training loss (left axis) + validation metric (right axis) vs epoch — identical
-    layout for clf and reg; only the metric label differs."""
-    metric_label = ("Validation macro-F1 (0-1, higher=better)" if task == "clf"
-                    else "Validation Spearman/R² (0-1, higher=better)")
+    """Two stacked panels sharing the epoch axis — no dual-axis tricks:
+
+    top:    training loss  (lower is better ↓), best epoch marked
+    bottom: validation metric (higher is better ↑), best epoch dot + value label
+    """
+    metric_name = "macro-F1" if task == "clf" else "Spearman"
     tl = list(history.get("train_loss", []))
     vm = list(history.get("val_metric", []))
     # Text-transformer stores per-step loss; average per epoch for consistency.
@@ -294,26 +326,37 @@ def learning_curve(history: dict, agg: Path, wf_type: str, task: str) -> None:
         epochs = len(vm) if vm else 1
         chunk = max(1, len(sl) // epochs)
         tl = [float(np.mean(sl[i * chunk:(i + 1) * chunk])) for i in range(epochs)]
-    fig, ax1 = plt.subplots(figsize=(7, 4))
+    if not tl and not vm:
+        return
+    best = int(np.argmax(vm)) if vm else None
+
+    palette.apply_style()
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(7.5, 6), sharex=True,
+                                   layout="constrained")
     if tl:
-        ax1.plot(range(1, len(tl) + 1), tl, color=palette.DUSK_BLUE,
-                 label="Training loss (lower=better)")
-    ax1.set_xlabel("Epoch")
-    ax1.set_ylabel("Training loss", color=palette.DUSK_BLUE)
-    ax2 = ax1.twinx()
+        ax1.plot(range(1, len(tl) + 1), tl, color=palette.DUSK_BLUE, lw=1.6)
+        ax1.fill_between(range(1, len(tl) + 1), tl, min(tl),
+                         color=palette.DUSK_BLUE, alpha=0.10)
+    ax1.set_ylabel("Training loss\n(lower is better ↓)")
+    ax1.grid(True, alpha=0.3)
     if vm:
-        ax2.plot(range(1, len(vm) + 1), vm, color=palette.OLIVE, label=metric_label)
-        best = int(np.argmax(vm))
-        ax2.axvline(best + 1, color="gray", ls=":", label=f"Best epoch ({best + 1})")
-    ax2.set_ylabel(metric_label, color=palette.OLIVE)
-    # twinx legends don't combine automatically — merge the handles of both axes
-    l1, lab1 = ax1.get_legend_handles_labels()
-    l2, lab2 = ax2.get_legend_handles_labels()
-    if l1 or l2:
-        ax1.legend(l1 + l2, lab1 + lab2, loc="best", fontsize=8)
-    ax1.set_title("Training Progress by Epoch")
-    fig.tight_layout()
-    fig.savefig(agg / f"learning_curve_{wf_type}.png", dpi=120)
+        ax2.plot(range(1, len(vm) + 1), vm, color=palette.OLIVE, lw=1.8)
+        ax2.fill_between(range(1, len(vm) + 1), vm, min(vm),
+                         color=palette.OLIVE, alpha=0.12)
+        ax2.plot(best + 1, vm[best], "o", ms=8, color=palette.GOLD,
+                 mec=palette.INK, mew=1.2, zorder=5)
+        ax2.annotate(f"best: {vm[best]:.3f}\n(epoch {best + 1})",
+                     xy=(best + 1, vm[best]), xytext=(8, -4),
+                     textcoords="offset points", fontsize=9, color=palette.INK)
+        for ax in (ax1, ax2):
+            ax.axvline(best + 1, color=palette.GRAY, ls=":", lw=1)
+    ax2.set_ylabel(f"Validation {metric_name}\n(higher is better ↑)")
+    ax2.set_xlabel("Epoch")
+    ax2.grid(True, alpha=0.3)
+    ax1.set_title("Training Progress — loss falls, validation quality rises",
+                  fontsize=11)
+    fig.align_ylabels((ax1, ax2))
+    fig.savefig(agg / f"learning_curve_{wf_type}.png", dpi=130)
     plt.close(fig)
 
 
@@ -658,32 +701,21 @@ def _build_nn_html(weights: list[np.ndarray], layer_sizes: list[int], n_z: int) 
 
     lines_svg: list[str] = []
     for li, w in enumerate(weights):
-        out_n, in_n = w.shape
-        max_w = np.abs(w).max()
-        if max_w < 1e-9:
-            continue
-        threshold = NN_WEIGHT_DISPLAY_THRESHOLD * max_w
         x1, x2 = xs[li], xs[li + 1]
-        dn_in, dn_out = display_n[li], display_n[li + 1]
-        step_in = max(1, in_n // dn_in)
-        step_out = max(1, out_n // dn_out)
-        pairs = []
-        for ni_raw, ni_disp in enumerate(range(0, min(in_n, dn_in * step_in), step_in)):
-            for nj_raw, nj_disp in enumerate(range(0, min(out_n, dn_out * step_out), step_out)):
-                abs_w = abs(w[nj_raw * step_out if step_out > 1 else nj_raw,
-                              ni_raw * step_in if step_in > 1 else ni_raw])
-                if abs_w > threshold:
-                    pairs.append((abs_w / max_w, ni_disp, nj_disp))
+        pairs = _select_important_connections(w, display_n[li], display_n[li + 1])
         if len(pairs) > NN_MAX_HTML_LINES_PER_LAYER:
-            pairs.sort(key=lambda t: t[0], reverse=True)
-            pairs = pairs[:NN_MAX_HTML_LINES_PER_LAYER]
-        pairs.sort(key=lambda t: t[0])  # weakest first so strong ones draw on top
-        for alpha, ni_d, nj_d in pairs:
+            pairs = pairs[-NN_MAX_HTML_LINES_PER_LAYER:]   # already sorted weakest first
+        for rel, signed_w, ni_d, nj_d in pairs:
             y1 = neuron_y(li, ni_d)
             y2 = neuron_y(li + 1, nj_d)
+            # quadratic emphasis: weak survivors stay faint, the strongest pop
+            alpha = 0.08 + 0.82 * rel * rel
+            width = 0.4 + 1.6 * rel * rel
+            color = palette.INK if signed_w >= 0 else palette.TERRACOTTA
             lines_svg.append(
                 f'<line x1="{x1}" y1="{y1:.1f}" x2="{x2}" y2="{y2:.1f}" '
-                f'stroke="{palette.INK}" stroke-opacity="{alpha:.3f}" stroke-width="0.6"/>'
+                f'stroke="{color}" stroke-opacity="{alpha:.3f}" '
+                f'stroke-width="{width:.2f}"/>'
             )
 
     circles_svg: list[str] = []
@@ -742,9 +774,11 @@ button{{padding:4px 10px;cursor:pointer}}
   <button onclick="zoom(0.67)">−</button>
   <button onclick="resetView()">Reset</button>
   <small>scroll=zoom &nbsp; drag=pan &nbsp;
-         <span style="color:{palette.TERRACOTTA}">&#9632;</span>metadata &nbsp;
-         <span style="color:{palette.DUSK_BLUE}">&#9632;</span>z-embedding &nbsp;
-         <span style="color:{palette.INK}">&#8212;</span>connection strength (opacity)</small>
+         <span style="color:{palette.TERRACOTTA}">&#9632;</span>metadata input &nbsp;
+         <span style="color:{palette.DUSK_BLUE}">&#9632;</span>z-embedding input &nbsp;
+         <span style="color:{palette.INK}">&#8212;</span>positive weight &nbsp;
+         <span style="color:{palette.TERRACOTTA}">&#8212;</span>negative weight &nbsp;
+         (only each neuron's top-{NN_TOP_K_PER_NEURON} strongest connections shown)</small>
 </div>
 <div id="container">
 <svg id="nn" viewBox="0 0 {total_w} {total_h}" width="{total_w}" height="{total_h}"
@@ -802,35 +836,23 @@ def _save_nn_png(weights: list[np.ndarray], layer_sizes: list[int],
         top = (height - n * N_SP) / 2
         return x, top + ni * N_SP
 
+    from matplotlib.colors import to_rgb
+    rgb_pos, rgb_neg = to_rgb(palette.INK), to_rgb(palette.TERRACOTTA)
     for li, w in enumerate(weights):
-        out_n, in_n = w.shape
-        dn_in, dn_out = display_n[li], display_n[li + 1]
-        step_in = max(1, in_n // dn_in)
-        step_out = max(1, out_n // dn_out)
-        max_w = np.abs(w).max()
-        if max_w < 1e-9:
-            continue
-        thr = NN_WEIGHT_DISPLAY_THRESHOLD * max_w
-        pairs = []
-        for ni_d in range(dn_in):
-            ni_r = ni_d * step_in
-            for nj_d in range(dn_out):
-                abs_w = abs(w[nj_d * step_out, ni_r])
-                if abs_w > thr:
-                    pairs.append((abs_w, ni_d, nj_d))
+        pairs = _select_important_connections(w, display_n[li], display_n[li + 1])
         if len(pairs) > MAX_LINES:
-            pairs.sort(reverse=True)
-            pairs = pairs[:MAX_LINES]
-        pairs.sort()  # weakest first
+            pairs = pairs[-MAX_LINES:]   # already sorted weakest first
         if not pairs:
             continue
-        lines, colors = [], []
-        for abs_w, ni_d, nj_d in pairs:
+        lines, colors, widths = [], [], []
+        for rel, signed_w, ni_d, nj_d in pairs:
             x1, y1 = pos(li, ni_d)
             x2, y2 = pos(li + 1, nj_d)
             lines.append([(x1, y1), (x2, y2)])
-            colors.append((0.0, 0.0, 0.545, abs_w / max_w))
-        ax.add_collection(LineCollection(lines, linewidths=0.4, colors=colors, zorder=1))
+            rgb = rgb_pos if signed_w >= 0 else rgb_neg
+            colors.append((*rgb, 0.08 + 0.82 * rel * rel))
+            widths.append(0.3 + 1.4 * rel * rel)
+        ax.add_collection(LineCollection(lines, linewidths=widths, colors=colors, zorder=1))
 
     for li, n in enumerate(display_n):
         for ni in range(n):
@@ -854,9 +876,10 @@ def _save_nn_png(weights: list[np.ndarray], layer_sizes: list[int],
         _, yz = pos(0, n_meta_d + min(n_z, display_n[0]) // 2)
         ax.text(-0.15, yz, "z-emb", ha="right", va="center", fontsize=7, color=palette.DUSK_BLUE)
 
-    ax.set_title("Neural Network Connection Strengths\n"
-                 f"(dark blue=strong, transparent=weak  |  "
-                 f"{'red=metadata, blue=z-embedding at input' if n_z > 0 else 'input neurons'})",
+    ax.set_title("Neural Network — Most Important Connections\n"
+                 f"(top-{NN_TOP_K_PER_NEURON} strongest inputs per neuron; "
+                 "dark olive=positive, terracotta=negative; thicker=stronger"
+                 f"{' | red=metadata, blue=z-embedding inputs' if n_z > 0 else ''})",
                  fontsize=9)
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=180, bbox_inches="tight", facecolor="white")
@@ -1275,6 +1298,97 @@ def plot_abstract_length_hist(lengths: pd.Series, path: Path) -> None:
     ax.grid(axis="y", alpha=0.3)
     fig.tight_layout()
     fig.savefig(path, dpi=120)
+    plt.close(fig)
+
+
+def plot_source_productivity(sources: pd.DataFrame, path: Path) -> None:
+    """Horizontal grouped bars per data source: records contributed (sand) vs records
+    usable for training (olive), with the usable % annotated — 'which source was most
+    productive'. Expects columns source, n_total, n_usable, pct_usable."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    palette.apply_style()
+    d = sources.sort_values("n_total")           # largest on top for horizontal bars
+    y = np.arange(len(d))
+    fig, ax = plt.subplots(figsize=(9, max(3.5, 0.55 * len(d) + 1.5)))
+    ax.barh(y + 0.2, d["n_total"], height=0.38, color=palette.SAND,
+            edgecolor=palette.INK, linewidth=0.5, label="all records")
+    ax.barh(y - 0.2, d["n_usable"], height=0.38, color=palette.OLIVE,
+            label="usable for training")
+    for yi, (tot, use, pct) in enumerate(zip(d["n_total"], d["n_usable"], d["pct_usable"])):
+        ax.text(tot, yi + 0.2, f" {tot:,}", va="center", fontsize=8, color=palette.INK)
+        ax.text(use, yi - 0.2, f" {use:,} ({pct:.0f}%)", va="center", fontsize=8,
+                color=palette.INK)
+    ax.set_yticks(y)
+    ax.set_yticklabels(d["source"])
+    ax.set_xlabel("papers")
+    ax.set_title("Data-Source Productivity — contributed vs training-usable records")
+    ax.legend(loc="lower right")
+    ax.grid(axis="x", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(path, dpi=130)
+    plt.close(fig)
+
+
+def plot_correlation_heatmap(corr: pd.DataFrame, path: Path) -> None:
+    """Spearman correlation heatmap of the numeric metadata columns (diverging BrBG)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    palette.apply_style()
+    cols = list(corr.columns)
+    fig, ax = plt.subplots(figsize=(1.1 * len(cols) + 2.5, 1.0 * len(cols) + 2))
+    im = ax.imshow(corr.to_numpy(dtype=float), cmap=palette.DIVERGING_CMAP,
+                   vmin=-1, vmax=1)
+    for i in range(len(cols)):
+        for j in range(len(cols)):
+            v = corr.iloc[i, j]
+            if np.isfinite(v):
+                ax.text(j, i, f"{v:.2f}", ha="center", va="center", fontsize=8,
+                        color="white" if abs(v) > 0.6 else "black")
+    ax.set_xticks(range(len(cols)))
+    ax.set_xticklabels(cols, rotation=35, ha="right", fontsize=9)
+    ax.set_yticks(range(len(cols)))
+    ax.set_yticklabels(cols, fontsize=9)
+    ax.set_title("Metadata Correlations (Spearman)")
+    fig.colorbar(im, ax=ax, shrink=0.8)
+    fig.tight_layout()
+    fig.savefig(path, dpi=130)
+    plt.close(fig)
+
+
+def plot_score_distributions(scores: pd.DataFrame, path: Path) -> None:
+    """Score distributions of the usable corpus: the [0,1] training target (should be
+    ~uniform by construction), log-scaled citation counts, and FWCI when present."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    palette.apply_style()
+    have_fwci = "fwci" in scores.columns and scores["fwci"].notna().sum() >= 10
+    n_panels = 3 if have_fwci else 2
+    fig, axes = plt.subplots(1, n_panels, figsize=(5 * n_panels, 4.2))
+
+    t = scores["target"].dropna()
+    axes[0].hist(t, bins=40, color=palette.OLIVE, alpha=0.85)
+    axes[0].set_xlabel("impact target (field-year percentile, 0-1)")
+    axes[0].set_ylabel("papers")
+    axes[0].set_title("Training-target distribution")
+
+    c = scores["citation_count"].dropna()
+    c = c[c >= 0]
+    axes[1].hist(np.log10(c + 1), bins=40, color=palette.DUSK_BLUE, alpha=0.85)
+    axes[1].set_xlabel("log10(citations + 1)")
+    axes[1].set_title(f"Citation distribution (median {c.median():.0f})")
+
+    if have_fwci:
+        f = scores["fwci"].dropna().clip(upper=scores["fwci"].quantile(0.99))
+        axes[2].hist(f, bins=40, color=palette.GOLD, alpha=0.85)
+        axes[2].set_xlabel("FWCI (clipped at p99)")
+        axes[2].set_title("FWCI distribution")
+
+    for ax in axes:
+        ax.grid(axis="y", alpha=0.3)
+    fig.suptitle("Score Distributions (training-usable corpus)", fontsize=12)
+    fig.tight_layout()
+    fig.savefig(path, dpi=130)
     plt.close(fig)
 
 

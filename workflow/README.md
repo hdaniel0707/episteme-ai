@@ -11,6 +11,63 @@ a diagram). For the statistics/equations behind every metric and target, see
 reference (every `config.yaml` / `.env.workflow` key), see
 [`WORKFLOW_REFERENCE.md`](WORKFLOW_REFERENCE.md).
 
+## Quickstart — the final two-step operation
+
+The system runs in **two separate sessions**: data collection first (network-bound),
+then the training queue (GPU-bound, fully offline once data exists).
+
+The canonical launchers now live in `workflow/deploy_and_run.sh` and
+`workflow/deploy_and_run.ps1`; use `workflow/stop_deploy_and_run.sh` or
+`workflow/stop_deploy_and_run.ps1` to stop the detached job and reclaim resources.
+
+**Step 1 — data collection** (run once, or whenever you want a bigger corpus):
+
+```bash
+# 1a. fresh multi-source fetch -> raw.db (KEEPS incomplete records; dedup only)
+python -m workflow.src.main_extend_db bootstrap --target-rows 100000
+
+# 1b. raw.db + legacy DBs -> extended.db (huge archive, provenance in `source`)
+#     -> gap-fill missing metadata -> training.db (complete records only)
+#     -> holdout benchmark parquet (offline benchmark for every later run)
+python -m workflow.src.main_extend_db extend
+
+# 1c. point training at the strict DB: set EPAI_DB=training in .env.workflow
+
+# 1d. (optional) pull external impact-prediction systems for comparison
+#     (NAIP v2 repo + weights into gitignored workflow/external/; needs git+uv+HF_TOKEN)
+python -m workflow.src.setup_external_models
+
+# 1e. (optional) dataset statistics -> workflow/data/analysis/
+python -m workflow.src.main_analyse_dataset --db extended
+```
+
+**Step 2 — the training queue** (sized for one 16 GB GPU, ~4-6 h + margin):
+
+```bash
+python -m workflow.run_all_workflows
+```
+
+Every run writes its plots/benchmarks the moment it finishes
+(`results/<run>/aggregate/`); cross-run comparisons (leaderboard, benchmark
+overview, LODO cross-domain matrix) land in `results/summary/` at queue end.
+
+### Pushing to GitHub — one-time checklist
+
+Everything generated is gitignored (`workflow/data|models|results|external`,
+`*.log`, both `.env` files). Two legacy problems must be cleaned from the git
+index once before the first push (files >100 MB are rejected by GitHub):
+
+```bash
+git rm --cached store/data/sql/0512_A.db store/data/sql/_deferred_big_db/0512_A.db
+git rm --cached store/data/parquet/0512_A.parquet
+git rm --cached workflow_run.log extend_db_v2.log
+git commit -m "untrack large data + logs"
+```
+
+(The files stay on disk; `store/data/` and `*.log` are ignored from now on.)
+For containers/VMs, the repo-root `Dockerfile` builds a CUDA-ready image; mount
+`workflow/data` + `workflow/results` as volumes and pass secrets via `--env-file`.
+
 ## The two-file control surface
 
 You configure everything by editing exactly **two files**:
