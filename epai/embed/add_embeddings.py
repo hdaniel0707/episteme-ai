@@ -29,22 +29,24 @@ larger one. ``--batch-size`` overrides all of them.
 timing a run before committing to the whole corpus. Rows past the limit keep
 whatever they already have; nothing is dropped from the output.
 
+``--gpu`` and ``--cpu-threads`` pin the run to one GPU and cap the CPU pools, so
+several corpora can be embedded side by side on a multi-GPU box without the runs
+fighting each other for threads. Both are applied before torch is imported,
+which is why the command line is parsed at module level.
+
 Where an embedding is recomputed on top of an existing one, the summary reports
 cosine(old, new) with the same buckets as
 ``epai/prepare/recompute_embedding.py`` -- identical / drifted / changed -- since
 re-running a model on the same text rarely reproduces bit-identical floats.
 
 Run:
-    uv run python epai/embed/add_embeddings.py data/parquet/essay_gpt54mini_binox0.parquet
-    uv run python epai/embed/add_embeddings.py data/parquet/reuter_gpt54mini_binox0.parquet
-    uv run python epai/embed/add_embeddings.py data/parquet/wp_gpt54mini_binox0.parquet
+    uv run python epai/embed/add_embeddings.py data/parquet/essay_gpt54mini_binox0.parquet --cpu-threads 16 --gpu 0
+    uv run python epai/embed/add_embeddings.py data/parquet/reuter_gpt54mini_binox0.parquet --cpu-threads 16 --gpu 0
+    uv run python epai/embed/add_embeddings.py data/parquet/wp_gpt54mini_binox0.parquet --cpu-threads 16 --gpu 0
 
-    uv run python epai/embed/add_embeddings.py data/parquet/essay_binox0.parquet
-    uv run python epai/embed/add_embeddings.py data/parquet/reuter_binox0.parquet
-    uv run python epai/embed/add_embeddings.py data/parquet/wp_binox0.parquet
-
-    uv run python epai/embed/add_embeddings.py data/parquet/essay_binox0.parquet --batch-size 8
-    uv run python epai/embed/add_embeddings.py data/parquet/essay_binox0.parquet -o data/parquet/essay_emb.parquet --yes
+    uv run python epai/embed/add_embeddings.py data/parquet/essay_binox0.parquet --cpu-threads 16 --gpu 0
+    uv run python epai/embed/add_embeddings.py data/parquet/reuter_binox0.parquet --cpu-threads 16 --gpu 0
+    uv run python epai/embed/add_embeddings.py data/parquet/wp_binox0.parquet --cpu-threads 16 --gpu 0
 
     # debug: 20 rows only, into a scratch copy, recomputing what is already there
     uv run python epai/embed/add_embeddings.py data/parquet/essay_binox0.parquet \
@@ -53,23 +55,12 @@ Run:
 
 from __future__ import annotations
 
+# Standard library only at this point: --gpu and --cpu-threads have to become
+# environment variables before torch is imported, so the command line is parsed
+# and applied further down, and the heavy imports come after it.
 import argparse
-import importlib.util
 import os
-import time
-from dataclasses import dataclass, field
 from pathlib import Path
-
-import numpy as np
-import pandas as pd
-from dotenv import load_dotenv
-from tqdm import tqdm
-
-from epai.prepare.recompute_embedding import DRIFT_COS, IDENTICAL_COS
-from epai.utils.embedding_utils import EMB_TYPES, add_embedding
-from epai.utils.parquet_utils import load_parquet, save_parquet
-
-load_dotenv()
 
 BASE_DIR = Path(__file__).parent.parent.parent
 
@@ -134,6 +125,110 @@ _REQUIRED_PACKAGE = {
     "openai_small": "openai",
     "openai_large": "openai",
 }
+
+
+def parse_args() -> argparse.Namespace:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("parquet", type=Path, help="Parquet to add embeddings to.")
+    ap.add_argument(
+        "-o",
+        "--out",
+        type=Path,
+        default=None,
+        help="Output path (default: overwrite the input in place).",
+    )
+    ap.add_argument(
+        "--text-col",
+        default=DEFAULT_TEXT_COL,
+        help=f"Column holding the text to embed (default: {DEFAULT_TEXT_COL!r}).",
+    )
+    ap.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help=f"Texts per forward pass, applied to every model. Default: "
+        f"{BATCH_SIZE}, except {BATCH_SIZE_OVERRIDE} which have per-model values.",
+    )
+    ap.add_argument(
+        "--gpu",
+        default=None,
+        help="Value for CUDA_VISIBLE_DEVICES (which GPU(s) to use, e.g. '0' or "
+        "'0,1'). Default: leave unset so all visible GPUs are used.",
+    )
+    ap.add_argument(
+        "--cpu-threads",
+        type=int,
+        default=None,
+        help="Limit CPU threads used for inference (sets OMP_NUM_THREADS / "
+        "MKL_NUM_THREADS and torch's intra-op pool). Default: leave unset.",
+    )
+    ap.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Debug option: only embed the first N rows of the file. Later rows "
+        "keep whatever they already have, they are not dropped from the output.",
+    )
+    ap.add_argument(
+        "--recompute",
+        action="store_true",
+        help="Recompute embedders that already have values, without asking.",
+    )
+    ap.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip the confirmation prompts (implies keeping existing values "
+        "unless --recompute is also given).",
+    )
+    return ap.parse_args()
+
+
+args = parse_args()
+
+# CUDA_VISIBLE_DEVICES is read when the CUDA driver initialises, and the thread
+# limits when the OpenMP runtime loads -- both of which happen inside torch.
+# Setting them after torch is imported is too late, so they go here, before the
+# imports below pull torch in transitively through embedding_utils.
+if args.gpu is not None:
+    os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
+if args.cpu_threads is not None:
+    os.environ["OMP_NUM_THREADS"] = str(args.cpu_threads)
+    os.environ["MKL_NUM_THREADS"] = str(args.cpu_threads)
+
+import importlib.util  # noqa: E402
+import time  # noqa: E402
+from dataclasses import dataclass, field  # noqa: E402
+
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
+import torch  # noqa: E402
+from dotenv import load_dotenv  # noqa: E402
+from tqdm import tqdm  # noqa: E402
+
+from epai.prepare.recompute_embedding import DRIFT_COS, IDENTICAL_COS  # noqa: E402
+from epai.utils.embedding_utils import EMB_TYPES, add_embedding  # noqa: E402
+from epai.utils.parquet_utils import load_parquet, save_parquet  # noqa: E402
+
+load_dotenv()
+
+if args.cpu_threads is not None:
+    # The env vars above cover the OpenMP/MKL pools; this covers torch's own
+    # intra-op pool, which does not always follow them.
+    torch.set_num_threads(args.cpu_threads)
+
+
+def describe_device() -> str:
+    """One line naming what the models will actually run on."""
+    if not torch.cuda.is_available():
+        return "cpu"
+    index = torch.cuda.current_device()
+    name = torch.cuda.get_device_name(index)
+    total = torch.cuda.get_device_properties(index).total_memory / 1024**3
+    # After CUDA_VISIBLE_DEVICES the chosen GPU is always renumbered to 0, so
+    # report the original id too or parallel runs are impossible to tell apart.
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    suffix = f", CUDA_VISIBLE_DEVICES={visible}" if visible else ""
+    return f"cuda:{index} — {name}, {total:.0f} GiB{suffix}"
 
 
 @dataclass
@@ -362,6 +457,8 @@ def print_findings(
     print(f"  rows          : {len(df)}")
     print(f"  text column   : {text_col!r}")
     print(f"  embeddable    : {int(embeddable.sum())}  ({n_empty} empty -> Null)")
+    print(f"  device        : {describe_device()}")
+    print(f"  cpu threads   : {torch.get_num_threads()}")
     print("=" * 78)
     print(f"{'column':<22}{'state':<10}{'filled':>8}{'missing':>9}{'dim':>10}  note")
     print("-" * 78)
@@ -477,51 +574,8 @@ def print_summary(
     print()
 
 
-def parse_args() -> argparse.Namespace:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("parquet", type=Path, help="Parquet to add embeddings to.")
-    ap.add_argument(
-        "-o",
-        "--out",
-        type=Path,
-        default=None,
-        help="Output path (default: overwrite the input in place).",
-    )
-    ap.add_argument(
-        "--text-col",
-        default=DEFAULT_TEXT_COL,
-        help=f"Column holding the text to embed (default: {DEFAULT_TEXT_COL!r}).",
-    )
-    ap.add_argument(
-        "--batch-size",
-        type=int,
-        default=None,
-        help=f"Texts per forward pass, applied to every model. Default: "
-        f"{BATCH_SIZE}, except {BATCH_SIZE_OVERRIDE} which have per-model values.",
-    )
-    ap.add_argument(
-        "--limit",
-        type=int,
-        default=None,
-        help="Debug option: only embed the first N rows of the file. Later rows "
-        "keep whatever they already have, they are not dropped from the output.",
-    )
-    ap.add_argument(
-        "--recompute",
-        action="store_true",
-        help="Recompute embedders that already have values, without asking.",
-    )
-    ap.add_argument(
-        "--yes",
-        action="store_true",
-        help="Skip the confirmation prompts (implies keeping existing values "
-        "unless --recompute is also given).",
-    )
-    return ap.parse_args()
-
-
 def main() -> None:
-    args = parse_args()
+    # args is parsed at import time, before torch, so --gpu/--cpu-threads apply.
     out_path = args.out or args.parquet
 
     check_embedders(EMBEDDERS)
