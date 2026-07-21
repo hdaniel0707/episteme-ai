@@ -23,7 +23,9 @@ memory, ...) is reported and skipped -- the remaining models still run.
 
 Batch size is the global ``BATCH_SIZE``, except for the models in
 ``BATCH_SIZE_OVERRIDE`` -- qwen3 and LUAR want a smaller one, openai a much
-larger one. ``--batch-size`` overrides all of them.
+larger one. ``--batch-size`` overrides all of them. A CUDA out-of-memory error
+halves the batch and retries rather than losing the model, since the GPU may be
+shared and the batch that fits is not knowable in advance.
 
 ``--limit N`` embeds only the first N rows of the file, for debugging a model or
 timing a run before committing to the whole corpus. Rows past the limit keep
@@ -108,6 +110,9 @@ BATCH_SIZE_OVERRIDE = {
     "openai_small": 256,
     "openai_large": 256,
 }
+
+# Floor for the automatic halving that follows a CUDA out-of-memory error.
+MIN_BATCH_SIZE = 1
 
 DEFAULT_TEXT_COL = "text"
 
@@ -195,6 +200,7 @@ if args.cpu_threads is not None:
     os.environ["OMP_NUM_THREADS"] = str(args.cpu_threads)
     os.environ["MKL_NUM_THREADS"] = str(args.cpu_threads)
 
+import gc  # noqa: E402
 import importlib.util  # noqa: E402
 import time  # noqa: E402
 from dataclasses import dataclass, field  # noqa: E402
@@ -531,6 +537,35 @@ def embed_column(
     return df, old_values, new_values
 
 
+def embed_with_backoff(
+    df: pd.DataFrame,
+    text_col: str,
+    emb_type: str,
+    positions: np.ndarray,
+    batch_size: int,
+) -> tuple[pd.DataFrame, list, list, int]:
+    """embed_column, halving the batch and retrying when the GPU is full.
+
+    The GPU may be shared with other jobs, so the batch that fits is not known in
+    advance. Nothing has been written to df when the failure happens, so a retry
+    starts from the same state. Returns the batch size that finally worked.
+    """
+    batch = batch_size
+    while True:
+        try:
+            df, old_values, new_values = embed_column(
+                df, text_col, emb_type, positions, batch
+            )
+            return df, old_values, new_values, batch
+        except torch.cuda.OutOfMemoryError:
+            if batch <= MIN_BATCH_SIZE:
+                raise
+            gc.collect()
+            torch.cuda.empty_cache()
+            batch = max(MIN_BATCH_SIZE, batch // 2)
+            tqdm.write(f"  out of GPU memory — retrying at batch {batch}")
+
+
 def print_summary(
     out_path: Path,
     done: list[tuple[str, int, float, dict]],
@@ -660,7 +695,7 @@ def main() -> None:
         tqdm.write(f"→ {st.col}  ({len(positions)} rows, batch {batch})")
         started = time.perf_counter()
         try:
-            df, old_values, new_values = embed_column(
+            df, old_values, new_values, batch = embed_with_backoff(
                 df, args.text_col, st.emb_type, positions, batch
             )
         except Exception as exc:  # keep going: one bad model must not lose the rest

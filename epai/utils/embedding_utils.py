@@ -58,8 +58,12 @@ models, ``openai`` for the ``openai_*`` models; everything else needs only
 
 Each backend is built as an ``encode(pairs) -> list[list[float]]`` callable that
 takes a batch of ``(title, abstract)`` tuples, joins them the way its own model
-expects and returns one vector per pair.
+expects and returns one vector per pair. ``add_embedding`` frees the model before
+it returns, so a caller that runs several embedders in sequence does not
+accumulate them all on the GPU.
 """
+
+import gc
 
 import torch
 import pandas as pd
@@ -100,6 +104,16 @@ _OPENAI_MODELS = {
     "openai_small": "text-embedding-3-small",
     "openai_large": "text-embedding-3-large",
 }
+
+# The API caps a single embeddings request at 300k tokens across all its inputs,
+# and any one input at 8192 tokens. A batch size counted in rows cannot respect a
+# limit counted in tokens, so the OpenAI backend re-splits whatever batch it is
+# given; batch_size is only an upper bound for it. The character-per-token ratio
+# is a deliberate under-estimate (English prose runs nearer 4) so the estimate
+# errs towards smaller, safer requests.
+OPENAI_MAX_TOKENS_PER_REQUEST = 250_000
+OPENAI_MAX_TOKENS_PER_INPUT = 8_000
+OPENAI_CHARS_PER_TOKEN = 3
 
 EMB_TYPES = (
     "specter2",
@@ -222,6 +236,26 @@ def _build_luar(model_id: str, device: str):
     return encode
 
 
+def _openai_requests(texts: list[str], max_tokens: int):
+    """Split texts into sub-requests that stay under the per-request token cap.
+
+    Greedy packing on an estimated token count -- a real tokenizer would be more
+    accurate but would add a dependency for what only needs to be a safe
+    under-estimate of how much fits in one call.
+    """
+    chunk: list[str] = []
+    chunk_tokens = 0
+    for text in texts:
+        tokens = max(1, len(text) // OPENAI_CHARS_PER_TOKEN)
+        if chunk and chunk_tokens + tokens > max_tokens:
+            yield chunk
+            chunk, chunk_tokens = [], 0
+        chunk.append(text)
+        chunk_tokens += tokens
+    if chunk:
+        yield chunk
+
+
 def _build_openai(model_id: str):
     """One OpenAI embedding model, at its native dimensionality."""
     from openai import OpenAI
@@ -230,9 +264,18 @@ def _build_openai(model_id: str):
 
     def encode(pairs):
         texts = [t + " [SEP] " + a for t, a in pairs]
-        response = client.embeddings.create(input=texts, model=model_id)
-        # The API does not promise input order, so sort by the returned index.
-        return [item.embedding for item in sorted(response.data, key=lambda d: d.index)]
+        # One over-long text would fail the whole request on its own.
+        limit = OPENAI_MAX_TOKENS_PER_INPUT * OPENAI_CHARS_PER_TOKEN
+        texts = [text[:limit] for text in texts]
+
+        vectors = []
+        for chunk in _openai_requests(texts, OPENAI_MAX_TOKENS_PER_REQUEST):
+            response = client.embeddings.create(input=chunk, model=model_id)
+            # The API does not promise input order, so sort by the returned index.
+            vectors.extend(
+                item.embedding for item in sorted(response.data, key=lambda d: d.index)
+            )
+        return vectors
 
     return encode
 
@@ -276,12 +319,23 @@ def add_embedding(
         (row["title"] or "", row["abstract"] or "") for _, row in df.iterrows()
     ]
 
-    embeddings = []
-    with tqdm(total=len(pairs), desc=f"Embedding ({emb_type})") as bar:
-        for start in range(0, len(pairs), batch_size):
-            batch = pairs[start : start + batch_size]
-            embeddings.extend(encode(batch))
-            bar.update(len(batch))
+    try:
+        embeddings = []
+        with tqdm(total=len(pairs), desc=f"Embedding ({emb_type})") as bar:
+            for start in range(0, len(pairs), batch_size):
+                batch = pairs[start : start + batch_size]
+                embeddings.extend(encode(batch))
+                bar.update(len(batch))
 
-    df[col] = embeddings
-    return df
+        df[col] = embeddings
+        return df
+    finally:
+        # Drop the model before the caller loads the next one. The closure is the
+        # only reference to it, so deleting it and collecting frees the weights;
+        # empty_cache then returns the allocator's blocks to the driver. Without
+        # this every model of a multi-embedder run stays resident on the GPU and
+        # the later, larger ones run out of memory.
+        del encode
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
