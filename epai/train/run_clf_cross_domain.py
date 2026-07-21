@@ -128,6 +128,7 @@ def run_cross_domain() -> str:
         tqdm.write(f"  FEATURES: {features}")
         tqdm.write(f"  SPLIT: grouped by {group_col!r}, test_size={test_size}")
         tqdm.write(f"  {'-'*30}")
+        tqdm.write(f"{'='*72}")
 
         data = {
             spec["name"]: load_dataset(spec, features, group_col, human_label)
@@ -135,7 +136,6 @@ def run_cross_domain() -> str:
         }
         names = [spec["name"] for spec in specs]
         labels = {spec["name"]: spec.get("label", spec["name"]) for spec in specs}
-        tqdm.write(f"{'='*72}")
 
         # Features must live in one shared space to be transferable: the same
         # columns, in the same order, for every corpus.
