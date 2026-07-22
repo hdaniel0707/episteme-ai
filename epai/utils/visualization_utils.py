@@ -1055,6 +1055,22 @@ def _save_clf_cd_figures(out_dir: Path, payload: dict) -> None:
     plt.close(fig)
 
 
+def plot_clf_cd_result(alg_dir: Path) -> None:
+    """Plot one cross-domain result directory from its ``cross_domain.json``.
+
+    Split out of ``plot_clf_cd_results`` so a run that produces one matrix per
+    embedding can plot each one as soon as it finishes, instead of only at the
+    end.
+    """
+    result_path = alg_dir / "cross_domain.json"
+    if not result_path.exists():
+        print(f"No cross_domain.json in {alg_dir}")
+        return
+    with open(result_path) as f:
+        payload = json.load(f)
+    _save_clf_cd_figures(alg_dir, payload)
+
+
 def plot_clf_cd_results(exp_dir: Path) -> None:
     """Plot every cross-domain config in an experiment directory."""
     alg_dirs = sorted(
@@ -1065,11 +1081,158 @@ def plot_clf_cd_results(exp_dir: Path) -> None:
         return
 
     for alg_dir in alg_dirs:
-        with open(alg_dir / "cross_domain.json") as f:
-            payload = json.load(f)
-        _save_clf_cd_figures(alg_dir, payload)
+        plot_clf_cd_result(alg_dir)
 
     print(f"Plots saved to: {exp_dir}")
+
+
+def plot_clf_cd_emb_comparison(exp_dir: Path, payload: dict) -> None:
+    """Compare the embeddings of one cross-domain experiment.
+
+    ``payload`` is the ``embedding_comparison.json`` written by
+    ``epai/train/run_clf_cross_domain_embeddings.py``: one entry per embedding,
+    each holding its full source x target accuracy matrix and the in-domain /
+    transfer means taken from it.
+
+    Two figures:
+
+      * ``embedding_comparison.png`` -- in-domain vs transfer per embedding,
+        ranked, next to the same two numbers as a scatter. The scatter is what
+        separates "this embedding is good" from "this embedding is good *at this
+        corpus*": points near the diagonal keep their score off-domain, points
+        far below it have learned the corpus.
+      * ``embedding_comparison_matrix.png`` -- every source->target cell of every
+        embedding in one heatmap, for the cases the means average away (one
+        corpus pair that collapses while the rest hold up).
+    """
+    rows: list[dict] = payload["embeddings"]
+    if not rows:
+        print(f"No embedding results to compare in {exp_dir}")
+        return
+
+    names: list[str] = payload["dataset_names"]
+    label_of: dict = payload.get("dataset_labels", {})
+    cfg = payload["config"]
+    alg_label = payload.get("alg_label", payload.get("alg_id", exp_dir.name))
+    subtitle = (
+        f"{cfg['model']['ml_alg']} · {cfg['model']['n_runs']} seeds · "
+        f"grouped by {cfg['data']['group_col']!r} · "
+        f"{len(names)} corpora · chance = {CD_CHANCE*100:.0f}%"
+    )
+
+    # Ranked by transfer: the whole point of the experiment is which embedding
+    # survives leaving its corpus, not which scores highest at home.
+    order = sorted(rows, key=lambda r: r["transfer_mean"])
+    labels = [f"{r['label']} ({r['feature_dim']}d)" for r in order]
+    in_domain = np.array([r["in_domain_mean"] for r in order])
+    transfer = np.array([r["transfer_mean"] for r in order])
+    transfer_std = np.array([r["transfer_std"] for r in order])
+    in_domain_std = np.array([r["in_domain_std"] for r in order])
+    transfer_min = np.array([r["transfer_min"] for r in order])
+
+    # Figure 1: ranked bars + the in-domain/transfer scatter.
+    height = max(5.0, 0.42 * len(order) + 2.4)
+    fig, axes = plt.subplots(1, 2, figsize=(15.0, height))
+
+    y = np.arange(len(order))
+    h = 0.38
+    b1 = axes[0].barh(y + h / 2, in_domain, h, xerr=in_domain_std, capsize=2,
+                      color="steelblue", label="in-domain (diagonal)")
+    b2 = axes[0].barh(y - h / 2, transfer, h, xerr=transfer_std, capsize=2,
+                      color="orange", label="transfer (off-diagonal)")
+    axes[0].bar_label(b1, fmt="%.3f", fontsize=7, padding=2)
+    axes[0].bar_label(b2, fmt="%.3f", fontsize=7, padding=2)
+    # Worst single transfer cell: a mean can hide one collapsed corpus pair.
+    axes[0].scatter(transfer_min, y - h / 2, marker="|", s=90, color="black",
+                    zorder=3, label="worst transfer cell")
+    axes[0].axvline(CD_CHANCE, linestyle="--", color="red", linewidth=1.2, label="chance")
+    axes[0].set_yticks(y)
+    axes[0].set_yticklabels(labels, fontsize=8)
+    axes[0].set_xlim(0.0, 1.18)
+    axes[0].set_xlabel("Accuracy")
+    axes[0].set_title("Ranked by transfer accuracy")
+    axes[0].legend(fontsize=8, loc="lower right")
+
+    axes[1].plot([0, 1], [0, 1], linestyle=":", color="gray", linewidth=1.0,
+                 label="no loss under transfer")
+    axes[1].axhline(CD_CHANCE, linestyle="--", color="red", linewidth=1.2, label="chance")
+    axes[1].axvline(CD_CHANCE, linestyle="--", color="red", linewidth=1.2)
+    axes[1].scatter(in_domain, transfer, s=45, color="seagreen", zorder=3)
+    for r, x_val, y_val in zip(order, in_domain, transfer):
+        axes[1].annotate(r["label"], (x_val, y_val), textcoords="offset points",
+                         xytext=(5, 4), fontsize=7.5)
+    lo = min(0.45, float(min(transfer.min(), in_domain.min())) - 0.05)
+    axes[1].set_xlim(lo, 1.02)
+    axes[1].set_ylim(lo, 1.02)
+    axes[1].set_xlabel("In-domain accuracy (diagonal)")
+    axes[1].set_ylabel("Transfer accuracy (off-diagonal)")
+    axes[1].set_title("Does the in-domain score survive an unseen corpus?")
+    axes[1].legend(fontsize=8, loc="lower right")
+
+    fig.suptitle(f"{alg_label} — embedding comparison\n{subtitle}")
+    fig.tight_layout(rect=(0, 0.02, 1, 1))
+    fig.savefig(exp_dir / "embedding_comparison.png", dpi=150)
+    plt.close(fig)
+
+    # Figure 2: every cell of every embedding, best transfer at the top.
+    order_desc = list(reversed(order))
+    pairs = [(s, t) for s in names for t in names]
+    pair_labels = [
+        f"{label_of.get(s, s)}\n→ {label_of.get(t, t)}" for s, t in pairs
+    ]
+    mat = np.array(
+        [
+            [r["accuracy"][names.index(s)][names.index(t)] for s, t in pairs]
+            for r in order_desc
+        ],
+        dtype=float,
+    )
+
+    fig, ax = plt.subplots(
+        figsize=(max(9.0, 1.25 * len(pairs) + 3.0), max(4.5, 0.36 * len(order) + 3.0))
+    )
+    im = ax.imshow(mat, vmin=0.0, vmax=1.0, cmap="RdBu", aspect="auto")
+    cbar = fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02)
+    cbar.set_label("Accuracy (dashed = chance)")
+    cbar.ax.axhline(CD_CHANCE, color="black", linewidth=1.2, linestyle="--")
+
+    ax.set_xticks(range(len(pairs)))
+    ax.set_xticklabels(pair_labels, fontsize=7.5, rotation=45, ha="right")
+    ax.set_yticks(range(len(order_desc)))
+    ax.set_yticklabels(
+        [f"{r['label']} ({r['feature_dim']}d)" for r in order_desc], fontsize=8
+    )
+    ax.set_xlabel("TRAINED ON → TESTED ON", fontweight="bold", labelpad=8)
+    ax.set_title(f"{alg_label} — every transfer cell, per embedding\n{subtitle}")
+
+    ax.set_xticks(np.arange(-0.5, len(pairs), 1), minor=True)
+    ax.set_yticks(np.arange(-0.5, len(order_desc), 1), minor=True)
+    ax.grid(which="minor", color="white", linewidth=2)
+    ax.tick_params(which="minor", length=0)
+
+    for i in range(mat.shape[0]):
+        for j in range(mat.shape[1]):
+            strong = abs(mat[i, j] - CD_CHANCE) > 0.32
+            ax.text(j, i, f"{mat[i, j]*100:.1f}", ha="center", va="center",
+                    fontsize=7, color="white" if strong else "black")
+    # Boxed columns are in-domain: they answer a different question from the rest.
+    for j, (s, t) in enumerate(pairs):
+        if s == t:
+            ax.add_patch(
+                plt.Rectangle((j - 0.5, -0.5), 1, mat.shape[0], fill=False,
+                              edgecolor="black", linewidth=2.0)
+            )
+
+    fig.text(0.01, 0.01,
+             "Boxed columns = in-domain (held-out split of the same corpus); the rest "
+             "are transfer to an unseen corpus.\nRows are ordered by mean transfer "
+             "accuracy, best first.",
+             fontsize=7.5, color="dimgray")
+    fig.tight_layout(rect=(0, 0.05, 1, 1))
+    fig.savefig(exp_dir / "embedding_comparison_matrix.png", dpi=150)
+    plt.close(fig)
+
+    print(f"Comparison plots saved to: {exp_dir}")
 
 
 ########################################################################

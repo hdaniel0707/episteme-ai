@@ -1,0 +1,91 @@
+# Cross-domain (transfer) classification, repeated for every embedding.
+#
+# Same experiment as a cfg/train/clf_cd/*.yaml config -- every dataset below is
+# trained on in turn and evaluated on ALL of them:
+#   diagonal     -> in-domain, held-out grouped test split
+#   off-diagonal -> transfer: the model never saw this corpus / this generator
+# -- except that the whole matrix is repeated once per entry in `embeddings`.
+# Each embedding gets its own directory and figures, and a final comparison
+# figure ranks the embeddings against each other.
+#
+# Every YAML in cfg/train/clf_cd_emb/ is run by
+# epai/train/run_clf_cross_domain_embeddings.py, so `alg_id` must be unique
+# across the folder -- it names the output directory under
+# results/clf_cd_emb/<experiment_id>/<alg_id>/<emb_column>/
+alg_id: "gpt54mini_logistic"
+alg_label: "gpt54mini + logistic"
+
+seed: 42
+
+# The embedders to compare. One full cross-domain matrix is produced per entry,
+# so the run costs len(embeddings) x n_runs x len(datasets) fits. Names may be
+# given with or without the `emb_` prefix. A column missing from any dataset is
+# reported by the preflight check before any training starts.
+embeddings:
+  # content-heavy
+  - emb_specter2
+  - emb_scincl
+  - emb_scibert
+  # general semantic
+  - emb_mpnet
+  - emb_minilm
+  - emb_e5
+  - emb_bge
+  - emb_qwen3
+  # raw LM baseline
+  - emb_roberta
+  # style / authorship
+  - emb_styledistance
+  - emb_style_wegmann
+  - emb_luar
+  - emb_luar_crud
+  # api
+  - emb_openai_small
+  - emb_openai_large
+
+# Extra columns appended to EVERY embedding's design matrix (e.g.
+# ["binoculars_score"]). They shift all embeddings equally, so the comparison
+# stays fair. Usually empty.
+extra_features: []
+
+data:
+  # Labels are binarised to human vs machine: `human_label` -> 0, every other
+  # class -> 1. The corpora do not agree on generator names (`gpt` here,
+  # `gpt_plain` there), so only this binary view is comparable across them.
+  human_label: "human"
+
+  # Column whose rows must stay in the SAME split. In the Ghostbuster corpora the
+  # human original and every LLM rewrite of a source document share one `id`.
+  # It also guards transfer: `essay` and `essay_gpt54mini` are built from the
+  # same human sources and share their ids, so target rows whose group was seen
+  # during training are excluded from the evaluation (and the count is reported).
+  group_col: "id"
+
+  datasets:
+    - name: "essay_gpt54mini"                                          # short key used in the matrix
+      label: "essay (gpt54mini)"                                       # optional, shown on the figures
+      parquet_path: "data/parquet/essay_gpt54mini_binox0.parquet"      # relative to the project root
+      drop_classes: []                                                 # e.g. ["claude", "gpt_prompt1"]
+    - name: "reuter_gpt54mini"
+      label: "reuter (gpt54mini)"
+      parquet_path: "data/parquet/reuter_gpt54mini_binox0.parquet"
+      drop_classes: []
+    - name: "wp_gpt54mini"
+      label: "wp (gpt54mini)"
+      parquet_path: "data/parquet/wp_gpt54mini_binox0.parquet"
+      drop_classes: []
+
+model:
+  ml_alg: "logistic"  # gradient_boosting | logistic | svm | mlp
+  n_runs: 3
+  test_size: 0.30     # held-out fraction; used for the in-domain diagonal
+
+# Preflight only: refuse to start if a (dataset, embedding) pair keeps fewer than
+# this many usable rows. Guards against a column that exists but is mostly Null,
+# which would otherwise train on a handful of rows and still look like a run.
+min_rows: 50
+
+# Preflight only: warn (do not abort) when a class is rarer than this share of a
+# dataset. The figures are read against a 50% chance line, which stops being the
+# right anchor once the classes are badly skewed.
+min_class_share: 0.10
