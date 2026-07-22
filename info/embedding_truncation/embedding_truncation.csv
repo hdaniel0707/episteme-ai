@@ -1,0 +1,16 @@
+emb_type,emb_column,model_id,builder,truncation_in_code,model_limit_tokens,effective_cutoff_tokens,effective_cutoff_note,limit_source
+specter2,emb_specter2,allenai/specter2_base + allenai/specter2 adapter,_build_specter2,max_length=512,512,512,,explicit in code
+scincl,emb_scincl,malteos/scincl,_build_hf,max_length=512,512,512,,explicit in code
+scibert,emb_scibert,allenai/scibert_scivocab_uncased,_build_hf,max_length=512,512,512,,explicit in code
+roberta,emb_roberta,roberta-base,_build_hf,max_length=512,512,512,514 position embeddings; 512 usable,explicit in code
+mpnet,emb_mpnet,sentence-transformers/all-mpnet-base-v2,_build_st,none,384,384,checkpoint caps below its 512-token backbone,sentence_bert_config.json
+minilm,emb_minilm,sentence-transformers/all-MiniLM-L6-v2,_build_st,none,256,256,checkpoint caps below its 512-token backbone,sentence_bert_config.json
+e5,emb_e5,intfloat/e5-base-v2,_build_st,none,512,512,,sentence_bert_config.json
+bge,emb_bge,BAAI/bge-base-en-v1.5,_build_st,none,512,512,,sentence_bert_config.json
+qwen3,emb_qwen3,Qwen/Qwen3-Embedding-0.6B,_build_st,none,32768,32768,whole document; ST falls back to min(max_position_embeddings 32768. model_max_length 131072),derived by sentence-transformers
+styledistance,emb_styledistance,StyleDistance/styledistance,_build_st,none,512,512,roberta-base backbone,sentence_bert_config.json
+style_wegmann,emb_style_wegmann,AnnaWegmann/Style-Embedding,_build_st,none,512,512,,sentence_bert_config.json
+luar,emb_luar,rrivera1849/LUAR-MUD,_build_luar,"max_length=512, padding=max_length",512,512,every input padded to exactly 512; backbone paraphrase-distilroberta-base-v1,explicit in code
+luar_crud,emb_luar_crud,rrivera1849/LUAR-CRUD,_build_luar,"max_length=512, padding=max_length",512,512,every input padded to exactly 512,explicit in code
+openai_small,emb_openai_small,text-embedding-3-small,_build_openai,text[:24000] characters,8192,6000,24000-character slice ~= 6000 tokens; stricter than the API limit,character slice in code
+openai_large,emb_openai_large,text-embedding-3-large,_build_openai,text[:24000] characters,8192,6000,24000-character slice ~= 6000 tokens; stricter than the API limit,character slice in code
