@@ -140,7 +140,8 @@ def plot_baseline_correlation(scores: pd.DataFrame, class_labels: np.ndarray | N
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5.5),
                                    gridspec_kw={"width_ratios": [1.15, 1]})
-    im = ax1.imshow(corr, cmap=palette.DIVERGING_CMAP, vmin=-1, vmax=1)
+    im = ax1.imshow(corr, cmap=palette.DIVERGING_CMAP, vmin=-1, vmax=1,
+                    interpolation="nearest")
     for i in range(len(cols)):
         for j in range(len(cols)):
             if np.isfinite(corr[i, j]):
@@ -187,8 +188,8 @@ def plot_baseline_correlation(scores: pd.DataFrame, class_labels: np.ndarray | N
 
 # ------------------------------------------------------------------ per-run entry
 
-def _best_seed_test_preds(wf_dir: Path) -> tuple[np.ndarray, np.ndarray] | None:
-    """(y_true, y_pred) on the test split from the best seed's result.json (reg scale)."""
+def _best_seed_result(wf_dir: Path) -> dict | None:
+    """The best seed's result.json (by test spearman/macro_f1)."""
     best, best_metric = None, -np.inf
     for sd in sorted(Path(wf_dir).glob("seed_*")):
         rj = sd / "result.json"
@@ -198,25 +199,59 @@ def _best_seed_test_preds(wf_dir: Path) -> tuple[np.ndarray, np.ndarray] | None:
         metric = r.get("spearman", r.get("macro_f1", 0.0)) or 0.0
         if metric > best_metric:
             best, best_metric = r, metric
-    if not best or "test" not in best:
+    return best
+
+
+def _split_preds_from_result(best: dict | None, split: str
+                             ) -> tuple[np.ndarray, np.ndarray] | None:
+    """(y_true, y_pred) for one split from a result.json dict (reg scale)."""
+    if not best or split not in best:
         return None
-    t = best["test"]
-    if not t.get("y_true") or not t.get("y_pred"):
+    t = best[split]
+    if not isinstance(t, dict) or not t.get("y_true") or not t.get("y_pred"):
         return None
     return np.asarray(t["y_true"], dtype=float), np.asarray(t["y_pred"], dtype=float)
 
 
+def _best_seed_test_preds(wf_dir: Path) -> tuple[np.ndarray, np.ndarray] | None:
+    """(y_true, y_pred) on the test split from the best seed's result.json (reg scale)."""
+    return _split_preds_from_result(_best_seed_result(wf_dir), "test")
+
+
+BASELINE_COLS = ("naip", "specter2_knn", "llm_judge", "venue_ais",
+                 "forecite", "cited_potential")
+
+
+def _split_scores(split_df: pd.DataFrame, ours: np.ndarray | None,
+                  task: str, n_classes: int) -> tuple[np.ndarray, dict]:
+    """(y_true, {scorer: scores}) for one split's baselines.parquet slice."""
+    y_true = pd.to_numeric(split_df["target"], errors="coerce").to_numpy(dtype=float)
+    scores: dict[str, np.ndarray] = {}
+    if ours is not None and len(ours) == len(split_df):
+        o = ours / max(1, n_classes - 1) if task == "clf" else ours
+        scores[OURS] = np.asarray(o, dtype=float)
+    for col in BASELINE_COLS:
+        if col in split_df.columns and split_df[col].notna().sum() >= 3:
+            scores[col] = pd.to_numeric(split_df[col], errors="coerce").to_numpy(dtype=float)
+    return y_true, scores
+
+
 def generate_baseline_plots(wf_type: str, task: str, wf_dir: Path, settings) -> None:
-    """Produce the two comparison figures + metrics CSV for one run. Never raises."""
+    """Produce the comparison figures + metrics CSV for one run, for every split. The CSV
+    ``baseline_metrics.csv`` gets a ``split`` column (train/val/test) so the model can be
+    benchmarked against the baselines on each split, not just test. Never raises.
+
+    ``spearman`` here is Spearman's rank correlation ρ between a scorer's ranking of the
+    papers and the true impact-target ranking on that split: +1 = identical ordering,
+    0 = unrelated, −1 = reversed. It is the headline "does this scorer rank papers by
+    impact the way the ground truth does" number. (This is ρ, not a p-value.)
+    """
     wf_dir = Path(wf_dir)
     bp = wf_dir / "baselines.parquet"
     if not bp.is_file():
         return
     df = pd.read_parquet(bp)
     if "split" not in df.columns or "target" not in df.columns:
-        return
-    test = df[df["split"].astype(str) == "test"].reset_index(drop=True)
-    if len(test) < 5:
         return
 
     thresholds = [float(t) for t in
@@ -225,26 +260,43 @@ def generate_baseline_plots(wf_type: str, task: str, wf_dir: Path, settings) -> 
     out = wf_dir / "aggregate" / "baselines"
     out.mkdir(parents=True, exist_ok=True)
 
-    preds = _best_seed_test_preds(wf_dir)
-    scores: dict[str, np.ndarray] = {}
-    y_true = pd.to_numeric(test["target"], errors="coerce").to_numpy(dtype=float)
-    if preds is not None and len(preds[1]) == len(test):
-        ours = preds[1]
-        if task == "clf":  # class ids -> [0,1] so it ranks like the other scorers
-            ours = ours / max(1, n_classes - 1)
-        scores[OURS] = ours
-    for col in ("naip", "specter2_knn", "llm_judge", "venue_ais",
-                "forecite", "cited_potential"):
-        if col in test.columns and test[col].notna().sum() >= 3:
-            scores[col] = pd.to_numeric(test[col], errors="coerce").to_numpy(dtype=float)
+    best = _best_seed_result(wf_dir)
+
+    # Per-split metrics table (train/val/test) → one CSV
+    per_split_metrics: list[pd.DataFrame] = []
+    for split in ("train", "val", "test"):
+        split_df = df[df["split"].astype(str) == split].reset_index(drop=True)
+        if len(split_df) < 5:
+            continue
+        preds = _split_preds_from_result(best, split)
+        ours = preds[1] if preds is not None else None
+        y_true, scores = _split_scores(split_df, ours, task, n_classes)
+        if not scores:
+            continue
+        m = baseline_metrics(y_true, scores, thresholds)
+        if m.empty:
+            continue
+        m.insert(0, "split", split)
+        per_split_metrics.append(m)
+
+    if not per_split_metrics:
+        return
+    metrics_all = pd.concat(per_split_metrics, ignore_index=True)
+    metrics_all.to_csv(out / "baseline_metrics.csv", index=False)
+
+    # Figures are drawn on the test split (the headline comparison)
+    test = df[df["split"].astype(str) == "test"].reset_index(drop=True)
+    if len(test) < 5:
+        return
+    preds = _split_preds_from_result(best, "test")
+    ours = preds[1] if preds is not None else None
+    y_true, scores = _split_scores(test, ours, task, n_classes)
     if not scores:
         return
-
-    metrics = baseline_metrics(y_true, scores, thresholds)
-    metrics.to_csv(out / "baseline_metrics.csv", index=False)
+    test_metrics = metrics_all[metrics_all["split"] == "test"].drop(columns=["split"])
 
     try:
-        plot_baseline_agreement(metrics, n_classes, wf_dir.name,
+        plot_baseline_agreement(test_metrics, n_classes, wf_dir.name,
                                 out / f"baseline_agreement_{wf_dir.name}.png")
     except Exception as e:
         print(f"[baselines] {wf_dir.name} agreement plot skipped ({e})")
@@ -259,46 +311,85 @@ def generate_baseline_plots(wf_type: str, task: str, wf_dir: Path, settings) -> 
 
 # ------------------------------------------------------------------ cross-run summary
 
+def _leaderboard_panel(ax, runs: dict[str, pd.DataFrame], scorers: list[str],
+                       split: str) -> bool:
+    """Draw one grouped-bar panel of Spearman ρ per run×scorer for a given split.
+    Returns True if any bars were drawn."""
+    x = np.arange(len(runs))
+    w = 0.8 / max(1, len(scorers))
+    drew = False
+    for si, scorer in enumerate(scorers):
+        vals = []
+        for m in runs.values():
+            sel = m[(m["scorer"] == scorer) & (m["split"] == split)]
+            vals.append(float(sel["spearman"].iloc[0]) if len(sel) else np.nan)
+        if np.isfinite(vals).any():
+            drew = True
+        ax.bar(x + (si - (len(scorers) - 1) / 2) * w, vals, w,
+               color=palette.color_for(scorer), alpha=0.85, label=scorer)
+    ax.set_xticks(x)
+    ax.set_xticklabels(list(runs), rotation=20, ha="right", fontsize=9)
+    ax.set_ylabel("Spearman ρ vs true impact target")
+    ax.set_title(f"{split} split")
+    ax.axhline(0.0, color="gray", lw=0.8)
+    ax.grid(True, axis="y", alpha=0.3)
+    return drew
+
+
 def baseline_leaderboard(results_dir: Path) -> None:
-    """Grouped bars of test Spearman-vs-target for every run's model + its baselines,
-    from each run's aggregate/baselines/baseline_metrics.csv. Never raises."""
+    """Grouped bars of Spearman-vs-target for every run's model + its baselines, one panel
+    per split (train / val / test), from each run's aggregate/baselines/baseline_metrics.csv.
+    Also writes ``summary/baseline_leaderboard.csv`` — the tidy (run, split, scorer, metric)
+    table behind the figure. Never raises.
+
+    Spearman ρ is the rank correlation between a scorer's ordering of the papers and the
+    true impact-target ordering (+1 best, 0 unrelated); it is the headline benchmark number.
+    """
     results_dir = Path(results_dir)
     runs: dict[str, pd.DataFrame] = {}
     for d in sorted(results_dir.iterdir()) if results_dir.is_dir() else []:
         csv = d / "aggregate" / "baselines" / "baseline_metrics.csv"
         if csv.is_file():
             try:
-                runs[d.name] = pd.read_csv(csv)
+                m = pd.read_csv(csv)
+                if "split" not in m.columns:      # backward-compat: old test-only CSVs
+                    m["split"] = "test"
+                runs[d.name] = m
             except Exception:
                 continue
     if not runs:
         return
+
+    out = results_dir / "summary"
+    out.mkdir(parents=True, exist_ok=True)
+
+    # Tidy summary CSV (statistics only — one row per run×split×scorer)
+    tidy = []
+    for run_name, m in runs.items():
+        for _, r in m.iterrows():
+            tidy.append({"run": run_name, **r.to_dict()})
+    pd.DataFrame(tidy).to_csv(out / "baseline_leaderboard.csv", index=False)
+
     scorers: list[str] = []
     for m in runs.values():
         for s in m["scorer"]:
             if s not in scorers:
                 scorers.append(s)
+    splits = [sp for sp in ("train", "val", "test")
+              if any((m["split"] == sp).any() for m in runs.values())]
+    if not splits:
+        return
 
-    x = np.arange(len(runs))
-    w = 0.8 / max(1, len(scorers))
-    fig, ax = plt.subplots(figsize=(max(8, len(runs) * 1.8), 5.5))
     palette.apply_style()
-    for si, scorer in enumerate(scorers):
-        vals = [float(m.loc[m["scorer"] == scorer, "spearman"].iloc[0])
-                if (m["scorer"] == scorer).any() else np.nan
-                for m in runs.values()]
-        ax.bar(x + (si - (len(scorers) - 1) / 2) * w, vals, w,
-               color=palette.color_for(scorer), alpha=0.85, label=scorer)
-    ax.set_xticks(x)
-    ax.set_xticklabels(list(runs), rotation=20, ha="right", fontsize=9)
-    ax.set_ylabel("Spearman ρ with the true impact target (test split)")
-    ax.set_title("Model-vs-baseline leaderboard (higher = better)")
-    ax.axhline(0.0, color="gray", lw=0.8)
-    ax.legend(fontsize=8, ncols=min(4, len(scorers)))
-    ax.grid(True, axis="y", alpha=0.3)
+    fig, axes = plt.subplots(1, len(splits), figsize=(max(8, len(runs) * 1.8) * len(splits) / 3 + 4, 5.5),
+                             squeeze=False)
+    for ax, split in zip(axes[0], splits):
+        _leaderboard_panel(ax, runs, scorers, split)
+    axes[0][-1].legend(fontsize=8, ncols=min(4, len(scorers)))
+    fig.suptitle("Model-vs-baseline leaderboard — Spearman ρ with the true impact target "
+                 "(higher = better)", fontsize=12)
     fig.tight_layout()
-    out = results_dir / "summary"
-    out.mkdir(parents=True, exist_ok=True)
     fig.savefig(out / "baseline_leaderboard.png", dpi=150)
     plt.close(fig)
-    print(f"[baselines] leaderboard -> {out / 'baseline_leaderboard.png'}")
+    print(f"[baselines] leaderboard -> {out / 'baseline_leaderboard.png'} "
+          f"(+ baseline_leaderboard.csv)")

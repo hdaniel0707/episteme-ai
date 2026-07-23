@@ -72,7 +72,7 @@ class NAIPModel(ExternalImpactModel):
             from gradio_client import Client
 
             self._client = Client(
-                "ssocean/Newborn_Article_Impact_Predict", token=config.secret("HF_TOKEN")
+                "ssocean/Newborn_Article_Impact_Predict", token=config.api_key("HF_TOKEN")
             )
         return self._client
 
@@ -191,21 +191,26 @@ JUDGE_PROMPT = (
 class LLMJudgeBaseline(ExternalImpactModel):
     """Zero-shot LLM impact rating, pinned model + prompt v1, temperature 0.
 
-    Provider from LLM_JUDGE_PROVIDER (anthropic | openai | ollama), model from
-    LLM_JUDGE_MODEL. Returns score/100 in [0,1]; None when unconfigured/unparseable."""
+    Provider from LLM_JUDGE_PROVIDER (anthropic | openai | local), model from
+    LLM_JUDGE_MODEL. 'local' talks to an OpenAI-compatible endpoint at LOCAL_LLM_URL with
+    LLM_JUDGE_API_KEY (via the shared iwf.llm.client — same config the LLM-as-judge
+    workflow and the extend-phase auto-fill use). Returns score/100 in [0,1]; None when
+    unconfigured/unparseable."""
 
     name = "llm_judge"
 
     def __init__(self):
         self.provider = (config.get_str("LLM_JUDGE_PROVIDER", "anthropic")).lower()
-        defaults = {"anthropic": "claude-haiku-4-5", "openai": "gpt-4o-mini",
-                    "ollama": "llama3"}
+        defaults = {"anthropic": "claude-haiku-4-5", "openai": "gpt-4o-mini"}
         self.model = config.get_str("LLM_JUDGE_MODEL", defaults.get(self.provider, ""))
 
     def _complete(self, prompt: str) -> str | None:
         try:
+            if self.provider == "local":
+                from workflow.src.iwf.llm.client import complete as _local_complete
+                return _local_complete(prompt)
             if self.provider == "anthropic":
-                key = config.secret("ANTHROPIC_API_KEY")
+                key = config.api_key("ANTHROPIC_API_KEY")
                 if not key:
                     return None
                 r = requests.post(
@@ -217,7 +222,7 @@ class LLMJudgeBaseline(ExternalImpactModel):
                     timeout=60)
                 return r.json()["content"][0]["text"] if r.ok else None
             if self.provider == "openai":
-                key = config.secret("OPENAI_API_KEY")
+                key = config.api_key("OPENAI_API_KEY")
                 if not key:
                     return None
                 r = requests.post(

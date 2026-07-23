@@ -77,7 +77,7 @@ def nf_correlation_matrix(df: pd.DataFrame, wf_name: str, path: Path) -> dict:
                 rho[i, j], pval[i, j] = r.correlation, r.pvalue
 
     fig, ax = plt.subplots(figsize=(1.1 * n + 3, 1.0 * n + 2))
-    im = ax.imshow(rho, cmap=palette.DIVERGING_CMAP, vmin=-1, vmax=1)
+    im = ax.imshow(rho, cmap=palette.DIVERGING_CMAP, vmin=-1, vmax=1, interpolation="nearest")
     for i in range(n):
         for j in range(n):
             if np.isfinite(rho[i, j]):
@@ -173,11 +173,24 @@ def generate_nf_analysis(wf_type: str, wf_dir: Path, settings) -> None:
 
 # ------------------------------------------------------------------ ablation summary
 
+def _task_of_wf(wf: str) -> str:
+    return "clf" if "clf" in str(wf) else "reg"
+
+
 def nf_ablation(results_dir: Path) -> None:
-    """Compare runs that differ only in use_novelty/use_feasibility: bars of the primary
-    test metric per (novelty, feasibility) setting, grouped by workflow type."""
+    """Do the novelty/feasibility (and metadata) features help?
+
+    The old version bucketed runs into the four (novelty, feasibility) combos and grouped
+    by workflow type. When every meta run enables both features, all bars collapse into the
+    single "both" bucket and the figure is uninformative. This version fixes the category
+    choice by plotting a **delta over the plain-embedding baseline** of the same task
+    (emb_clf/emb_reg with no fused features): each meta run shows how much its feature set
+    lifts the primary metric above that no-feature reference. Only feature combos that
+    actually occur in the run set are drawn, and a tidy CSV is written alongside.
+    """
     results_dir = Path(results_dir)
     entries = []
+    baselines: dict[str, list[float]] = {"clf": [], "reg": []}
     for d in sorted(results_dir.iterdir()) if results_dir.is_dir() else []:
         rc, ms = d / "run_config.json", d / "aggregate" / "metrics_summary.json"
         if not (rc.is_file() and ms.is_file()):
@@ -187,42 +200,80 @@ def nf_ablation(results_dir: Path) -> None:
             summ = json.loads(ms.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             continue
+        wf = str(cfg.get("workflow_type", ""))
         primary = summ.get("primary_metric", "spearman")
         mean = summ.get(f"mean_{primary}")
-        if mean is None or "meta" not in str(cfg.get("workflow_type", "")):
+        if mean is None:
             continue
-        entries.append({"run": d.name, "wf": cfg.get("workflow_type"),
-                        "novelty": bool(cfg.get("use_novelty")),
-                        "feasibility": bool(cfg.get("use_feasibility")),
-                        "metric": primary, "mean": float(mean),
-                        "std": float(summ.get(f"std_{primary}") or 0.0)})
-    if len(entries) < 2:
+        task = _task_of_wf(wf)
+        is_meta = "meta" in wf
+        # Plain-embedding reference run for its task. use_novelty/use_feasibility are
+        # config-global fields inherited by EVERY run's settings snapshot, but they only
+        # take effect for meta feature-builds (feature_builder.py only reads them when the
+        # 'novelty'/'feasibility' columns exist, which the z-only workflows never build) —
+        # so gating on wf identity (plain emb_clf/emb_reg), not those flags, is what
+        # actually identifies the no-fused-features baseline.
+        if wf in ("emb_clf", "emb_reg"):
+            # plain-embedding reference run for its task
+            baselines[task].append(float(mean))
+        if is_meta:
+            entries.append({"run": d.name, "wf": wf, "task": task,
+                            "novelty": bool(cfg.get("use_novelty")),
+                            "feasibility": bool(cfg.get("use_feasibility")),
+                            "metadata": bool(cfg.get("use_metadata")),
+                            "metric": primary, "mean": float(mean),
+                            "std": float(summ.get(f"std_{primary}") or 0.0)})
+    if not entries:
         return
     df = pd.DataFrame(entries)
-    combos = [(False, False), (True, False), (False, True), (True, True)]
-    labels = ["neither", "novelty", "feasibility", "both"]
+
+    def _combo(row) -> str:
+        parts = [p for p, on in (("novelty", row["novelty"]),
+                                 ("feasibility", row["feasibility"]),
+                                 ("metadata", row["metadata"])) if on]
+        return "+".join(parts) if parts else "meta(none)"
+
+    df["combo"] = df.apply(_combo, axis=1)
+    base_mean = {t: (float(np.mean(v)) if v else np.nan) for t, v in baselines.items()}
+    df["baseline"] = df["task"].map(base_mean)
+    df["delta"] = df["mean"] - df["baseline"]
+
+    out = results_dir / "summary"
+    out.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out / "nf_ablation_delta.csv", index=False)
+
+    # Only combos that actually occur; group along workflow type
+    combos = list(dict.fromkeys(df["combo"]))
     wfs = sorted(df["wf"].unique())
     x = np.arange(len(wfs))
-    w = 0.8 / len(combos)
+    w = 0.8 / max(1, len(combos))
+    colors = palette.class_colors(len(combos))
+    have_baseline = df["baseline"].notna().any()
+    yvals = "delta" if have_baseline else "mean"
+
     fig, ax = plt.subplots(figsize=(max(7, len(wfs) * 2.2), 5))
-    cmap = plt.get_cmap("viridis")
-    for ci, ((nov, feas), lab) in enumerate(zip(combos, labels)):
+    for ci, combo in enumerate(combos):
         means, stds = [], []
         for wf in wfs:
-            sel = df[(df["wf"] == wf) & (df["novelty"] == nov) & (df["feasibility"] == feas)]
-            means.append(sel["mean"].iloc[-1] if len(sel) else np.nan)
-            stds.append(sel["std"].iloc[-1] if len(sel) else 0.0)
+            sel = df[(df["wf"] == wf) & (df["combo"] == combo)]
+            means.append(float(sel[yvals].iloc[-1]) if len(sel) else np.nan)
+            stds.append(float(sel["std"].iloc[-1]) if len(sel) else 0.0)
         ax.bar(x + (ci - (len(combos) - 1) / 2) * w, means, w, yerr=stds,
-               color=cmap(ci / max(1, len(combos) - 1)), alpha=0.9, capsize=3, label=lab)
+               color=colors[ci], alpha=0.9, capsize=3, label=combo)
+    ax.axhline(0.0, color=palette.GRAY, lw=0.8)
     ax.set_xticks(x)
     ax.set_xticklabels(wfs, fontsize=9)
-    ax.set_ylabel("mean primary test metric across seeds")
-    ax.set_title("Do novelty/feasibility features help? (ablation across runs)")
+    if have_baseline:
+        ax.set_ylabel("Δ primary metric vs plain-embedding baseline (same task)")
+        ax.set_title("Do fused novelty/feasibility/metadata features help?\n"
+                     "(lift over the no-feature embedding baseline)")
+    else:
+        ax.set_ylabel("mean primary test metric across seeds")
+        ax.set_title("Fused-feature runs by feature set\n"
+                     "(no plain-embedding baseline found for a delta)")
     ax.legend(title="fused features", fontsize=9)
     ax.grid(True, axis="y", alpha=0.3)
     fig.tight_layout()
-    out = results_dir / "summary"
-    out.mkdir(parents=True, exist_ok=True)
     fig.savefig(out / "nf_ablation_delta.png", dpi=150)
     plt.close(fig)
-    print(f"[nf] ablation figure -> {out / 'nf_ablation_delta.png'}")
+    print(f"[nf] ablation figure -> {out / 'nf_ablation_delta.png'} (+ nf_ablation_delta.csv)")

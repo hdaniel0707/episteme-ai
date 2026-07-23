@@ -204,6 +204,7 @@ def write_model_description(wf_type: str, task: str, settings, wf_dir: Path, agg
     to the workflow type are skipped."""
     s = settings.to_dict() if hasattr(settings, "to_dict") else dict(settings or {})
     is_tfm = wf_type.startswith("tfm_")
+    is_judge = wf_type.startswith("llm_")
     is_meta = "meta" in wf_type
     primary = (summary or {}).get("primary_metric", PRIMARY_METRIC[task])
     best = (summary or {}).get(f"best_{primary}")
@@ -211,7 +212,12 @@ def write_model_description(wf_type: str, task: str, settings, wf_dir: Path, agg
     std = (summary or {}).get(f"std_{primary}")
     n_seeds = (summary or {}).get("n_seeds", s.get("n_runs"))
 
-    what = "text-transformer fine-tune" if is_tfm else "frozen embedding + trained head"
+    if is_judge:
+        what = "LLM-as-judge (RAG store of precedents + evolving notes.md, no trained network)"
+    elif is_tfm:
+        what = "text-transformer fine-tune"
+    else:
+        what = "frozen embedding + trained head"
     if is_meta:
         what += " + fused metadata features"
     mean_std = (f"{mean:.4g} ± {std:.4g}"
@@ -253,8 +259,30 @@ def write_model_description(wf_type: str, task: str, settings, wf_dir: Path, agg
     lines.append(_md_table(["Parameter", "Value"], rows))
     lines.append("")
 
-    lines.append("## 2. Neural Network Architecture")
-    if is_tfm:
+    lines.append("## 2. Model")
+    if is_judge:
+        from workflow.src.iwf import config as _config
+        rows = [
+            ("Kind", "RAG store + evolving notes, batched + error-gated learning, "
+                    "VAL-based early stopping (no trained network)"),
+            ("Retrieval embedding", s.get("embed_for_encoder") or "specter2"),
+            ("Batch size cap (papers/rewrite call)", s.get("judge_batch_max_papers")),
+            ("VAL-checkpoint interval (% of TRAIN)", s.get("judge_checkpoint_interval_pct")),
+            ("VAL eval start / max %", f"{s.get('judge_val_eval_start_pct')} / "
+                                       f"{s.get('judge_val_eval_max_pct')}"),
+            ("Early-stop margin", s.get("judge_early_stop_margin")),
+            ("Error-gate threshold", s.get("judge_error_gate_threshold")),
+            ("Good-paper replay-sample fraction", s.get("judge_good_sample_fraction")),
+            ("RAG token budget (.env.workflow)",
+             _config.get_int("JUDGE_RAG_TOKEN_BUDGET", 3000)),
+            ("Notes token budget (.env.workflow)",
+             _config.get_int("JUDGE_NOTE_TOKENS", 500)),
+            ("RAG chunk token budget (.env.workflow)",
+             _config.get_int("JUDGE_RAG_CHUNK_TOKENS", 200)),
+            ("LLM context window (.env.workflow, 0=unknown)",
+             _config.get_int("LLM_JUDGE_MAX_CONTEXT_TOKENS", 0)),
+        ]
+    elif is_tfm:
         arch = s.get("text_transformer_arch") or ""
         rows = [
             ("Backbone", arch),
@@ -281,8 +309,17 @@ def write_model_description(wf_type: str, task: str, settings, wf_dir: Path, agg
                         " → ".join(map(str, actual))))
     lines.append(_md_table(["Parameter", "Value"], rows))
     lines.append("")
+    if is_judge:
+        lines.append(
+            "Each `seed_<i>/model/` holds the artifact this run actually produced: "
+            "`notes.md` (the general, non-paper-specific principles the LLM rewrote after "
+            "every TRAIN example), `rag_chunks.parquet` (every TRAIN abstract + its true "
+            "impact, for audit), and `rag_index.joblib` (the same chunks as embeddings, for "
+            "fast retrieval during benchmark scoring). VAL/TEST predictions use the "
+            "end-of-TRAIN notes + RAG store only — no label ever leaks forward.")
+        lines.append("")
 
-    if not is_tfm:
+    if not is_tfm and not is_judge:
         lines.append("## 3. Encoder / Dimensionality Reduction")
         rows = [
             ("Embedder(s)", s.get("embedders")),
@@ -306,7 +343,15 @@ def write_model_description(wf_type: str, task: str, settings, wf_dir: Path, agg
         lines.append("")
 
     lines.append("## 4. Training Hyperparameters")
-    if is_tfm:
+    if is_judge:
+        from workflow.src.iwf import config as _config
+        rows = [
+            ("Seeds (n_runs)", s.get("n_runs")),
+            ("LLM provider", _config.get_str("LLM_JUDGE_PROVIDER", "(not configured)")),
+            ("LLM model", _config.get_str("LLM_JUDGE_MODEL", "(not configured)")),
+            ("Order TRAIN papers are seen", "shuffled per seed (model_seed + seed index)"),
+        ]
+    elif is_tfm:
         rows = [
             ("Learning rate", s.get("text_transformer_lr")),
             ("Epochs", s.get("text_transformer_epochs")),
@@ -439,10 +484,51 @@ def cross_workflow_comparison() -> dict:
     out_json.write_text(json.dumps(comparison, indent=2), encoding="utf-8")
     if comparison:
         try:
+            _write_cross_workflow_csv(comparison, summary_dir)
+        except Exception as e:
+            print(f"[results] cross-workflow CSV skipped ({e})")
+        try:
             _plot_cross_workflow(comparison, summary_dir)
         except Exception as e:
             print(f"[results] cross-workflow figure skipped ({e})")
     return comparison
+
+
+def _write_cross_workflow_csv(comparison: dict, summary_dir: Path) -> None:
+    """Tidy per-workflow metric table behind the cross-workflow figure: one row per
+    (folder, task, primary_metric) with best/mean/std of the primary metric plus the
+    mean±std of every scalar metric aggregated across seeds."""
+    import csv as _csv
+
+    rows = []
+    for folder, c in comparison.items():
+        primary = c.get("primary_metric", "")
+        base = {
+            "folder": folder,
+            "workflow_type": c.get("workflow_type", ""),
+            "task": c.get("task", ""),
+            "primary_metric": primary,
+            "n_seeds": c.get("n_seeds", ""),
+            f"best_{primary}": c.get(f"best_{primary}", ""),
+            f"mean_{primary}": c.get(f"mean_{primary}", ""),
+            f"std_{primary}": c.get(f"std_{primary}", ""),
+        }
+        for mname, mstats in (c.get("metrics", {}) or {}).items():
+            base[f"{mname}_mean"] = mstats.get("mean", "")
+            base[f"{mname}_std"] = mstats.get("std", "")
+        rows.append(base)
+    if not rows:
+        return
+    header: list[str] = []
+    for r in rows:
+        for k in r:
+            if k not in header:
+                header.append(k)
+    with (summary_dir / "cross_workflow_comparison.csv").open("w", newline="",
+                                                              encoding="utf-8") as fh:
+        w = _csv.DictWriter(fh, fieldnames=header)
+        w.writeheader()
+        w.writerows(rows)
 
 
 def _panel(ax, wf_names, comparison, metric, title):
@@ -459,10 +545,23 @@ def _panel(ax, wf_names, comparison, metric, title):
         stds.append(m["std"])
     if labels:
         y = np.arange(len(labels))
-        ax.barh(y, means, xerr=stds, color=palette.OLIVE, alpha=0.8, capsize=4)
+        # Fixed bar thickness so a 1–2 run panel doesn't balloon into giant bars.
+        ax.barh(y, means, xerr=stds, height=min(0.6, 0.9 / max(1, len(labels))),
+                color=palette.OLIVE, alpha=0.85, edgecolor=palette.INK, linewidth=0.5,
+                capsize=4)
+        for yi, (mn, sd) in enumerate(zip(means, stds)):
+            ax.text(mn + sd, yi, f" {mn:.3f}", va="center", ha="left", fontsize=8,
+                    color=palette.INK)
         ax.set_yticks(y)
         ax.set_yticklabels(labels, fontsize=max(6, 10 - len(labels) // 4))
+        ax.set_ylim(-0.6, len(labels) - 0.4)           # vertical breathing room
+        # x headroom so bars + labels never touch the right spine (metric is 0..1-ish)
+        hi = max((m + s) for m, s in zip(means, stds)) if means else 1.0
+        ax.set_xlim(min(0.0, *means, 0.0), min(1.05, hi * 1.18 + 0.02))
         ax.set_xlabel(metric)
+    else:
+        ax.text(0.5, 0.5, "(no runs)", ha="center", va="center", transform=ax.transAxes,
+                fontsize=10, color=palette.GRAY)
     ax.set_title(title)
 
 
@@ -471,9 +570,10 @@ def _plot_cross_workflow(comparison: dict, summary_dir: Path | None = None) -> N
         summary_dir = paths.RESULTS_DIR / "summary"
     reg_wfs = sorted(k for k, v in comparison.items() if v.get("task") == "reg")
     clf_wfs = sorted(k for k, v in comparison.items() if v.get("task") == "clf")
-    width = max(12, (len(reg_wfs) + len(clf_wfs)) * 0.8)
-    height = max(4.5, max(len(reg_wfs), len(clf_wfs), 1) * 0.4 + 1.5)
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(width, height))
+    n_max = max(len(reg_wfs), len(clf_wfs), 1)
+    # Height tracks the busiest panel's bar count (compact for few runs, taller for many).
+    height = min(11.0, max(2.6, n_max * 0.6 + 1.6))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, height))
     _panel(ax1, reg_wfs, comparison, "spearman", "Regression (Spearman ρ)")
     _panel(ax2, clf_wfs, comparison, "macro_f1", "Classification (macro-F1)")
     fig.suptitle("Cross-workflow comparison (mean ± std across seeds)")

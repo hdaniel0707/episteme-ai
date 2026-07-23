@@ -78,6 +78,10 @@ You configure everything by editing exactly **two files**:
 | [`.env.workflow`](.env.workflow) | **HOW this machine runs it** — parallelism, GPU batch size, cache-force flags, browser behaviour | `PARALLEL_JOBS`, `PARALLEL_LOAD_TARGET`, `EMBED_BATCH_SIZE`, `FORCE_EMBED` |
 
 Secrets (OpenAI / S2 / HF / MIRAI keys) live in the repo-root `.env` — never in either file.
+**One deliberate exception:** the LLM-as-judge workflow and the extend-phase LLM auto-fill
+read their credentials (`LLM_JUDGE_PROVIDER`/`LLM_JUDGE_MODEL`/`LLM_JUDGE_API_KEY`/
+`LOCAL_LLM_URL`) from `.env.workflow`, so this module stays fully configurable from that one
+file without touching the repo-root `.env` — see `.env.workflow.example`.
 `config.yaml` is ordered most-changed-first: section 1 holds the knobs you touch every
 training (workflow, seeds, class count, target); sections 2-6 hold model, encoder, text
 transformer, features and data/split; section 7 is the `runs:` queue with a commented
@@ -105,7 +109,7 @@ python -m workflow.run_all_workflows      # EVERY entry of config.yaml's runs: q
 Parameter sweeps are just several `runs:` entries with different overrides — same
 mechanism, one file.
 
-## The 8 workflow topologies
+## The 10 workflow topologies
 
 `WORKFLOWS` in [`src/iwf/config.py`](src/iwf/config.py) is the single table every module
 derives from — task, feature set and phase list per topology:
@@ -120,11 +124,21 @@ derives from — task, feature set and phase list per topology:
 | `emb_all_meta_reg` | regression | same | 0 1 2 3 4 6 7 |
 | `tfm_clf` | classification | raw title+abstract into a fine-tuned transformer | 0 1 5 6 7 |
 | `tfm_reg` | regression | same | 0 1 6 7 |
+| `llm_clf` | classification | LLM-as-judge: RAG store of precedents + evolving notes.md | 0 1 2 5 6 7 |
+| `llm_reg` | regression | same | 0 1 2 6 7 |
 
 The `emb_all_meta_*` pair deliberately bypasses the leakage guard (set automatically from
 the workflow type) to measure the performance ceiling when target-derived columns are fed
 to the model. The `tfm_*` pair skips embed/encode/reduce entirely — it never touches the
-encoder artifact.
+encoder artifact. The `llm_*` pair runs the embed phase (it retrieves over the frozen
+specter2 embedding) but skips encode/reduce/training: instead of a trained network, phase 6
+([`src/main_train_judge.py`](src/main_train_judge.py)) builds a RAG store of TRAIN
+abstracts + their true impact and a `notes.md` of general judging principles, both rewritten
+example-by-example via an OpenAI-compatible LLM (`LLM_JUDGE_PROVIDER`/`LLM_JUDGE_MODEL`/
+`LLM_JUDGE_API_KEY`/`LOCAL_LLM_URL`, all in `.env.workflow` — this workflow module reads its
+LLM credentials from `.env.workflow` only, not the repo-root `.env`); with no endpoint
+configured every LLM call is a no-op and the run falls back to a deterministic kNN-mean judge
+instead of erroring.
 
 ## Phases (ids used by `--from` / `--to`)
 

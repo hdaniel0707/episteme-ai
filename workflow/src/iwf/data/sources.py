@@ -138,6 +138,23 @@ def load_sqlite(path: str | Path, year_from: int | None = None,
     if before > after:
         print(f"[sources] dropped {before - after} rows missing title/abstract")
 
+    # Drop LLM-filled abstracts unless opted in (mirrors derive_training, any EPAI_DB).
+    if "source" in df.columns and not config.use_llm_abstracts_for_training():
+        before = len(df)
+        df = df[df["source"].fillna("") != "llm"].reset_index(drop=True)
+        if len(df) < before:
+            print(f"[sources] dropped {before - len(df)} LLM-sourced abstract rows "
+                  "(use_llm_abstracts_for_training=false)")
+
+    # Drop unknown-domain rows when required (never train on unknown domain).
+    if "domains" in df.columns and config.require_known_domain_for_training():
+        before = len(df)
+        df = df[df["domains"].map(lambda v: isinstance(v, list) and len(v) > 0)
+                ].reset_index(drop=True)
+        if len(df) < before:
+            print(f"[sources] dropped {before - len(df)} unknown-domain rows "
+                  "(require_known_domain_for_training=true)")
+
     return df
 
 
@@ -153,6 +170,9 @@ _QUOTA_RETRY_AFTER_S = 60
 
 
 def _oa_get(params: dict) -> dict | None:
+    key = config.api_key("OPENALEX_API_KEY")   # required since 2026-02-13 (free tier: 100k/day)
+    if key:
+        params = {**params, "api_key": key}
     mailto = config.get_str("OPENALEX_MAILTO", "")
     if mailto:
         params = {**params, "mailto": mailto}

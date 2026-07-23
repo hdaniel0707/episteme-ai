@@ -10,6 +10,7 @@ Resume-safe: the page cursor is persisted in the DB's ``fetch_state`` table.
 
 from __future__ import annotations
 
+import gc
 import sqlite3
 import time
 from typing import Iterator
@@ -29,22 +30,44 @@ SELECT = ("id,doi,title,publication_year,primary_location,abstract_inverted_inde
           "cited_by_count,fwci,citation_normalized_percentile,primary_topic,authorships")
 
 
-def _mailto() -> dict:
+def _auth_params() -> dict:
+    """Auth/politeness query params (api_key when set, plus mailto)."""
+    params: dict = {}
+    key = config.api_key("OPENALEX_API_KEY")
+    if key:
+        params["api_key"] = key
     m = config.get_str("OPENALEX_MAILTO", "")
-    return {"mailto": m} if m else {}
+    if m:
+        params["mailto"] = m
+    return params
+
+
+# Body words that mean a daily-credit limit (not a transient burst 429).
+_DAILY_LIMIT_MARKERS = ("daily", "credit", "quota", "insufficient", "limit reached",
+                        "rate limit", "exceeded")
+
+
+def _looks_like_daily_limit(text: str) -> bool:
+    """True when the response body reads like a daily-limit message."""
+    t = (text or "").lower()
+    return any(m in t for m in _DAILY_LIMIT_MARKERS)
 
 
 def _get(url: str, params: dict) -> dict | None:
+    """GET one OpenAlex page; raise QuotaExhausted on a daily limit."""
     for attempt in range(4):
         try:
-            r = requests.get(url, params={**params, **_mailto()}, timeout=60)
+            r = requests.get(url, params={**params, **_auth_params()}, timeout=60)
             if r.status_code == 429:
                 retry_after = int(r.headers.get("retry-after", 0) or 0)
-                if retry_after > _QUOTA_RETRY_AFTER_S:
+                if retry_after > _QUOTA_RETRY_AFTER_S or _looks_like_daily_limit(r.text):
                     raise QuotaExhausted(
-                        f"OpenAlex quota exhausted (retry-after={retry_after}s)")
+                        f"OpenAlex daily/rate limit (429, retry-after={retry_after}s)")
                 time.sleep(3.0 * (attempt + 1))
                 continue
+            if r.status_code in (402, 403) and _looks_like_daily_limit(r.text):
+                raise QuotaExhausted(
+                    f"OpenAlex daily/credit limit (HTTP {r.status_code}): {r.text[:150]}")
             if r.ok:
                 return r.json()
             print(f"[openalex] HTTP {r.status_code}: {r.text[:200]}")
@@ -147,6 +170,74 @@ class OpenAlexFetcher(BaseFetcher):
                 cursor = (data.get("meta") or {}).get("next_cursor")
                 set_cursor(conn, state_key, cursor, fetched)
                 time.sleep(0.11)  # ~9 req/s: inside the polite-pool rate limit
+
+
+def _wait_for_daily_reset(hours: float, already_elapsed: float = 0.0) -> None:
+    """Idle for the daily-credit reset in 5-minute chunks, freeing memory first."""
+    gc.collect()
+    total_s = max(0, int(hours * 3600 - already_elapsed))
+    chunk = 300
+    resume = time.strftime("%Y-%m-%d %H:%M", time.localtime(time.time() + total_s))
+    print(f"[openalex] idling {total_s / 3600:.1f}h for the quota reset "
+          f"(resume ~{resume}); minimal-memory wait.", flush=True)
+    waited = 0
+    while waited < total_s:
+        time.sleep(min(chunk, total_s - waited))
+        waited += chunk
+        if waited % 3600 < chunk:
+            print(f"[openalex] waiting for daily reset: ~{(total_s - waited) / 3600:.1f}h left",
+                  flush=True)
+
+
+def collect_new_papers(conn: sqlite3.Connection, fetcher: "OpenAlexFetcher",
+                       target: int | None, *, wait_days: int = 0, wait_hours: float = 25.0,
+                       stall_limit: int = 2000, on_wait=None) -> int:
+    """Collect up to target new papers, waiting out daily limits up to wait_days times.
+
+    One session at a time (each frees its own Deduper). On a daily limit before the target,
+    wait ~wait_hours and continue, at most wait_days times; stop early without waiting when the
+    query is exhausted or stalls on duplicates. ``on_wait`` runs useful work at the start of
+    each wait (e.g. LLM fills) and counts against the wait time.
+    """
+    total = 0
+    days_left = int(wait_days)
+    while target is None or total < target:
+        remaining = None if target is None else target - total
+        total += fetcher.run(conn, limit=remaining, stall_limit=stall_limit)
+        reason = getattr(fetcher, "stop_reason", "exhausted")
+
+        if target is not None and total >= target:
+            print(f"[openalex] target reached: {total} new papers")
+            break
+        if reason == "limit":
+            break
+        if reason in ("stalled", "exhausted"):
+            print(f"[openalex] no more new papers from this query ({reason}); stopping at "
+                  f"{total}"
+                  + (f"/{target}" if target else "")
+                  + " — a daily-reset wait would not help.")
+            break
+        if reason == "quota":
+            if days_left <= 0:
+                print(f"[openalex] daily limit reached and wait-day budget spent; stopping at "
+                      f"{total}" + (f"/{target}" if target else "") + " new papers.")
+                break
+            days_left -= 1
+            print(f"[openalex] daily limit at {total}"
+                  + (f"/{target}" if target else "")
+                  + f"; {days_left} wait-day(s) remaining after this one.")
+            elapsed = 0.0
+            if on_wait is not None:
+                t0 = time.time()
+                try:
+                    on_wait()
+                except Exception as e:
+                    print(f"[openalex] wait-time fill skipped: {type(e).__name__}: {e}")
+                elapsed = time.time() - t0
+            _wait_for_daily_reset(wait_hours, already_elapsed=elapsed)
+            continue
+        break
+    return total
 
 
 def fill_author_h_index(conn: sqlite3.Connection, batch: int = 100) -> int:

@@ -83,7 +83,7 @@ def main(settings: Settings | None = None, *, workflow_type: str | None = None,
     s = settings or load_settings()
     wf = (workflow_type or s.workflow_type).lower()
     spec = WORKFLOWS.get(wf)
-    if spec is None or spec["features"] == "text":
+    if spec is None or spec["features"] in ("text", "rag"):
         raise ValueError(f"main_train handles the embedding workflows, not {wf!r}.")
     task, features = spec["task"], spec["features"]
     bypass = features == "all_meta"     # intentional-leakage upper bound

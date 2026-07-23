@@ -94,6 +94,10 @@ def t_config_overrides():
         [0.15, 0.5, 0.85]
     assert resolve_class_thresholds({"num_classes": 4}) == [0.25, 0.5, 0.75]
     assert resolve_class_thresholds({"class_thresholds": [0.5, 0.9]}) == [0.5, 0.9]
+    # 2-class Q2/Q1 setup (config.yaml default): one 0.5 boundary, names Q2 (low) .. Q1 (high)
+    assert resolve_class_thresholds({"num_classes": 2}) == [0.5]
+    from workflow.src.iwf.targets import default_class_names
+    assert default_class_names(2) == ["Q2", "Q1"]
     for bad in ({"num_classes": 1}, {"num_classes": 26},
                 {"class_distribution": [100]}):
         try:
@@ -415,18 +419,28 @@ def t_validate():
 
 
 def t_workflow_table():
-    """All eight topologies are present and route to the documented phase lists."""
-    from workflow.src.iwf.config import WORKFLOWS, WORKFLOW_TYPES, is_text_workflow
-    assert len(WORKFLOW_TYPES) == 8
+    """All ten topologies are present and route to the documented phase lists."""
+    from workflow.src.iwf.config import (
+        WORKFLOWS, WORKFLOW_TYPES, is_judge_workflow, is_text_workflow,
+    )
+    assert len(WORKFLOW_TYPES) == 10
     assert WORKFLOWS["emb_reg"]["phases"] == [0, 1, 2, 3, 4, 6, 7]
     assert WORKFLOWS["emb_clf"]["phases"] == [0, 1, 2, 3, 4, 5, 6, 7]
     assert WORKFLOWS["tfm_clf"]["phases"] == [0, 1, 5, 6, 7]
     assert WORKFLOWS["tfm_reg"]["phases"] == [0, 1, 6, 7]
     assert WORKFLOWS["emb_all_meta_clf"]["features"] == "all_meta"
+    assert WORKFLOWS["llm_clf"]["phases"] == [0, 1, 2, 5, 6, 7]
+    assert WORKFLOWS["llm_reg"]["phases"] == [0, 1, 2, 6, 7]
     # text workflows must never schedule embed/encode/reduce
     for wf in ("tfm_clf", "tfm_reg"):
         assert is_text_workflow(wf)
         assert not ({2, 3, 4} & set(WORKFLOWS[wf]["phases"]))
+    # judge workflows embed (retrieval needs it) but never encode/reduce/train a network
+    for wf in ("llm_clf", "llm_reg"):
+        assert is_judge_workflow(wf)
+        assert not is_text_workflow(wf)
+        assert 2 in WORKFLOWS[wf]["phases"]
+        assert not ({3, 4} & set(WORKFLOWS[wf]["phases"]))
     # every emb workflow's task matches its name suffix
     for wf, spec in WORKFLOWS.items():
         assert spec["task"] == ("clf" if wf.endswith("_clf") else "reg")
@@ -438,6 +452,8 @@ def t_registry():
     assert {"specter2_ft", "scibert_ft", "specter2_lora", "scibert_lora"} <= set(
         available_modules("text_transformer"))
     assert "identity" in available_modules("encoder")
+    # SPECTER2 base + adapter flavours are selectable embedders (base vs citation adapter)
+    assert {"specter2", "specter2_base", "specter2_adhoc"} <= set(available_modules("embedder"))
     assert {"mlp", "resmlp", "ft_transformer"} <= set(available_modules("impact_predictor"))
     cls = get_module("text_transformer", "specter2_ft")
     assert cls.BACKBONE_NAME == "allenai/specter2_base"
@@ -540,6 +556,71 @@ def t_tfm_mock():
     assert {"macro_f1", "accuracy", "per_class_f1"} <= m_clf.keys()
     assert len(m_clf["per_class_f1"]) == len(class_names)
     assert "confusion" in m_clf     # shared metrics give tfm seeds a confusion matrix too
+
+
+def t_judge_workflow():
+    """LLM-as-judge trainer (main_train_judge) with the LLM client mocked, reg + clf.
+
+    Offline: monkeypatches iwf.llm.client.complete so no network/key is needed, and
+    asserts a seed writes the standard result.json contract + the RAG/notes artifact."""
+    import json
+    from workflow.src.iwf import paths
+    from workflow.src.iwf.config import Settings
+    from workflow.src.iwf.data.dataset import add_split_column
+    from workflow.src.iwf.targets import to_classes
+    from workflow.src.iwf.llm import client as llm_client
+    from workflow.src import main_train_judge
+
+    rng = np.random.default_rng(0)
+    n = 30
+    vecs = rng.normal(size=(n, 8)).astype(np.float32)
+    target = rng.random(n)
+    df = pd.DataFrame({
+        "paper_id": [f"W{i:03d}" for i in range(n)],
+        "title": [f"Paper {i}" for i in range(n)],
+        "abstract": [f"Abstract text number {i}" for i in range(n)],
+        "target": target.astype(np.float64),
+        "emb_specter2": [v.tolist() for v in vecs],
+    })
+    df["strat_label"] = to_classes(df["target"], "percentile", [0.5])
+    df = add_split_column(df, seed=42, ratios=[0.7, 0.15, 0.15], stratify_col="strat_label")
+
+    calls = {"n": 0}
+
+    def fake_complete(prompt, system=None, as_json=False):
+        # Serves both the predict call (reads "impact") and the batched-rewrite call
+        # (reads "notes"/"chunks") from one dict — each parser only pulls the keys it
+        # needs and ignores the rest, so one fake response satisfies both shapes.
+        calls["n"] += 1
+        return {"impact": 0.5, "notes": "updated notes", "chunks": ["chunk text"] * 30}
+
+    orig = llm_client.complete
+    llm_client.complete = fake_complete
+    try:
+        s = Settings(n_runs=1, class_thresholds=[0.5], embed_for_encoder="specter2")
+        seed_dir = paths.RESULTS_DIR / "llm_reg_1" / "seed_0"
+        main_train_judge._train_seed(df, "reg", s, 0, seed_dir, "emb_specter2")
+        assert calls["n"] > 0                          # the mock was actually exercised
+        res = json.loads((seed_dir / "result.json").read_text())
+        assert {"spearman", "mae", "r2"} <= res["test"].keys()
+        assert (seed_dir / "model" / "notes.md").is_file()
+        assert (seed_dir / "model" / "rag_index.joblib").is_file()
+        assert (seed_dir / "model" / "rag_chunks.parquet").is_file()
+
+        s_clf = Settings(n_runs=1, class_thresholds=[0.5], embed_for_encoder="specter2")
+        seed_dir_clf = paths.RESULTS_DIR / "llm_clf_1" / "seed_0"
+        main_train_judge._train_seed(df, "clf", s_clf, 0, seed_dir_clf, "emb_specter2")
+        res_clf = json.loads((seed_dir_clf / "result.json").read_text())
+        assert {"macro_f1", "accuracy"} <= res_clf["test"].keys()
+        assert "proba_test" in res_clf
+
+        # LLM unavailable (complete -> None) still completes, via the kNN-mean fallback
+        llm_client.complete = lambda *a, **kw: None
+        seed_dir_fb = paths.RESULTS_DIR / "llm_reg_1" / "seed_1"
+        main_train_judge._train_seed(df, "reg", s, 1, seed_dir_fb, "emb_specter2")
+        assert (seed_dir_fb / "result.json").is_file()
+    finally:
+        llm_client.complete = orig
 
 
 def t_novelty_kinds():
@@ -842,9 +923,14 @@ def t_per_domain_metrics_fixture() -> None:
             df = per_domain_metrics(wf_dir, s, task="reg")
             assert set(df.columns) == {"domain", "n", "metric", "value"}
             assert set(df["domain"]) == {"Physics", "Chemistry", "ALL"}
-            assert (df["metric"] == "spearman").all()
+            # reg is reported on the same 0-100 "% class correct" scale as clf (C7)
+            assert (df["metric"] == "pct_correct").all()
+            assert df["value"].between(0, 100).all()
             all_row = df[df["domain"] == "ALL"].iloc[0]
             assert all_row["n"] == n
+            # y_true/y_pred are near-identical (small noise) -> most rows land in the same
+            # class bin as their true value, so the ALL accuracy should be high, not near-0
+            assert all_row["value"] > 50
         finally:
             prepared_path.unlink(missing_ok=True)
 
@@ -928,6 +1014,84 @@ def t_palette_colors() -> None:
             f"{const} = {color}, expected hex string"
 
 
+def t_dedup_fuzzy() -> None:
+    """Fuzzy title dedup + metadata merge used by the DB collector (base.Deduper)."""
+    import os
+    import tempfile
+    from workflow.src.iwf.fetchers import base as fbase
+
+    fd, p = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    try:
+        conn = fbase.open_db(p)
+        conn.execute("INSERT INTO papers (paper_id, title, year, citation_count, source) "
+                     "VALUES ('p1', 'Deep Learning for Genomics', 2020, 10, 'openalex')")
+        conn.commit()
+        d = fbase.Deduper(conn, fuzzy=True, threshold=0.85)
+        # near-duplicate title (punctuation/spacing differs), same year -> matches p1
+        assert d.find_duplicate({"title": "Deep-Learning for  Genomics!", "year": 2020}) == "p1"
+        # unrelated title -> no match
+        assert d.find_duplicate({"title": "Quantum Error Correction", "year": 2019}) is None
+        # same title but a different year -> kept separate (not a duplicate)
+        assert d.find_duplicate({"title": "Deep Learning for Genomics", "year": 1999}) is None
+        # merge fills the NULL abstract but never overwrites the existing citation_count
+        fbase.merge_paper_metadata(conn, "p1", {"abstract": "A study.", "citation_count": 999})
+        row = conn.execute(
+            "SELECT abstract, citation_count FROM papers WHERE paper_id='p1'").fetchone()
+        assert row[0] == "A study." and row[1] == 10, row
+        conn.close()
+    finally:
+        os.unlink(p)
+
+
+def t_llm_fill() -> None:
+    """LLM domain auto-fill (Stage E) with the client mocked — offline, no network."""
+    import os
+    import tempfile
+    from workflow.src.iwf.domains import ALLOWED_DOMAINS
+    from workflow.src.iwf.fetchers import base as fbase
+    from workflow.src.iwf.fetchers.llm_fill import llm_fill_domains
+    from workflow.src.iwf.llm import client as llm_client
+
+    fd, p = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    try:
+        conn = fbase.open_db(p)
+        conn.execute(
+            "INSERT INTO papers (paper_id, title, abstract, source) "
+            "VALUES ('p1', 'Deep learning for protein folding', 'We study...', 'openalex')")
+        conn.commit()
+
+        orig = llm_client.complete
+        llm_client.complete = lambda *a, **kw: {"domain": ALLOWED_DOMAINS[0]}
+        try:
+            n = llm_fill_domains(conn)
+            assert n == 1
+            row = conn.execute("SELECT domains FROM papers WHERE paper_id='p1'").fetchone()
+            assert json.loads(row[0]) == [ALLOWED_DOMAINS[0]]
+            assert conn.execute(
+                "SELECT source FROM papers WHERE paper_id='p1'").fetchone()[0] == "openalex"
+
+            # already-filled rows are never re-queried (the WHERE clause is idempotent)
+            n2 = llm_fill_domains(conn)
+            assert n2 == 0
+        finally:
+            llm_client.complete = orig
+
+        # LLM unavailable (complete -> None) leaves the row untouched, no crash
+        conn.execute("UPDATE papers SET domains = NULL WHERE paper_id = 'p1'")
+        conn.commit()
+        llm_client.complete = lambda *a, **kw: None
+        try:
+            n3 = llm_fill_domains(conn)
+            assert n3 == 0
+        finally:
+            llm_client.complete = orig
+        conn.close()
+    finally:
+        os.unlink(p)
+
+
 def main() -> int:
     import shutil
     from workflow.src.iwf import paths
@@ -967,6 +1131,7 @@ def _run_all() -> int:
         ("nf_analysis", t_nf_analysis),
         ("external_model_registry", t_external_model_registry),
         ("fetchers_offline", t_fetchers_offline),
+        ("dedup_fuzzy", t_dedup_fuzzy),
         ("generated_sources_file", t_generated_sources_file),
         ("experiment_reg", t_experiment_reg),
         ("experiment_meta_and_clf", t_experiment_meta_and_clf),
@@ -976,6 +1141,8 @@ def _run_all() -> int:
         ("registry", t_registry),
         ("progress", t_progress),
         ("tfm_mock", t_tfm_mock),
+        ("judge_workflow", t_judge_workflow),
+        ("llm_fill", t_llm_fill),
         ("workflow_results_aggregate", t_workflow_results_aggregate),
         ("auto_increment", t_auto_increment),
         ("benchmark_metrics_hand_cases", t_benchmark_metrics_hand_cases),

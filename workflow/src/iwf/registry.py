@@ -129,7 +129,8 @@ def _register_builtin_slots() -> None:
             return add_embedding(df, name)
         return add
 
-    for name in ("specter2", "scibert", "scincl", "e5", "openai"):
+    for name in ("specter2", "specter2_base", "specter2_adhoc",
+                 "scibert", "scincl", "e5", "openai"):
         _MODULES.setdefault("embedder", {}).setdefault(name, _embedder_factory(name))
 
     def _predictor_factory(arch: str):

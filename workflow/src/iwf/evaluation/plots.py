@@ -46,22 +46,26 @@ ERROR_COLORSCALE = palette.ERROR_COLORSCALE_PLOTLY
 ERROR_CMAP = palette.ERROR_CMAP_MATPLOTLIB
 SPLIT_SHADES = palette.SPLIT_SHADES
 
-# NN-weight diagram sparsity: a connection is drawn only when it is BOTH above this
-# fraction of the layer's max |weight| AND among the strongest NN_TOP_K_PER_NEURON
-# incoming connections of its target neuron. This keeps only the genuinely important
-# connections visible instead of a uniform hairball.
-NN_WEIGHT_DISPLAY_THRESHOLD = 0.35
-NN_TOP_K_PER_NEURON = 3
-NN_MAX_HTML_LINES_PER_LAYER = 1200
+# NN-weight diagram sparsity: only the genuinely important connections are drawn, as blue
+# lines whose opacity grows with strength (weak connections fade to invisible/white). A
+# connection is kept only when it is BOTH above this fraction of the layer's max |weight|
+# AND among the strongest NN_TOP_K_PER_NEURON incoming connections of its target neuron —
+# so the diagram reveals the top structure instead of a uniform hairball.
+NN_WEIGHT_DISPLAY_THRESHOLD = 0.45
+NN_TOP_K_PER_NEURON = 2
+NN_MAX_HTML_LINES_PER_LAYER = 700
 
 
 def _select_important_connections(w: np.ndarray, dn_in: int, dn_out: int
                                   ) -> list[tuple[float, float, int, int]]:
     """Pick the connections worth drawing for one weight matrix ``w`` [out, in].
 
-    Returns (rel_strength 0..1, signed_weight, in_display_idx, out_display_idx),
-    weakest first. Selection: per displayed OUTPUT neuron keep its top-K strongest
-    incoming displayed connections, then drop any below the global threshold."""
+    Returns (rel_strength 0..1, signed_weight, in_ACTUAL_idx, out_ACTUAL_idx), weakest
+    first. The submatrix is a strided subsample (dn_in × dn_out) of ``w``; the returned
+    indices are mapped back to ACTUAL neuron indices (display_idx × stride) so callers can
+    place each endpoint at a position proportional to the true layer size. Selection: per
+    displayed output neuron keep its top-K strongest incoming displayed connections, then
+    drop any below the global threshold."""
     out_n, in_n = w.shape
     step_in = max(1, in_n // dn_in)
     step_out = max(1, out_n // dn_out)
@@ -77,7 +81,8 @@ def _select_important_connections(w: np.ndarray, dn_in: int, dn_out: int
         top = np.argsort(row)[-k:] if len(row) > k else np.arange(len(row))
         for ni in top:
             if row[ni] >= thr:
-                pairs.append((row[ni] / max_w, float(sub[nj, ni]), int(ni), nj))
+                pairs.append((row[ni] / max_w, float(sub[nj, ni]),
+                              int(ni) * step_in, int(nj) * step_out))
     pairs.sort(key=lambda t: t[0])   # weakest first so strong ones draw on top
     return pairs
 
@@ -250,6 +255,12 @@ def _correctness_pct_bars(splits: list[str], correct: list[int], totals: list[in
                           agg: Path, wf_type: str, title: str) -> None:
     """One olive-shaded bar per split showing % correct, item count in the x-label."""
     pct = [100.0 * c / max(t, 1) for c, t in zip(correct, totals)]
+    try:
+        pd.DataFrame({"split": splits, "n_correct": correct, "n_total": totals,
+                      "pct_correct": [round(p, 2) for p in pct]}).to_csv(
+            agg / f"correctness_bars_{wf_type}.csv", index=False)
+    except Exception as e:
+        print(f"[plots] {wf_type}: correctness CSV skipped ({e})")
     x = np.arange(len(splits))
     colors = [SPLIT_SHADES.get(sp, "#8FA35E") for sp in splits]
     fig, ax = plt.subplots(figsize=(6, 4.5))
@@ -330,6 +341,17 @@ def learning_curve(history: dict, agg: Path, wf_type: str, task: str) -> None:
         return
     best = int(np.argmax(vm)) if vm else None
 
+    # CSV of the curve (aligned by epoch; shorter series padded with NaN)
+    try:
+        n_ep = max(len(tl), len(vm))
+        pd.DataFrame({
+            "epoch": np.arange(1, n_ep + 1),
+            "train_loss": list(tl) + [np.nan] * (n_ep - len(tl)),
+            f"val_{metric_name}": list(vm) + [np.nan] * (n_ep - len(vm)),
+        }).to_csv(agg / f"learning_curve_{wf_type}.csv", index=False)
+    except Exception as e:
+        print(f"[plots] {wf_type}: learning-curve CSV skipped ({e})")
+
     palette.apply_style()
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(7.5, 6), sharex=True,
                                    layout="constrained")
@@ -364,14 +386,24 @@ def learning_curve(history: dict, agg: Path, wf_type: str, task: str) -> None:
 
 def _render_confusion_matrix(cm: np.ndarray, class_names: list[str], seed_label: str,
                              agg: Path, wf_type: str) -> None:
-    """Confusion-matrix heatmap; ticks auto-adjust to the configured class count (2..25)."""
+    """Confusion-matrix heatmap (blue); ticks auto-adjust to the class count (2..25).
+    Also writes the matrix as CSV next to the figure."""
     n = cm.shape[0]
     ticks = class_names if len(class_names) == n else [str(i) for i in range(n)]
+    # CSV of the raw counts (rows = actual class, cols = predicted class)
+    try:
+        pd.DataFrame(cm.astype(int), index=[f"actual_{t}" for t in ticks],
+                     columns=[f"pred_{t}" for t in ticks]).to_csv(
+            agg / f"confusion_matrix_{wf_type}_{seed_label}.csv")
+    except Exception as e:
+        print(f"[plots] {wf_type}: confusion CSV skipped ({e})")
+    vmax = float(cm.max()) if cm.size else 1.0
     fig, ax = plt.subplots(figsize=(5, 4.5))
-    im = ax.imshow(cm, cmap=palette.register_olive_seq())
+    im = ax.imshow(cm, cmap=palette.register_blue_seq(), interpolation="nearest")
     for i in range(cm.shape[0]):
         for j in range(cm.shape[1]):
-            ax.text(j, i, int(cm[i, j]), ha="center", va="center", fontsize=8)
+            ax.text(j, i, int(cm[i, j]), ha="center", va="center", fontsize=8,
+                    color="white" if cm[i, j] > 0.55 * vmax else palette.INK)
     ax.set_xticks(range(n)); ax.set_xticklabels(ticks, rotation=45, ha="right")
     ax.set_yticks(range(n)); ax.set_yticklabels(ticks)
     ax.set_xlabel("Predicted Impact Class")
@@ -399,7 +431,7 @@ def plot_seed_spread_figures(wf_type: str, task: str, seeds: list[dict], agg: Pa
             ax.set_xlabel("Spearman rho (test)")
             ax.set_ylabel("seeds")
             ax.set_title(f"{wf_type}: Spearman across seeds")
-            ax.legend()
+            ax.legend(loc="upper right")
             fig.tight_layout(); fig.savefig(agg / "spearman_distribution.png", dpi=120)
             plt.close(fig)
         seed_p = next((s for s in seeds
@@ -431,6 +463,15 @@ def plot_seed_spread_figures(wf_type: str, task: str, seeds: list[dict], agg: Pa
             cols = [[row[j] for row in arr if len(row) > j] for j in range(width)]
             labels = (class_names if len(class_names) == width
                       else [f"class {j}" for j in range(width)])
+            # CSV: one row per seed, one column per class F1 (long format)
+            try:
+                rows = []
+                for si, row in enumerate(arr):
+                    for j, v in enumerate(row):
+                        rows.append({"seed_index": si, "class": labels[j], "f1": v})
+                pd.DataFrame(rows).to_csv(agg / f"class_boxplot_{wf_type}.csv", index=False)
+            except Exception as e:
+                print(f"[plots] {wf_type}: class boxplot CSV skipped ({e})")
             fig, ax = plt.subplots(figsize=(max(6, width * 1.1), 4))
             bp = ax.boxplot(cols, tick_labels=labels, patch_artist=True, showmeans=True,
                             medianprops=dict(color=palette.INK),
@@ -489,11 +530,14 @@ def clf_umap_classes(coords, class_labels, target, class_names, agg: Path,
     fig = go.Figure()
     groups = []
     total = len(class_names)
+    # Four distinct, good-together categorical colours (cycled if >4 classes) instead of
+    # a single-hue ramp, so the impact classes are visually separable.
+    class_palette = palette.class_colors(total)
     for j, cn in enumerate(class_names):
         m = class_labels == cn
         if not m.any():
             continue
-        color = _ordinal_color(j, total)
+        color = class_palette[j]
         fig.add_trace(go.Scatter3d(
             x=coords[m, 0], y=coords[m, 1], z=coords[m, 2],
             mode="markers", name=cn,
@@ -681,51 +725,66 @@ def extract_linear_weights(net) -> list[np.ndarray]:
 
 
 def _build_nn_html(weights: list[np.ndarray], layer_sizes: list[int], n_z: int) -> str:
-    """Interactive HTML SVG showing neural-network connection strengths."""
+    """Interactive HTML SVG showing neural-network connection strengths.
+
+    Layout is proportional to the true layer sizes: each layer's neuron column spans a
+    vertical height ∝ its neuron count, so a 512-unit layer is drawn twice as tall as a
+    256-unit layer. Connections are blue with opacity ∝ strength² (weak → invisible/white);
+    only the strongest few per neuron are drawn."""
+    from matplotlib.colors import to_hex, to_rgb
+
     LAYER_SPACING = 320
     MAX_NEURONS_DISPLAY = 400
-    NEURON_SPACING = max(4, int(3000 / max(layer_sizes)))
-    RADIUS = max(2, NEURON_SPACING // 3)
+    MARGIN = 60
+    max_size = max(layer_sizes)
+    # vertical unit (px per neuron) so the biggest layer spans ~PLOT_H
+    PLOT_H = max(600, min(1600, max_size * 3))
+    U = PLOT_H / max_size
+    RADIUS = max(1.5, min(4.0, U * 0.4))
 
     n_layers = len(layer_sizes)
     display_n = [min(n, MAX_NEURONS_DISPLAY) for n in layer_sizes]
-    total_h = max(display_n) * NEURON_SPACING + 120
+    total_h = PLOT_H + 2 * MARGIN
     total_w = (n_layers - 1) * LAYER_SPACING + 160
 
     xs = [80 + i * LAYER_SPACING for i in range(n_layers)]
 
-    def neuron_y(li: int, ni: int) -> float:
-        n = display_n[li]
-        top = (total_h - 80 - n * NEURON_SPACING) / 2 + 40
-        return top + ni * NEURON_SPACING
+    def top_of(li: int) -> float:
+        return MARGIN + (PLOT_H - layer_sizes[li] * U) / 2
 
+    def neuron_y(li: int, actual_idx: int) -> float:
+        return top_of(li) + actual_idx * U
+
+    blue = to_rgb(palette.BLUE_DARK)
     lines_svg: list[str] = []
     for li, w in enumerate(weights):
         x1, x2 = xs[li], xs[li + 1]
         pairs = _select_important_connections(w, display_n[li], display_n[li + 1])
         if len(pairs) > NN_MAX_HTML_LINES_PER_LAYER:
             pairs = pairs[-NN_MAX_HTML_LINES_PER_LAYER:]   # already sorted weakest first
-        for rel, signed_w, ni_d, nj_d in pairs:
-            y1 = neuron_y(li, ni_d)
-            y2 = neuron_y(li + 1, nj_d)
-            # quadratic emphasis: weak survivors stay faint, the strongest pop
-            alpha = 0.08 + 0.82 * rel * rel
-            width = 0.4 + 1.6 * rel * rel
-            color = palette.INK if signed_w >= 0 else palette.TERRACOTTA
+        for rel, _signed_w, ai, aj in pairs:
+            y1 = neuron_y(li, ai)
+            y2 = neuron_y(li + 1, aj)
+            # blue opacity grows with strength²; weak survivors fade toward white/invisible
+            alpha = 0.05 + 0.9 * rel * rel
+            width = 0.4 + 1.8 * rel * rel
             lines_svg.append(
                 f'<line x1="{x1}" y1="{y1:.1f}" x2="{x2}" y2="{y2:.1f}" '
-                f'stroke="{color}" stroke-opacity="{alpha:.3f}" '
+                f'stroke="{palette.BLUE_DARK}" stroke-opacity="{alpha:.3f}" '
                 f'stroke-width="{width:.2f}"/>'
             )
 
     circles_svg: list[str] = []
-    for li, n in enumerate(display_n):
-        for ni in range(n):
-            y = neuron_y(li, ni)
+    for li, size in enumerate(layer_sizes):
+        dn = display_n[li]
+        step = max(1, size // dn)
+        n_meta = size - min(n_z, size) if li == 0 else 0
+        for d in range(dn):
+            ai = d * step
+            y = neuron_y(li, ai)
             x = xs[li]
             if li == 0:
-                n_meta_disp = display_n[0] - min(n_z, display_n[0])
-                fill = palette.TERRACOTTA if ni < max(n_meta_disp, 0) else palette.DUSK_BLUE
+                fill = palette.RED_MID if ai < max(n_meta, 0) else palette.DUSK_BLUE
             else:
                 fill = palette.GRAY
             circles_svg.append(f'<circle cx="{x}" cy="{y:.1f}" r="{RADIUS}" fill="{fill}"/>')
@@ -738,15 +797,14 @@ def _build_nn_html(weights: list[np.ndarray], layer_sizes: list[int], n_z: int) 
             f'font-size="13" fill="#222">{name} ({layer_sizes[li]})</text>'
         )
     if 0 < n_z < layer_sizes[0]:
-        n_meta_disp = display_n[0] - min(n_z, display_n[0])
-        if n_meta_disp > 0:
-            y_mid_meta = (neuron_y(0, 0) + neuron_y(0, n_meta_disp - 1)) / 2
+        n_meta = layer_sizes[0] - n_z          # actual metadata input count (top block)
+        if n_meta > 0:
+            y_mid_meta = (neuron_y(0, 0) + neuron_y(0, n_meta - 1)) / 2
             labels_svg.append(
                 f'<text x="{xs[0] - RADIUS - 6}" y="{y_mid_meta + 4}" '
-                f'text-anchor="end" font-size="10" fill="{palette.TERRACOTTA}">metadata</text>'
+                f'text-anchor="end" font-size="10" fill="{palette.RED_MID}">metadata</text>'
             )
-        n_z_disp = min(n_z, display_n[0])
-        y_mid_z = (neuron_y(0, n_meta_disp) + neuron_y(0, n_meta_disp + n_z_disp - 1)) / 2
+        y_mid_z = (neuron_y(0, n_meta) + neuron_y(0, layer_sizes[0] - 1)) / 2
         labels_svg.append(
             f'<text x="{xs[0] - RADIUS - 6}" y="{y_mid_z + 4}" '
             f'text-anchor="end" font-size="10" fill="{palette.DUSK_BLUE}">z-emb.</text>'
@@ -774,10 +832,9 @@ button{{padding:4px 10px;cursor:pointer}}
   <button onclick="zoom(0.67)">−</button>
   <button onclick="resetView()">Reset</button>
   <small>scroll=zoom &nbsp; drag=pan &nbsp;
-         <span style="color:{palette.TERRACOTTA}">&#9632;</span>metadata input &nbsp;
+         <span style="color:{palette.RED_MID}">&#9632;</span>metadata input &nbsp;
          <span style="color:{palette.DUSK_BLUE}">&#9632;</span>z-embedding input &nbsp;
-         <span style="color:{palette.INK}">&#8212;</span>positive weight &nbsp;
-         <span style="color:{palette.TERRACOTTA}">&#8212;</span>negative weight &nbsp;
+         <span style="color:{palette.BLUE_DARK}">&#8212;</span>strong weight (opacity ∝ strength; weak = invisible) &nbsp;
          (only each neuron's top-{NN_TOP_K_PER_NEURON} strongest connections shown)</small>
 </div>
 <div id="container">
@@ -810,34 +867,45 @@ function resetView(){{scale=1;tx=0;ty=0;applyT();}}
 
 def _save_nn_png(weights: list[np.ndarray], layer_sizes: list[int],
                  n_z: int, wf_type: str, path: Path) -> None:
-    """High-resolution PNG of the NN connection-strength diagram."""
+    """High-resolution PNG of the NN connection-strength diagram.
+
+    Each layer's neuron column spans a vertical height proportional to its true neuron
+    count (a 512-unit layer is drawn twice as tall as a 256-unit one), so the figure
+    reflects the real network shape. Connections are blue with opacity ∝ strength² — weak
+    connections fade to invisible/white and only the strongest per neuron are drawn."""
     from matplotlib.collections import LineCollection
+    from matplotlib.colors import to_rgb
 
     LAYER_SP = 2.5
-    N_SP = 0.12
-    MAX_N = 300
-    MAX_LINES = 8000
+    MAX_N = 300          # max dots drawn per layer (subsample for rendering only)
+    MAX_LINES = 4000
 
     n_layers = len(layer_sizes)
-    display_n = [min(n, MAX_N) for n in layer_sizes]
-    max_d = max(display_n)
-    height = max_d * N_SP
+    max_size = max(layer_sizes)
+    HEIGHT = 8.0                       # data-units tall for the largest layer
+    U = HEIGHT / max_size              # vertical unit per neuron (shared by all layers)
     width = (n_layers - 1) * LAYER_SP
+    display_n = [min(n, MAX_N) for n in layer_sizes]
 
-    fig, ax = plt.subplots(figsize=(max(8, n_layers * 3.5), max(6, max_d * 0.04 + 1)))
+    fig, ax = plt.subplots(figsize=(max(8, n_layers * 3.5), max(6, HEIGHT + 1.5)))
     ax.set_facecolor("white")
     ax.axis("off")
-    ax.set_xlim(-0.3, width + 0.3)
-    ax.set_ylim(-N_SP, height + N_SP)
+    ax.set_xlim(-0.6, width + 0.3)
+    ax.set_ylim(-0.6, HEIGHT + 0.6)
 
-    def pos(li, ni):
-        n = display_n[li]
-        x = li * LAYER_SP
-        top = (height - n * N_SP) / 2
-        return x, top + ni * N_SP
+    def top_of(li):
+        return (HEIGHT - layer_sizes[li] * U) / 2
 
-    from matplotlib.colors import to_rgb
-    rgb_pos, rgb_neg = to_rgb(palette.INK), to_rgb(palette.TERRACOTTA)
+    def pos(li, actual_idx):
+        # Matplotlib's y-axis increases upward (larger y = higher on the page), the
+        # opposite of the HTML/SVG renderer's top-down coordinates. actual_idx=0 must map
+        # to the LARGEST y in the column's span so index 0 (metadata, when present) lands
+        # at the visual TOP here too — without this flip metadata rendered at the bottom.
+        size = layer_sizes[li]
+        y = top_of(li) + (size - 1 - actual_idx) * U
+        return li * LAYER_SP, y
+
+    blue = to_rgb(palette.BLUE_DARK)
     for li, w in enumerate(weights):
         pairs = _select_important_connections(w, display_n[li], display_n[li + 1])
         if len(pairs) > MAX_LINES:
@@ -845,40 +913,46 @@ def _save_nn_png(weights: list[np.ndarray], layer_sizes: list[int],
         if not pairs:
             continue
         lines, colors, widths = [], [], []
-        for rel, signed_w, ni_d, nj_d in pairs:
-            x1, y1 = pos(li, ni_d)
-            x2, y2 = pos(li + 1, nj_d)
+        for rel, _signed_w, ai, aj in pairs:
+            x1, y1 = pos(li, ai)
+            x2, y2 = pos(li + 1, aj)
             lines.append([(x1, y1), (x2, y2)])
-            rgb = rgb_pos if signed_w >= 0 else rgb_neg
-            colors.append((*rgb, 0.08 + 0.82 * rel * rel))
-            widths.append(0.3 + 1.4 * rel * rel)
+            # blue, opacity grows with strength²; weak → transparent (white shows through)
+            colors.append((*blue, 0.05 + 0.9 * rel * rel))
+            widths.append(0.3 + 1.7 * rel * rel)
         ax.add_collection(LineCollection(lines, linewidths=widths, colors=colors, zorder=1))
 
-    for li, n in enumerate(display_n):
-        for ni in range(n):
-            x, y = pos(li, ni)
+    dot_ms = max(1.2, min(4.0, U * 30))
+    for li, size in enumerate(layer_sizes):
+        dn = display_n[li]
+        step = max(1, size // dn)
+        n_meta = size - min(n_z, size) if li == 0 else 0
+        for d in range(dn):
+            ai = d * step
+            x, y = pos(li, ai)
             if li == 0:
-                n_meta_d = display_n[0] - min(n_z, display_n[0])
-                c = palette.TERRACOTTA if ni < max(n_meta_d, 0) else palette.DUSK_BLUE
+                c = palette.RED_MID if ai < max(n_meta, 0) else palette.DUSK_BLUE
             else:
                 c = palette.GRAY
-            ax.plot(x, y, "o", ms=max(1.5, N_SP * 5), color=c, zorder=3)
+            ax.plot(x, y, "o", ms=dot_ms, color=c, zorder=3)
 
     layer_names = ["Input"] + [f"H{i + 1}" for i in range(n_layers - 2)] + ["Output"]
     for li, name in enumerate(layer_names):
-        ax.text(li * LAYER_SP, -N_SP * 0.8, f"{name}\n({layer_sizes[li]})",
+        ax.text(li * LAYER_SP, -0.35, f"{name}\n({layer_sizes[li]})",
                 ha="center", va="top", fontsize=8)
     if 0 < n_z < layer_sizes[0]:
-        n_meta_d = display_n[0] - min(n_z, display_n[0])
-        if n_meta_d > 0:
-            _, ym = pos(0, n_meta_d // 2)
-            ax.text(-0.15, ym, "meta", ha="right", va="center", fontsize=7, color=palette.TERRACOTTA)
-        _, yz = pos(0, n_meta_d + min(n_z, display_n[0]) // 2)
-        ax.text(-0.15, yz, "z-emb", ha="right", va="center", fontsize=7, color=palette.DUSK_BLUE)
+        n_meta = layer_sizes[0] - n_z
+        if n_meta > 0:
+            _, ym = pos(0, n_meta // 2)
+            ax.text(-0.35, ym, "meta", ha="right", va="center", fontsize=7,
+                    color=palette.RED_MID)
+        _, yz = pos(0, n_meta + n_z // 2)
+        ax.text(-0.35, yz, "z-emb", ha="right", va="center", fontsize=7,
+                color=palette.DUSK_BLUE)
 
     ax.set_title("Neural Network — Most Important Connections\n"
-                 f"(top-{NN_TOP_K_PER_NEURON} strongest inputs per neuron; "
-                 "dark olive=positive, terracotta=negative; thicker=stronger"
+                 f"(top-{NN_TOP_K_PER_NEURON} strongest inputs per neuron; blue opacity ∝ "
+                 "strength, weak connections invisible; layer heights ∝ neuron count"
                  f"{' | red=metadata, blue=z-embedding inputs' if n_z > 0 else ''})",
                  fontsize=9)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1089,7 +1163,7 @@ def plot_dim_curve(curve: list[dict], baseline: float, k_star: int, path: Path) 
     ax.set_xlabel("latent dim k")
     ax.set_ylabel("val metric")
     ax.set_title("Latent-dimension selection")
-    ax.legend()
+    ax.legend(loc="upper right")
     fig.tight_layout()
     fig.savefig(path, dpi=120)
     plt.close(fig)
@@ -1111,7 +1185,7 @@ def plot_generated_distribution(human_scores, generated: dict, path: Path) -> No
     ax.set_xlabel("Predicted normalized impact")
     ax.set_ylabel("Density")
     ax.set_title("Predicted impact: human test vs LLM-generated")
-    ax.legend()
+    ax.legend(loc="upper right")
     fig.tight_layout()
     fig.savefig(path, dpi=120)
     plt.close(fig)
@@ -1132,7 +1206,7 @@ def plot_tfm_training_curve(history: dict, path: Path,
     ax.set_xlabel("epoch")
     ax.set_ylabel("val metric (Spearman / macro-F1)")
     ax.set_title(title)
-    ax.legend(loc="lower right")
+    ax.legend(loc="upper right")
     fig.tight_layout()
     fig.savefig(path, dpi=120)
     plt.close(fig)
@@ -1172,23 +1246,40 @@ def plot_tfm_loss_lr(history: dict, path: Path,
 
 # ===================================================================== dataset analysis plots
 
-def plot_counts_year(counts: pd.DataFrame, path: Path) -> None:
-    """Bar chart: papers per year."""
+def plot_counts_year(counts: pd.DataFrame, path: Path, *, color: str | None = None,
+                     title: str | None = None) -> None:
+    """Bar chart: papers per year. Everything before 1900 is compressed into one '<1900'
+    bar (early years carry minimal counts), so the modern distribution stays readable.
+
+    Accepts the merged schema (``year_label``/``n``); falls back to a raw ``year`` column.
+    ``color``/``title`` let the training-subset variant re-render this in red.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     palette.apply_style()
-    fig, ax = plt.subplots(figsize=(12, 4))
-    ax.bar(counts["year"], counts["n"], color=palette.OLIVE, alpha=0.85, edgecolor=palette.INK, linewidth=0.5)
+    label_col = "year_label" if "year_label" in counts.columns else "year"
+    labels = counts[label_col].astype(str).tolist()
+    x = np.arange(len(labels))
+    fig, ax = plt.subplots(figsize=(max(10, len(labels) * 0.12), 4))
+    ax.bar(x, counts["n"], color=color or palette.OLIVE, alpha=0.85,
+           edgecolor=palette.INK, linewidth=0.5)
+    ax.set_xticks(x)
+    # thin the tick labels when there are many years so they don't overprint
+    step = max(1, len(labels) // 30)
+    ax.set_xticklabels([lbl if (i % step == 0 or lbl == "<1900") else ""
+                        for i, lbl in enumerate(labels)], rotation=45, ha="right",
+                       fontsize=8)
     ax.set_xlabel("Year")
     ax.set_ylabel("Number of Papers")
-    ax.set_title("Papers per Year")
+    ax.set_title(title or "Papers per Year (pre-1900 merged)")
     ax.grid(axis="y", alpha=0.3)
     fig.tight_layout()
     fig.savefig(path, dpi=120)
     plt.close(fig)
 
 
-def plot_counts_domain(counts: pd.DataFrame, path: Path) -> None:
+def plot_counts_domain(counts: pd.DataFrame, path: Path, *, color: str | None = None,
+                       title: str | None = None) -> None:
     """Horizontal bar chart: papers per domain (top N, sorted descending)."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1196,11 +1287,12 @@ def plot_counts_domain(counts: pd.DataFrame, path: Path) -> None:
     fig, ax = plt.subplots(figsize=(8, max(5, len(counts) * 0.2)))
     # Sort by count descending (already done in data_analysis.py)
     y_pos = np.arange(len(counts))
-    ax.barh(y_pos, counts["n"], color=palette.SAGE, alpha=0.85, edgecolor=palette.INK, linewidth=0.5)
+    ax.barh(y_pos, counts["n"], color=color or palette.SAGE, alpha=0.85,
+            edgecolor=palette.INK, linewidth=0.5)
     ax.set_yticks(y_pos)
     ax.set_yticklabels(counts["domain"], fontsize=9)
     ax.set_xlabel("Number of Papers")
-    ax.set_title("Papers per Domain (Top Domains)")
+    ax.set_title(title or "Papers per Domain (Top Domains)")
     ax.invert_yaxis()
     ax.grid(axis="x", alpha=0.3)
     fig.tight_layout()
@@ -1208,31 +1300,34 @@ def plot_counts_domain(counts: pd.DataFrame, path: Path) -> None:
     plt.close(fig)
 
 
-def plot_year_domain_heatmap(pivot: pd.DataFrame, path: Path) -> None:
-    """Heatmap: years × domains."""
+def plot_year_domain_heatmap(pivot: pd.DataFrame, path: Path, *, cmap: str | None = None,
+                             title: str | None = None) -> None:
+    """Heatmap (blue): year-bucket rows ('<1900' then equal modern ranges) × domain
+    columns. The whole matrix is shown — the year axis is already bucketed upstream into a
+    manageable number of ranges, so no rows/columns are truncated. ``cmap``/``title`` let
+    the training-subset variant re-render this in red."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     palette.apply_style()
-    # Limit size for readability
-    max_size = 25
-    if pivot.shape[0] > max_size or pivot.shape[1] > max_size:
-        pivot = pivot.iloc[:max_size, :max_size]
-    fig, ax = plt.subplots(figsize=(max(8, pivot.shape[1] * 0.5), max(6, pivot.shape[0] * 0.4)))
-    im = ax.imshow(pivot.values, cmap=palette.register_olive_seq(), aspect="auto")
+    vals = pivot.values.astype(float)
+    fig, ax = plt.subplots(figsize=(max(8, pivot.shape[1] * 0.55),
+                                    max(6, pivot.shape[0] * 0.45)))
+    im = ax.imshow(vals, cmap=cmap or palette.register_blue_seq(), aspect="auto",
+                   interpolation="nearest")
     ax.set_xticks(np.arange(pivot.shape[1]))
     ax.set_yticks(np.arange(pivot.shape[0]))
     ax.set_xticklabels(pivot.columns, rotation=45, ha="right", fontsize=8)
-    ax.set_yticklabels(pivot.index, fontsize=8)
+    ax.set_yticklabels(pivot.index, fontsize=9)
     ax.set_xlabel("Domain")
-    ax.set_ylabel("Year")
-    ax.set_title("Papers: Year × Domain Heatmap")
-    # Annotate if small enough
-    if pivot.shape[0] <= 25 and pivot.shape[1] <= 25:
-        for i in range(pivot.shape[0]):
-            for j in range(pivot.shape[1]):
-                val = pivot.iloc[i, j]
-                if val > 0:
-                    ax.text(j, i, str(int(val)), ha="center", va="center", fontsize=7, color="white")
+    ax.set_ylabel("Year range")
+    ax.set_title(title or "Papers: Year × Domain Heatmap")
+    vmax = vals.max() if vals.size else 1.0
+    for i in range(pivot.shape[0]):
+        for j in range(pivot.shape[1]):
+            val = vals[i, j]
+            if val > 0:
+                ax.text(j, i, str(int(val)), ha="center", va="center", fontsize=7,
+                        color="white" if val > 0.55 * vmax else palette.INK)
     cbar = plt.colorbar(im, ax=ax)
     cbar.set_label("Count")
     fig.tight_layout()
@@ -1240,41 +1335,90 @@ def plot_year_domain_heatmap(pivot: pd.DataFrame, path: Path) -> None:
     plt.close(fig)
 
 
-def plot_completeness(comp: pd.DataFrame, path: Path) -> None:
-    """Horizontal bars: completeness % per field."""
+def plot_completeness(comp: pd.DataFrame, path: Path, *, bold_fields: set | None = None) -> None:
+    """Vertical bars: completeness % per field (fields on the horizontal axis, completeness
+    on the vertical axis). Fields are grouped and shaded by group — olive for the core
+    text/metadata (title, abstract, year), blue for identifiers/linkage (domains, subfield,
+    doi, oa_id), red for the remaining citation/venue metrics — with a separate group
+    legend and a per-field ordering that matches the completeness-by-year figure.
+    ``bold_fields`` renders the named x-labels in bold (the target-defining fields)."""
+    import matplotlib.patches as mpatches
+
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     palette.apply_style()
-    fig, ax = plt.subplots(figsize=(10, len(comp) * 0.3))
-    y_pos = np.arange(len(comp))
-    colors = palette.ordinal_colors(len(comp))
-    ax.barh(y_pos, comp["pct_nonnull"], color=colors, alpha=0.85, edgecolor=palette.INK, linewidth=0.5)
-    ax.set_yticks(y_pos)
-    ax.set_yticklabels(comp["field"], fontsize=9)
-    ax.set_xlabel("Completeness (%)")
+    bold_fields = {str(f).lower() for f in (bold_fields or ())}
+
+    fields = list(comp["field"])
+    ordered = [f for f in palette.order_fields(fields) if f in fields]
+    comp = comp.set_index("field").reindex(ordered).reset_index()
+    cmap = palette.field_color_map(ordered)
+    colors = [cmap.get(f, palette.GRAY) for f in ordered]
+
+    x = np.arange(len(ordered))
+    fig, ax = plt.subplots(figsize=(max(8, len(ordered) * 0.7), 5))
+    ax.bar(x, comp["pct_nonnull"], color=colors, alpha=0.9,
+           edgecolor=palette.INK, linewidth=0.5)
+    for xi, v in zip(x, comp["pct_nonnull"]):
+        ax.text(xi, v + 1, f"{v:.0f}", ha="center", va="bottom", fontsize=8)
+    ax.set_xticks(x)
+    ax.set_xticklabels(ordered, rotation=40, ha="right", fontsize=10)
+    for tick, field in zip(ax.get_xticklabels(), ordered):
+        if str(field).lower() in bold_fields:       # highlight target-defining fields
+            tick.set_fontweight("bold")
+    ax.set_ylabel("Completeness (%)")
+    ax.set_xlabel("Field")
+    ax.set_ylim(0, 108)
     ax.set_title("Field Completeness")
-    ax.set_xlim(0, 105)
-    ax.invert_yaxis()
-    ax.grid(axis="x", alpha=0.3)
+    ax.grid(axis="y", alpha=0.3)
+
+    # separate legend: one entry per field group, coloured by that group's base shade
+    group_base = {"olive": palette.OLIVE, "blue": palette.BLUE_MID, "red": palette.RED_MID}
+    handles = [mpatches.Patch(color=group_base[g], label=palette.FIELD_GROUP_LABELS[g])
+               for g in ("olive", "blue", "red")
+               if any(palette.field_group_of(f) == g for f in ordered)]
+    ax.legend(handles=handles, title="field group", fontsize=9, title_fontsize=9,
+              loc="upper right")
     fig.tight_layout()
     fig.savefig(path, dpi=120)
     plt.close(fig)
 
 
-def plot_completeness_by_year(pivot_pct: pd.DataFrame, path: Path) -> None:
-    """Heatmap: field × year completeness %."""
+def plot_completeness_by_year(pivot_pct: pd.DataFrame, path: Path, *,
+                              cmap: str | None = None, title: str | None = None,
+                              bold_fields: set | None = None) -> None:
+    """Heatmap (blue): field × year completeness %. Fields (vertical axis) keep the same
+    olive→blue→red group ordering as the full-completeness figure; pre-1900 years are one
+    '<1900' column. Field labels use a slightly larger font for legibility. ``bold_fields``
+    renders the named fields in bold (the ones feeding the impact target + title/abstract);
+    ``cmap``/``title`` let the training-subset variant re-render this in red."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     palette.apply_style()
-    fig, ax = plt.subplots(figsize=(max(10, pivot_pct.shape[1] * 0.4), max(8, pivot_pct.shape[0] * 0.3)))
-    im = ax.imshow(pivot_pct.values, cmap=palette.register_olive_seq(), aspect="auto", vmin=0, vmax=100)
-    ax.set_xticks(np.arange(pivot_pct.shape[1]))
-    ax.set_yticks(np.arange(pivot_pct.shape[0]))
-    ax.set_xticklabels(pivot_pct.columns, rotation=45, ha="right", fontsize=8)
-    ax.set_yticklabels(pivot_pct.index, fontsize=8)
+    bold_fields = {str(f).lower() for f in (bold_fields or ())}
+    ncols, nrows = pivot_pct.shape[1], pivot_pct.shape[0]
+    # Cap the width (per-year columns can number ~100+) and give each field row real height
+    # so the matrix reads as a balanced grid instead of a thin 40-inch-wide strip.
+    fig, ax = plt.subplots(figsize=(min(26.0, max(11.0, ncols * 0.22)),
+                                    max(6.5, nrows * 0.55)))
+    im = ax.imshow(pivot_pct.values, cmap=cmap or palette.register_blue_seq(), aspect="auto",
+                   vmin=0, vmax=100, interpolation="nearest")
+    ax.set_xticks(np.arange(ncols))
+    ax.set_yticks(np.arange(nrows))
+    step = max(1, ncols // 25)
+    xlabels = [lbl if (i % step == 0 or str(lbl) == "<1900") else ""
+               for i, lbl in enumerate(pivot_pct.columns)]
+    ax.set_xticklabels(xlabels, rotation=45, ha="right", fontsize=8)
+    # Colour each field label by its group so the grouping reads at a glance
+    ax.set_yticklabels(pivot_pct.index, fontsize=11)
+    group_base = {"olive": palette.OLIVE, "blue": palette.BLUE_MID, "red": palette.RED_MID}
+    for tick, field in zip(ax.get_yticklabels(), pivot_pct.index):
+        tick.set_color(group_base[palette.field_group_of(field)])
+        if str(field).lower() in bold_fields:      # highlight target-defining fields
+            tick.set_fontweight("bold")
     ax.set_xlabel("Year")
     ax.set_ylabel("Field")
-    ax.set_title("Field Completeness (%) by Year")
+    ax.set_title(title or "Field Completeness (%) by Year")
     cbar = plt.colorbar(im, ax=ax)
     cbar.set_label("Completeness (%)")
     fig.tight_layout()
@@ -1282,19 +1426,61 @@ def plot_completeness_by_year(pivot_pct: pd.DataFrame, path: Path) -> None:
     plt.close(fig)
 
 
-def plot_abstract_length_hist(lengths: pd.Series, path: Path) -> None:
-    """Histogram: abstract character lengths with median vline."""
+def plot_abstract_length_hist(lengths: pd.Series, path: Path, *, color: str | None = None,
+                              accent: str | None = None, title: str | None = None) -> None:
+    """Histogram: abstract character lengths with median vline. ``color``/``accent``/``title``
+    let the training-subset variant re-render this in red."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     palette.apply_style()
     fig, ax = plt.subplots(figsize=(10, 5))
-    ax.hist(lengths, bins=50, color=palette.SAND, alpha=0.75, edgecolor=palette.INK, linewidth=0.5)
+    ax.hist(lengths, bins=50, color=color or palette.SAND, alpha=0.75,
+            edgecolor=palette.INK, linewidth=0.5)
     median_val = lengths.median()
-    ax.axvline(median_val, color=palette.OLIVE, linestyle="--", linewidth=2, label=f"Median: {median_val:.0f} chars")
+    ax.axvline(median_val, color=accent or palette.OLIVE, linestyle="--", linewidth=2,
+               label=f"Median: {median_val:.0f} chars")
     ax.set_xlabel("Abstract Length (characters)")
     ax.set_ylabel("Frequency")
-    ax.set_title("Abstract Length Distribution")
-    ax.legend()
+    ax.set_title(title or "Abstract Length Distribution")
+    ax.legend(loc="upper right")
+    ax.grid(axis="y", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+
+
+def plot_abstract_length_box(lengths: pd.Series, path: Path,
+                             embedder_max_chars: dict[str, int] | None = None) -> None:
+    """Box plot of abstract character lengths (min → max, quartiles + median), with a
+    horizontal marker line per embedder at ``max_tokens * ~3`` characters — i.e. roughly how
+    much of the abstract each embedder can actually ingest before truncation. Lets you see at
+    a glance what fraction of abstracts overflow specter2/scibert's 512-token window."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    palette.apply_style()
+    vals = pd.to_numeric(lengths, errors="coerce").dropna().to_numpy()
+    fig, ax = plt.subplots(figsize=(9, 5))
+    if vals.size:
+        ax.boxplot(vals, vert=True, showfliers=False, widths=0.5,
+                   patch_artist=True,
+                   boxprops=dict(facecolor=palette.SAND, edgecolor=palette.INK),
+                   medianprops=dict(color=palette.OLIVE, linewidth=2),
+                   whiskerprops=dict(color=palette.INK), capprops=dict(color=palette.INK))
+        ax.text(1.06, np.max(vals), f"max {int(np.max(vals)):,}", va="center", fontsize=8,
+                color=palette.INK)
+        ax.text(1.06, np.min(vals), f"min {int(np.min(vals)):,}", va="center", fontsize=8,
+                color=palette.INK)
+    # one dashed marker per embedder capacity (max_tokens * ~3 chars/token)
+    ramp = palette.ordinal_colors(max(1, len(embedder_max_chars or {})))
+    for (name, chars), col in zip(sorted((embedder_max_chars or {}).items()), ramp):
+        ax.axhline(chars, color=col, linestyle="--", linewidth=1.5,
+                   label=f"{name} ≈{chars:,} chars")
+    ax.set_xticks([1])
+    ax.set_xticklabels(["abstracts"])
+    ax.set_ylabel("Abstract length (characters)")
+    ax.set_title("Abstract Length vs Embedder Input Capacity")
+    if embedder_max_chars:
+        ax.legend(loc="upper right", fontsize=8)
     ax.grid(axis="y", alpha=0.3)
     fig.tight_layout()
     fig.savefig(path, dpi=120)
@@ -1323,42 +1509,53 @@ def plot_source_productivity(sources: pd.DataFrame, path: Path) -> None:
     ax.set_yticklabels(d["source"])
     ax.set_xlabel("papers")
     ax.set_title("Data-Source Productivity — contributed vs training-usable records")
-    ax.legend(loc="lower right")
+    ax.legend(loc="upper right")
     ax.grid(axis="x", alpha=0.3)
     fig.tight_layout()
     fig.savefig(path, dpi=130)
     plt.close(fig)
 
 
-def plot_correlation_heatmap(corr: pd.DataFrame, path: Path) -> None:
-    """Spearman correlation heatmap of the numeric metadata columns (diverging BrBG)."""
+def plot_correlation_heatmap(corr: pd.DataFrame, path: Path, *, cmap: str | None = None,
+                             title: str | None = None, bold_fields: set | None = None) -> None:
+    """Spearman correlation heatmap of the numeric metadata columns (diverging blue).
+    ``bold_fields`` renders the named row/column labels in bold (the target-defining fields);
+    ``cmap``/``title`` let the training-subset variant re-render this in red."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     palette.apply_style()
+    bold_fields = {str(f).lower() for f in (bold_fields or ())}
     cols = list(corr.columns)
     fig, ax = plt.subplots(figsize=(1.1 * len(cols) + 2.5, 1.0 * len(cols) + 2))
-    im = ax.imshow(corr.to_numpy(dtype=float), cmap=palette.DIVERGING_CMAP,
-                   vmin=-1, vmax=1)
+    im = ax.imshow(corr.to_numpy(dtype=float), cmap=cmap or palette.DIVERGING_CMAP,
+                   vmin=-1, vmax=1, interpolation="nearest")
     for i in range(len(cols)):
         for j in range(len(cols)):
             v = corr.iloc[i, j]
             if np.isfinite(v):
+                # diverging maps are dark only at the strong-positive end → white text there
                 ax.text(j, i, f"{v:.2f}", ha="center", va="center", fontsize=8,
-                        color="white" if abs(v) > 0.6 else "black")
+                        color="white" if v > 0.55 else "black")
     ax.set_xticks(range(len(cols)))
     ax.set_xticklabels(cols, rotation=35, ha="right", fontsize=9)
     ax.set_yticks(range(len(cols)))
     ax.set_yticklabels(cols, fontsize=9)
-    ax.set_title("Metadata Correlations (Spearman)")
+    for ticks in (ax.get_xticklabels(), ax.get_yticklabels()):
+        for tick, field in zip(ticks, cols):
+            if str(field).lower() in bold_fields:    # highlight target-defining fields
+                tick.set_fontweight("bold")
+    ax.set_title(title or "Metadata Correlations (Spearman)")
     fig.colorbar(im, ax=ax, shrink=0.8)
     fig.tight_layout()
     fig.savefig(path, dpi=130)
     plt.close(fig)
 
 
-def plot_score_distributions(scores: pd.DataFrame, path: Path) -> None:
+def plot_score_distributions(scores: pd.DataFrame, path: Path, *, color: str | None = None,
+                             title: str | None = None) -> None:
     """Score distributions of the usable corpus: the [0,1] training target (should be
-    ~uniform by construction), log-scaled citation counts, and FWCI when present."""
+    ~uniform by construction), log-scaled citation counts, and FWCI when present.
+    ``color``/``title`` let the training-subset variant re-render the target panel in red."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     palette.apply_style()
@@ -1367,7 +1564,7 @@ def plot_score_distributions(scores: pd.DataFrame, path: Path) -> None:
     fig, axes = plt.subplots(1, n_panels, figsize=(5 * n_panels, 4.2))
 
     t = scores["target"].dropna()
-    axes[0].hist(t, bins=40, color=palette.OLIVE, alpha=0.85)
+    axes[0].hist(t, bins=40, color=color or palette.OLIVE, alpha=0.85)
     axes[0].set_xlabel("impact target (field-year percentile, 0-1)")
     axes[0].set_ylabel("papers")
     axes[0].set_title("Training-target distribution")
@@ -1386,9 +1583,47 @@ def plot_score_distributions(scores: pd.DataFrame, path: Path) -> None:
 
     for ax in axes:
         ax.grid(axis="y", alpha=0.3)
-    fig.suptitle("Score Distributions (training-usable corpus)", fontsize=12)
+    fig.suptitle(title or "Score Distributions (training-usable corpus)", fontsize=12)
     fig.tight_layout()
     fig.savefig(path, dpi=130)
+    plt.close(fig)
+
+
+def plot_impact_inflation(matrix: pd.DataFrame, path: Path) -> None:
+    """Heatmap: how the impact metrics drift/inflate across time. Rows are year buckets
+    ('<1900' then equal modern ranges); columns are the impact metrics (raw citations,
+    field-weighted FWCI, normalized citation percentile). Each column is z-scored across
+    year buckets so a metric that trends up or down over time reads as a clear light→dark
+    gradient down the column (the 'citation inflation' check)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    palette.apply_style()
+    if matrix.empty:
+        return
+    raw = matrix.to_numpy(dtype=float)
+    mean = np.nanmean(raw, axis=0)
+    std = np.nanstd(raw, axis=0)
+    z = (raw - mean) / np.where(std > 0, std, 1.0)     # per-column z-score
+    fig, ax = plt.subplots(figsize=(max(7, matrix.shape[1] * 1.6),
+                                    max(5, matrix.shape[0] * 0.5)))
+    im = ax.imshow(z, cmap=palette.register_blue_seq(), aspect="auto",
+                   interpolation="nearest")
+    ax.set_xticks(np.arange(matrix.shape[1]))
+    ax.set_yticks(np.arange(matrix.shape[0]))
+    ax.set_xticklabels(matrix.columns, rotation=20, ha="right", fontsize=9)
+    ax.set_yticklabels(matrix.index, fontsize=9)
+    ax.set_xlabel("Impact metric (z-scored across year buckets)")
+    ax.set_ylabel("Year range")
+    ax.set_title("Impact-Metric Inflation over Time")
+    for i in range(matrix.shape[0]):
+        for j in range(matrix.shape[1]):
+            if np.isfinite(raw[i, j]):
+                ax.text(j, i, f"{raw[i, j]:.2f}", ha="center", va="center", fontsize=7,
+                        color="white" if z[i, j] > 0.6 else palette.INK)
+    cbar = plt.colorbar(im, ax=ax)
+    cbar.set_label("z-score (per metric)")
+    fig.tight_layout()
+    fig.savefig(path, dpi=120)
     plt.close(fig)
 
 
@@ -1443,7 +1678,7 @@ def plot_benchmark_run(metrics: pd.DataFrame, bench_name: str, run_name: str,
     ax.set_xticklabels(metric_names)
     ax.set_ylabel("Metric Value")
     ax.set_title(f"Benchmark: {bench_name} ({run_name})")
-    ax.legend(fontsize=9)
+    ax.legend(loc="upper right", fontsize=9)
     ax.grid(axis="y", alpha=0.3)
     fig.tight_layout()
     fig.savefig(path, dpi=120)
@@ -1468,20 +1703,35 @@ def plot_benchmark_overview(all_metrics: pd.DataFrame, path: Path) -> None:
     # Sort by value
     metric_df = metric_df.sort_values("value")
 
-    fig, ax = plt.subplots(figsize=(10, max(6, len(metric_df) * 0.3)))
+    n = len(metric_df)
+    # Compact height that tracks the number of rows — a 1–2 row chart stays short instead
+    # of stretching a couple of dots across a tall empty canvas.
+    fig, ax = plt.subplots(figsize=(9, min(12.0, max(2.4, n * 0.5 + 1.4))))
 
-    y_pos = np.arange(len(metric_df))
+    y_pos = np.arange(n)
     x_vals = metric_df["value"].values
-    labels = [f"{row['run']}:{row['scorer']}" for _, row in metric_df.iterrows()]
+    # Include the benchmark name: a run can appear once per benchmark it was evaluated on
+    # (e.g. holdout_extended + holdout_recent), and without it two rows from the same run
+    # render with an identical "run:scorer" label, looking like an accidental duplicate.
+    labels = [f"{row['run']}:{row['scorer']} ({row['benchmark']})"
+              for _, row in metric_df.iterrows()]
     colors = [palette.color_for(row["scorer"]) for _, row in metric_df.iterrows()]
 
-    # Lollipop chart
-    ax.hlines(y_pos, 0, x_vals, colors=palette.GRAY, alpha=0.3, linewidth=1)
-    ax.scatter(x_vals, y_pos, c=colors, s=60, alpha=0.85, edgecolors=palette.INK, linewidth=0.5, zorder=3)
+    # Lollipop chart — visible stems + labelled dots
+    ax.hlines(y_pos, 0, x_vals, colors=palette.GRAY, alpha=0.5, linewidth=2)
+    ax.scatter(x_vals, y_pos, c=colors, s=110, alpha=0.9, edgecolors=palette.INK,
+               linewidth=0.6, zorder=3)
+    for yi, v in zip(y_pos, x_vals):
+        ax.text(v, yi + 0.18, f"{v:.3f}", ha="center", va="bottom", fontsize=8,
+                color=palette.INK)
 
     ax.set_yticks(y_pos)
     ax.set_yticklabels(labels, fontsize=8)
-    ax.set_xlabel("Spearman ρ")
+    ax.set_ylim(-0.6, n - 0.4)
+    lo = min(0.0, float(np.nanmin(x_vals)))
+    hi = float(np.nanmax(x_vals))
+    ax.set_xlim(lo, min(1.05, hi * 1.15 + 0.05))
+    ax.set_xlabel("Spearman ρ (benchmark, domain=ALL)")
     ax.set_title("Benchmark Overview - All Runs")
     ax.grid(axis="x", alpha=0.3)
     fig.tight_layout()
@@ -1490,39 +1740,105 @@ def plot_benchmark_overview(all_metrics: pd.DataFrame, path: Path) -> None:
 
 
 def plot_benchmark_heatmap(all_metrics: pd.DataFrame, path: Path) -> None:
-    """Heatmap: rows=models, cols=(benchmark, metric), values=score."""
+    """Heatmap: rows = scorer:run, cols = (benchmark, metric), values = score.
+
+    Redesigned: rows are sorted best-first by their mean score, our trained models (scorer
+    'ours') are marked with a ★ and drawn above the external baselines, a divider separates
+    the two groups, and the colour scale is normalized per column so benchmarks on different
+    scales stay comparable. Each cell is annotated with its score."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     palette.apply_style()
 
-    all_domain = all_metrics[all_metrics["domain"] == "ALL"]
+    all_domain = all_metrics[all_metrics["domain"] == "ALL"].copy()
     if all_domain.empty:
         return
 
-    # Create pivot: rows=run:scorer, cols=benchmark:metric
-    all_domain["model"] = all_domain["run"] + ":" + all_domain["scorer"]
+    all_domain["model"] = all_domain["scorer"] + ":" + all_domain["run"]
     all_domain["bench_metric"] = all_domain["benchmark"] + "\n" + all_domain["metric"]
-
     pivot = all_domain.pivot_table(index="model", columns="bench_metric", values="value")
 
-    fig, ax = plt.subplots(figsize=(max(10, pivot.shape[1] * 0.6), max(8, pivot.shape[0] * 0.3)))
+    # Order rows: our trained models first (★), each group sorted best-mean first.
+    is_ours = {m: str(m).startswith("ours:") for m in pivot.index}
+    row_mean = pivot.mean(axis=1, skipna=True)
+    ours = sorted([m for m in pivot.index if is_ours[m]], key=lambda m: -row_mean[m])
+    others = sorted([m for m in pivot.index if not is_ours[m]], key=lambda m: -row_mean[m])
+    pivot = pivot.reindex(ours + others)
+    labels = [("★ " + m if is_ours[m] else m) for m in pivot.index]
 
-    im = ax.imshow(pivot.values, cmap=palette.register_olive_seq(), aspect="auto")
+    nrows, ncols = pivot.shape
+    fig, ax = plt.subplots(figsize=(max(4.5, ncols * 1.9 + 2.5), max(2.8, nrows * 0.75 + 2)))
+
+    # Per-column min-max normalization so differently-scaled benchmarks share the colour map.
+    vals = pivot.values.astype(float)
+    norm = np.full_like(vals, np.nan)
+    for j in range(ncols):
+        col = vals[:, j]
+        finite = col[np.isfinite(col)]
+        if finite.size:
+            lo, hi = float(finite.min()), float(finite.max())
+            norm[:, j] = (col - lo) / (hi - lo) if hi - lo > 1e-9 else 0.5
+    im = ax.imshow(norm, cmap=palette.register_blue_seq(), aspect="auto",
+                   vmin=0, vmax=1, interpolation="nearest")
+    ax.set_xticks(np.arange(ncols))
+    ax.set_yticks(np.arange(nrows))
+    ax.set_xticklabels(pivot.columns, rotation=45, ha="right", fontsize=8)
+    ax.set_yticklabels(labels, fontsize=8)
+
+    for i in range(nrows):
+        for j in range(ncols):
+            val = vals[i, j]
+            if np.isfinite(val):
+                shade = norm[i, j] if np.isfinite(norm[i, j]) else 0.0
+                ax.text(j, i, f"{val:.2f}", ha="center", va="center", fontsize=8,
+                        color="white" if shade > 0.55 else palette.INK)
+    # divider between our models and the external baselines
+    if ours and others:
+        ax.axhline(len(ours) - 0.5, color=palette.INK, linewidth=1.2)
+
+    ax.set_title("Benchmark Heatmap — ★ our models vs baselines (colour = per-benchmark rank)")
+    cbar = plt.colorbar(im, ax=ax)
+    cbar.set_label("per-benchmark normalized (0=worst, 1=best)")
+    fig.tight_layout()
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+
+
+def plot_embedder_performance(df: pd.DataFrame, path: Path) -> None:
+    """Heatmap: embedder type (x) × task (y), coloured by the BEST model's % class-correct
+    using that embedder. Groups every run by its embedder type (specter2_base, specter2 +
+    citation adapter, specter2 + trained autoencoder, scibert, tfm, …) and keeps the best
+    performer per (embedder, task) cell — so it answers 'which embedding gives the best
+    impact prediction', independent of which specific model won. ``df`` columns:
+    embedder_type, task, value (best % correct), run (best run's name)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    palette.apply_style()
+    if df.empty:
+        return
+    pivot = df.pivot_table(index="task", columns="embedder_type", values="value", aggfunc="max")
+    best_run = {(r["task"], r["embedder_type"]): r["run"] for _, r in df.iterrows()}
+    vals = pivot.values.astype(float)
+    fig, ax = plt.subplots(figsize=(max(6, pivot.shape[1] * 1.7 + 2),
+                                    max(3, pivot.shape[0] * 0.9 + 2)))
+    im = ax.imshow(vals, cmap=palette.register_olive_seq(), aspect="auto",
+                   vmin=0, vmax=100, interpolation="nearest")
     ax.set_xticks(np.arange(pivot.shape[1]))
     ax.set_yticks(np.arange(pivot.shape[0]))
-    ax.set_xticklabels(pivot.columns, rotation=45, ha="right", fontsize=8)
-    ax.set_yticklabels(pivot.index, fontsize=8)
-
-    # Annotate with values
-    for i in range(pivot.shape[0]):
-        for j in range(pivot.shape[1]):
-            val = pivot.iloc[i, j]
-            if not np.isnan(val):
-                ax.text(j, i, f"{val:.2f}", ha="center", va="center", fontsize=7, color="white")
-
-    ax.set_title("Benchmark Heatmap: Model x Benchmark-Metric")
+    ax.set_xticklabels(pivot.columns, rotation=30, ha="right", fontsize=9)
+    ax.set_yticklabels(pivot.index, fontsize=10)
+    for i, task in enumerate(pivot.index):
+        for j, emb in enumerate(pivot.columns):
+            val = vals[i, j]
+            if np.isfinite(val):
+                run = best_run.get((task, emb), "")
+                ax.text(j, i, f"{val:.0f}%\n{run}", ha="center", va="center", fontsize=7,
+                        color="white" if val > 55 else palette.INK)
+    ax.set_xlabel("Embedder type")
+    ax.set_ylabel("Task")
+    ax.set_title("Best Model per Embedder Type (% class correct)")
     cbar = plt.colorbar(im, ax=ax)
-    cbar.set_label("Score")
+    cbar.set_label("% correct (best model)")
     fig.tight_layout()
     fig.savefig(path, dpi=120)
     plt.close(fig)
@@ -1563,7 +1879,7 @@ def plot_per_domain_bars(metrics_df: pd.DataFrame, run_name: str, path: Path) ->
     if not all_row.empty:
         ax.axvline(float(all_row.iloc[0]["value"]), color=palette.INK, linestyle="--",
                    linewidth=1, alpha=0.7, label=f"ALL (n={int(all_row.iloc[0]['n'])})")
-        ax.legend(loc="lower right", fontsize=8)
+        ax.legend(loc="upper right", fontsize=8)
 
     ax.grid(axis="x", alpha=0.3)
     fig.tight_layout()
@@ -1572,7 +1888,8 @@ def plot_per_domain_bars(metrics_df: pd.DataFrame, run_name: str, path: Path) ->
 
 
 def plot_cross_domain_matrix(matrix: pd.DataFrame, path: Path) -> None:
-    """LODO matrix: runs vs domains heatmap."""
+    """Cross-domain matrix: runs vs domains, coloured by % of test items whose predicted
+    impact class is correct (reg and clf on the same 0-100 scale)."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     palette.apply_style()
@@ -1582,22 +1899,85 @@ def plot_cross_domain_matrix(matrix: pd.DataFrame, path: Path) -> None:
 
     fig, ax = plt.subplots(figsize=(max(10, matrix.shape[1] * 0.5), max(8, matrix.shape[0] * 0.3)))
 
-    im = ax.imshow(matrix.values, cmap=palette.register_olive_seq(), aspect="auto")
+    vals = matrix.values.astype(float)
+    im = ax.imshow(vals, cmap=palette.register_blue_seq(), aspect="auto",
+                   vmin=0, vmax=100, interpolation="nearest")
     ax.set_xticks(np.arange(matrix.shape[1]))
     ax.set_yticks(np.arange(matrix.shape[0]))
     ax.set_xticklabels(matrix.columns, rotation=45, ha="right", fontsize=8)
     ax.set_yticklabels(matrix.index, fontsize=8)
 
-    # Annotate with values
     for i in range(matrix.shape[0]):
         for j in range(matrix.shape[1]):
-            val = matrix.iloc[i, j]
-            if not np.isnan(val):
-                ax.text(j, i, f"{val:.2f}", ha="center", va="center", fontsize=7, color="white")
+            val = vals[i, j]
+            if np.isfinite(val):
+                ax.text(j, i, f"{val:.0f}", ha="center", va="center", fontsize=7,
+                        color="white" if val > 55 else palette.INK)
 
-    ax.set_title("Cross-Domain Matrix: Run x Domain")
+    ax.set_title("Cross-Domain Matrix: Run × Domain (% class correct)")
     cbar = plt.colorbar(im, ax=ax)
-    cbar.set_label("Metric Value")
+    cbar.set_label("% correct")
+    fig.tight_layout()
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+
+
+def plot_cross_domain_gap(gap_matrix: pd.DataFrame, path: Path) -> None:
+    """Generalization-gap heatmap (olive diverging): per-domain metric minus each run's
+    ALL-domain value. Positive (dark olive) = the model does better on that domain than its
+    own average; negative (pale) = worse."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    palette.apply_style()
+    if gap_matrix.empty:
+        return
+    vals = gap_matrix.values.astype(float)
+    finite = np.abs(vals[np.isfinite(vals)])
+    lim = float(finite.max()) if finite.size else 1.0
+    lim = max(lim, 1e-6)
+    cmap = matplotlib.colors.LinearSegmentedColormap.from_list(
+        "_olive_div", [palette.SAND, "#FFFFFF", palette.OLIVE])
+    fig, ax = plt.subplots(figsize=(max(10, gap_matrix.shape[1] * 0.5),
+                                    max(6, gap_matrix.shape[0] * 0.3)))
+    im = ax.imshow(vals, cmap=cmap, aspect="auto", vmin=-lim, vmax=lim,
+                   interpolation="nearest")
+    ax.set_xticks(np.arange(gap_matrix.shape[1]))
+    ax.set_yticks(np.arange(gap_matrix.shape[0]))
+    ax.set_xticklabels(gap_matrix.columns, rotation=45, ha="right", fontsize=8)
+    ax.set_yticklabels(gap_matrix.index, fontsize=8)
+    for i in range(gap_matrix.shape[0]):
+        for j in range(gap_matrix.shape[1]):
+            val = vals[i, j]
+            if np.isfinite(val):
+                ax.text(j, i, f"{val:+.2f}", ha="center", va="center", fontsize=7,
+                        color="white" if val > 0.55 * lim else palette.INK)
+    ax.set_title("Cross-Domain Generalization Gap: per-domain − ALL (per run)")
+    cbar = plt.colorbar(im, ax=ax)
+    cbar.set_label("metric − run's ALL-domain metric")
+    fig.tight_layout()
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+
+
+def plot_cross_domain_difficulty(difficulty: pd.DataFrame, path: Path) -> None:
+    """Per-domain difficulty across all runs (red horizontal bars): mean per-domain metric
+    ± std over runs, sorted ascending (hardest domains at the bottom)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    palette.apply_style()
+    if difficulty.empty:
+        return
+    d = difficulty.sort_values("mean_value")
+    y = np.arange(len(d))
+    fig, ax = plt.subplots(figsize=(9, max(4, len(d) * 0.35)))
+    ax.barh(y, d["mean_value"], xerr=d["std_value"], color=palette.RED_MID, alpha=0.85,
+            edgecolor=palette.RED_DARK, linewidth=0.5, capsize=3)
+    ax.set_yticks(y)
+    ax.set_yticklabels([f"{dom} (n_runs={n})" for dom, n in zip(d["domain"], d["n_runs"])],
+                       fontsize=9)
+    ax.set_xlabel("mean per-domain metric across runs")
+    ax.set_title("Cross-Domain Difficulty (mean ± std over runs)")
+    ax.grid(axis="x", alpha=0.3)
     fig.tight_layout()
     fig.savefig(path, dpi=120)
     plt.close(fig)

@@ -2,8 +2,8 @@
 
 Fills ``influential_citation_count`` and the SPECTER ``embedding`` for extended-DB rows
 that came from OpenAlex, using the S2 batch endpoint keyed by DOI (100 papers/request).
-API key from S2_API_KEY in the repo-root .env (optional; the public tier also works,
-just slower).
+API key from SEMANTIC_SCHOLAR_API_KEY (or the legacy alias S2_API_KEY) in the repo-root
+.env (optional; the public tier also works, just slower and on a shared anonymous pool).
 """
 
 from __future__ import annotations
@@ -22,7 +22,8 @@ BATCH = 100
 
 
 def _headers() -> dict:
-    key = config.secret("S2_API_KEY")
+    # .env ships the key as SEMANTIC_SCHOLAR_API_KEY; S2_API_KEY kept as a legacy alias.
+    key = config.api_key("SEMANTIC_SCHOLAR_API_KEY", "S2_API_KEY")
     return {"x-api-key": key} if key else {}
 
 

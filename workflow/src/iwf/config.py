@@ -31,6 +31,7 @@ _LOADED = False
 # features: model input — z (latent only) | meta (z + curated scalars)
 #           | all_meta (z + ALL numeric columns, intentional leakage upper bound)
 #           | text (raw title+abstract into a fine-tuned transformer)
+#           | rag (LLM-as-judge: RAG store + evolving notes as the model)
 # phases:   ordered phase ids run by run_pipeline (see run_pipeline.PHASE_NAMES)
 WORKFLOWS: dict[str, dict] = {
     "emb_clf":          {"task": "clf", "features": "z",        "phases": [0, 1, 2, 3, 4, 5, 6, 7]},
@@ -41,6 +42,8 @@ WORKFLOWS: dict[str, dict] = {
     "emb_all_meta_reg": {"task": "reg", "features": "all_meta", "phases": [0, 1, 2, 3, 4, 6, 7]},
     "tfm_clf":          {"task": "clf", "features": "text",     "phases": [0, 1, 5, 6, 7]},
     "tfm_reg":          {"task": "reg", "features": "text",     "phases": [0, 1, 6, 7]},
+    "llm_clf":          {"task": "clf", "features": "rag",      "phases": [0, 1, 2, 5, 6, 7]},
+    "llm_reg":          {"task": "reg", "features": "rag",      "phases": [0, 1, 2, 6, 7]},
 }
 WORKFLOW_TYPES = tuple(WORKFLOWS)
 VALID_WORKFLOW_TYPES = (*WORKFLOW_TYPES, "all")
@@ -59,6 +62,11 @@ MAX_CLASSES = 25
 def is_text_workflow(workflow_type: str) -> bool:
     """True for the text-transformer topologies, which skip embed/encode/reduce."""
     return WORKFLOWS.get((workflow_type or "").lower(), {}).get("features") == "text"
+
+
+def is_judge_workflow(workflow_type: str) -> bool:
+    """True for the LLM-as-judge workflows (llm_clf/llm_reg), which use RAG features."""
+    return WORKFLOWS.get((workflow_type or "").lower(), {}).get("features") == "rag"
 
 
 def load_env() -> None:
@@ -114,6 +122,48 @@ def secret(key: str) -> str | None:
     """Read an API key / secret from the environment (repo-root .env). May be None."""
     load_env()
     return os.getenv(key)
+
+
+# Placeholder secret values treated as "not set" (so a bogus key is never sent).
+_PLACEHOLDER_SECRETS = {"", "xxx", "changeme", "none", "null"}
+
+
+def api_key(*names: str) -> str | None:
+    """First real (non-placeholder) API key among names, or None."""
+    for name in names:
+        v = secret(name)
+        if v is None:
+            continue
+        v = v.strip()
+        low = v.lower()
+        if low in _PLACEHOLDER_SECRETS or low.startswith("your-") or low.startswith("your_"):
+            continue
+        return v
+    return None
+
+
+def use_llm_abstracts_for_training() -> bool:
+    """Whether LLM-filled abstracts (source='llm') may enter training (config.yaml, default False)."""
+    try:
+        cfg = load_config_yaml()
+    except Exception:
+        cfg = {}
+    if "use_llm_abstracts_for_training" in cfg and cfg["use_llm_abstracts_for_training"] is not None:
+        return _coerce("use_llm_abstracts_for_training", "bool", cfg["use_llm_abstracts_for_training"])
+    return get_bool("USE_LLM_ABSTRACTS_FOR_TRAINING", False)
+
+
+def require_known_domain_for_training() -> bool:
+    """Whether rows without a domain are dropped from training (config.yaml, default False)."""
+    try:
+        cfg = load_config_yaml()
+    except Exception:
+        cfg = {}
+    if "require_known_domain_for_training" in cfg and \
+            cfg["require_known_domain_for_training"] is not None:
+        return _coerce("require_known_domain_for_training", "bool",
+                       cfg["require_known_domain_for_training"])
+    return get_bool("REQUIRE_KNOWN_DOMAIN_FOR_TRAINING", False)
 
 
 # ---------- class-count resolution (config.yaml knobs) ----------
@@ -245,6 +295,19 @@ class Settings:
     text_transformer_lora_dropout: float = 0.1
     text_transformer_freeze_layers: int = 0   # freeze first N encoder layers (0 = train all)
     text_transformer_n_runs: int = 2
+
+    # LLM-as-judge workflow settings (llm_clf / llm_reg only) — these are per-run "science"
+    # knobs (they change what the judge actually learns/produces), so they live here in
+    # Settings/config.yaml like every other training parameter, NOT in .env.workflow.
+    # Machine-level LLM connection settings (endpoint, key, context window) stay in
+    # .env.workflow — see iwf/llm/client.py.
+    judge_batch_max_papers: int = 25       # hard cap on papers combined into one rewrite call
+    judge_checkpoint_interval_pct: float = 0.15   # VAL-checkpoint cadence, as % of TRAIN size
+    judge_val_eval_start_pct: float = 0.10        # initial (cheap) fraction of VAL evaluated
+    judge_val_eval_max_pct: float = 1.0           # ceiling for the escalating VAL subset
+    judge_early_stop_margin: float = 0.01         # min VAL-metric improvement to not "saturate"
+    judge_error_gate_threshold: float = 0.15      # |predicted-true| above this -> "bad" (learn)
+    judge_good_sample_fraction: float = 0.10      # random fraction of "good" papers kept as replay
 
     def __post_init__(self) -> None:
         if not self.class_names:

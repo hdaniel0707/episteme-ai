@@ -6,6 +6,13 @@ Workflow:
   3. Create extended.db as authoritative cumulative dataset
 
 Filters out papers with NULL title/abstract, deduplicates by paper_id/DOI/title+year.
+
+NOTE: This standalone script is NOT wired into the `main_extend_db` pipeline. The
+authoritative merge used by `python -m workflow.src.main_extend_db extend` is
+``main_extend_db.copy_legacy_dbs`` (+ the inline raw.db copy in ``cmd_extend``), which now
+does fuzzy-title dedup and metadata-merge via ``base.Deduper(fuzzy=True)`` /
+``base.merge_paper_metadata``. Prefer that path; keep this module only for ad-hoc one-off
+merges.
 """
 
 import sqlite3

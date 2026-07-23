@@ -33,7 +33,7 @@ def download_naip_weights(dest: Path | None = None, repo_id: str | None = None) 
     repo_id = repo_id or NAIP_DEFAULT_REPO
     dest.mkdir(parents=True, exist_ok=True)
 
-    token = config.secret("HF_TOKEN")
+    token = config.api_key("HF_TOKEN")
     if not token:
         print("[model_weights] no HF_TOKEN in .env — this will fail unless the repo is "
               "public and you already have Llama-3 access cached locally.")

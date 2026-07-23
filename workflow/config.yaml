@@ -35,7 +35,7 @@
 #   all              run every topology once, sharing the common phases
 workflow: emb_clf
 
-n_runs: 5              # seeds per run (model seed varies; the data split never does)
+n_runs: 3              # seeds per run (model seed varies; the data split never does)
 model_seed: 42         # base seed; seed i trains with model_seed + i
 
 # Number of impact classes (classification + the class-binned regression plots).
@@ -43,7 +43,8 @@ model_seed: 42         # base seed; seed i trains with model_seed + i
 #   class_distribution: [15, 35, 35, 15]   # per-class % shares (uneven allowed)
 #   num_classes: 4                         # equal-sized classes -> Q4..Q1
 #   class_thresholds: [0.25, 0.50, 0.75]   # manual [0,1] boundaries (N -> N+1 classes)
-class_thresholds: [0.25, 0.50, 0.75]
+# Two classes for now (easier training): 50% split -> bottom half Q2, upper half Q1.
+class_thresholds: [0.5]
 # class_names: [Q4, Q3, Q2, Q1]  # optional; auto-derived (Qn..Q1) when omitted
 class_scheme: percentile          # percentile | css (cluster-based boundaries)
 
@@ -54,16 +55,15 @@ target_kind: field_year_percentile
 # ---------------------------------------------------------------------------
 # 2. MODEL & TRAINING  (the impact-predictor head; ignored by tfm_* workflows)
 # ---------------------------------------------------------------------------
-model_arch: mlp        # mlp | resmlp | ft_transformer
-hidden: [256, 128]     # hidden sizes per layer (mlp AND resmlp honor the full list;
-                       # resmlp: one residual block per entry, projections between widths)
+model_arch: resmlp     # mlp | resmlp | ft_transformer  (resmlp = recommended for the head)
+hidden: [384, 256, 128] # recommended layout: 3 residual blocks, tapering widths
 activation: gelu       # relu | gelu | tanh | htanh | sigmoid | leaky_relu | elu | silu | mish
-dropout: 0.5
+dropout: 0.4
 lr: 0.0005
-weight_decay: 0.02
-max_epochs: 2000       # early stopping usually ends training long before this
-patience: 60           # epochs without val improvement before stopping
-batch_size: 128
+weight_decay: 0.01
+max_epochs: 300        # full training with early stopping (patience below)
+patience: 40           # epochs without val improvement before stopping
+batch_size: 512        # large corpus (embeddings precomputed) -> bigger batch is fine
 
 # Classifier loss (ignored by regression):
 class_weight: effective  # none | balanced (inverse-freq) | effective (Cui 2019)
@@ -78,25 +78,29 @@ label_smoothing: 0.05    # 0..~0.1; calms over-confident softmax
 embedder: specter2     # specter2 | scibert | scincl | e5 | openai — the frozen embedding
                        # (sets both the computed embedding and the one fed to the encoder;
                        #  use `embedders: [a, b]` + `embed_for_encoder: a` to compute extras)
+                       # Already cached in data/parquet/wf01_emb.parquet — free to reuse.
 encoder_kind: identity # identity (no reduction) | autoencoder | pca | umap
-dim_grid: [64, 128, 256, 512]   # candidate latent dims for k* selection
+                       # top-level default is identity; the encoder `runs:` below set
+                       # autoencoder to optimise the latent size.
+dim_grid: [64, 128, 256, 512]   # candidate latent dims — the AE picks the smallest that
+                       # keeps reconstruction quality (best dimension while quality constant)
 dim_recon_target: 0.95 # autoencoder: smallest k with reconstruction R^2 >= this
 dim_tolerance: 0.01    # probe-metric tolerance when no reconstruction is available
-encoder_max_epochs: 600
+encoder_max_epochs: 400
 encoder_patience: 40
 
 # ---------------------------------------------------------------------------
 # 4. TEXT TRANSFORMER  (tfm_* workflows only)
 # ---------------------------------------------------------------------------
-text_transformer_arch: specter2_ft  # specter2_ft | scibert_ft | specter2_lora | scibert_lora
+text_transformer_arch: specter2_lora  # specter2_ft | scibert_ft | specter2_lora | scibert_lora
 text_transformer_lr: 2.0e-5
-text_transformer_epochs: 5
+text_transformer_epochs: 15          # >=15 training iterations (short vs deep set per run below)
 text_transformer_warmup_ratio: 0.06
-text_transformer_batch_size: 16     # micro-batch; grad-accum keeps effective batch 64
-text_transformer_max_len: 256       # token cap for title+abstract
-text_transformer_freeze_layers: 10  # freeze first N encoder layers (0 = train all)
-text_transformer_n_runs: 2          # seeds for tfm runs (GPU-heavy; fewer than n_runs)
-text_transformer_lora_r: 8          # LoRA rank / alpha / dropout (only *_lora arches)
+text_transformer_batch_size: 8       # micro-batch (4 GB GPU); grad-accum keeps effective batch 64
+text_transformer_max_len: 256        # token cap for title+abstract
+text_transformer_freeze_layers: 8    # freeze first N encoder layers (0 = train all)
+text_transformer_n_runs: 1           # seeds per tfm run (GPU-heavy; 1 for a large corpus)
+text_transformer_lora_r: 8           # LoRA rank / alpha / dropout (only *_lora arches)
 text_transformer_lora_alpha: 16
 text_transformer_lora_dropout: 0.1
 
@@ -112,29 +116,53 @@ novelty_k: 10            # kNN size for the novelty/feasibility geometry
 # Frozen external baseline scorers, fused as features AND dumped to
 # results/<run>/baselines.parquet for the comparison plots (phase 7):
 #   naip | naip_local | specter2_knn | llm_judge | venue_ais | forecite | cited_potential
-# llm_judge needs an API key (LLM_JUDGE_PROVIDER/MODEL in .env.workflow, key in .env);
+# llm_judge needs LLM_JUDGE_PROVIDER/MODEL/API_KEY + LOCAL_LLM_URL, all in .env.workflow;
 # venue_ais needs the UEFISCDI xlsx/pdf lists under workflow/data/;
 # naip_local needs weights (python -m workflow.src.setup_external_models) + peft;
 # every scorer degrades to None gracefully when unavailable, runs never crash.
 # Default ON: the two fully-offline scorers (cached per paper_id, cheap after run 1).
 external_impact: [specter2_knn, venue_ais]
 
-# Benchmark suites evaluated for every run at phase 7 (aggregate/benchmarks/):
+# Benchmark suites evaluated for every run at phase 7 (aggregate/model_benchmarks/):
 #   holdout_extended  local, built by `main_extend_db extend` — no network needed
+#   holdout_recent    local recent-years temporal holdout, also built by extend
 #   naip12k           downloaded NAIP dataset (evaluation.benchmarks.download_benchmark)
 #   sciimpact_pairs | dblp_v14_sample   optional, download first
-benchmarks: [holdout_extended]
+# Each benchmark gets its own figure + CSV in aggregate/model_benchmarks/.
+benchmarks: [holdout_extended, holdout_recent]
+
+# ---------------------------------------------------------------------------
+# 5b. LLM-AS-JUDGE  (llm_clf / llm_reg only — see src/main_train_judge.py)
+# ---------------------------------------------------------------------------
+# These are per-run "science" knobs — they change what the judge learns and how much it
+# costs in LLM tokens — so, unlike the LLM endpoint/key/context-window (machine-level,
+# in .env.workflow), they live here and can differ per `runs:` entry.
+judge_batch_max_papers: 25        # hard cap: papers combined into one rewrite/chunk-write
+                                   # call (also auto-trimmed to fit LLM_JUDGE_MAX_CONTEXT_
+                                   # TOKENS in .env.workflow, whichever is smaller)
+judge_checkpoint_interval_pct: 0.15   # VAL-checkpoint cadence, as a fraction of TRAIN size
+judge_val_eval_start_pct: 0.10        # initial (cheap) fraction of VAL evaluated per check
+judge_val_eval_max_pct: 1.0           # ceiling for the escalating VAL subset (doubles on
+                                       # a suspected plateau; two saturations in a row stops)
+judge_early_stop_margin: 0.01         # min VAL-metric improvement to NOT count as saturated
+judge_error_gate_threshold: 0.15      # |predicted-true| >= this -> "bad" -> queued to learn
+judge_good_sample_fraction: 0.10      # random fraction of "good" (well-predicted) papers
+                                       # also queued, as a replay/regularization check
 
 # ---------------------------------------------------------------------------
 # 6. DATA & SPLIT  (rarely changed — changing these invalidates cached parquets)
 # ---------------------------------------------------------------------------
-dataset_id: wf01
+# dataset_id: wf01                 # the full corpus (~55.8k papers via EPAI_DB) — restore
+                                    # this (and comment out wf01_verify/max_papers below)
+                                    # for a real training session; config.yaml.full_backup
+                                    # has the original flagship queue for that dataset.
+dataset_id: wf01_scratch200k       # separate id -> fresh cache for the from-scratch corpus
 split_seed: 45
 split_ratios: [0.70, 0.15, 0.15]   # train / val / test — ONE shared split for all stages
 target_min_refset: 30              # min (field x year) papers before pooling
 # year_from: 2015                  # optional corpus filters
 # year_to: 2023
-# max_papers: 2000                 # cap corpus size for quick tests
+max_papers: 200000                 # full collected corpus (up to the fetch target below)
 
 # ---------------------------------------------------------------------------
 # 6b. DATA EXTENSION  (python -m workflow.src.main_extend_db — plan §4)
@@ -143,16 +171,44 @@ target_min_refset: 30              # min (field x year) papers before pooling
 # fetch_target_rows real papers from OpenAlex + UEFISCDI journal seeds; the
 # professor's store/ DBs are read-only. Point the pipeline at the result with
 # EPAI_DB=extended in workflow/.env.workflow.
-fetch_target_rows: 100000
+# THIS RUN: build a brand-new OpenAlex-only corpus of 200k papers spanning every field,
+# over at most 3 daily-credit cycles, then LLM-fill up to 5000 unknown domains and train.
+fetch_target_rows: 200000      # collect this many papers total from OpenAlex
+fetch_new_rows: 0              # 0 = fill toward fetch_target_rows (from scratch, have=0 -> 200k)
+# fetch_from_scratch: start a FRESH OpenAlex-only corpus instead of growing the existing DB.
+# true  = back up any current extended.db (non-destructive .pre_scratch_* copy) and build empty
+#         (skips the legacy 'copy' step, so no professor/base rows seed it)
+# false = grow the currently available extended.db as the starting point
+fetch_from_scratch: true       # true | false
+# fetch_domains: list of OpenAlex filter strings, or `all` to crawl every one of OpenAlex's
+# 26 scientific fields (wide-domain coverage). Field ids: https://api.openalex.org/fields
+fetch_domains: all             # all | [] (whole index, unbucketed) | [<filter>, <filter>, ...]
+# fetch_wait_days: OpenAlex meters requests as DAILY credits (100k/day on the free key, resets
+# ~midnight UTC). On the daily limit before fetch_target_rows is reached, wait
+# FETCH_RATE_LIMIT_WAIT_HOURS (.env.workflow, 25h) for the reset and continue — at most this
+# many times (3 = up to a 3-day campaign), then stop with what was gathered. Waiting is skipped
+# automatically when the query is exhausted / stalls on duplicates (a reset yields nothing new).
+# While waiting, the idle day is used to LLM-fill domains/abstracts (see caps below).
+fetch_wait_days: 3             # max daily-reset waits (0 = never wait)
 # fetch_year_from: 2010
 # fetch_year_to: 2024
-fetch_per_journal_cap: 300     # max papers per UEFISCDI red/yellow journal
-# OpenAlex domain balance: one filter string per bucket (empty list = no bucketing).
-# Field ids: https://api.openalex.org/fields  (e.g. computer science=17, medicine=27)
-fetch_domains: []
-# fetch_domains:
-#   - primary_topic.field.id:fields/17
-#   - primary_topic.field.id:fields/27
+fetch_per_journal_cap: 300     # max papers per UEFISCDI red/yellow journal (unused this run)
+
+# --- LLM auto-fill caps (main_extend_db `llm_fill` step; see iwf/fetchers/llm_fill.py) ---
+# These live here (not .env.workflow) because they change WHAT a run produces and how many
+# (paid) LLM tokens it spends. Gated by ENABLE_LLM_FILL / ENABLE_LLM_ABSTRACT_FILL /
+# ENABLE_LLM_WEBSEARCH in .env.workflow. The cap is a RUN TOTAL shared across the daily-limit
+# wait passes and the final fill pass. THIS RUN: domains only (abstract fill off).
+llm_fill_domain_max: 5000      # max UNKNOWN-domain rows to classify from ALLOWED_DOMAINS
+                               # (harmless: never marks source='llm', always trained)
+llm_fill_abstract_max: 0       # 0 = abstract reconstruction OFF this run (domains only)
+# Whether LLM-reconstructed abstracts (source='llm') may enter TRAINING (off; moot here since
+# abstract fill is disabled). Enforced in derive_training AND the phase-0 loader.
+use_llm_abstracts_for_training: false   # true | false
+# require_known_domain_for_training: unknown-domain papers are NEVER used for training. After
+# the LLM fills up to llm_fill_domain_max, any row still lacking a domain is dropped from the
+# training set (in derive_training AND the phase-0 loader).
+require_known_domain_for_training: true # true | false
 
 # ============================================================================
 # 7. RUNS — the training queue for `python -m workflow.run_all_workflows`
@@ -185,165 +241,64 @@ fetch_domains: []
 
 runs:
   # ==========================================================================
-  # FINAL 8-HOUR QUEUE (sized for one 16 GB-VRAM GPU, ~4-6 h expected + margin).
-  # Data collection runs SEPARATELY BEFORE this queue:
-  #   1. python -m workflow.src.main_extend_db bootstrap --target-rows 100000
-  #   2. python -m workflow.src.main_extend_db extend
-  #      (builds extended.db -> training.db -> holdout benchmark; set
-  #       EPAI_DB=training in .env.workflow afterwards)
-  #   3. optional: python -m workflow.src.setup_external_models   (NAIP weights)
-  #   4. optional: download naip12k benchmark for the flagship entry
-  # Every run gets baselines (specter2_knn, venue_ais) + the holdout benchmark
-  # automatically from the top-level keys above.
+  # FULL QUEUE — 12 models on the fresh 200k wide-domain corpus (each entry runs
+  # both clf + reg). All inherit the recommended head (§2: resmlp [384,256,128],
+  # max_epochs 300). SPECTER2 embeddings only. Shared fetch/prepare/embed phases
+  # are computed once and reused across runs with matching data/embedding params.
+  #   1 specter2 + cites adapter (768-d, identity encoder)
+  #   2 specter2 + encoder       (base weights + autoencoder, optimised latent)
+  #   3 specter2 + cites adapter + encoder (adapter + autoencoder, optimised latent)
+  #   4 trf, short LoRA adapter  (r=8,  8 layers frozen, >=15 epochs)
+  #   5 trf, deep  LoRA adapter  (r=32, 0 layers frozen, >=15 epochs)
+  #   6 LLM-as-judge (<=2 dataset passes)
   # ==========================================================================
 
-  # -- 1-6: specter2 grid — encoder {autoencoder, identity} x depth {deep, mid, shallow}
-  - name: specter2_ae_mlp_deep
-    workflow: [emb_clf, emb_reg]
-    embedder: specter2
-    encoder_kind: autoencoder
-    model_arch: mlp
-    hidden: [1024,768,512,384,256,192,128,64,32]
-    patience: 40
-
-  - name: specter2_ae_mlp
-    workflow: [emb_clf, emb_reg]
-    embedder: specter2
-    encoder_kind: autoencoder
-    model_arch: mlp
-    hidden: [1024,512,256,128,64,32]
-    patience: 40
-
-  - name: specter2_ae_mlp_shallow
-    workflow: [emb_clf, emb_reg]
-    embedder: specter2
-    encoder_kind: autoencoder
-    model_arch: mlp
-    hidden: [1024,256,32]
-    patience: 40
-
-  - name: specter2_id_mlp_deep
+  # (1) SPECTER2 with citation/proximity adapter, full 768-d (identity encoder).
+  - name: specter2_adapter
     workflow: [emb_clf, emb_reg]
     embedder: specter2
     encoder_kind: identity
-    model_arch: mlp
-    hidden: [1024,768,512,384,256,192,128,64,32]
-    patience: 40
 
-  - name: specter2_id_mlp
+  # (2) SPECTER2 with encoder: base weights compressed by a trained autoencoder. The
+  #     autoencoder sweeps dim_grid and keeps the smallest latent that holds quality
+  #     (dim_recon_target 0.95) — "best dimension reducing while quality is constant".
+  - name: specter2_encoder
     workflow: [emb_clf, emb_reg]
-    embedder: specter2
-    encoder_kind: identity
-    model_arch: mlp
-    hidden: [1024,512,256,128,64,32]
-    patience: 40
+    embedder: specter2_base
+    encoder_kind: autoencoder
 
-  - name: specter2_id_mlp_shallow
-    workflow: [emb_clf, emb_reg]
-    embedder: specter2
-    encoder_kind: identity
-    model_arch: mlp
-    hidden: [1024,256,32]
-    patience: 40
-
-  # -- 7-8: residual MLP (true shrinking pyramid since the resmlp fix)
-  - name: specter2_ae_resmlp
+  # (3) SPECTER2 with cites adapter + encoder: adapter embedding, then the same
+  #     quality-preserving autoencoder dimension search.
+  - name: specter2_adapter_encoder
     workflow: [emb_clf, emb_reg]
     embedder: specter2
     encoder_kind: autoencoder
-    model_arch: resmlp
-    hidden: [1024,512,256,128,64,32]
-    patience: 40
 
-  - name: specter2_id_resmlp
-    workflow: [emb_clf, emb_reg]
-    embedder: specter2
-    encoder_kind: identity
-    model_arch: resmlp
-    hidden: [1024,512,256,128,64,32]
-    patience: 40
-
-  # -- 9-10: scibert embedding comparison
-  - name: scibert_id_mlp
-    workflow: [emb_clf, emb_reg]
-    embedder: scibert
-    encoder_kind: identity
-    model_arch: mlp
-    hidden: [1024,512,256,128,64,32]
-    patience: 40
-
-  - name: scibert_ae_mlp
-    workflow: [emb_clf, emb_reg]
-    embedder: scibert
-    encoder_kind: autoencoder
-    model_arch: mlp
-    hidden: [1024,512,256,128,64,32]
-    patience: 40
-
-  # -- 11: fine-tune the SPECTER2 backbone on the text (the GPU-heavy entry).
-  #    max_len 512 = the model's positional-embedding limit (1024 would crash).
-  - name: tfm_specter2ft
+  # (4) Text transformer, SHORT LoRA adapter — low rank, most layers frozen.
+  - name: trf_short_adapter
     workflow: [tfm_clf, tfm_reg]
-    text_transformer_arch: specter2_ft
-    text_transformer_freeze_layers: 10
-    text_transformer_max_len: 512
-    text_transformer_epochs: 25
-    text_transformer_batch_size: 24
+    text_transformer_arch: specter2_lora
+    text_transformer_lora_r: 8
+    text_transformer_lora_alpha: 16
+    text_transformer_freeze_layers: 8
+    text_transformer_epochs: 15
+    text_transformer_n_runs: 1
 
-  # -- 12-13: metadata-fused and leakage-upper-bound variants
-  - name: specter2_id_mlp_meta
-    workflow: [emb_meta_clf, emb_meta_reg]
-    embedder: specter2
-    encoder_kind: identity
-    model_arch: mlp
-    hidden: [1024,512,256,128,64,32]
-    patience: 40
+  # (5) Text transformer, DEEP LoRA adapter — higher rank, all layers adapt.
+  - name: trf_deep_adapter
+    workflow: [tfm_clf, tfm_reg]
+    text_transformer_arch: specter2_lora
+    text_transformer_lora_r: 32
+    text_transformer_lora_alpha: 64
+    text_transformer_freeze_layers: 0
+    text_transformer_epochs: 15
+    text_transformer_n_runs: 1
 
-  - name: specter2_id_mlp_all_meta
-    workflow: [emb_all_meta_clf, emb_all_meta_reg]
+  # (6) LLM-as-judge: RAG store + evolving notes.md instead of a trained head (see
+  #     main_train_judge.py). Uses the gpt-oss:20b model on the Obuda gateway
+  #     (LLM_JUDGE_* + LOCAL_LLM_URL in .env.workflow). n_runs 1; the judge makes at most
+  #     ~2 passes over TRAIN while building precedents.
+  - name: llm_judge
+    workflow: [llm_reg, llm_clf]
     embedder: specter2
-    encoder_kind: identity
-    model_arch: mlp
-    hidden: [512,128,32]
-    patience: 40
-
-  # -- 14: flagship benchmark entry — full external-model comparison. naip12k and
-  #    naip_local activate only when downloaded/installed; otherwise they skip.
-  - name: specter2_benchmark_flagship
-    workflow: [emb_clf, emb_reg]
-    embedder: specter2
-    encoder_kind: identity
-    model_arch: mlp
-    hidden: [1024,512,256,128,64,32]
-    patience: 40
-    benchmarks: [holdout_extended, naip12k]
-    external_impact: [naip_local, specter2_knn, venue_ais]
-
-  # -- 15-17: leave-one-domain-out cross-domain validation (matrix in summary/).
-  #    domain_holdout must match a _get_domain() value of the current corpus.
-  - name: lodo_computer_science
-    workflow: emb_reg
-    embedder: specter2
-    encoder_kind: identity
-    model_arch: mlp
-    hidden: [1024,512,256,128,64,32]
-    patience: 40
-    domain_holdout: Computer Science
-
-  - name: lodo_medicine
-    workflow: emb_reg
-    embedder: specter2
-    encoder_kind: identity
-    model_arch: mlp
-    hidden: [1024,512,256,128,64,32]
-    patience: 40
-    domain_holdout: Medicine
-
-  - name: lodo_physics
-    workflow: emb_reg
-    embedder: specter2
-    encoder_kind: identity
-    model_arch: mlp
-    hidden: [1024,512,256,128,64,32]
-    patience: 40
-    domain_holdout: Physics
+    n_runs: 1

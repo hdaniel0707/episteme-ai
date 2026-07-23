@@ -204,6 +204,11 @@ def main() -> int:
         cross_domain_matrix(paths.RESULTS_DIR)
     except Exception as e:
         print(f"[run_all] cross-domain matrix skipped ({e})", file=sys.stderr)
+    try:
+        from workflow.src.iwf.evaluation.embedder_summary import generate_embedder_summary
+        generate_embedder_summary(paths.RESULTS_DIR)
+    except Exception as e:
+        print(f"[run_all] embedder-performance summary skipped ({e})", file=sys.stderr)
 
     print(f"\n[run_all] summary ({n_total} runs):")
     print(f"  {'FOLDER':<25s} {'CONFIG':<25s} {'STATUS':<10s} {'METRIC'}")

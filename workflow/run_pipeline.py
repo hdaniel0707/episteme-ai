@@ -32,11 +32,12 @@ for _stream in (sys.stdout, sys.stderr):
 
 from workflow.src import (
     main_embed, main_encoder, main_fetch, main_label, main_prepare, main_reduce,
-    main_train, main_train_tfm,
+    main_train, main_train_judge, main_train_tfm,
 )
 from workflow.src.iwf import paths, workflow_results
 from workflow.src.iwf.config import (
-    WORKFLOWS, WORKFLOW_TYPES, Settings, get_bool, is_text_workflow, load_settings,
+    WORKFLOWS, WORKFLOW_TYPES, Settings, get_bool, is_judge_workflow, is_text_workflow,
+    load_settings,
 )
 
 PHASE_NAMES = {
@@ -73,6 +74,8 @@ def _run_phase(num: int, wf: str, s: Settings, force: bool, prog_cb,
     elif num == 6:
         if is_text_workflow(wf):
             main_train_tfm.main(s, workflow_type=wf, progress=prog_cb, wf_dir=wf_dir)
+        elif is_judge_workflow(wf):
+            main_train_judge.main(s, workflow_type=wf, progress=prog_cb, wf_dir=wf_dir)
         else:
             main_train.main(s, workflow_type=wf, wf_dir=wf_dir)
     elif num == 7:

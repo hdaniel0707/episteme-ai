@@ -18,7 +18,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
-from tqdm import tqdm
+
+# Route the AE(k=…) bar through the workflow progress footer when a live multi-workflow
+# display is running (so it stays a single separate bottom line instead of colliding with
+# the per-workflow block); falls back to the real tqdm for standalone runs.
+from workflow.src.iwf.progress import tqdm
 
 from workflow.src.iwf.activations import make_activation
 from workflow.src.iwf.encoder.base import Encoder

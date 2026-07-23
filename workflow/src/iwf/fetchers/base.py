@@ -14,6 +14,7 @@ import json
 import re
 import sqlite3
 from abc import ABC, abstractmethod
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Iterator
 
@@ -112,10 +113,61 @@ def _title_hash(title: str | None, year) -> str | None:
     return hashlib.sha1(f"{t}|{year}".encode("utf-8")).hexdigest()
 
 
-class Deduper:
-    """In-memory dedup over paper_id, DOI and (normalized title, year)."""
+def _title_key(title: str | None) -> str:
+    """Compact normalized title for fuzzy dedup: lowercase, drop spaces/underscores/
+    hyphens, then keep only alphanumerics. '(Deep-Learning)_v2' -> 'deeplearningv2'."""
+    t = str(title or "").lower()
+    t = re.sub(r"[\s_\-]+", "", t)
+    return re.sub(r"[^a-z0-9]+", "", t)
 
-    def __init__(self, conn: sqlite3.Connection):
+
+def _block_key(norm: str) -> tuple:
+    """Blocking key so fuzzy comparison stays ~O(n): only titles sharing a length
+    bucket AND the same 12-char prefix are ever compared (avoids an O(n^2) sweep)."""
+    return (len(norm) // 8, norm[:12])
+
+
+def _year_int(v):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _author_key(name) -> str:
+    """Last-name key for author confirmation (lowercased alphanumerics of the last token)."""
+    toks = re.sub(r"[^\w\s]", " ", str(name or "")).lower().split()
+    return re.sub(r"[^a-z0-9]+", "", toks[-1]) if toks else ""
+
+
+def _incoming_author_key(row: dict) -> str:
+    """First-author key from a normalized row dict (authors list of {name} or an
+    'author'/'authors' string), or '' when no author information is available."""
+    authors = row.get("authors")
+    if isinstance(authors, (list, tuple)) and authors:
+        first = authors[0]
+        name = first.get("name") if isinstance(first, dict) else first
+        return _author_key(name)
+    if isinstance(authors, str) and authors.strip():
+        return _author_key(authors.split(",")[0])
+    if row.get("author"):
+        return _author_key(str(row["author"]).split(",")[0])
+    return ""
+
+
+class Deduper:
+    """In-memory dedup over paper_id, DOI and (normalized title, year).
+
+    ``fuzzy=True`` additionally enables near-duplicate detection across sources
+    (``find_duplicate``): titles are normalized (spaces/_/- stripped) and compared with
+    a character-similarity ratio; a match is confirmed by publication year and, when
+    available, first-author last name. The threshold defaults to
+    ``TITLE_SIMILARITY_THRESHOLD`` in .env.workflow (0.85). Comparison is blocked by
+    title length+prefix so it stays roughly linear even on ~100k-row merges.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, fuzzy: bool = False,
+                 threshold: float | None = None):
         self.ids = {r[0] for r in conn.execute("SELECT paper_id FROM papers")}
         self.dois = {r[0] for r in
                      conn.execute("SELECT doi FROM papers WHERE doi IS NOT NULL")}
@@ -123,6 +175,29 @@ class Deduper:
             _title_hash(r[0], r[1])
             for r in conn.execute("SELECT title, year FROM papers WHERE title IS NOT NULL")
         } - {None}
+        self.fuzzy = fuzzy
+        self.blocks: dict[tuple, list] = {}
+        self.first_author: dict[str, str] = {}
+        if fuzzy:
+            if threshold is None:
+                from workflow.src.iwf import config
+                threshold = config.get_float("TITLE_SIMILARITY_THRESHOLD", 0.85)
+            self.threshold = float(threshold)
+            for pid, title, year in conn.execute(
+                    "SELECT paper_id, title, year FROM papers WHERE title IS NOT NULL"):
+                norm = _title_key(title)
+                if norm:
+                    self.blocks.setdefault(_block_key(norm), []).append(
+                        (norm, pid, _year_int(year)))
+            try:
+                for pid, name in conn.execute(
+                        "SELECT pa.paper_id, a.name FROM paper_authors pa "
+                        "JOIN authors a ON a.author_id = pa.author_id"):
+                    self.first_author.setdefault(pid, _author_key(name))
+            except sqlite3.OperationalError:
+                pass
+        else:
+            self.threshold = 1.0
 
     def seen(self, row: dict) -> bool:
         pid = str(row.get("paper_id"))
@@ -137,14 +212,54 @@ class Deduper:
                 or (doi is not None and doi in self.dois)
                 or (th is not None and th in self.title_hashes))
 
+    def seen_exact(self, row: dict) -> bool:
+        """Same-record check by identity only (paper_id or DOI) — used by the merge paths
+        so that title-based near-duplicates fall through to ``find_duplicate`` instead."""
+        pid = str(row.get("paper_id"))
+        doi = normalize_doi(row.get("doi"))
+        return pid in self.ids or (doi is not None and doi in self.dois)
+
+    def find_duplicate(self, row: dict) -> str | None:
+        """Return the paper_id of an existing near-duplicate (fuzzy title + year/author
+        confirmation), or None. No-op unless the Deduper was built with fuzzy=True."""
+        if not self.fuzzy:
+            return None
+        norm = _title_key(row.get("title"))
+        if not norm or len(norm) < 6:
+            return None
+        yr = _year_int(row.get("year"))
+        incoming_author = _incoming_author_key(row)
+        len_gate = max(6, int(len(norm) * (1.0 - self.threshold)) + 1)
+        for cnorm, cpid, cyear in self.blocks.get(_block_key(norm), ()):  # blocked candidates
+            if abs(len(cnorm) - len(norm)) > len_gate:
+                continue
+            if SequenceMatcher(None, norm, cnorm).ratio() < self.threshold:
+                continue
+            if yr is not None and cyear is not None and yr != cyear:
+                continue                                   # same title, different year -> keep both
+            cauthor = self.first_author.get(cpid, "")
+            if incoming_author and cauthor and incoming_author != cauthor:
+                continue                                   # authors disagree -> not a duplicate
+            return cpid
+        return None
+
     def add(self, row: dict) -> None:
-        self.ids.add(str(row.get("paper_id")))
+        pid = str(row.get("paper_id"))
+        self.ids.add(pid)
         doi = normalize_doi(row.get("doi"))
         if doi:
             self.dois.add(doi)
         th = _title_hash(row.get("title"), row.get("year"))
         if th:
             self.title_hashes.add(th)
+        if self.fuzzy:
+            norm = _title_key(row.get("title"))
+            if norm:
+                self.blocks.setdefault(_block_key(norm), []).append(
+                    (norm, pid, _year_int(row.get("year"))))
+            ak = _incoming_author_key(row)
+            if ak:
+                self.first_author.setdefault(pid, ak)
 
 
 def _normalize_domains(v) -> list:
@@ -225,6 +340,47 @@ def _int_or_none(v):
     return int(bool(v))
 
 
+# Columns that a duplicate row may contribute to an existing paper (COALESCE-fill only —
+# an existing non-null value is never overwritten; the incoming row only fills gaps).
+_MERGEABLE_COLS = (
+    "abstract", "citation_count", "influential_citation_count", "year", "venue",
+    "doi", "fwci", "citation_normalized_percentile", "is_in_top_1_percent",
+    "is_in_top_10_percent", "subfield", "venue_issn", "venue_ais", "venue_zone",
+    "oa_id", "embedding",
+)
+
+
+def merge_paper_metadata(conn: sqlite3.Connection, existing_pid: str, row: dict) -> None:
+    """Gap-fill an existing paper's NULL columns from a duplicate row (no overwrite).
+
+    Used by the DB-merge paths when ``Deduper.find_duplicate`` matches a near-duplicate:
+    instead of dropping the incoming row (old INSERT OR IGNORE behaviour) or inserting a
+    second copy, its metadata is folded into the row already stored. ``domains`` is filled
+    only when the existing value is empty. No commit here.
+    """
+    sets: list[str] = []
+    vals: list = []
+    for col in _MERGEABLE_COLS:
+        val = row.get(col)
+        if col == "doi":
+            val = normalize_doi(val)
+        elif col in ("is_in_top_1_percent", "is_in_top_10_percent"):
+            val = _int_or_none(val)
+        if val is None or val == "":
+            continue
+        sets.append(f"{col} = COALESCE({col}, ?)")
+        vals.append(val)
+    doms = _normalize_domains(row.get("domains"))
+    if doms:
+        sets.append("domains = CASE WHEN domains IS NULL OR TRIM(COALESCE(domains,'')) "
+                    "IN ('', '[]') THEN ? ELSE domains END")
+        vals.append(json.dumps(doms))
+    if not sets:
+        return
+    vals.append(str(existing_pid))
+    conn.execute(f"UPDATE papers SET {', '.join(sets)} WHERE paper_id = ?", vals)
+
+
 def get_cursor(conn: sqlite3.Connection, source: str) -> str | None:
     r = conn.execute("SELECT cursor FROM fetch_state WHERE source = ?", (source,)).fetchone()
     return r[0] if r else None
@@ -251,35 +407,50 @@ class BaseFetcher(ABC):
     def rows(self, conn: sqlite3.Connection) -> Iterator[dict]:
         ...
 
+    # Why the last run() stopped: limit | quota | stalled | exhausted. The daily-reset
+    # orchestrator reads it to decide whether waiting could yield more papers.
+    stop_reason: str = "exhausted"
+
     def run(self, conn: sqlite3.Connection, limit: int | None = None,
-            keep_incomplete: bool = False) -> int:
+            keep_incomplete: bool = False, stall_limit: int | None = None) -> int:
+        """Insert normalized rows with dedup, resume, and an anti-waste stall guard."""
         from tqdm import tqdm
 
         dedup = Deduper(conn)
         inserted = 0
+        since_last_insert = 0
+        self.stop_reason = "exhausted"
         bar = tqdm(desc=f"[{self.name}]", unit="paper", total=limit)
         try:
             for row in self.rows(conn):
                 if limit is not None and inserted >= limit:
+                    self.stop_reason = "limit"
                     break
-                if not keep_incomplete and (not row.get("abstract") or not str(row.get("abstract")).strip()):
-                    continue  # real, usable records only
-                if not row.get("paper_id") or dedup.seen(row):
+                usable = keep_incomplete or (row.get("abstract") and
+                                             str(row.get("abstract")).strip())
+                if usable and row.get("paper_id") and not dedup.seen(row):
+                    insert_paper(conn, row)
+                    dedup.add(row)
+                    inserted += 1
+                    since_last_insert = 0
+                    bar.update(1)
+                    if inserted % 500 == 0:
+                        conn.commit()
                     continue
-                insert_paper(conn, row)
-                dedup.add(row)
-                inserted += 1
-                bar.update(1)
-                if inserted % 500 == 0:
-                    conn.commit()
-        except QuotaExhausted as e:
+                since_last_insert += 1
+                if stall_limit and since_last_insert >= stall_limit:
+                    self.stop_reason = "stalled"
+                    print(f"[{self.name}] {since_last_insert} consecutive already-known/"
+                          f"unusable rows — query mined out, stopping this session")
+                    break
+        except QuotaExhausted:
             set_cursor(conn, self.name, None, inserted)
             conn.commit()
-            print(f"[{self.name}] quota exhausted — checkpointed, resume later")
+            self.stop_reason = "quota"
             bar.close()
-            print(f"[{self.name}] inserted {inserted} papers (quota hit)")
+            print(f"[{self.name}] rate/daily limit hit — checkpointed at {inserted} papers")
             return inserted
         conn.commit()
         bar.close()
-        print(f"[{self.name}] inserted {inserted} new papers")
+        print(f"[{self.name}] inserted {inserted} new papers ({self.stop_reason})")
         return inserted

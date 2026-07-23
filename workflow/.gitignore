@@ -9,6 +9,11 @@ __pycache__/
 /models/
 /results/
 
+# Generated result backups + timestamped DB backups (never commit — large, regenerable)
+/results_backup_*/
+*.pre_scratch_*
+*.pre_scratch_*/
+
 # Downloaded external impact-prediction systems (setup_external_models.py)
 /external/
 

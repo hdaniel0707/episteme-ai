@@ -15,7 +15,12 @@ Extend phase — build the two DBs from raw.db + legacy DBs:
       s2        influential-citation + SPECTER gap-fill by DOI
       fill      metadata gap-fill of incomplete rows (OpenAlex+S2 title search) —
                 runs BEFORE training.db derivation to maximise usable rows
-    then always: report + derive training.db (strict: title+abstract+year+citations).
+      llm_fill  LLM auto-fill: domain classification (ENABLE_LLM_FILL, on by default) +
+                optional abstract/year reconstruction (ENABLE_LLM_ABSTRACT_FILL, off by
+                default, marks source='llm') — no-op unless LLM_JUDGE_PROVIDER/MODEL/
+                API_KEY + LOCAL_LLM_URL are configured; see .env.workflow
+    then always: report + derive training.db (strict: title+abstract+year+citations;
+                filters by TRAIN_YEAR_FROM/TO and MAX_TRAINING_ROWS, see .env.workflow).
 
 Legacy (backward compat):
     python -m workflow.src.main_extend_db  # behaves as extend
@@ -36,13 +41,37 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from workflow.src.iwf import paths
+from workflow.src.iwf import config
 from workflow.src.iwf.config import load_config_yaml
 from workflow.src.iwf.fetchers import base as fbase
-from workflow.src.iwf.fetchers.openalex import OpenAlexFetcher, fill_author_h_index
+from workflow.src.iwf.fetchers.openalex import (
+    OpenAlexFetcher, collect_new_papers, fill_author_h_index)
 from workflow.src.iwf.fetchers.s2 import fill_from_s2
 from workflow.src.iwf.fetchers.uefiscdi import UefiscdiSeedFetcher, print_download_hints
 from workflow.src.iwf.fetchers.crossref import CrossrefFetcher
 from workflow.src.iwf.fetchers.arxiv import ArxivFetcher
+
+
+# Per-source on/off switches read from .env.workflow, so a direct `main_extend_db` run
+# honours the same ENABLE_* toggles the deploy scripts pass as --sources. 'copy' has no
+# toggle (always allowed). Default True = source enabled unless explicitly turned off.
+_SOURCE_TOGGLES = {
+    "openalex": "ENABLE_OPENALEX", "s2": "ENABLE_S2", "pdf": "ENABLE_PDF",
+    "crossref": "ENABLE_CROSSREF", "arxiv": "ENABLE_ARXIV",
+    "uefiscdi": "ENABLE_UEFISCDI", "fill": "ENABLE_FILL",
+}
+
+
+def _filter_sources(sources: set[str]) -> set[str]:
+    """Drop any requested source whose ENABLE_* flag is false in .env.workflow."""
+    kept = set()
+    for s in sources:
+        env = _SOURCE_TOGGLES.get(s)
+        if env is None or config.get_bool(env, True):
+            kept.add(s)
+        else:
+            print(f"[extend_db] source '{s}' disabled via {env}=false; skipping")
+    return kept
 
 
 @contextmanager
@@ -117,6 +146,8 @@ def derive_training(ext_path: Path, out_path: Path) -> tuple[int, int]:
     Reads extended.db via ATTACH; only the column intersection is copied, so an
     extended.db built by an older schema version still derives cleanly.
     """
+    import random
+
     out_path = Path(out_path)
     out_path.unlink(missing_ok=True)          # always a fresh derivation
     out_conn = fbase.open_db(out_path)
@@ -127,14 +158,48 @@ def derive_training(ext_path: Path, out_path: Path) -> tuple[int, int]:
     ext_cols = [r[1] for r in out_conn.execute("PRAGMA ext.table_info(papers)")]
     tr_cols = [r[1] for r in out_conn.execute("PRAGMA table_info(papers)")]
     cols = ", ".join(c for c in tr_cols if c in ext_cols)
+
+    # Training-corpus filters, all adjustable from .env.workflow:
+    #   TRAIN_YEAR_FROM / TRAIN_YEAR_TO       keep only 1700..2024 (inclusive) by default
+    #   USE_LLM_ABSTRACTS_FOR_TRAINING        include rows whose abstract was LLM-filled
+    #                                         (source='llm'); default off (see Stage E)
+    #   MAX_TRAINING_ROWS / SELECTION_SEED    cap to a seeded random subset (reproducible;
+    #                                         seed defaults to the config.yaml split_seed 45)
+    year_from = config.get_int("TRAIN_YEAR_FROM", 1700)
+    year_to = config.get_int("TRAIN_YEAR_TO", 2024)
+    # config.yaml `use_llm_abstracts_for_training` (falls back to the .env.workflow flag)
+    use_llm_abs = config.use_llm_abstracts_for_training()
+    max_rows = config.get_int("MAX_TRAINING_ROWS", 150)
+    seed = config.get_int("SELECTION_SEED", 45)
+
+    where = ["title IS NOT NULL AND TRIM(title) != ''",
+             "abstract IS NOT NULL AND TRIM(abstract) != ''",
+             "year IS NOT NULL", "citation_count IS NOT NULL",
+             "year >= ?", "year <= ?"]
+    params = [year_from, year_to]
+    if not use_llm_abs:
+        where.append("(source IS NULL OR source != 'llm')")
+    # unknown-domain papers must never be used for training (config.yaml
+    # require_known_domain_for_training) — keep only rows with a non-empty domain
+    if config.require_known_domain_for_training():
+        where.append("domains IS NOT NULL AND TRIM(domains) NOT IN ('', '[]')")
+    candidates = [r[0] for r in out_conn.execute(
+        f"SELECT paper_id FROM ext.papers WHERE {' AND '.join(where)}", params)]
+    n_complete = len(candidates)
+    if max_rows and n_complete > max_rows:
+        candidates = random.Random(seed).sample(candidates, max_rows)
+        print(f"[derive] capping training set to {max_rows} of {n_complete} complete rows "
+              f"(random, seed={seed})")
+
+    out_conn.execute("CREATE TEMP TABLE _keep (paper_id TEXT PRIMARY KEY)")
+    out_conn.executemany("INSERT OR IGNORE INTO _keep VALUES (?)",
+                         [(c,) for c in candidates])
     inserted = out_conn.execute(f"""
         INSERT OR IGNORE INTO papers ({cols})
         SELECT {cols} FROM ext.papers
-        WHERE title IS NOT NULL AND TRIM(title) != ''
-          AND abstract IS NOT NULL AND TRIM(abstract) != ''
-          AND year IS NOT NULL
-          AND citation_count IS NOT NULL
+        WHERE paper_id IN (SELECT paper_id FROM _keep)
     """).rowcount
+    out_conn.execute("DROP TABLE _keep")
 
     try:
         a_ext = [r[1] for r in out_conn.execute("PRAGMA ext.table_info(authors)")]
@@ -155,7 +220,8 @@ def derive_training(ext_path: Path, out_path: Path) -> tuple[int, int]:
     out_conn.execute("DETACH DATABASE ext")
     out_conn.close()
 
-    print(f"[derive] extended.db: {n_ext} papers -> training.db: {inserted} papers (strict filter)")
+    print(f"[derive] extended.db: {n_ext} papers -> training.db: {inserted} papers "
+          f"(strict filter, years {year_from}-{year_to})")
     return n_ext, inserted
 
 
@@ -176,8 +242,8 @@ def copy_legacy_dbs(conn: sqlite3.Connection) -> int:
         return 0
     for src_db in legacy:
         src = sqlite3.connect(f"file:{src_db.as_posix()}?mode=ro", uri=True)
-        dedup = fbase.Deduper(conn)
-        copied = skipped = 0
+        dedup = fbase.Deduper(conn, fuzzy=True)   # cross-source fuzzy title dedup + merge
+        copied = skipped = merged = 0
         try:
             try:
                 cur = src.execute("SELECT * FROM papers")
@@ -196,8 +262,14 @@ def copy_legacy_dbs(conn: sqlite3.Connection) -> int:
                     pid = str(row.get("paper_id") or "").strip()
                     if not pid:
                         pid = stable_text_id(title, abstract, salt=str(row.get("year") or ""))
-                    if dedup.seen({"paper_id": pid, "title": title,
-                                   "year": row.get("year"), "doi": row.get("doi")}):
+                    ident = {"paper_id": pid, "title": title or None,
+                             "year": row.get("year"), "doi": row.get("doi")}
+                    if dedup.seen_exact(ident):
+                        continue              # same record already stored (paper_id/DOI)
+                    dup_pid = dedup.find_duplicate(ident)
+                    if dup_pid:               # near-duplicate title -> merge metadata, don't re-insert
+                        fbase.merge_paper_metadata(conn, dup_pid, row)
+                        merged += 1
                         continue
                     conn.execute(
                         """
@@ -213,8 +285,7 @@ def copy_legacy_dbs(conn: sqlite3.Connection) -> int:
                          row.get("venue"), row.get("queries"), row.get("domains"),
                          row.get("generated_by", "human"), row.get("doi"),
                          f"s2_original_{src_db.stem}"))
-                    dedup.add({"paper_id": pid, "title": title,
-                               "year": row.get("year"), "doi": row.get("doi")})
+                    dedup.add(ident)
                     copied += 1
                 except Exception:
                     skipped += 1
@@ -245,7 +316,8 @@ def copy_legacy_dbs(conn: sqlite3.Connection) -> int:
                 pass
         finally:
             src.close()
-        print(f"[copy] {src_db.name}: {copied} copied, {skipped} skipped (no identity)")
+        print(f"[copy] {src_db.name}: {copied} copied, {merged} merged (near-dup), "
+              f"{skipped} skipped (no identity)")
         total += copied
     conn.commit()
     return total
@@ -267,6 +339,10 @@ def cmd_bootstrap(args) -> int:
     target_rows = args.target_rows or cfg.get("fetch_target_rows") or 50000
 
     sources = {s.strip().lower() for s in (args.sources or "openalex,crossref,arxiv,s2").split(",")}
+    sources = _filter_sources(sources)
+    if not sources:
+        print("[bootstrap] all requested sources disabled via ENABLE_* flags; nothing to do")
+        return 0
     per_source = max(1, target_rows // len(sources))
 
     paths.ensure_dirs()
@@ -313,17 +389,47 @@ def cmd_extend(args) -> int:
     year_from = cfg.get("fetch_year_from")
     year_to = cfg.get("fetch_year_to")
     target_rows = args.target_rows or cfg.get("fetch_target_rows") or 100000
-    domain_filters = list(cfg.get("fetch_domains") or [""])
+    # fetch_domains: filter strings, or "all" to crawl every OpenAlex field.
+    raw_domains = cfg.get("fetch_domains")
+    if raw_domains in ("all", ["all"]):
+        from workflow.src.iwf.domains import all_field_filters
+        domain_filters = all_field_filters()
+        print(f"[extend] fetch_domains=all -> crawling {len(domain_filters)} OpenAlex fields")
+    else:
+        domain_filters = list(raw_domains or [""])
     per_journal_cap = int(cfg.get("fetch_per_journal_cap") or 300)
 
     sources = {s.strip().lower()
-               for s in (args.sources or "copy,pdf,uefiscdi,openalex,s2,fill").split(",")}
-    paths.ensure_dirs()
+               for s in (args.sources or "copy,pdf,uefiscdi,openalex,s2,fill,llm_fill").split(",")}
+    sources = _filter_sources(sources)
 
-    # Open/create extended.db
+    # fetch_from_scratch: back up any existing DB and build OpenAlex-only from empty.
+    from_scratch = bool(cfg.get("fetch_from_scratch"))
+    paths.ensure_dirs()
     ext_path = fbase.extended_db_path()
+    if from_scratch:
+        sources.discard("copy")
+        if ext_path.exists():
+            import shutil
+            bak = ext_path.with_name(ext_path.name + f".pre_scratch_{int(time.time())}")
+            shutil.move(str(ext_path), str(bak))
+            print(f"[extend] fetch_from_scratch: backed up existing DB -> {bak.name}")
+
     conn = fbase.open_db(ext_path)
-    print(f"[extend] extended.db={ext_path}, target={target_rows}, sources={sorted(sources)}")
+    print(f"[extend] extended.db={ext_path}, target={target_rows}, "
+          f"from_scratch={from_scratch}, sources={sorted(sources)}")
+
+    # Run-total LLM-fill budget, shared by the wait-time fills and the final llm_fill phase.
+    fill_budget = {"domain": int(cfg.get("llm_fill_domain_max") or 60),
+                   "abstract": int(cfg.get("llm_fill_abstract_max") or 50)}
+
+    def _fill_during_wait() -> None:
+        """Spend an idle daily-limit wait on LLM domain/abstract fills."""
+        from workflow.src.iwf.fetchers.llm_fill import llm_fill_domains, llm_fill_abstracts
+        if config.get_bool("ENABLE_LLM_FILL", False) and fill_budget["domain"] > 0:
+            fill_budget["domain"] -= llm_fill_domains(conn, limit=fill_budget["domain"])
+        if config.get_bool("ENABLE_LLM_ABSTRACT_FILL", False) and fill_budget["abstract"] > 0:
+            fill_budget["abstract"] -= llm_fill_abstracts(conn, limit=fill_budget["abstract"])
 
     try:
         # Phase 1: Copy from raw.db + legacy DBs (without title/abstract filter)
@@ -334,7 +440,7 @@ def cmd_extend(args) -> int:
                 if fbase.raw_db_path().exists():
                     raw_conn = sqlite3.connect(fbase.raw_db_path())
                     raw_conn.row_factory = sqlite3.Row
-                    dedup = fbase.Deduper(conn)
+                    dedup = fbase.Deduper(conn, fuzzy=True)  # fuzzy title dedup + merge
 
                     # author_id -> {name,h_index,citation_count,paper_count} + paper_id -> [author_id,...]
                     authors_by_id: dict[str, dict] = {}
@@ -346,20 +452,27 @@ def cmd_extend(args) -> int:
                     for pa in raw_conn.execute("SELECT paper_id, author_id FROM paper_authors"):
                         paper_author_ids.setdefault(pa["paper_id"], []).append(pa["author_id"])
 
-                    n_copied = 0
+                    n_copied = n_merged = 0
                     for row in raw_conn.execute("SELECT * FROM papers"):
                         pid = row["paper_id"]
-                        if not dedup.seen({"paper_id": pid}):
-                            row_dict = dict(row)
-                            row_dict["authors"] = [
-                                authors_by_id[aid] for aid in paper_author_ids.get(pid, [])
-                                if aid in authors_by_id
-                            ]
-                            fbase.insert_paper(conn, row_dict)
-                            dedup.add({"paper_id": pid})
-                            n_copied += 1
+                        row_dict = dict(row)
+                        row_dict["authors"] = [
+                            authors_by_id[aid] for aid in paper_author_ids.get(pid, [])
+                            if aid in authors_by_id
+                        ]
+                        if dedup.seen_exact({"paper_id": pid, "doi": row_dict.get("doi")}):
+                            continue          # same record already stored (paper_id/DOI)
+                        dup_pid = dedup.find_duplicate(row_dict)
+                        if dup_pid:           # near-duplicate title -> merge metadata
+                            fbase.merge_paper_metadata(conn, dup_pid, row_dict)
+                            n_merged += 1
+                            continue
+                        fbase.insert_paper(conn, row_dict)
+                        dedup.add(row_dict)
+                        n_copied += 1
                     raw_conn.close()
-                    print(f"[extend] Copied {n_copied} papers (+ author records) from raw.db to extended.db")
+                    print(f"[extend] Copied {n_copied} papers ({n_merged} merged as near-dups) "
+                          f"(+ author records) from raw.db to extended.db")
 
                 # Copy from every legacy/professor DB (kept incomplete; dedup only)
                 copy_legacy_dbs(conn)
@@ -383,14 +496,28 @@ def cmd_extend(args) -> int:
                     print(f"[uefiscdi] skipped: {e}")
 
         if "openalex" in sources:
-            print("[extend] OpenAlex fill (timeout: 3600s)")
-            with phase_timeout("openalex", 3600):
+            # Daily-limit survival knobs (see fetchers.openalex.collect_new_papers).
+            wait_days = int(cfg.get("fetch_wait_days") or 0)
+            wait_hours = config.get_float("FETCH_RATE_LIMIT_WAIT_HOURS", 25.0)
+            stall_limit = config.get_int("FETCH_STALL_LIMIT", 2000)
+            oa_timeout = 3600 + wait_days * int(wait_hours * 3600) + 3600
+            print(f"[extend] OpenAlex fill (timeout advisory: {oa_timeout}s; "
+                  f"wait_days={wait_days}, wait_hours={wait_hours:g})")
+            with phase_timeout("openalex", oa_timeout):
                 have = conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
-                remaining = max(0, target_rows - have)
+                # fetch_new_rows: fixed count of new papers; else fill toward fetch_target_rows.
+                new_rows = int(cfg.get("fetch_new_rows") or 0)
+                remaining = new_rows if new_rows > 0 else max(0, target_rows - have)
+                print(f"[extend] OpenAlex: have={have}, fetching up to {remaining} new "
+                      f"({'fetch_new_rows' if new_rows > 0 else 'target_rows'} mode)")
                 if remaining:
                     cap = max(1, remaining // max(1, len(domain_filters)))
-                    OpenAlexFetcher(year_from, year_to, domain_filters,
-                                    per_filter_cap=cap).run(conn, limit=remaining)
+                    fetcher = OpenAlexFetcher(year_from, year_to, domain_filters,
+                                              per_filter_cap=cap)
+                    got = collect_new_papers(conn, fetcher, remaining, wait_days=wait_days,
+                                             wait_hours=wait_hours, stall_limit=stall_limit,
+                                             on_wait=_fill_during_wait)
+                    print(f"[extend] OpenAlex collected {got}/{remaining} new papers")
                     fill_author_h_index(conn)
 
         if "s2" in sources:
@@ -408,6 +535,28 @@ def cmd_extend(args) -> int:
                 n_filled = enrich_incomplete_papers(conn)
                 print(f"[fill] {n_filled} papers enriched")
 
+        # Phase 2c: LLM auto-fill — domain classification (cheap, on by default) + optional
+        # abstract/year reconstruction from the LLM's own knowledge (heavier, off by
+        # default). No-op (returns 0, prints nothing beyond a skip note) unless
+        # LLM_JUDGE_PROVIDER/MODEL/API_KEY + LOCAL_LLM_URL are configured in .env.workflow.
+        # Uses the SAME shared budget as the wait-time fills above, so the run-total stays
+        # within llm_fill_domain_max / llm_fill_abstract_max no matter how the fills split
+        # between the daily-limit waits and this final pass.
+        if "llm_fill" in sources:
+            from workflow.src.iwf.fetchers.llm_fill import llm_fill_abstracts, llm_fill_domains
+            if config.get_bool("ENABLE_LLM_FILL", False) and fill_budget["domain"] > 0:
+                print("[extend] LLM domain fill (timeout: 3600s)")
+                with phase_timeout("llm_fill_domains", 3600):
+                    n_dom = llm_fill_domains(conn, limit=fill_budget["domain"])
+                    fill_budget["domain"] -= n_dom
+                    print(f"[llm_fill] {n_dom} domains filled")
+            if config.get_bool("ENABLE_LLM_ABSTRACT_FILL", False) and fill_budget["abstract"] > 0:
+                print("[extend] LLM abstract/year fill (timeout: 3600s)")
+                with phase_timeout("llm_fill_abstracts", 3600):
+                    n_abs = llm_fill_abstracts(conn, limit=fill_budget["abstract"])
+                    fill_budget["abstract"] -= n_abs
+                    print(f"[llm_fill] {n_abs} abstracts/years filled")
+
         # Phase 3: Report
         print("[extend] Report (timeout: 300s)")
         with phase_timeout("report", 300):
@@ -421,12 +570,20 @@ def cmd_extend(args) -> int:
     with phase_timeout("training", 300):
         n_ext, n_train = derive_training(ext_path, fbase.extended_db_path().parent / "training.db")
 
-    # Phase 5: Build the local holdout benchmark from the fresh training DB, so the
-    # training session later needs no network for benchmark evaluation.
-    print("[extend] Build holdout benchmark (timeout: 600s)")
+    # Phase 5: Build the local benchmarks from the fresh training DB, so the training
+    # session later needs no network for benchmark evaluation. Two are built: the
+    # stratified holdout (holdout_extended) and the recent-years temporal holdout
+    # (holdout_recent), giving each trained model more than one benchmark to compare on.
+    print("[extend] Build local benchmarks (timeout: 600s)")
     with phase_timeout("benchmark", 600):
-        from workflow.src.iwf.evaluation.benchmarks import build_holdout_benchmark
-        build_holdout_benchmark(fbase.extended_db_path().parent / "training.db")
+        from workflow.src.iwf.evaluation.benchmarks import (
+            build_holdout_benchmark, build_temporal_holdout)
+        train_db = fbase.extended_db_path().parent / "training.db"
+        build_holdout_benchmark(train_db)
+        try:
+            build_temporal_holdout(train_db)
+        except Exception as e:
+            print(f"[extend] temporal-holdout benchmark skipped: {e}")
 
     print(f"\n[extend] complete: extended={n_ext}, training={n_train}")
     return 0

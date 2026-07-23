@@ -22,9 +22,24 @@ def load_parquet(path: str | Path) -> pd.DataFrame:
     return pd.read_parquet(path)
 
 
+def _sanitize_object_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Coerce all-numeric object columns (mixed bool/int) to float for pyarrow."""
+    for col in df.columns:
+        if df[col].dtype != object:
+            continue
+        nonnull = df[col].dropna()
+        if nonnull.empty:
+            continue
+        if all(isinstance(v, (bool, int, float)) and not isinstance(v, str)
+               for v in nonnull):
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
 def save_parquet(df: pd.DataFrame, path: str | Path) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    df = _sanitize_object_columns(df)
     df.to_parquet(path, index=False)
     print(f"[dataset] saved {len(df)} rows -> {path}")
     return path
