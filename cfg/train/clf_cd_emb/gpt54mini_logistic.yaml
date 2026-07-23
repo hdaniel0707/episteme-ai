@@ -48,6 +48,15 @@ embeddings:
 # stays fair. Usually empty.
 extra_features: []
 
+# LEAKAGE SANITY CHECK / positive control. Text columns listed here are
+# binarised human-vs-machine (human -> 0, any generator -> 1, same rule as the
+# target) and appended to EVERY embedding's design matrix as a 0/1 feature.
+# `generated_by` binarises to the label itself, so a working pipeline should
+# score ~100% in-domain AND under transfer; anything less points to a bug in the
+# split / scaling / transfer / eval path. Leave empty ([]) for real experiments
+# -- this deliberately leaks the answer. The Binoculars baseline ignores it.
+extra_binary_text: []
+
 # Zero-shot Binoculars baseline. No classifier is trained: a single decision
 # threshold on the Binoculars score is calibrated on each source's TRAINING
 # split (Youden's J; low score => machine) and applied unchanged to every

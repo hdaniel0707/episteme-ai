@@ -10,7 +10,9 @@ they transfer.
 Configs are the YAML files in ``CFG_DIR``, one experiment each, exactly as in
 ``run_clf_cross_domain.py``. The only difference in their shape is that
 ``features`` is replaced by ``embeddings`` (a list, one matrix per entry) plus
-an optional ``extra_features`` appended to all of them.
+an optional ``extra_features`` appended to all of them, and an optional
+``extra_binary_text`` (text columns binarised human-vs-machine and appended as
+0/1 features -- a leakage sanity check; see below).
 
 The per-embedding run is identical to the single-feature script -- grouped
 split, binarised human-vs-machine target, target rows whose group was seen in
@@ -90,6 +92,12 @@ CFG_DIR = BASE_DIR / "cfg" / "train" / "clf_cd_emb"
 
 EMB_PREFIX = "emb_"
 
+# A feature whose name ends in BIN_SUFFIX is not read from the parquet: it is
+# derived from the raw text column of the same stem by binarising human vs
+# machine (see binarize_text_column). It lets a text label such as generated_by
+# be dropped into the design matrix as a 0/1 feature -- a leakage sanity check.
+BIN_SUFFIX = "__bin"
+
 # Zero-shot Binoculars baseline: no model is fitted, only a threshold on this
 # scalar score. The output lands in this subdirectory, alongside the embeddings.
 DEFAULT_BINOX_COL = "binoculars_score"
@@ -137,6 +145,36 @@ def binoculars_baseline_col(cfg: dict) -> str | None:
         return None
     col = spec.get("column", DEFAULT_BINOX_COL)
     return col if isinstance(col, str) and col.strip() else None
+
+
+def raw_feature_col(feature: str) -> str:
+    """The parquet column a feature reads from (strips the derived BIN_SUFFIX)."""
+    return feature[: -len(BIN_SUFFIX)] if feature.endswith(BIN_SUFFIX) else feature
+
+
+def binary_text_columns(cfg: dict) -> list[str]:
+    """The raw text columns a config asks to binarise, from ``extra_binary_text``."""
+    return [c for c in (cfg.get("extra_binary_text") or []) if isinstance(c, str)]
+
+
+def binary_text_features(cfg: dict) -> list[str]:
+    """Derived ``<col>__bin`` feature names for every ``extra_binary_text`` column."""
+    return [f"{c}{BIN_SUFFIX}" for c in binary_text_columns(cfg)]
+
+
+def binarize_text_column(series: pd.Series, human_label: str) -> pd.Series:
+    """``human_label`` -> 0.0, any other non-null value -> 1.0, missing -> NaN.
+
+    The same human-vs-machine rule as the target ``y``, so binarising
+    ``generated_by`` yields the label itself -- which is the point: it is a
+    leakage sanity check / positive control, a feature the model should be able
+    to learn to ~100% in-domain and under transfer. Missing values become NaN so
+    the usual group-aware missing-row drop removes them.
+    """
+    missing = series.map(is_missing)
+    result = (series != human_label).astype(float)
+    result[missing] = np.nan
+    return result
 
 
 @dataclass
@@ -206,6 +244,12 @@ def check_config(cfg: dict, report: Report) -> None:
     extra = cfg.get("extra_features") or []
     if not isinstance(extra, (list, tuple)) or not all(isinstance(c, str) for c in extra):
         report.error("'extra_features' must be a list of column names")
+
+    extra_bin = cfg.get("extra_binary_text") or []
+    if not isinstance(extra_bin, (list, tuple)) or not all(
+        isinstance(c, str) and c.strip() for c in extra_bin
+    ):
+        report.error("'extra_binary_text' must be a list of column names")
 
     bx = cfg.get("binoculars_baseline")
     if bx is not None:
@@ -286,7 +330,13 @@ def check_files(cfg: dict, emb_cols: list[str], report: Report) -> None:
     group_col = cfg["data"]["group_col"]
     extra = list(cfg.get("extra_features") or [])
     binox = binoculars_baseline_col(cfg)
-    needed = [group_col, CLF_TARGET_COL] + emb_cols + extra + ([binox] if binox else [])
+    needed = (
+        [group_col, CLF_TARGET_COL]
+        + emb_cols
+        + extra
+        + binary_text_columns(cfg)  # raw text columns; the __bin features derive from them
+        + ([binox] if binox else [])
+    )
 
     print(f"{'dataset':<22}{'rows':>9}{'cols':>7}  file")
     print("-" * RULE)
@@ -405,7 +455,12 @@ def load_prepared(
     reading all of them would pull hundreds of MB per corpus per embedding.
     """
     path = BASE_DIR / spec["parquet_path"]
-    columns = list(dict.fromkeys([group_col, CLF_TARGET_COL] + features))
+    # A ``<col>__bin`` feature is derived, not stored: read its raw text column.
+    columns = list(
+        dict.fromkeys(
+            [group_col, CLF_TARGET_COL] + [raw_feature_col(f) for f in features]
+        )
+    )
     df = pd.read_parquet(path, columns=columns)
     n_file = len(df)
 
@@ -413,6 +468,13 @@ def load_prepared(
     if drop_classes:
         df = df[~df[CLF_TARGET_COL].isin(drop_classes)].reset_index(drop=True)
     n_class_dropped = n_file - len(df)
+
+    # Materialise the binarised text features so they stack and get missing-checked
+    # like any other numeric column. Done after drop_classes so a dropped generator
+    # never contributes a row here.
+    for feat in features:
+        if feat.endswith(BIN_SUFFIX):
+            df[feat] = binarize_text_column(df[raw_feature_col(feat)], human_label)
 
     keep, missing_per_col = usable_mask(df, features, group_col)
     n_missing_dropped = int((~keep).sum())
@@ -604,10 +666,15 @@ def preflight_config(cfg: dict, emb_cols: list[str], report: Report) -> None:
     n_feature_sets = len(emb_cols) + (1 if binox else 0)
     n_fits = n_feature_sets * cfg["model"]["n_runs"] * len(cfg["data"]["datasets"])
     baseline_note = f" + binoculars baseline ({binox})" if binox else ""
+    bin_note = (
+        f" + binarised text {binary_text_features(cfg)}"
+        if binary_text_columns(cfg)
+        else ""
+    )
     print(
         f"  {len(cfg['data']['datasets'])} datasets, {len(emb_cols)} embeddings"
-        f"{baseline_note}, {cfg['model']['ml_alg']}, {cfg['model']['n_runs']} seeds "
-        f" → {n_fits} fits"
+        f"{bin_note}{baseline_note}, {cfg['model']['ml_alg']}, "
+        f"{cfg['model']['n_runs']} seeds  → {n_fits} fits"
     )
 
     print("\n[2/3] parquet files")
@@ -630,9 +697,14 @@ def preflight_config(cfg: dict, emb_cols: list[str], report: Report) -> None:
     )
     print("-" * RULE)
 
-    # The Binoculars baseline is checked as one more feature set: a single scalar
-    # column, no extra_features appended (it is a threshold rule, not a model).
-    feature_sets: list[tuple[str, list[str]]] = [(e, [e] + extra) for e in emb_cols]
+    # Every embedding is checked with its extra_features and any binarised text
+    # features appended, exactly as the training run stacks them.
+    bin_feats = binary_text_features(cfg)
+    feature_sets: list[tuple[str, list[str]]] = [
+        (e, [e] + extra + bin_feats) for e in emb_cols
+    ]
+    # The Binoculars baseline is one more feature set: a single scalar column,
+    # nothing appended (it is a threshold rule, not a model).
     binox = binoculars_baseline_col(cfg)
     if binox:
         feature_sets.append((binox, [binox]))
@@ -756,7 +828,11 @@ def run_embedding(emb_col: str, cfg: dict, emb_dir: Path) -> dict:
     ml_alg: str = cfg["model"]["ml_alg"]
     n_runs: int = cfg["model"]["n_runs"]
     test_size: float = cfg["model"].get("test_size", 0.30)
-    features = [emb_col] + list(cfg.get("extra_features") or [])
+    features = (
+        [emb_col]
+        + list(cfg.get("extra_features") or [])
+        + binary_text_features(cfg)
+    )
 
     names = [spec["name"] for spec in specs]
     labels = {spec["name"]: spec.get("label", spec["name"]) for spec in specs}
