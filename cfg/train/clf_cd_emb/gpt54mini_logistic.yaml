@@ -48,6 +48,17 @@ embeddings:
 # stays fair. Usually empty.
 extra_features: []
 
+# Zero-shot Binoculars baseline. No classifier is trained: a single decision
+# threshold on the Binoculars score is calibrated on each source's TRAINING
+# split (Youden's J; low score => machine) and applied unchanged to every
+# corpus, giving a source x target matrix directly comparable to the trained
+# embeddings. It becomes one more entry in the comparison (marked with a ★) and
+# writes its own matrix + figures under <alg_id>/binoculars/. Drop the whole key
+# or set enabled: false to skip it.
+binoculars_baseline:
+  enabled: true
+  column: "binoculars_score"
+
 data:
   # Labels are binarised to human vs machine: `human_label` -> 0, every other
   # class -> 1. The corpora do not agree on generator names (`gpt` here,

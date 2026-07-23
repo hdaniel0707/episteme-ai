@@ -17,9 +17,22 @@ split, binarised human-vs-machine target, target rows whose group was seen in
 training excluded -- so the numbers are directly comparable to it. What is new:
 
   * one matrix per embedding, written to ``<experiment>/<alg_id>/<emb_col>/``;
+  * a zero-shot Binoculars baseline (see below), one more matrix directly
+    comparable to the embeddings, written to ``<experiment>/<alg_id>/binoculars/``;
   * a comparison figure over embeddings (in-domain vs transfer, the gap between
-    them, and every source->target cell as a heatmap);
+    them, and every source->target cell as a heatmap), with the baseline marked;
   * a preflight check that runs *before any training*, over *every* config.
+
+The Binoculars baseline trains no classifier. For each source corpus a single
+decision threshold on the Binoculars score is calibrated on the source's
+*training* split (Youden's J, as in
+``epai/analyse/analyse_binox_human_vs_ai.py``: a low score means machine, so
+predict machine when ``score <= threshold``) and then applied unchanged to
+every corpus's evaluation rows -- the held-out grouped test split on the
+diagonal, the unseen corpora off it. The split, seeds and group exclusion are
+the classifiers' exactly, so the baseline's numbers drop straight into the same
+matrix and comparison. It is opt-in per config via the ``binoculars_baseline``
+key.
 
 The preflight matters because the interesting failures here are slow ones. A
 run is fifteen embedders x nine matrix cells x three seeds; a column that is
@@ -50,6 +63,7 @@ import joblib
 import numpy as np
 import pandas as pd
 import yaml
+from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, roc_curve
 from sklearn.model_selection import GroupShuffleSplit
 from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
@@ -75,6 +89,11 @@ CFG_DIR = BASE_DIR / "cfg" / "train" / "clf_cd_emb"
 ##########################################
 
 EMB_PREFIX = "emb_"
+
+# Zero-shot Binoculars baseline: no model is fitted, only a threshold on this
+# scalar score. The output lands in this subdirectory, alongside the embeddings.
+DEFAULT_BINOX_COL = "binoculars_score"
+BINOX_DIR_NAME = "binoculars"
 
 # Classifiers build_clf_model knows about. Checked up front so a typo does not
 # survive until the first fit.
@@ -103,6 +122,21 @@ def embedding_columns(cfg: dict) -> list[str]:
         for e in cfg.get("embeddings", []) or []
         if isinstance(e, str)
     ]
+
+
+def binoculars_baseline_col(cfg: dict) -> str | None:
+    """The Binoculars column for the zero-shot baseline, or None if it is off.
+
+    The baseline is opt-in: a config asks for it with a ``binoculars_baseline``
+    mapping (``enabled`` defaults to True when the key is present, ``column`` to
+    ``binoculars_score``). Malformed values are caught by ``check_config``; here
+    an off / absent / malformed baseline simply reads as None.
+    """
+    spec = cfg.get("binoculars_baseline")
+    if not isinstance(spec, dict) or not spec.get("enabled", True):
+        return None
+    col = spec.get("column", DEFAULT_BINOX_COL)
+    return col if isinstance(col, str) and col.strip() else None
 
 
 @dataclass
@@ -173,6 +207,17 @@ def check_config(cfg: dict, report: Report) -> None:
     if not isinstance(extra, (list, tuple)) or not all(isinstance(c, str) for c in extra):
         report.error("'extra_features' must be a list of column names")
 
+    bx = cfg.get("binoculars_baseline")
+    if bx is not None:
+        if not isinstance(bx, dict):
+            report.error("'binoculars_baseline' must be a mapping")
+        else:
+            if "enabled" in bx and not isinstance(bx["enabled"], bool):
+                report.error("'binoculars_baseline.enabled' must be a boolean")
+            col = bx.get("column", DEFAULT_BINOX_COL)
+            if not isinstance(col, str) or not col.strip():
+                report.error("'binoculars_baseline.column' must be a non-empty string")
+
     data = cfg["data"]
     if not isinstance(data, dict):
         report.error("'data' must be a mapping")
@@ -240,7 +285,8 @@ def check_files(cfg: dict, emb_cols: list[str], report: Report) -> None:
 
     group_col = cfg["data"]["group_col"]
     extra = list(cfg.get("extra_features") or [])
-    needed = [group_col, CLF_TARGET_COL] + emb_cols + extra
+    binox = binoculars_baseline_col(cfg)
+    needed = [group_col, CLF_TARGET_COL] + emb_cols + extra + ([binox] if binox else [])
 
     print(f"{'dataset':<22}{'rows':>9}{'cols':>7}  file")
     print("-" * RULE)
@@ -554,10 +600,14 @@ def preflight_config(cfg: dict, emb_cols: list[str], report: Report) -> None:
         # The checks below index into the config; stop while it is still unsafe.
         print("  invalid — skipping the data checks for this config")
         return
-    n_fits = len(emb_cols) * cfg["model"]["n_runs"] * len(cfg["data"]["datasets"])
+    binox = binoculars_baseline_col(cfg)
+    n_feature_sets = len(emb_cols) + (1 if binox else 0)
+    n_fits = n_feature_sets * cfg["model"]["n_runs"] * len(cfg["data"]["datasets"])
+    baseline_note = f" + binoculars baseline ({binox})" if binox else ""
     print(
-        f"  {len(cfg['data']['datasets'])} datasets, {len(emb_cols)} embeddings, "
-        f"{cfg['model']['ml_alg']}, {cfg['model']['n_runs']} seeds  → {n_fits} fits"
+        f"  {len(cfg['data']['datasets'])} datasets, {len(emb_cols)} embeddings"
+        f"{baseline_note}, {cfg['model']['ml_alg']}, {cfg['model']['n_runs']} seeds "
+        f" → {n_fits} fits"
     )
 
     print("\n[2/3] parquet files")
@@ -575,28 +625,34 @@ def preflight_config(cfg: dict, emb_cols: list[str], report: Report) -> None:
     specs = cfg["data"]["datasets"]
 
     print(
-        f"{'embedding':<22}{'dataset':<20}{'rows':>7}{'dropped':>9}"
+        f"{'feature set':<22}{'dataset':<20}{'rows':>7}{'dropped':>9}"
         f"{'dim':>7}{'groups':>8}  classes"
     )
     print("-" * RULE)
 
-    for emb_col in emb_cols:
-        features = [emb_col] + extra
+    # The Binoculars baseline is checked as one more feature set: a single scalar
+    # column, no extra_features appended (it is a threshold rule, not a model).
+    feature_sets: list[tuple[str, list[str]]] = [(e, [e] + extra) for e in emb_cols]
+    binox = binoculars_baseline_col(cfg)
+    if binox:
+        feature_sets.append((binox, [binox]))
+
+    for feat_label, features in feature_sets:
         preps: dict[str, Prepared] = {}
         for spec in specs:
             try:
                 prep = load_prepared(spec, features, group_col, human_label)
             except Exception as exc:
                 report.error(
-                    f"{emb_col} | {spec['name']}: failed to load: "
+                    f"{feat_label} | {spec['name']}: failed to load: "
                     f"{type(exc).__name__}: {exc}"
                 )
                 continue
 
-            ok = check_dataset(prep, cfg, emb_col, report)
+            ok = check_dataset(prep, cfg, feat_label, report)
             dropped = prep.n_class_dropped + prep.n_missing_dropped
             print(
-                f"{emb_col:<22}{prep.name:<20}{len(prep.df):>7}{dropped:>9}"
+                f"{feat_label:<22}{prep.name:<20}{len(prep.df):>7}{dropped:>9}"
                 f"{(prep.feature_dim if prep.dims_per_col else 0):>7}"
                 f"{(prep.n_groups if len(prep.df) else 0):>8}  "
                 f"{prep.class_counts if len(prep.df) else '-'}"
@@ -623,12 +679,12 @@ def preflight_config(cfg: dict, emb_cols: list[str], report: Report) -> None:
         dims = {name: p.feature_dim for name, p in preps.items()}
         if len(set(dims.values())) != 1:
             report.error(
-                f"{emb_col}: datasets disagree on feature dimensionality: {dims} "
+                f"{feat_label}: datasets disagree on feature dimensionality: {dims} "
                 f"— the model trained on one corpus cannot be applied to another"
             )
             continue
 
-        check_splits(preps, cfg, emb_col, report)
+        check_splits(preps, cfg, feat_label, report)
 
 
 def preflight(cfg_paths: list[Path]) -> tuple[Report, list[tuple[Path, dict, list[str]]]]:
@@ -851,7 +907,192 @@ def summarise_embedding(payload: dict) -> dict:
         "transfer_f1_mean": float(f1_off.mean()),
         # How much of the in-domain score does not survive leaving the corpus.
         "gap": float(diag.mean() - off.mean()),
+        "baseline": bool(payload.get("baseline")),
     }
+
+
+# ---------------------------------------------------------------------------
+# Zero-shot Binoculars baseline
+# ---------------------------------------------------------------------------
+
+
+def fit_binoculars_threshold(scores: np.ndarray, y: np.ndarray) -> float:
+    """Youden's-J optimal Binoculars-score cutoff, fit on a source training split.
+
+    Positive class is machine (``y == 1``). A *low* Binoculars score means
+    machine, so the decision score fed to the ROC is ``-score`` (higher ⇒ more
+    machine-like) and the returned cutoff is on the raw score: predict machine
+    when ``score <= cutoff``. This is the rule used in
+    ``epai/analyse/analyse_binox_human_vs_ai.py``, except the threshold is
+    calibrated here on the *training* split rather than the evaluation set, so
+    the diagonal stays an honest held-out number and the off-diagonal is a real
+    transfer of the source's threshold to an unseen corpus.
+
+    Falls back to the score median if the split holds a single class (no ROC).
+    """
+    if np.unique(y).size < 2:
+        return float(np.median(scores))
+    fpr, tpr, thr = roc_curve(y, -scores)
+    j = tpr - fpr
+    return float(-thr[int(np.argmax(j))])
+
+
+def evaluate_binoculars(scores: np.ndarray, y: np.ndarray, threshold: float) -> dict:
+    """Score the ``score <= threshold ⇒ machine`` rule on one evaluation set.
+
+    Same keys as ``run_clf_cross_domain.evaluate`` so the payload is identical in
+    shape to an embedding's and the existing figures read it unchanged.
+    """
+    y_pred = (scores <= threshold).astype(int)
+    return {
+        "accuracy": float(accuracy_score(y, y_pred)),
+        "macro_f1": float(f1_score(y, y_pred, average="macro", zero_division=0)),
+        "confusion": confusion_matrix(
+            y, y_pred, labels=range(len(BINARY_CLASSES))
+        ).tolist(),
+        "n": int(len(y)),
+        "class_balance": {
+            BINARY_CLASSES[c]: int(n)
+            for c, n in zip(*np.unique(y, return_counts=True))
+        },
+    }
+
+
+def run_binoculars_baseline(binox_col: str, cfg: dict, out_dir: Path) -> dict:
+    """Full source x target matrix for the zero-shot Binoculars baseline.
+
+    No classifier is trained. For each source a threshold is calibrated on its
+    training split and applied to every corpus's evaluation rows -- the held-out
+    grouped test split on the diagonal, the unseen corpora off it. The split,
+    seeds and group exclusion match ``run_embedding`` exactly, and the payload is
+    shaped identically, so it drops straight into the same figures and comparison.
+    """
+    base_seed: int = cfg["seed"]
+    group_col: str = cfg["data"]["group_col"]
+    human_label: str = cfg["data"]["human_label"]
+    specs: list[dict] = cfg["data"]["datasets"]
+    n_runs: int = cfg["model"]["n_runs"]
+    test_size: float = cfg["model"].get("test_size", 0.30)
+
+    names = [spec["name"] for spec in specs]
+    labels = {spec["name"]: spec.get("label", spec["name"]) for spec in specs}
+
+    data = {}
+    for spec in specs:
+        prep = load_prepared(spec, [binox_col], group_col, human_label)
+        tqdm.write(f"  {spec['name']:<20} {len(prep.df):>6} rows  {prep.class_counts}")
+        data[spec["name"]] = prep.df
+
+    scores_all = {
+        name: df[binox_col].to_numpy(dtype=float) for name, df in data.items()
+    }
+
+    # per_seed[i][source][target] -> metrics
+    per_seed: list[dict] = []
+
+    for i in tqdm(range(n_runs), desc="Seeds", leave=False):
+        seed = base_seed + i
+        seed_res: dict[str, dict] = {}
+
+        for source in names:
+            df_s = data[source]
+            s_s, y_s = scores_all[source], df_s["y"].to_numpy()
+            groups_s = df_s["group"].to_numpy()
+
+            # Same grouped split the classifiers take, so the calibration set is
+            # the same rows they train on.
+            splitter = GroupShuffleSplit(
+                n_splits=1, test_size=test_size, random_state=seed
+            )
+            train_idx, test_idx = next(
+                splitter.split(np.zeros((len(y_s), 1)), y_s, groups_s)
+            )
+            train_groups = set(groups_s[train_idx])
+            threshold = fit_binoculars_threshold(s_s[train_idx], y_s[train_idx])
+
+            seed_res[source] = {}
+            for target in names:
+                if target == source:
+                    # In-domain: the corpus's own held-out grouped test split.
+                    res = evaluate_binoculars(s_s[test_idx], y_s[test_idx], threshold)
+                    res["excluded"] = 0
+                else:
+                    df_t = data[target]
+                    # Target rows whose group was seen while calibrating would be
+                    # a free hit, exactly as for the trained models, so drop them.
+                    keep = ~df_t["group"].isin(train_groups).to_numpy()
+                    res = evaluate_binoculars(
+                        scores_all[target][keep],
+                        df_t.loc[keep, "y"].to_numpy(),
+                        threshold,
+                    )
+                    res["excluded"] = int((~keep).sum())
+                res["train_n"] = int(len(train_idx))
+                res["threshold"] = float(threshold)
+                seed_res[source][target] = res
+
+        per_seed.append(seed_res)
+
+    # Aggregate over seeds (same shape as run_embedding's summary).
+    summary: dict[str, dict] = {}
+    for source in names:
+        summary[source] = {}
+        for target in names:
+            runs = [s[source][target] for s in per_seed]
+            accs = [r["accuracy"] for r in runs]
+            f1s = [r["macro_f1"] for r in runs]
+            summary[source][target] = {
+                "train_set": source,
+                "test_set": target,
+                "in_domain": source == target,
+                "accuracy_mean": float(np.mean(accs)),
+                "accuracy_std": float(np.std(accs)),
+                "macro_f1_mean": float(np.mean(f1s)),
+                "macro_f1_std": float(np.std(f1s)),
+                "confusion_mean": np.mean(
+                    [r["confusion"] for r in runs], axis=0
+                ).tolist(),
+                "train_n": runs[0]["train_n"],
+                "n": runs[0]["n"],
+                "excluded": runs[0]["excluded"],
+                "class_balance": runs[0]["class_balance"],
+                # Mean of the source-fit cutoffs over seeds; the same for every
+                # target of a source, but kept per cell for a uniform schema.
+                "threshold_mean": float(np.mean([r["threshold"] for r in runs])),
+            }
+
+    # Shaped like run_embedding's payload so plot_clf_cd_result works unchanged.
+    bx_cfg = dict(cfg)
+    bx_cfg["features"] = [binox_col]
+    bx_cfg["model"] = dict(cfg["model"])
+    bx_cfg["model"]["ml_alg"] = "binoculars (zero-shot)"
+    bx_cfg["alg_id"] = f"{cfg['alg_id']}__binoculars"
+    bx_cfg["alg_label"] = f"{cfg['alg_label']} — binoculars (zero-shot)"
+
+    payload = {
+        "alg_id": bx_cfg["alg_id"],
+        "alg_label": bx_cfg["alg_label"],
+        "embedding": binox_col,
+        "baseline": True,
+        "feature_dim": 1,
+        "dataset_names": names,
+        "dataset_labels": labels,
+        "classes": BINARY_CLASSES,
+        "config": bx_cfg,
+        "summary": summary,
+        "per_seed": per_seed,
+    }
+    with open(out_dir / "cross_domain.json", "w") as f:
+        json.dump(payload, f, indent=2)
+    return payload
+
+
+def summarise_baseline(payload: dict) -> dict:
+    """The baseline's comparison row: an embedding row, relabelled and flagged."""
+    row = summarise_embedding(payload)
+    row["label"] = "binoculars (0-shot)"
+    row["baseline"] = True
+    return row
 
 
 def print_ranking(alg_label: str, rows: list[dict]) -> None:
@@ -912,6 +1153,19 @@ def run_config(cfg_path: Path, cfg: dict, emb_cols: list[str], alg_dir: Path) ->
         # with their figures.
         plot_clf_cd_result(emb_dir)
         rows.append(summarise_embedding(payload))
+
+    # Zero-shot Binoculars baseline: no model, just a source-fit threshold. Run
+    # after the embeddings so it shows up as one more row in the comparison.
+    binox_col = binoculars_baseline_col(cfg)
+    if binox_col:
+        tqdm.write(f"\n→ {binox_col} (zero-shot Binoculars baseline)")
+        binox_dir = alg_dir / BINOX_DIR_NAME
+        binox_dir.mkdir(parents=True, exist_ok=True)
+
+        payload = run_binoculars_baseline(binox_col, cfg, binox_dir)
+        print_matrix(payload["alg_label"], payload["summary"], payload["dataset_names"])
+        plot_clf_cd_result(binox_dir)
+        rows.append(summarise_baseline(payload))
 
     specs = cfg["data"]["datasets"]
     comparison = {

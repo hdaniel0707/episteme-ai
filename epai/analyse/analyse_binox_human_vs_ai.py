@@ -44,15 +44,7 @@ ROC curve. Classes are balanced (paired), so the PR chance baseline is 0.5.
 
 Usage:
     uv run python epai/analyse/analyse_binox_human_vs_ai.py data/parquet/wp_binox0.parquet
-    uv run python epai/analyse/analyse_binox_human_vs_ai.py \
-        data/parquet/wp_binox1.parquet:gpt \
-        data/parquet/essay_binox1.parquet:gpt \
-        data/parquet/reuter_binox1.parquet:gpt \
-        data/parquet/wp_binox0.parquet:gpt \
-        data/parquet/essay_binox0.parquet:gpt \
-        data/parquet/reuter_binox0.parquet:gpt
 
-    
     uv run python epai/analyse/analyse_binox_human_vs_ai.py \
         data/parquet/wp_binox0.parquet:gpt \
         data/parquet/essay_binox0.parquet:gpt \

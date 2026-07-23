@@ -1123,7 +1123,13 @@ def plot_clf_cd_emb_comparison(exp_dir: Path, payload: dict) -> None:
     # Ranked by transfer: the whole point of the experiment is which embedding
     # survives leaving its corpus, not which scores highest at home.
     order = sorted(rows, key=lambda r: r["transfer_mean"])
-    labels = [f"{r['label']} ({r['feature_dim']}d)" for r in order]
+    # Zero-shot baselines (e.g. Binoculars) are not embeddings; they are marked
+    # with a ★ and hatched bars so the reader can tell them apart at a glance.
+    is_baseline = np.array([bool(r.get("baseline")) for r in order])
+    labels = [
+        f"{'★ ' if r.get('baseline') else ''}{r['label']} ({r['feature_dim']}d)"
+        for r in order
+    ]
     in_domain = np.array([r["in_domain_mean"] for r in order])
     transfer = np.array([r["transfer_mean"] for r in order])
     transfer_std = np.array([r["transfer_std"] for r in order])
@@ -1142,6 +1148,12 @@ def plot_clf_cd_emb_comparison(exp_dir: Path, payload: dict) -> None:
                       color="orange", label="transfer (off-diagonal)")
     axes[0].bar_label(b1, fmt="%.3f", fontsize=7, padding=2)
     axes[0].bar_label(b2, fmt="%.3f", fontsize=7, padding=2)
+    # Hatch the baseline's bars so it never reads as just another embedding.
+    for idx in np.nonzero(is_baseline)[0]:
+        for bar in (b1[idx], b2[idx]):
+            bar.set_hatch("//")
+            bar.set_edgecolor("black")
+            bar.set_linewidth(1.2)
     # Worst single transfer cell: a mean can hide one collapsed corpus pair.
     axes[0].scatter(transfer_min, y - h / 2, marker="|", s=90, color="black",
                     zorder=3, label="worst transfer cell")
@@ -1151,13 +1163,26 @@ def plot_clf_cd_emb_comparison(exp_dir: Path, payload: dict) -> None:
     axes[0].set_xlim(0.0, 1.18)
     axes[0].set_xlabel("Accuracy")
     axes[0].set_title("Ranked by transfer accuracy")
-    axes[0].legend(fontsize=8, loc="lower right")
+    handles, _ = axes[0].get_legend_handles_labels()
+    if is_baseline.any():
+        from matplotlib.patches import Patch
+        handles.append(
+            Patch(facecolor="white", edgecolor="black", hatch="//",
+                  label="zero-shot baseline")
+        )
+    axes[0].legend(handles=handles, fontsize=8, loc="lower right")
 
     axes[1].plot([0, 1], [0, 1], linestyle=":", color="gray", linewidth=1.0,
                  label="no loss under transfer")
     axes[1].axhline(CD_CHANCE, linestyle="--", color="red", linewidth=1.2, label="chance")
     axes[1].axvline(CD_CHANCE, linestyle="--", color="red", linewidth=1.2)
-    axes[1].scatter(in_domain, transfer, s=45, color="seagreen", zorder=3)
+    emb_pts = ~is_baseline
+    axes[1].scatter(in_domain[emb_pts], transfer[emb_pts], s=45, color="seagreen",
+                    zorder=3, label="embedding")
+    if is_baseline.any():
+        axes[1].scatter(in_domain[is_baseline], transfer[is_baseline], s=130,
+                        marker="*", color="crimson", edgecolor="black",
+                        linewidth=0.6, zorder=4, label="zero-shot baseline")
     for r, x_val, y_val in zip(order, in_domain, transfer):
         axes[1].annotate(r["label"], (x_val, y_val), textcoords="offset points",
                          xytext=(5, 4), fontsize=7.5)
@@ -1200,7 +1225,11 @@ def plot_clf_cd_emb_comparison(exp_dir: Path, payload: dict) -> None:
     ax.set_xticklabels(pair_labels, fontsize=7.5, rotation=45, ha="right")
     ax.set_yticks(range(len(order_desc)))
     ax.set_yticklabels(
-        [f"{r['label']} ({r['feature_dim']}d)" for r in order_desc], fontsize=8
+        [
+            f"{'★ ' if r.get('baseline') else ''}{r['label']} ({r['feature_dim']}d)"
+            for r in order_desc
+        ],
+        fontsize=8,
     )
     ax.set_xlabel("TRAINED ON → TESTED ON", fontweight="bold", labelpad=8)
     ax.set_title(f"{alg_label} — every transfer cell, per embedding\n{subtitle}")
@@ -1226,7 +1255,8 @@ def plot_clf_cd_emb_comparison(exp_dir: Path, payload: dict) -> None:
     fig.text(0.01, 0.01,
              "Boxed columns = in-domain (held-out split of the same corpus); the rest "
              "are transfer to an unseen corpus.\nRows are ordered by mean transfer "
-             "accuracy, best first.",
+             "accuracy, best first. ★ marks a zero-shot baseline (no classifier "
+             "trained).",
              fontsize=7.5, color="dimgray")
     fig.tight_layout(rect=(0, 0.05, 1, 1))
     fig.savefig(exp_dir / "embedding_comparison_matrix.png", dpi=150)
