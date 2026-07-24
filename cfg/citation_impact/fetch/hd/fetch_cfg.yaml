@@ -1,0 +1,105 @@
+queries_domains:
+  Physics:
+    - "quantum mechanics particle physics"
+    - "condensed matter solid state physics"
+    - "thermodynamics statistical mechanics"
+    - "electromagnetism optics photonics"
+    - "nuclear physics plasma"
+
+  Chemistry:
+    - "organic synthesis reaction mechanisms"
+    - "physical chemistry thermodynamics kinetics"
+    - "inorganic coordination chemistry"
+    - "analytical chemistry spectroscopy"
+    - "computational chemistry molecular simulation"
+
+  Biology:
+    - "molecular biology cell signalling"
+    - "genetics genomics gene expression"
+    - "developmental biology stem cells"
+    - "microbiology virology infectious disease"
+    - "biochemistry protein structure function"
+
+  Mathematics:
+    - "algebraic geometry topology"
+    - "number theory combinatorics"
+    - "differential equations dynamical systems"
+    - "probability theory stochastic processes"
+    - "numerical analysis optimization"
+
+  Earth Sciences:
+    - "geophysics seismology tectonics"
+    - "climate science atmospheric dynamics"
+    - "oceanography hydrology"
+    - "geochemistry mineralogy petrology"
+    - "glaciology cryosphere"
+
+  Astronomy:
+    - "stellar astrophysics stellar evolution"
+    - "cosmology dark matter dark energy"
+    - "exoplanets planetary science"
+    - "galactic structure interstellar medium"
+    - "high energy astrophysics gravitational waves"
+
+  Computer Science:
+    - "machine learning deep learning"
+    - "natural language processing large language models"
+    - "computer vision image recognition"
+    - "algorithms complexity distributed systems"
+    - "computer security cryptography"
+
+  Medicine:
+    - "clinical trials drug efficacy"
+    - "cancer oncology tumour biology"
+    - "cardiovascular disease cardiology"
+    - "immunology vaccine autoimmune"
+    - "surgery trauma critical care"
+
+  Psychology:
+    - "cognitive psychology memory attention"
+    - "social psychology behaviour decision making"
+    - "clinical psychology mental health disorders"
+    - "developmental psychology child adolescent"
+    - "neuropsychology brain behaviour"
+
+  Ecology:
+    - "ecosystem ecology biodiversity"
+    - "population ecology species interactions"
+    - "conservation biology habitat loss"
+    - "community ecology food webs"
+    - "global change ecology climate adaptation"
+
+  Neuroscience:
+    - "systems neuroscience neural circuits"
+    - "cellular molecular neuroscience synaptic"
+    - "cognitive neuroscience fMRI brain imaging"
+    - "computational neuroscience neural coding"
+    - "neurodegenerative disease Alzheimer Parkinson"
+
+  Materials Science:
+    - "nanomaterials nanostructures synthesis"
+    - "polymers soft matter"
+    - "semiconductors electronic materials"
+    - "biomaterials tissue engineering"
+    - "energy materials batteries solar cells"
+
+  Economics:
+    - "macroeconomics monetary policy"
+    - "microeconomics market design mechanism"
+    - "behavioural economics experimental"
+    - "labour economics inequality"
+    - "development economics growth institutions"
+
+  Sociology:
+    - "social networks inequality stratification"
+    - "political sociology collective action"
+    - "urban sociology migration"
+    - "culture identity organisations"
+    - "quantitative sociology survey methods"
+
+  Anthropology:
+    - "cultural anthropology ethnography"
+    - "biological anthropology human evolution"
+    - "archaeological anthropology prehistory"
+    - "linguistic anthropology language culture"
+    - "medical anthropology health society"

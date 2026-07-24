@@ -1,0 +1,35 @@
+# Cross-domain transfer control for the human-vs-machine classifier.
+#
+# The Ghostbuster corpora (essay / reuter / wp) carry six generators; only
+# `human` + the plain `gpt` rewrite are kept, so every dataset is a comparable
+# binary problem. The *_gpt54mini parquets already hold exactly two classes.
+alg_id: "gpt54mini_logistic"
+alg_label: "gpt54mini + logistic"
+
+seed: 42
+
+data:
+  human_label: "human"
+  group_col: "id"
+
+  datasets:
+    - name: "essay_gpt54mini"
+      label: "essay (gpt54mini)"
+      parquet_path: "data/parquet/essay_gpt54mini_binox0.parquet"
+      drop_classes: []
+    - name: "reuter_gpt54mini"
+      label: "reuter (gpt54mini)"
+      parquet_path: "data/parquet/reuter_gpt54mini_binox0.parquet"
+      drop_classes: []
+    - name: "wp_gpt54mini"
+      label: "wp (gpt54mini)"
+      parquet_path: "data/parquet/wp_gpt54mini_binox0.parquet"
+      drop_classes: []
+
+features:
+  - emb_specter2
+
+model:
+  ml_alg: "logistic"  # gradient_boosting | logistic | svm | mlp
+  n_runs: 3
+  test_size: 0.30

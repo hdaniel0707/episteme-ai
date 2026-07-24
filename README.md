@@ -1,33 +1,86 @@
 # Episteme AI
 
-A research pipeline for studying academic papers at scale. It fetches papers from the [Semantic Scholar](https://www.semanticscholar.org/) API, enriches them with LLM-generated synthetic variants and scientific embeddings, optionally scores them with the [NAIP](https://huggingface.co/spaces/ssocean/Newborn_Article_Impact_Predict) impact predictor, and trains machine learning models for two tasks:
+A research platform for studying AI-generated text in scientific literature. The repository contains two independent but related pipelines that share a common library:
 
-1. **Citation impact regression** — predict how many citations a paper will receive from its metadata and text embeddings.
-2. **AI-text detection (classification)** — classify whether an abstract was written by a human or rephrased by an LLM.
+| Pipeline | Short name | Goal |
+|---|---|---|
+| **Citation Impact** | `epai/citation_impact/` | Fetch academic papers from Semantic Scholar, enrich them with LLM-generated synthetic variants, and train models to predict citation impact. |
+| **AI Detection** | `epai/ai_detection/` | Prepare AI-vs-human text corpora (Ghostbuster / Denario), compute embeddings, and train classifiers that distinguish human from machine-generated text. |
+
+Both pipelines draw on the shared library under `epai/utils/`, `epai/train/`, and `epai/analyse/`.
 
 ---
 
 ## Table of Contents
 
+- [Repository Layout](#repository-layout)
 - [Setup](#setup)
 - [Git LFS — Store Folder](#git-lfs--store-folder)
 - [Environment Variables](#environment-variables)
 - [File Naming Convention](#file-naming-convention)
-- [Pipeline Overview](#pipeline-overview)
-- [Stage 1 — Fetch](#stage-1--fetch)
-- [Stage 2 — Summarise DB](#stage-2--summarise-db)
-- [Stage 3 — Prepare Data](#stage-3--prepare-data)
-- [Stage 4 — Fetch NAIP Scores](#stage-4--fetch-naip-scores)
-- [Stage 5 — Analyse Data](#stage-5--analyse-data)
-- [Stage 6 — Analyse NAIP](#stage-6--analyse-naip)
-- [Stage 7 — Training](#stage-7--training)
-  - [Regression](#regression-run_regpy)
-  - [Representation Learning](#representation-learning-run_reprpy)
-  - [Classification](#classification-run_clfpy)
-- [Stage 8 — Analyse Experiments](#stage-8--analyse-experiments)
+- [Pipeline 1 — Citation Impact](#pipeline-1--citation-impact)
+  - [Stage 1 — Fetch](#stage-1--fetch)
+  - [Stage 2 — Summarise DB](#stage-2--summarise-db)
+  - [Stage 3 — Prepare Data](#stage-3--prepare-data)
+  - [Stage 4 — Fetch NAIP Scores](#stage-4--fetch-naip-scores)
+  - [Stage 5 — Analyse Data](#stage-5--analyse-data)
+  - [Stage 6 — Analyse NAIP](#stage-6--analyse-naip)
+  - [Stage 7 — Training (Regression / Repr Learning)](#stage-7--training-regression--repr-learning)
+  - [Stage 8 — Analyse Experiments](#stage-8--analyse-experiments)
+- [Pipeline 2 — AI Detection](#pipeline-2--ai-detection)
+  - [Stage A — Prepare Corpora](#stage-a--prepare-corpora)
+  - [Stage B — Embed](#stage-b--embed)
+  - [Stage C — Analyse Embeddings / Binoculars](#stage-c--analyse-embeddings--binoculars)
+  - [Stage D — Training (Classification)](#stage-d--training-classification)
+- [Shared Library](#shared-library)
 - [Configuration Reference](#configuration-reference)
-- [Project Structure](#project-structure)
 - [Key Concepts for Students](#key-concepts-for-students)
+
+---
+
+## Repository Layout
+
+```
+episteme-ai/
+├── epai/
+│   ├── citation_impact/           # Pipeline 1 — Semantic Scholar / citation prediction
+│   │   ├── fetch/fetch.py         #   Stage 1: Semantic Scholar → SQLite
+│   │   ├── db/summarise_db.py     #   Stage 2: EDA on raw SQLite
+│   │   ├── prepare/prepare_data.py#   Stage 3: SQLite → Parquet, LLM rephrasing
+│   │   ├── score/add_naip_scores.py#  Stage 4: add NAIP impact scores
+│   │   ├── analyse/               #   Stages 5–6: EDA on Parquet & NAIP scores
+│   │   └── train/                 #   Stage 7: run_reg.py, run_repr.py
+│   │
+│   ├── ai_detection/              # Pipeline 2 — AI vs human text detection
+│   │   ├── fetch/fetch_denario.py #   Download Denario papers
+│   │   ├── prepare/               #   prepare_{reuter,wp,essay,denario}.py,
+│   │   │                          #   recompute_embedding.py, merge_parquets.py
+│   │   ├── embed/add_embeddings.py#   Add multiple embedding columns to a Parquet
+│   │   ├── analyse/               #   Binoculars analysis, 2D embedding vis, corpus QA
+│   │   └── train/                 #   run_clf.py, run_clf_cross_domain*.py,
+│   │                              #   replot_cross_domain.py
+│   │
+│   ├── train/                     # Shared: algs/ (classifiers/regressors), autoencoder.py
+│   ├── analyse/                   # Shared: analyse_exp.py, analyse_exp_compare.py
+│   └── utils/                     # Shared: all utility modules
+│
+├── cfg/
+│   ├── citation_impact/
+│   │   ├── fetch/                 # Semantic Scholar query configs
+│   │   └── train/reg/, repr/      # Regression / repr-learning experiment configs
+│   └── ai_detection/
+│       └── train/clf/, clf_cd/,   # Classification experiment configs
+│                clf_cd_algs/, clf_cd_emb/
+│
+├── store/                         # Versioned datasets tracked with Git LFS
+│   └── data/parquet/, sql/
+├── data/                          # Local working data (gitignored)
+│   ├── sql/                       # SQLite databases (citation impact pipeline)
+│   ├── parquet/                   # Parquet datasets (both pipelines)
+│   ├── ghostbuster-data*/         # Raw Ghostbuster text corpora
+│   └── papers/                    # Downloaded Denario PDFs
+└── results/                       # All experiment outputs (gitignored)
+```
 
 ---
 
@@ -43,9 +96,9 @@ uv sync
 uv pip install -e .
 ```
 
-For the compute server you will need to add this at the end of your `pyproject.toml`:
+For the compute server, add this at the end of your `pyproject.toml`:
 
-```
+```toml
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
@@ -105,19 +158,33 @@ cp .env_sample .env
 
 | Variable | Required by | Purpose |
 |---|---|---|
-| `SEMANTIC_SCHOLAR_API_KEY` | `fetch.py` | Increases the Semantic Scholar API rate limit |
-| `OPENAI_API_KEY` | `prepare_data.py`, `embedding_utils.py` | GPT-4o-mini rephrasing and OpenAI embeddings |
-| `ANTHROPIC_API_KEY` | `prepare_data.py` | Claude Haiku abstract rephrasing |
-| `GOOGLE_API_KEY` | `prepare_data.py` | Gemini abstract rephrasing |
-| `HF_TOKEN` | `add_naip_scores.py` | HuggingFace token for the NAIP Gradio API (optional but avoids rate limits) |
+| `SEMANTIC_SCHOLAR_API_KEY` | `citation_impact/fetch/fetch.py` | Increases the Semantic Scholar API rate limit |
+| `OPENAI_API_KEY` | `citation_impact/prepare/prepare_data.py`, `utils/embedding_utils.py` | GPT-4o-mini rephrasing and OpenAI embeddings |
+| `ANTHROPIC_API_KEY` | `citation_impact/prepare/prepare_data.py` | Claude Haiku abstract rephrasing |
+| `GOOGLE_API_KEY` | `citation_impact/prepare/prepare_data.py` | Gemini abstract rephrasing |
+| `HF_TOKEN` | `citation_impact/score/add_naip_scores.py` | HuggingFace token for the NAIP Gradio API (optional but avoids rate limits) |
 
 The Semantic Scholar key is optional but strongly recommended — without it you will be heavily rate-limited. The LLM keys are only needed if you enable the `ADD_GEN_AI` flag in `prepare_data.py`.
 
 ---
 
-## Pipeline Overview
+## File Naming Convention
 
-The stages run sequentially. Stages 2, 4, 5, and 6 are optional analysis or enrichment steps.
+Parquet files produced by the citation-impact pipeline follow a `<id>[_AI][_naip].parquet` pattern:
+
+- `<id>` — a short experiment name, e.g. `0523_A_100`
+- `_AI` suffix — the file contains both human and LLM-rephrased rows
+- `_naip` suffix — NAIP scores have been added
+
+Parquet files produced by the AI-detection pipeline follow a `<corpus>[_<variant>][_binox<N>].parquet` pattern:
+
+- `<corpus>` — one of `reuter`, `wp`, `essay`, `denario_papers`
+- `_<variant>` — e.g. `_gpt54mini` for the GPT-4o-mini variant
+- `_binox<N>` — Binoculars scores have been added (N = run index)
+
+---
+
+## Pipeline 1 — Citation Impact
 
 ```
 [fetch.py]
@@ -127,7 +194,7 @@ The stages run sequentially. Stages 2, 4, 5, and 6 are optional analysis or enri
 [prepare_data.py]
    ↓  data/parquet/<id>.parquet  or  <id>_AI.parquet
 [add_naip_scores.py]           ← optional: add NAIP impact scores
-   ↓  data/parquet/<id>_naip.parquet
+   ↓  data/parquet/<id>_AI_naip.parquet
 [analyse_data.py]              ← optional: EDA on processed Parquet
 [analyse_naip.py]              ← optional: EDA on NAIP scores
    ↓
@@ -135,286 +202,332 @@ The stages run sequentially. Stages 2, 4, 5, and 6 are optional analysis or enri
 │  Training (pick one or more)         │
 │  run_reg.py   → results/reg/         │
 │  run_repr.py  → results/repr/        │
-│  run_clf.py   → results/clf/         │
 └──────────────────────────────────────┘
    ↓
 [analyse_exp.py + analyse_exp_compare.py]  ← called automatically after training
 ```
 
----
+### Stage 1 — Fetch
 
-## Stage 1 — Fetch
-
-**Script:** `epai/fetch/fetch.py`
+**Script:** `epai/citation_impact/fetch/fetch.py`
+**Config:** `cfg/citation_impact/fetch/hd/fetch_cfg_reduced.yaml`
 **Output:** `data/sql/<id>.db`
 
 ```bash
-python -m epai.fetch.fetch
+python -m epai.citation_impact.fetch.fetch
 ```
 
-Queries the Semantic Scholar bulk-search API for each (domain, query) pair defined in a fetch config YAML. For every paper found it stores:
-
-- Title, abstract, publication year, venue
-- SPECTER embedding (768-dimensional vector pre-computed by Semantic Scholar)
-- Citation count and influential citation count
-- Per-author: name, h-index, citation count, paper count, affiliations
+Queries the Semantic Scholar bulk-search API for each (domain, query) pair defined in a fetch config YAML. For every paper found it stores title, abstract, publication year, venue, SPECTER embedding, citation count, influential citation count, and author metadata (name, h-index, citation count, affiliations).
 
 Papers are stored in a local SQLite database with three tables: `papers`, `authors`, and `paper_authors`.
 
 **Configuration** — edit the constants at the top of `fetch.py`:
 
 ```python
-DB_PATH = DB_DIR / "sql" / "my_dataset.db"          # output file
-CFG_PATH = BASE_DIR / "cfg" / "fetch" / "hd" / "fetch_cfg_reduced.yaml"  # query config
+DB_PATH = DB_DIR / "sql" / "my_dataset.db"
+CFG_PATH = BASE_DIR / "cfg" / "citation_impact" / "fetch" / "hd" / "fetch_cfg_reduced.yaml"
 ```
 
-The fetch config maps domains to a list of search queries (see `cfg/fetch/fetch_cfg_example.yaml`). `TOPIC_LIMIT` controls how many papers to fetch per domain, distributed evenly across queries in that domain.
+The fetch config maps domains to a list of search queries (see `cfg/citation_impact/fetch/fetch_cfg_example.yaml`). `TOPIC_LIMIT` controls how many papers to fetch per domain.
 
 ---
 
-## Stage 2 — Summarise DB
+### Stage 2 — Summarise DB
 
-**Script:** `epai/db/summarise_db.py`
+**Script:** `epai/citation_impact/db/summarise_db.py`
 **Output:** `results/analyse_sql/<id>/*.html`
 
 ```bash
-python -m epai.db.summarise_db
+python -m epai.citation_impact.db.summarise_db
 ```
 
-An optional exploratory step. Loads the raw SQLite database, prints descriptive statistics to the terminal, and saves a set of interactive Plotly HTML charts:
-
-- Citation count distributions (raw and log-transformed)
-- Papers per year, top venues
-- Author h-index and citation distributions
-- Authors per paper, best-author h-index vs paper citations
-- NULL percentage per column (useful for data quality checks)
-- A single-page overview dashboard
+An optional exploratory step. Loads the raw SQLite database, prints descriptive statistics, and saves interactive Plotly HTML charts (citation distributions, papers per year, author statistics, NULL percentages, overview dashboard).
 
 Edit `DB_NAME` at the top of the script to point at your database.
 
 ---
 
-## Stage 3 — Prepare Data
+### Stage 3 — Prepare Data
 
-**Script:** `epai/prepare/prepare_data.py`
+**Script:** `epai/citation_impact/prepare/prepare_data.py`
 **Output:** `data/parquet/<id>.parquet` or `data/parquet/<id>_AI.parquet`
 
 ```bash
-python -m epai.prepare.prepare_data
+python -m epai.citation_impact.prepare.prepare_data
 ```
 
-Converts the SQLite database to a Parquet file (a columnar format that loads much faster for ML) and optionally enriches the dataset in two ways:
+Converts the SQLite database to a Parquet file and optionally enriches it:
 
-### 3a — AI-generated synthetic abstracts (`ADD_GEN_AI = True`)
-
-For each human-written paper, several LLMs each produce a rephrased version of the title and abstract as structured JSON output. Two rephrasing styles are available:
-
-- **normal** — preserves meaning, rewrites sentence structure and vocabulary
-- **aggressive** — same meaning but maximally different phrasing and paragraph structure
-
-The following model/style combinations are used by default:
+**3a — AI-generated synthetic abstracts (`ADD_GEN_AI = True`):** For each human-written paper, several LLMs each produce a rephrased version. Model/style combinations used by default:
 - `gemini-2.5-flash-lite` / normal
 - `claude-haiku-4-5-20251001` / normal
 - `gpt-4o-mini` / normal
 - `gpt-4o-mini` / aggressive
 
-Only papers for which **all** models succeed are kept. Each successful paper produces N+1 rows in the output: one original (human) row and one row per model/style, tagged with a `generated_by` column (e.g. `"gpt-4o-mini:aggressive"`). This labelled dataset is what the classification task uses.
+Each successful paper produces N+1 rows: one original (human) and one per model/style tagged with a `generated_by` column. This labelled dataset is what the citation-impact classification task uses.
 
-### 3b — Local scientific embeddings (`ADD_EMB_SPECTER2 = True`)
-
-Computes fresh embeddings locally using [SPECTER2](https://huggingface.co/allenai/specter2_base). The result is stored as a new column `emb_specter2`. This is important for the classification task because Semantic Scholar only provides embeddings for real papers — the AI-generated abstracts need their own embeddings computed locally.
-
-Other supported embedding models (see `embedding_utils.py`): `specter2`, `scibert`, `openai`.
+**3b — Local scientific embeddings (`ADD_EMB_SPECTER2 = True`):** Computes fresh embeddings locally using [SPECTER2](https://huggingface.co/allenai/specter2_base). Required for the classification task because Semantic Scholar only provides embeddings for real papers.
 
 ---
 
-## Stage 4 — Fetch NAIP Scores
+### Stage 4 — Fetch NAIP Scores
 
-**Script:** `epai/score/add_naip_scores.py`
-**Input:** `data/parquet/<id>_AI.parquet`
+**Script:** `epai/citation_impact/score/add_naip_scores.py`
 **Output:** `data/parquet/<id>_AI_naip.parquet`
 
 ```bash
-python -m epai.score.add_naip_scores
+python -m epai.citation_impact.score.add_naip_scores
 ```
 
-An optional enrichment step. Queries the [NAIP](https://huggingface.co/spaces/ssocean/Newborn_Article_Impact_Predict) (Newborn Article Impact Predictor) Gradio API on HuggingFace for each row in the dataset and adds two columns:
-
-| Column | Description |
-|---|---|
-| `naip_raw_score` | Raw model output |
-| `naip_final_score` | Normalised TNCSI_sp score (0–1) |
-
-The script is resume-safe: if the output file already exists, previously scored rows are loaded from it and skipped. This means you can interrupt and re-run without re-querying the API.
-
-**Configuration** — edit the constants at the top of `add_naip_scores.py`:
-
-```python
-PARQUET_IN  = ...   # input Parquet (AI-augmented)
-PARQUET_OUT = ...   # output path
-MODEL_VERSION = "v2.1"      # "v1" or "v2.1"
-SLEEP_BETWEEN = 0.2         # seconds between requests
-```
-
-A `HF_TOKEN` in `.env` is optional but recommended to avoid rate limits on the public Gradio space.
+Queries the [NAIP](https://huggingface.co/spaces/ssocean/Newborn_Article_Impact_Predict) Gradio API on HuggingFace and adds `naip_raw_score` and `naip_final_score` (0–1) columns. Resume-safe: previously scored rows are skipped on re-run.
 
 ---
 
-## Stage 5 — Analyse Data
+### Stage 5 — Analyse Data
 
-**Script:** `epai/analyse/analyse_data.py`
+**Script:** `epai/citation_impact/analyse/analyse_data.py`
 **Output:** `results/analyse_data/<id>/`
 
 ```bash
-python -m epai.analyse.analyse_data
+python -m epai.citation_impact.analyse.analyse_data
 ```
 
-Exploratory data analysis on the processed Parquet file. Edit `DB_ID` and `MODE_AI` at the top.
-
-**Standard mode (`MODE_AI = False`)** produces:
-- Publication year histogram and citation count histograms (raw and log-transformed)
-- Citations vs year correlation (scatter + mean trend line)
-- Author h-index vs citations correlation
-- 2D PCA and UMAP projections of SPECTER embeddings, colored by year and by domain
-
-**AI-augmented mode (`MODE_AI = True`)** produces:
-- 2D PCA of SPECTER2 embeddings colored by `generated_by` label (human vs each LLM)
-- Human vs LLM abstract semantic similarity — pairwise cosine distances between human and AI abstract embeddings, showing how far each LLM's rephrasing drifts in embedding space
-
-All plots are saved as interactive `.html` files (Plotly).
+EDA on the processed Parquet. Standard mode produces citation histograms, correlation plots, and 2D PCA/UMAP projections of SPECTER embeddings. AI-augmented mode (`MODE_AI = True`) produces 2D PCA colored by `generated_by` and pairwise cosine distances between human and AI abstract embeddings.
 
 ---
 
-## Stage 6 — Analyse NAIP
+### Stage 6 — Analyse NAIP
 
-**Script:** `epai/analyse/analyse_naip.py`
-**Input:** `data/parquet/<id>_naip.parquet`
+**Script:** `epai/citation_impact/analyse/analyse_naip.py`
 **Output:** `results/naip/<parquet_stem>/`
 
 ```bash
-python -m epai.analyse.analyse_naip
+python -m epai.citation_impact.analyse.analyse_naip
 ```
 
-An optional analysis step for datasets that have been enriched with NAIP scores (Stage 4). Produces:
-
-- `overall_distribution.png` — histograms of raw and final score across all rows
-- `grouped_raw.png` / `grouped_final.png` — score distributions per `generated_by` group
-- `grouped_stats_{raw,final}.png` — mean ± std bar chart per group
-- `corr_raw_citations.png` / `corr_final_citations.png` — NAIP score vs `log(1 + citation_count)`
-- `corr_raw_yearly_citations.png` / `corr_final_yearly_citations.png` — NAIP score vs yearly citations
-
-Edit the `PARQUET_PATH` constant at the top of the script.
+EDA on NAIP-enriched datasets. Produces score distributions per `generated_by` group, mean ± std bar charts, and correlations between NAIP scores and citation counts.
 
 ---
 
-## Stage 7 — Training
+### Stage 7 — Training (Regression / Repr Learning)
 
-All three training scripts follow the same pattern:
+All training scripts follow the same pattern: load YAML configs → run N seeds → save results as JSON + model `.joblib` → auto-run analysis.
 
-1. Load all YAML configs from a directory (`cfg/train/<task>/...`)
-2. For each config, run `n_runs` independent seeds
-3. Each seed: load data → build features → split 70/15/15 → `StandardScaler` → train model → save results as JSON + model as `.joblib`
-4. After all configs finish, automatically run `analyse_exp.py` and `analyse_exp_compare.py`
+**Configs live in:** `cfg/citation_impact/train/`
 
-### Regression (`run_reg.py`)
+#### Regression (`run_reg.py`)
 
 **Output:** `results/reg/<experiment_id>/`
 
 ```bash
-python -m epai.train.run_reg
+python -m epai.citation_impact.train.run_reg
 ```
 
-Predicts `log1p(citation_count)` from paper features. Metrics saved per seed: RMSE and R² on train, val, and test splits.
+Predicts `log1p(citation_count)` from paper features. Metrics per seed: RMSE and R² on train/val/test.
 
-**Available models** (`ml_alg` in config):
+Available models (`ml_alg` in config): `gradient_boosting`, `linear`, `svm`, `mlp`, `ae`
 
-| Value | Model |
-|---|---|
-| `gradient_boosting` | Gradient Boosting Regressor (sklearn) |
-| `linear` | Linear Regression |
-| `svm` | Support Vector Regression |
-| `mlp` | MLP Regressor (sklearn) |
-| `ae` | Autoencoder + Ridge head (see Representation Learning) |
+Available features: `embedding`, `emb_specter2`, `year`, `best_author_h_index`, `author_count`, `page_count`
 
-**Available features** (`features` list in config):
-
-| Name | Description |
-|---|---|
-| `embedding` | 768-dim SPECTER vector pre-computed by Semantic Scholar |
-| `emb_specter2` | Locally computed SPECTER2 vector |
-| `year` | Publication year (scalar) |
-| `best_author_h_index` | H-index of the most cited author on the paper (scalar) |
-| `author_count` | Number of authors (scalar) |
-| `page_count` | Number of pages (scalar) |
-
-Multiple features can be combined — they are concatenated column-wise before training.
-
-### Representation Learning (`run_repr.py`)
+#### Representation Learning (`run_repr.py`)
 
 **Output:** `results/repr/<experiment_id>/`
 
 ```bash
-python -m epai.train.run_repr
+python -m epai.citation_impact.train.run_repr
 ```
 
-Trains the **Autoencoder Regressor** defined in `epai/train/autoencoder.py`. This is a two-stage model:
+Trains the `AERegressor` in `epai/train/autoencoder.py`: a deep autoencoder (768→512→256→128→256→512→768) whose 128-dim latent space is used as input to a Ridge regression head predicting `log1p(citation_count)`.
 
-1. A deep autoencoder is trained to reconstruct the input embedding (768 → 512 → 256 → **128** → 256 → 512 → 768). The loss is a weighted sum of MSE and cosine similarity.
-2. A Ridge regression head is fitted on the compressed 128-dimensional **latent space** to predict `log1p(citation_count)`.
+---
 
-This lets you study what structure emerges in a compressed embedding space and whether that compressed structure is predictive of citations. Use `ml_alg: ae` in the repr config.
+### Stage 8 — Analyse Experiments
 
-### Classification (`run_clf.py`)
+These two scripts from `epai/analyse/` are called automatically at the end of each training script. They can also be run standalone.
+
+- `analyse_exp.py` — per-algorithm plots (loss curves, feature importance, metrics summary, pred vs. gt scatter)
+- `analyse_exp_compare.py` — cross-algorithm comparison (grouped bar charts, overlaid CI bands, feature importances)
+
+---
+
+## Pipeline 2 — AI Detection
+
+```
+[prepare_{reuter,wp,essay,denario}.py]   ← Stage A: raw text → Parquet
+   ↓  data/parquet/<corpus>.parquet
+[merge_parquets.py]                      ← optional: combine corpora
+[recompute_embedding.py]                 ← optional: verify embedding stability
+   ↓
+[add_embeddings.py]                      ← Stage B: add embedding columns
+   ↓  data/parquet/<corpus>_binox*.parquet
+[analyse_binox_*.py]                     ← Stage C: EDA — Binoculars scores & embeddings
+[analyse_emb_2d.py]
+[analyse_parquet_*.py]
+   ↓
+┌────────────────────────────────────────────────────────────┐
+│  Classification (pick one or more)                         │
+│  run_clf.py                → results/clf/                  │
+│  run_clf_cross_domain.py   → results/clf_cd/               │
+│  run_clf_cross_domain_algs.py  → results/clf_cd_algs/      │
+│  run_clf_cross_domain_embeddings.py → results/clf_cd_emb/  │
+└────────────────────────────────────────────────────────────┘
+```
+
+### Stage A — Prepare Corpora
+
+All prepare scripts read raw text files from `data/ghostbuster-data*/` (or `data/papers/denario/`) and produce a structured Parquet with columns: `id`, `text`, `generated_by`, embedding columns.
+
+```bash
+python -m epai.ai_detection.prepare.prepare_reuter
+python -m epai.ai_detection.prepare.prepare_wp
+python -m epai.ai_detection.prepare.prepare_essay
+python -m epai.ai_detection.prepare.prepare_denario
+```
+
+To fetch the Denario papers first:
+```bash
+python epai/ai_detection/fetch/fetch_denario.py
+```
+
+To combine multiple Parquets into one:
+```bash
+python -m epai.ai_detection.prepare.merge_parquets data/parquet/a.parquet data/parquet/b.parquet
+```
+
+**Configs live in:** `cfg/ai_detection/train/`
+
+---
+
+### Stage B — Embed
+
+**Script:** `epai/ai_detection/embed/add_embeddings.py`
+**Output:** overwrites / extends the input Parquet with new `emb_*` columns
+
+```bash
+uv run python epai/ai_detection/embed/add_embeddings.py data/parquet/reuter_binox0.parquet --cpu-threads 16 --gpu 0
+```
+
+Adds multiple embedding columns in one pass. Supported embedders (subset, see `EMBEDDERS` list in the script):
+
+| Key | Model |
+|---|---|
+| `specter2` | SPECTER2 (scientific) |
+| `scibert` | SciBERT |
+| `mpnet` | all-mpnet-base-v2 |
+| `minilm` | all-MiniLM-L6-v2 |
+| `e5` | E5 |
+| `bge` | BGE |
+| `qwen3` | Qwen3-Embedding-0.6B |
+| `luar` / `luar_crud` | LUAR (authorship) |
+| `styledistance` | StyleDistance |
+| `openai_small` / `openai_large` | OpenAI text-embedding-3-* |
+
+The Parquet is written after every embedder finishes — a crash does not throw away completed embeddings.
+
+---
+
+### Stage C — Analyse Embeddings / Binoculars
+
+```bash
+# 2D UMAP/PCA of embeddings coloured by generated_by
+python -m epai.ai_detection.analyse.analyse_emb_2d data/parquet/reuter_binox0.parquet --by-generator
+
+# Binoculars human vs. AI per-id score differences
+uv run python epai/ai_detection/analyse/analyse_binox_human_vs_ai.py data/parquet/wp_binox0.parquet
+
+# Pairwise comparison between two Binoculars runs
+uv run python epai/ai_detection/analyse/analyse_binox_pairwise.py
+
+# Corpus QA (row/column counts, missing values)
+uv run python epai/ai_detection/analyse/analyse_parquet_compare.py data/parquet/a.parquet data/parquet/b.parquet
+uv run python epai/ai_detection/analyse/analyse_parquet_summary.py data/parquet/reuter_binox0.parquet
+
+# Text length distributions
+uv run python epai/ai_detection/analyse/analyse_text_lengths.py
+
+# Count and flag empty .txt files in a raw-data folder
+uv run python epai/ai_detection/analyse/analyse_txt_folder.py data/ghostbuster-data/essay
+```
+
+---
+
+### Stage D — Training (Classification)
+
+#### In-domain classification (`run_clf.py`)
 
 **Output:** `results/clf/<experiment_id>/`
 
 ```bash
-python -m epai.train.run_clf
+python -m epai.ai_detection.train.run_clf
 ```
 
-Classifies whether an abstract is human-written or generated by a specific model/style, based on the `generated_by` label column. The feature is the `emb_specter2` embedding. Metrics: accuracy and a per-class classification report (precision, recall, F1).
+Classifies whether a text is human-written or generated by a specific model/style based on the `generated_by` label column and `emb_specter2` embeddings. Metrics: accuracy and per-class F1. Splits are stratified.
 
-Train/val/test splits are **stratified** to ensure balanced class representation across splits. The label encoder mapping (integer → class name) is saved as `label_mapping.json` next to the model.
+#### Cross-domain transfer control (`run_clf_cross_domain.py`)
 
-**Available classifiers** (`ml_alg` in config):
+**Output:** `results/clf_cd/<experiment_id>/`
 
-| Value | Model |
-|---|---|
-| `gradient_boosting` | Gradient Boosting Classifier |
-| `logistic` | Logistic Regression |
-| `svm` | Support Vector Classifier |
-| `mlp` | MLP Classifier |
+```bash
+python -m epai.ai_detection.train.run_clf_cross_domain
+```
 
-You can exclude specific classes from training using `drop_classes` in the config — for example, to run a binary human-vs-AI experiment instead of multi-class.
+Trains on each corpus in turn and evaluates on all of them, producing a source × target accuracy matrix. The off-diagonal shows how well the classifier transfers to unseen corpora — distinguishing "learned machine-generated-ness" from "learned corpus artifacts".
+
+#### Cross-domain × algorithm sweep (`run_clf_cross_domain_algs.py`)
+
+**Output:** `results/clf_cd_algs/<experiment_id>/`
+
+```bash
+python -m epai.ai_detection.train.run_clf_cross_domain_algs
+```
+
+Same as the cross-domain control but sweeps across ML algorithms (logistic, SVM, gradient boosting, MLP, Binoculars-MLP) on one fixed feature set. Each algorithm gets its own matrix and a comparison ranking.
+
+#### Cross-domain × embedding sweep (`run_clf_cross_domain_embeddings.py`)
+
+**Output:** `results/clf_cd_emb/<experiment_id>/`
+
+```bash
+python -m epai.ai_detection.train.run_clf_cross_domain_embeddings
+```
+
+Same as the cross-domain control but sweeps across all embedding columns in the config. Each embedder gets its own matrix and a final comparison figure. Includes a zero-shot Binoculars baseline.
+
+To regenerate figures from saved results without retraining:
+```bash
+uv run python epai/ai_detection/train/replot_cross_domain.py results/clf_cd_algs
+uv run python epai/ai_detection/train/replot_cross_domain.py results/clf_cd_emb
+```
 
 ---
 
-## Stage 8 — Analyse Experiments
+## Shared Library
 
-These two scripts are called automatically at the end of each training script. They can also be run standalone by editing the `experiment_id` variable at the bottom of each file.
+The `epai/utils/`, `epai/train/`, and `epai/analyse/` modules are used by both pipelines and should not be modified for pipeline-specific purposes.
 
-### Per-run analysis (`epai/analyse/analyse_exp.py`)
-
-For each algorithm in an experiment, produces figures aggregated across all seeds. Saved to `results/<task>/<experiment_id>/<alg_id>/figs/`:
-
-- `loss_curves.png` — mean ± std loss over boosting stages or autoencoder epochs
-- `feature_importance.png` — top-20 features with error bars across seeds (gradient boosting only)
-- `metrics_summary.png` — RMSE and R² across train/val/test splits with per-seed dots
-- `pred_vs_gt.png` — hexbin scatter of predicted vs. ground truth citations per seed
-
-### Cross-run comparison (`epai/analyse/analyse_exp_compare.py`)
-
-Overlays all algorithm configs within one experiment. Saved to `results/<task>/<experiment_id>/figs/`:
-
-- `results_comparison.png` — grouped bar chart of metrics per algorithm
-- `loss_curves_comparison.png` — overlaid CI bands for all algorithms
-- `feature_importance_comparison.png` — grouped or per-algorithm feature importances
+| Module | Purpose |
+|---|---|
+| `epai/utils/config_utils.py` | Load and collect YAML experiment configs |
+| `epai/utils/cuda_util.py` | Check CUDA availability |
+| `epai/utils/dimred_utils.py` | PCA, KernelPCA, UMAP wrappers |
+| `epai/utils/embedding_utils.py` | SPECTER2 / SciBERT / OpenAI embedding computation |
+| `epai/utils/env_utils.py` | `.env` variable and installed-package checks |
+| `epai/utils/genai_utils.py` | Multi-LLM abstract rephrasing (OpenAI, Anthropic, Gemini) |
+| `epai/utils/parquet_utils.py` | Parquet save/load helpers |
+| `epai/utils/s2_utils.py` | Semantic Scholar API client |
+| `epai/utils/sqlite_utils.py` | SQLite schema, save, and load helpers |
+| `epai/utils/train_utils.py` | Feature assembly and model factory |
+| `epai/utils/visualization_utils.py` | Plotly and matplotlib plot functions |
+| `epai/train/algs/` | Pluggable classifier/regressor subclasses |
+| `epai/train/autoencoder.py` | `AERegressor`: PyTorch autoencoder + Ridge regression head |
+| `epai/analyse/analyse_exp.py` | Per-algorithm plots (lib, called by training scripts) |
+| `epai/analyse/analyse_exp_compare.py` | Cross-algorithm comparison plots (lib) |
 
 ---
 
 ## Configuration Reference
 
-### Fetch config (`cfg/fetch/fetch_cfg_example.yaml`)
+### Fetch config (`cfg/citation_impact/fetch/fetch_cfg_example.yaml`)
 
 ```yaml
 queries_domains:
@@ -426,105 +539,37 @@ queries_domains:
     - "natural language processing large language models"
 ```
 
-Each domain maps to a list of free-text search queries sent to the Semantic Scholar API.
-
-### Training configs (`cfg/train/<task>/`)
+### Regression / repr-learning configs (`cfg/citation_impact/train/`)
 
 ```yaml
-alg_id: "A1"           # unique name → determines the output subdirectory
-alg_label: "SPECTER + year + h-index"  # human-readable label used in plots
-
-seed: 42               # base random seed; run i uses seed + i
-
+alg_id: "A1"
+alg_label: "SPECTER + year + h-index"
+seed: 42
 data:
-  parquet_path: "data/parquet/my_dataset.parquet"  # relative to project root
-  drop_classes: []     # classification only — list classes to exclude
-
+  parquet_path: "data/parquet/my_dataset.parquet"
 features:
-  - embedding          # one or more feature columns (regression/repr)
+  - embedding
   - year
   - best_author_h_index
-
 model:
-  ml_alg: "gradient_boosting"   # see model tables above
-  n_runs: 3                     # number of independent seeds to average over
+  ml_alg: "gradient_boosting"
+  n_runs: 3
 ```
 
-Place multiple YAML files in a directory and point `CFG_DIR` in the training script at that directory — all configs will be run as separate algorithms within the same timestamped experiment, enabling direct comparison.
+### Classification configs (`cfg/ai_detection/train/clf/`, `clf_cd/`, etc.)
 
----
-
-## Project Structure
-
-```
-episteme-ai/
-├── epai/
-│   ├── fetch/                     # Data acquisition
-│   │   ├── fetch.py               #   Stage 1: fetch papers from Semantic Scholar → SQLite
-│   │   └── fetch_denario.py       #   fetch Denario papers
-│   ├── prepare/                   # Raw data → Parquet
-│   │   ├── prepare_data.py        #   Stage 3: SQLite → Parquet, LLM rephrases & embeddings
-│   │   ├── prepare_denario.py     #   Denario papers → Parquet
-│   │   ├── prepare_reuter.py      #   Ghostbuster Reuters corpus → Parquet
-│   │   ├── prepare_wp.py          #   Ghostbuster creative-writing (wp) corpus → Parquet
-│   │   ├── prepare_essay.py       #   Ghostbuster essay corpus → Parquet
-│   │   └── merge_parquets.py      #   concatenate multiple Parquet files
-│   ├── score/                     # Enrich Parquet with detector/impact scores
-│   │   ├── add_naip_scores.py     #   Stage 4: add NAIP impact scores
-│   │   └── add_binoculars_scores.py  # add Binoculars AI-detector scores
-│   ├── analyse/                   # Analysis (standalone scripts + shared lib)
-│   │   ├── analyse_data.py        #   Stage 5: EDA on processed Parquet dataset
-│   │   ├── analyse_naip.py        #   Stage 6: EDA on NAIP impact scores
-│   │   ├── analyse_binoculars.py  #   EDA on Binoculars scores
-│   │   ├── analyse_exp.py         #   Stage 8a: per-algorithm plots (lib, called by train/)
-│   │   └── analyse_exp_compare.py #   Stage 8b: cross-algorithm comparison plots (lib)
-│   ├── train/                     # Experiment runners + model
-│   │   ├── run_reg.py             #   Stage 7a: regression — predict citation count
-│   │   ├── run_repr.py            #   Stage 7b: representation learning via autoencoder
-│   │   ├── run_clf.py             #   Stage 7c: classification — human vs. AI-generated abstract
-│   │   └── autoencoder.py         #   AERegressor: PyTorch autoencoder + Ridge regression head
-│   ├── db/
-│   │   └── summarise_db.py        #   Stage 2: EDA on raw SQLite database
-│   └── utils/
-│       ├── config_utils.py       # Load and collect YAML experiment configs
-│       ├── cuda_util.py          # Check CUDA availability
-│       ├── dimred_utils.py       # PCA, KernelPCA, UMAP wrappers
-│       ├── embedding_utils.py    # SPECTER2 / SciBERT / OpenAI embedding computation
-│       ├── env_utils.py          # .env variable and installed-package checks
-│       ├── genai_utils.py        # Multi-LLM abstract rephrasing (OpenAI, Anthropic, Gemini)
-│       ├── parquet_utils.py      # Parquet save/load helpers
-│       ├── s2_utils.py           # Semantic Scholar API client
-│       ├── sqlite_utils.py       # SQLite schema, save, and load helpers
-│       ├── train_utils.py        # Feature assembly and model factory
-│       └── visualization_utils.py # Plotly and matplotlib plot functions
-├── cfg/
-│   ├── fetch/
-│   │   ├── fetch_cfg_example.yaml   # Template: domain → query mapping
-│   │   └── hd/                      # Fetch configs used in experiments
-│   └── train/
-│       ├── reg/
-│       │   └── hd/                  # Regression experiment configs
-│       ├── repr/
-│       │   └── hd/                  # Representation learning configs
-│       └── clf/
-│           └── hd/                  # Classification experiment configs
-├── store/                     # Versioned datasets tracked with Git LFS
-│   └── data/
-│       ├── parquet/           # Selected Parquet snapshots
-│       └── sql/               # Selected SQLite snapshots
-├── data/                      # Local working data (gitignored)
-│   ├── sql/                   # SQLite databases (one per fetch run)
-│   └── parquet/               # Parquet datasets
-├── results/                   # All experiment outputs (gitignored)
-│   ├── analyse_sql/           # summarise_db.py HTML charts
-│   ├── analyse_data/          # analyse_data.py HTML charts
-│   ├── naip/                  # analyse_naip.py figures
-│   ├── reg/                   # Regression experiment outputs
-│   ├── repr/                  # Representation learning outputs
-│   └── clf/                   # Classification experiment outputs
-├── .gitattributes             # Git LFS tracking rules (*.parquet, *.db)
-├── pyproject.toml
-└── .env_sample                # Template for API keys
+```yaml
+alg_id: "A1"
+alg_label: "SPECTER2"
+seed: 42
+data:
+  parquet_path: "data/parquet/reuter_binox0.parquet"
+  drop_classes: []
+features:
+  - emb_specter2
+model:
+  ml_alg: "logistic"
+  n_runs: 3
 ```
 
 ---
@@ -533,30 +578,32 @@ episteme-ai/
 
 ### Why log1p(citation_count)?
 
-Citation counts follow a heavy-tailed distribution — a handful of papers accumulate tens of thousands of citations while most receive just a few. Training a regression model on raw counts causes the loss function to be dominated by extreme outliers. Applying `log1p(x) = log(1 + x)` compresses the scale and makes the target distribution more symmetric, which is much easier to model. `log1p` is used instead of plain `log` because it handles papers with zero citations gracefully (`log(0)` is undefined, `log1p(0) = 0`).
+Citation counts follow a heavy-tailed distribution — a handful of papers accumulate tens of thousands of citations while most receive just a few. Training a regression model on raw counts causes the loss to be dominated by outliers. `log1p(x) = log(1 + x)` compresses the scale and handles zero-citation papers gracefully (`log(0)` is undefined, `log1p(0) = 0`).
 
 ### What is a SPECTER embedding?
 
-SPECTER and its successor SPECTER2 are transformer models trained specifically on the citation graph of academic papers. Given a paper's title and abstract as input, the model outputs a fixed-length 768-dimensional vector (an embedding) such that papers that frequently cite each other end up close together in this vector space. Using this vector as a feature lets a downstream ML model reason about a paper's topic and scientific community without manually engineering keyword or topic features.
+SPECTER and SPECTER2 are transformer models trained on the citation graph of academic papers. Given a paper's title and abstract, the model outputs a 768-dimensional vector such that papers that frequently cite each other end up close together. Using this as a feature lets downstream ML models reason about a paper's topic and scientific community without manual feature engineering.
 
 ### What does the autoencoder do?
 
-The `AERegressor` in `epai/train/autoencoder.py` learns a **compressed representation** of the 768-dim input embeddings. The encoder network progressively reduces dimensionality (768 → 512 → 256 → 128); the decoder reconstructs the original vector from this 128-dim bottleneck. After training on reconstruction alone, the bottleneck layer (the latent space) is used as input to a simple Ridge regression that predicts `log1p(citation_count)`.
+The `AERegressor` in `epai/train/autoencoder.py` learns a **compressed representation** of 768-dim input embeddings. The encoder progressively reduces dimensionality (768→512→256→128); the decoder reconstructs the original from this 128-dim bottleneck. After training on reconstruction alone, the bottleneck layer is used as input to a Ridge regression head that predicts `log1p(citation_count)`.
 
-The motivation is that forcing the model to compress information may discard noise and retain only the structure that is predictive of citation impact. The reconstruction loss combines MSE (to match magnitudes) and cosine similarity (to match directions) so the latent space preserves both the magnitude and orientation of the original embeddings.
+### What is the citation-impact classification task testing?
 
-### What is the classification task testing?
+When LLMs rephrase abstracts, they shift the text's semantic embedding even if the scientific meaning is preserved. The classification task asks: **can a model distinguish human-written from LLM-rephrased abstracts using only their embeddings?** If yes, LLM-generated scientific text carries a detectable stylistic signature at the embedding level.
 
-When LLMs rephrase abstracts, they inevitably shift the text's semantic embedding even if the scientific meaning is preserved — different word choices produce slightly different SPECTER2 vectors. The classification task asks: **can a model distinguish human-written from LLM-rephrased abstracts using only their embeddings?** If yes, it suggests that LLM-generated scientific text carries a detectable stylistic signature at the embedding level — even when the content is identical to the human original.
+### What is the AI-detection cross-domain task testing?
+
+In-domain accuracy for the classification task is very high (~97–99%). The open question is what signal the classifier has actually learned: **machine-generated-ness** (which should transfer to unseen corpora) vs. **corpus artifacts** (which would collapse to ~50% under transfer). The cross-domain scripts produce a source × target matrix to answer this.
 
 ### What is NAIP?
 
-NAIP (Newborn Article Impact Predictor) is an external model hosted on HuggingFace that predicts the likely long-term impact of a paper from its title and abstract alone, without needing citation data. The `naip_final_score` (0–1) is the normalised TNCSI_sp score. Adding NAIP scores to the dataset lets you study whether LLM-rephrased abstracts are rated as more or less impactful than the human originals, and how NAIP scores correlate with actual citation counts.
+NAIP (Newborn Article Impact Predictor) is an external model on HuggingFace that predicts the likely long-term impact of a paper from its title and abstract alone. The `naip_final_score` (0–1) is the normalised TNCSI_sp score. Adding NAIP scores lets you study whether LLM-rephrased abstracts are rated as more or less impactful than the human originals.
 
 ### Train / Val / Test split
 
-All training scripts use a 70 / 15 / 15 split (train / validation / test). The `StandardScaler` is always fitted on the **training set only** and then applied to validation and test without refitting — this is essential to prevent data leakage. Fitting the scaler on the full dataset would let the model peek at test-set statistics, producing overly optimistic results that would not generalise. Results are averaged across `n_runs` independent random seeds to give a more reliable estimate of model performance and its variance.
+All training scripts use a 70 / 15 / 15 split. The `StandardScaler` is always fitted on the **training set only** and then applied to validation and test — this prevents data leakage. Results are averaged across `n_runs` independent random seeds.
 
 ### Experiment IDs and reproducibility
 
-Each training run generates a timestamped experiment ID (e.g. `reg_20260519_143022`). All config files, per-seed JSON result files, trained model `.joblib` files, and figures are saved under that ID. This makes it easy to go back and reproduce any individual run or compare results across different experiments.
+Each training run generates a timestamped experiment ID (e.g. `reg_20260519_143022`). All config files, per-seed JSON result files, trained model `.joblib` files, and figures are saved under that ID.

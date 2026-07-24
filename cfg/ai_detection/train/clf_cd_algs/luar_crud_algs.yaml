@@ -1,0 +1,144 @@
+# Cross-domain (transfer) classification, repeated for every ML ALGORITHM.
+#
+# Sibling of cfg/train/clf_cd_emb/*.yaml. There the algorithm is fixed and the
+# embedding is swept; here the FEATURE SET is fixed and the `algorithms` list is
+# swept -- every dataset below is trained on in turn and evaluated on ALL of
+# them, once per algorithm:
+#   diagonal     -> in-domain, held-out grouped test split
+#   off-diagonal -> transfer: the model never saw this corpus / this generator
+# Each algorithm gets its own directory and figures, and a final comparison
+# figure ranks the algorithms against each other.
+#
+# Every YAML in cfg/train/clf_cd_algs/ is run by
+# epai/train/run_clf_cross_domain_algs.py, so `alg_id` must be unique across the
+# folder -- it names the output directory under
+# results/clf_cd_algs/<experiment_id>/<alg_id>/<algorithm_id>/
+alg_id: "luar_crud_algs"
+alg_label: "luar_crud — algorithm comparison"
+
+seed: 42
+
+# The algorithms to compare. One full cross-domain matrix is produced per entry,
+# so the run costs len(algorithms) x n_runs x len(datasets) fits. Each entry is
+# either a bare name or a mapping:
+#   name   -> registry key in epai/train/algs (logistic | svm | gradient_boosting
+#             | simple_mlp | binox_mlp)
+#   id     -> optional; output-folder name, set it to run one algorithm twice
+#             with different params without a collision (defaults to `name`)
+#   label  -> optional; shown on the figures (defaults to `name`)
+#   params -> optional; hyper-parameters handed to the algorithm
+#   binoculars -> optional; a column name (or `true` for `binoculars_score`)
+#             handed to the algorithm as a SECOND input beside `features`. Only
+#             algorithms built for it accept one (currently binox_mlp) -- the
+#             preflight rejects the key anywhere else rather than ignoring it.
+#             Such an entry is a HYBRID: it is marked with a ◆ in the ranking and
+#             on the figures, because it sees more than the shared feature set
+#             and its rank cannot be read as an architecture result. The column
+#             never enters `features`, so the plain algorithms are unchanged by
+#             it, but it does join the missing-value filter, so every algorithm
+#             in this config still trains and is scored on identical rows.
+algorithms:
+  # - name: logistic
+  #   label: "Logistic Regression"
+  #   params: {C: 1.0, max_iter: 1000}
+  # - name: svm
+  #   label: "SVM (RBF)"
+  #   params: {C: 1.0, kernel: "rbf", gamma: "scale"}
+  # - name: gradient_boosting
+  #   label: "Gradient Boosting"
+  #   params: {n_estimators: 100, learning_rate: 0.1, max_depth: 3}
+  - name: simple_mlp
+    label: "Simple MLP"
+    params:
+      hidden_dims: [256, 64]
+      dropout: 0.1
+      epochs: 100
+      batch_size: 64
+      lr: 0.001
+      weight_decay: 0.0001
+      patience: 10
+  - name: binox_mlp
+    id: binox_mlp_8
+    label: "MLP + Binoculars (upscale 8)"
+    binoculars: "binoculars_score"
+    params:
+      pre_dims: [256, 64]     # trunk, embedding only
+      post_dims: [16]            # head, after the score is concatenated
+      score_hidden: 8            # 0 = raw scalar; >0 = Linear→ReLU on the score
+      dropout: 0.1
+      epochs: 100
+      batch_size: 64
+      lr: 0.001
+      weight_decay: 0.0001
+      patience: 10
+
+features:
+  - emb_luar_crud
+
+# Zero-shot Binoculars baselines (same as the embeddings script). No classifier
+# is trained by either; each becomes one more ★ row in the comparison, a fixed
+# reference the trained algorithms are measured against. Set enabled: false to
+# skip both.
+#
+#   binoculars_fitted            -> always runs. The cutoff is calibrated per
+#                                   source on its TRAINING split (Youden's J)
+#                                   and applied unchanged to every corpus. No
+#                                   model, but the threshold still comes from
+#                                   the source data, so it is not zero-shot in
+#                                   the strict sense.
+#   binoculars_vanilla_<value>   -> one per `vanilla_threshold` below. The cutoff
+#                                   is taken straight from this file and used
+#                                   everywhere, fit to nothing at all -- the only
+#                                   row in the table that saw no labels. Omit
+#                                   `vanilla_threshold` to skip it; give a list
+#                                   to compare several published cutoffs.
+#
+# Both take the same grouped split, seeds and group exclusion as the trained
+# algorithms, so every row of the comparison is scored on the same rows.
+# 0.9015310749276843 is the cutoff from the Binoculars paper (the accuracy mode;
+# the low-FPR mode uses a different one).
+binoculars_baseline:
+  enabled: true
+  column: "binoculars_score"
+  vanilla_threshold: [0.9015310749276843, 0.8536432310785527]
+
+data:
+  # Labels are binarised to human vs machine: `human_label` -> 0, every other
+  # class -> 1. The corpora do not agree on generator names (`gpt` here,
+  # `gpt_plain` there), so only this binary view is comparable across them.
+  human_label: "human"
+
+  # Column whose rows must stay in the SAME split. In the Ghostbuster corpora the
+  # human original and every LLM rewrite of a source document share one `id`.
+  # It also guards transfer: `essay` and `essay_gpt54mini` are built from the
+  # same human sources and share their ids, so target rows whose group was seen
+  # during training are excluded from the evaluation (and the count is reported).
+  group_col: "id"
+
+  datasets:
+    - name: "essay_gpt54mini"                                          # short key used in the matrix
+      label: "essay (gpt54mini)"                                       # optional, shown on the figures
+      parquet_path: "data/parquet/essay_gpt54mini_binox0.parquet"      # relative to the project root
+      drop_classes: []                                                 # e.g. ["claude", "gpt_prompt1"]
+    - name: "reuter_gpt54mini"
+      label: "reuter (gpt54mini)"
+      parquet_path: "data/parquet/reuter_gpt54mini_binox0.parquet"
+      drop_classes: []
+    - name: "wp_gpt54mini"
+      label: "wp (gpt54mini)"
+      parquet_path: "data/parquet/wp_gpt54mini_binox0.parquet"
+      drop_classes: []
+
+model:
+  n_runs: 3
+  test_size: 0.30     # held-out fraction; used for the in-domain diagonal
+
+# Preflight only: refuse to start if a dataset keeps fewer than this many usable
+# rows on the fixed feature set. Guards against a column that exists but is
+# mostly Null, which would otherwise train on a handful of rows.
+min_rows: 50
+
+# Preflight only: warn (do not abort) when a class is rarer than this share of a
+# dataset. The figures are read against a 50% chance line, which stops being the
+# right anchor once the classes are badly skewed.
+min_class_share: 0.10
