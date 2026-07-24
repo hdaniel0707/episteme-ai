@@ -9,16 +9,18 @@ a new algorithm by writing a subclass and adding it to the registry below.
 from __future__ import annotations
 
 from .base import ClfAlgorithm
+from .binox_mlp import BinoxMLPAlg
 from .gradient_boosting import GradientBoostingAlg
 from .logistic import LogisticAlg
 from .svm import SVMAlg
-from .torch_mlp import TorchMLPAlg
+from .simple_mlp import SimpleMLPAlg
 
 ALGORITHMS: dict[str, type[ClfAlgorithm]] = {
     LogisticAlg.name: LogisticAlg,
     SVMAlg.name: SVMAlg,
     GradientBoostingAlg.name: GradientBoostingAlg,
-    TorchMLPAlg.name: TorchMLPAlg,
+    SimpleMLPAlg.name: SimpleMLPAlg,
+    BinoxMLPAlg.name: BinoxMLPAlg,
 }
 
 
@@ -35,10 +37,11 @@ def build_algorithm(name: str, seed: int = 0, **params) -> ClfAlgorithm:
 
 __all__ = [
     "ALGORITHMS",
+    "BinoxMLPAlg",
     "ClfAlgorithm",
     "GradientBoostingAlg",
     "LogisticAlg",
     "SVMAlg",
-    "TorchMLPAlg",
+    "SimpleMLPAlg",
     "build_algorithm",
 ]

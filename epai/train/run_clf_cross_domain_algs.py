@@ -15,8 +15,15 @@ embedding sweep. What is new:
     same ``features`` design matrix (loaded and stacked once, reused across
     algorithms), so any difference in the matrix is the algorithm's;
   * algorithms are pluggable ``ClfAlgorithm`` subclasses under ``epai/train/algs``
-    (logistic, svm, gradient_boosting, torch_mlp), selected by ``name`` and
-    configured with per-entry ``params``. Each owns its own preprocessing;
+    (logistic, svm, gradient_boosting, simple_mlp, binox_mlp), selected by
+    ``name`` and configured with per-entry ``params``. Each owns its own
+    preprocessing;
+  * an entry may set ``binoculars`` to hand that algorithm the Binoculars score
+    as a second input beside the shared design matrix -- a *hybrid*, marked with
+    a ◆ in the ranking and on the figures because it is not ranked on the same
+    information as the rest. The column stays out of ``features`` (so the plain
+    algorithms are unaffected) but joins the missing-value filter (so every
+    algorithm still trains and is scored on identical rows);
   * one matrix per algorithm, written to ``<experiment>/<alg_id>/<algo_id>/``;
   * an optional zero-shot Binoculars baseline (reused from the embeddings
     script), one more matrix marked with a ★ in the comparison;
@@ -44,6 +51,8 @@ from epai.train.algs import ALGORITHMS, build_algorithm
 from epai.train.run_clf_cross_domain import BINARY_CLASSES, print_matrix
 from epai.train.run_clf_cross_domain_embeddings import (
     BINOX_DIR_NAME,
+    DEFAULT_BINOX_COL,
+    Prepared,
     Report,
     binoculars_baseline_col,
     check_dataset,
@@ -77,18 +86,44 @@ RULE = 78
 # ---------------------------------------------------------------------------
 
 
+def spec_binox_col(entry: dict) -> str | None:
+    """The auxiliary Binoculars column one ``algorithms`` entry asks for, or None.
+
+    ``binoculars: true`` takes the default column, a string names one, and
+    ``false`` / absent means the entry is a plain algorithm on ``features``
+    alone. A non-None value makes the entry a *hybrid*: it sees the score on
+    top of the shared feature set, which the ranking and the figures mark.
+    """
+    value = entry.get("binoculars")
+    if value is True:
+        return DEFAULT_BINOX_COL
+    if isinstance(value, str) and value.strip():
+        return value
+    return None
+
+
 def algorithm_specs(cfg: dict) -> list[dict]:
-    """Normalise the ``algorithms`` list to ``{id, name, label, params}`` dicts.
+    """Normalise ``algorithms`` to ``{id, name, label, params, binoculars}`` dicts.
 
     An entry may be a bare string (``"logistic"``) or a mapping with ``name``
     and optional ``id`` (output-folder name, so two entries of the same
-    algorithm with different params do not collide), ``label`` (shown on figures)
-    and ``params`` (hyper-parameters passed to the algorithm).
+    algorithm with different params do not collide), ``label`` (shown on figures),
+    ``params`` (hyper-parameters passed to the algorithm) and ``binoculars`` (an
+    auxiliary column handed to the algorithm beside the design matrix -- only
+    algorithms whose class sets ``uses_aux`` accept one).
     """
     specs: list[dict] = []
     for entry in cfg.get("algorithms", []) or []:
         if isinstance(entry, str):
-            specs.append({"id": entry, "name": entry, "label": entry, "params": {}})
+            specs.append(
+                {
+                    "id": entry,
+                    "name": entry,
+                    "label": entry,
+                    "params": {},
+                    "binoculars": None,
+                }
+            )
         elif isinstance(entry, dict) and isinstance(entry.get("name"), str):
             name = entry["name"]
             specs.append(
@@ -97,9 +132,38 @@ def algorithm_specs(cfg: dict) -> list[dict]:
                     "name": name,
                     "label": entry.get("label", name),
                     "params": entry.get("params") or {},
+                    "binoculars": spec_binox_col(entry),
                 }
             )
     return specs
+
+
+def aux_columns(cfg: dict) -> list[str]:
+    """Every auxiliary column any algorithm in this config asks for, deduplicated.
+
+    These are *not* part of ``features``: they never enter the shared design
+    matrix, so the plain algorithms are unaffected by their presence. They do
+    join the missing-value filter, though -- see ``load_config_data`` -- so that
+    every algorithm in the config trains and is scored on an identical row set.
+    """
+    cols = [s["binoculars"] for s in algorithm_specs(cfg) if s["binoculars"]]
+    return list(dict.fromkeys(cols))
+
+
+def load_columns(cfg: dict) -> list[str]:
+    """Columns every dataset is read and missing-filtered on: features + auxiliary.
+
+    One list, used by the preflight and by the run alike, so the rows a hybrid
+    algorithm trains on are exactly the rows the plain ones train on. Filtering
+    per algorithm instead would score them on different subsets and quietly make
+    the comparison table meaningless.
+    """
+    return list(dict.fromkeys(list(cfg["features"]) + aux_columns(cfg)))
+
+
+def feature_only_dim(prep: Prepared, features: list[str]) -> int:
+    """Width of the shared design matrix, excluding any auxiliary columns."""
+    return sum(max(d) for c, d in prep.dims_per_col.items() if c in features)
 
 
 def check_config(cfg: dict, report: Report) -> None:
@@ -149,7 +213,7 @@ def check_config(cfg: dict, report: Report) -> None:
             report.error(
                 f"algorithm ids must be unique (set an 'id' to disambiguate): {dupes}"
             )
-        for s in specs:
+        for entry, s in zip(raw, specs):
             if s["name"] not in ALGORITHMS:
                 report.error(
                     f"unknown algorithm {s['name']!r}. Choose from: {sorted(ALGORITHMS)}"
@@ -158,6 +222,29 @@ def check_config(cfg: dict, report: Report) -> None:
             if not isinstance(s["params"], dict):
                 report.error(f"{s['id']}: 'params' must be a mapping")
                 continue
+
+            # An auxiliary column and an algorithm that takes one must agree, in
+            # both directions: a 'binoculars' key on an algorithm that ignores it
+            # would silently not be a hybrid, and a hybrid without one cannot fit.
+            uses_aux = bool(getattr(ALGORITHMS[s["name"]], "uses_aux", False))
+            asked = isinstance(entry, dict) and entry.get("binoculars") is not None
+            if asked and not s["binoculars"]:
+                report.error(
+                    f"{s['id']}: 'binoculars' must be true or a column name, got "
+                    f"{entry.get('binoculars')!r}"
+                )
+            elif s["binoculars"] and not uses_aux:
+                report.error(
+                    f"{s['id']}: {s['name']!r} does not take an auxiliary column, so "
+                    f"'binoculars' would be ignored — drop it, or use an algorithm "
+                    f"that sets uses_aux"
+                )
+            elif uses_aux and not s["binoculars"]:
+                report.error(
+                    f"{s['id']}: {s['name']!r} needs an auxiliary column — set "
+                    f"'binoculars: {DEFAULT_BINOX_COL}' on this entry"
+                )
+
             try:
                 build_algorithm(s["name"], cfg.get("seed", 0), **s["params"])
             except Exception as exc:  # a known name that still cannot be built
@@ -218,9 +305,14 @@ def check_files(cfg: dict, report: Report) -> None:
     import pyarrow.parquet as pq
 
     group_col = cfg["data"]["group_col"]
-    features = list(cfg["features"])
     binox = binoculars_baseline_col(cfg)
-    needed = [group_col, CLF_TARGET_COL] + features + ([binox] if binox else [])
+    needed = list(
+        dict.fromkeys(
+            [group_col, CLF_TARGET_COL]
+            + load_columns(cfg)  # features + every algorithm's auxiliary column
+            + ([binox] if binox else [])
+        )
+    )
 
     print(f"{'dataset':<22}{'rows':>9}{'cols':>7}  file")
     print("-" * RULE)
@@ -268,6 +360,17 @@ def preflight_config(cfg: dict, report: Report) -> None:
         f"{baseline_note}, features={cfg['features']}, "
         f"{cfg['model']['n_runs']} seeds  → {n_fits} fits"
     )
+    hybrids = [s for s in specs if s["binoculars"]]
+    if hybrids:
+        # These see more than the feature set, so say so before anything runs.
+        print(
+            f"  {len(hybrids)} hybrid algorithm(s) also take an auxiliary column: "
+            + ", ".join(f"{s['id']} ({s['binoculars']})" for s in hybrids)
+        )
+        print(
+            f"  every algorithm is filtered on {load_columns(cfg)} so they all "
+            f"train and score on the same rows"
+        )
 
     print("\n[2/3] parquet files")
     n_errors = len(report.errors)
@@ -280,6 +383,7 @@ def preflight_config(cfg: dict, report: Report) -> None:
     group_col: str = cfg["data"]["group_col"]
     human_label: str = cfg["data"]["human_label"]
     features = list(cfg["features"])
+    columns = load_columns(cfg)
     datasets = cfg["data"]["datasets"]
 
     print(
@@ -291,7 +395,7 @@ def preflight_config(cfg: dict, report: Report) -> None:
     preps: dict = {}
     for spec in datasets:
         try:
-            prep = load_prepared(spec, features, group_col, human_label)
+            prep = load_prepared(spec, columns, group_col, human_label)
         except Exception as exc:
             report.error(
                 f"{spec['name']}: failed to load: {type(exc).__name__}: {exc}"
@@ -300,9 +404,11 @@ def preflight_config(cfg: dict, report: Report) -> None:
 
         ok = check_dataset(prep, cfg, "features", report)
         dropped = prep.n_class_dropped + prep.n_missing_dropped
+        # 'dim' is the shared design matrix only; auxiliary columns are handed to
+        # their algorithm separately and never widen it.
         print(
             f"{prep.name:<22}{len(prep.df):>7}{dropped:>9}"
-            f"{(prep.feature_dim if prep.dims_per_col else 0):>7}"
+            f"{(feature_only_dim(prep, features) if prep.dims_per_col else 0):>7}"
             f"{(prep.n_groups if len(prep.df) else 0):>8}  "
             f"{prep.class_counts if len(prep.df) else '-'}"
         )
@@ -382,13 +488,29 @@ def print_report(report: Report) -> None:
 # ---------------------------------------------------------------------------
 
 
-def evaluate_alg(alg, X: np.ndarray, y: np.ndarray) -> dict:
+def fit_alg(alg, X: np.ndarray, y: np.ndarray, Z: np.ndarray | None):
+    """Fit, passing the auxiliary matrix only to algorithms that declare it.
+
+    Keeps the plain ``fit(X, y)`` signature intact for every algorithm that does
+    not set ``uses_aux``; ``Z`` is None for those and never reaches them.
+    """
+    return alg.fit(X, y, Z) if alg.uses_aux else alg.fit(X, y)
+
+
+def predict_alg(alg, X: np.ndarray, Z: np.ndarray | None) -> np.ndarray:
+    """Predict, mirroring ``fit_alg``'s two signatures."""
+    return alg.predict(X, Z) if alg.uses_aux else alg.predict(X)
+
+
+def evaluate_alg(alg, X: np.ndarray, y: np.ndarray, Z: np.ndarray | None = None) -> dict:
     """Metrics for one algorithm on one evaluation set.
 
     Same keys as ``run_clf_cross_domain.evaluate``, but the algorithm owns its
-    own preprocessing, so there is no external scaler to apply here.
+    own preprocessing, so there is no external scaler to apply here. ``Z`` holds
+    the auxiliary columns for a hybrid algorithm, sliced to the same rows as
+    ``X``, and is None for every other algorithm.
     """
-    y_pred = np.asarray(alg.predict(X))
+    y_pred = np.asarray(predict_alg(alg, X, Z))
     return {
         "accuracy": float(accuracy_score(y, y_pred)),
         "macro_f1": float(f1_score(y, y_pred, average="macro", zero_division=0)),
@@ -425,6 +547,16 @@ def run_algorithm(
 
     feature_dim = int(next(iter(X_all.values())).shape[1])
 
+    # The auxiliary column, kept out of X so it can enter the network late. Per
+    # algorithm, since two entries may name different columns; one scalar column
+    # per corpus, so stacking it here rather than in run_config costs nothing.
+    binox_col = spec["binoculars"]
+    Z_all = (
+        {n: stack_features(df, [binox_col])[0] for n, df in data.items()}
+        if binox_col
+        else {n: None for n in data}
+    )
+
     # per_seed[i][source][target] -> metrics
     per_seed: list[dict] = []
 
@@ -437,6 +569,7 @@ def run_algorithm(
         for source in names:
             df_s = data[source]
             X_s, y_s = X_all[source], df_s["y"].to_numpy()
+            Z_s = Z_all[source]
             groups_s = df_s["group"].to_numpy()
 
             # Grouped split: a document and its rewrites never straddle the cut.
@@ -448,29 +581,42 @@ def run_algorithm(
 
             # A fresh algorithm per (seed, source); each owns its preprocessing.
             alg = build_algorithm(name, seed, **params)
-            alg.fit(X_s[train_idx], y_s[train_idx])
+            fit_alg(
+                alg,
+                X_s[train_idx],
+                y_s[train_idx],
+                Z_s[train_idx] if Z_s is not None else None,
+            )
 
             seed_res[source] = {}
             for target in names:
                 if target == source:
                     # In-domain: the corpus's own held-out grouped test split.
-                    res = evaluate_alg(alg, X_s[test_idx], y_s[test_idx])
+                    res = evaluate_alg(
+                        alg,
+                        X_s[test_idx],
+                        y_s[test_idx],
+                        Z_s[test_idx] if Z_s is not None else None,
+                    )
                     res["excluded"] = 0
                 else:
                     df_t = data[target]
                     # Target rows whose group was trained on would be a free hit.
                     keep = ~df_t["group"].isin(train_groups).to_numpy()
+                    Z_t = Z_all[target]
                     res = evaluate_alg(
                         alg,
                         X_all[target][keep],
                         df_t.loc[keep, "y"].to_numpy(),
+                        Z_t[keep] if Z_t is not None else None,
                     )
                     res["excluded"] = int((~keep).sum())
                 res["train_n"] = int(len(train_idx))
                 seed_res[source][target] = res
 
-            # Persist last: TorchMLPAlg.save() moves the model to CPU, so saving
-            # before the predictions above would drop them off the GPU. Best-effort.
+            # Persist last: the torch algorithms' save() moves the model to CPU,
+            # so saving before the predictions above would drop them off the GPU.
+            # Best-effort.
             try:
                 alg.save(seed_model_dir / f"{source}.joblib")
             except Exception as exc:  # persistence must never abort a long run
@@ -511,6 +657,7 @@ def run_algorithm(
     # comparison code; 'algorithm' / 'params' record what actually ran.
     alg_cfg = dict(cfg)
     alg_cfg["features"] = features
+    alg_cfg["binoculars"] = binox_col
     alg_cfg["model"] = {**cfg["model"], "ml_alg": name}
     alg_cfg["alg_id"] = f"{cfg['alg_id']}__{spec['id']}"
     alg_cfg["alg_label"] = f"{cfg['alg_label']} — {spec['label']}"
@@ -521,6 +668,7 @@ def run_algorithm(
         "embedding": spec["label"],
         "algorithm": name,
         "params": params,
+        "binoculars": binox_col,
         "feature_dim": feature_dim,
         "dataset_names": names,
         "dataset_labels": labels,
@@ -542,12 +690,13 @@ def print_ranking(alg_label: str, rows: list[dict]) -> None:
     print(f"  {alg_label} — ALGORITHMS RANKED BY TRANSFER (off-diagonal) ACCURACY")
     print("=" * RULE)
     print(
-        f"{'algorithm':<24}{'in-domain':>12}{'transfer':>11}{'worst':>9}{'gap':>8}"
+        f"{'algorithm':<26}{'in-domain':>12}{'transfer':>11}{'worst':>9}{'gap':>8}"
     )
     print("-" * RULE)
     for r in order:
+        mark = "★ " if r.get("baseline") else ("◆ " if r.get("hybrid") else "  ")
         print(
-            f"{r['label']:<24}"
+            f"{mark + r['label']:<26}"
             f"{r['in_domain_mean']*100:>11.1f}%{r['transfer_mean']*100:>10.1f}%"
             f"{r['transfer_min']*100:>8.1f}%{r['gap']*100:>7.1f}"
         )
@@ -555,6 +704,15 @@ def print_ranking(alg_label: str, rows: list[dict]) -> None:
     print("  in-domain = mean of the diagonal (held-out, same corpus)")
     print("  transfer  = mean of the off-diagonal (unseen corpus); chance is 50%")
     print("  gap       = in-domain − transfer, i.e. what does not survive transfer")
+    if any(r.get("baseline") for r in order):
+        print("  ★ zero-shot baseline: no classifier trained")
+    hybrids = [r for r in order if r.get("hybrid")]
+    if hybrids:
+        cols = sorted({r.get("aux_column", "?") for r in hybrids})
+        print(
+            f"  ◆ hybrid: trained on the shared features PLUS {', '.join(cols)}, so "
+            f"it is not ranked on equal information"
+        )
 
 
 def run_config(cfg_path: Path, cfg: dict, alg_dir: Path) -> None:
@@ -568,6 +726,8 @@ def run_config(cfg_path: Path, cfg: dict, alg_dir: Path) -> None:
     human_label: str = cfg["data"]["human_label"]
     specs_ds: list[dict] = cfg["data"]["datasets"]
     features = list(cfg["features"])
+    columns = load_columns(cfg)
+    aux = aux_columns(cfg)
     names = [spec["name"] for spec in specs_ds]
     labels = {spec["name"]: spec.get("label", spec["name"]) for spec in specs_ds}
     specs = algorithm_specs(cfg)
@@ -576,6 +736,8 @@ def run_config(cfg_path: Path, cfg: dict, alg_dir: Path) -> None:
     tqdm.write(f"  ALG ID     : {cfg['alg_id']}")
     tqdm.write(f"  ALGORITHMS : {[s['id'] for s in specs]}")
     tqdm.write(f"  FEATURES   : {features}")
+    if aux:
+        tqdm.write(f"  AUXILIARY  : {aux}  (hybrid entries only)")
     tqdm.write(
         f"  SPLIT      : grouped by {group_col!r}, "
         f"test_size={cfg['model'].get('test_size', 0.30)}, "
@@ -584,17 +746,23 @@ def run_config(cfg_path: Path, cfg: dict, alg_dir: Path) -> None:
     tqdm.write(f"  OUTPUT     : {alg_dir}")
     tqdm.write("=" * RULE)
 
-    # Load and stack the fixed feature set once; every algorithm reuses it.
+    # Load and stack the fixed feature set once; every algorithm reuses it. The
+    # missing-value filter runs over features + auxiliary columns together, so a
+    # row a hybrid algorithm cannot use is absent for the plain ones too and the
+    # comparison stays like-for-like.
     data = {}
     for spec in specs_ds:
-        prep = load_prepared(spec, features, group_col, human_label)
+        prep = load_prepared(spec, columns, group_col, human_label)
         tqdm.write(f"  {spec['name']:<20} {len(prep.df):>6} rows  {prep.class_counts}")
         data[spec["name"]] = prep.df
     X_all = {name: stack_features(df, features)[0] for name, df in data.items()}
 
     rows: list[dict] = []
     for spec in tqdm(specs, desc="Algorithms", unit="alg", leave=False):
-        tqdm.write(f"\n→ {spec['id']}  ({spec['name']}, params={spec['params']})")
+        hybrid_note = f" + {spec['binoculars']}" if spec["binoculars"] else ""
+        tqdm.write(
+            f"\n→ {spec['id']}  ({spec['name']}{hybrid_note}, params={spec['params']})"
+        )
         out_dir = alg_dir / spec["id"]
         out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -606,7 +774,14 @@ def run_config(cfg_path: Path, cfg: dict, alg_dir: Path) -> None:
         # Plot as we go: an interrupted run still leaves finished algorithms
         # with their figures.
         plot_clf_cd_result(out_dir)
-        rows.append(summarise_embedding(payload))
+        row = summarise_embedding(payload)
+        if spec["binoculars"]:
+            # Flags the row for the ranking and the figures: it saw the shared
+            # feature set *and* the score, so it is not on equal footing with the
+            # plain algorithms and must not read as though it were.
+            row["hybrid"] = True
+            row["aux_column"] = spec["binoculars"]
+        rows.append(row)
 
     # Optional zero-shot Binoculars baseline (reused from the embeddings script).
     binox_col = binoculars_baseline_col(cfg)

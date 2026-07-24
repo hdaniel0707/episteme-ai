@@ -29,10 +29,21 @@ class ClfAlgorithm(ABC):
     algorithm is fully described by ``(name, seed, params)`` and each subclass
     reads its own hyper-parameters out of ``self.params`` with sensible
     defaults.
+
+    An algorithm that wants a *second* input beside the design matrix -- the
+    Binoculars score, say, kept out of ``X`` so it can enter the network late --
+    sets ``uses_aux = True`` and takes a third argument ``Z`` on ``fit`` and a
+    second on ``predict``. The runner passes ``Z`` only to those algorithms, so
+    every other subclass keeps the plain two-argument signature, and a config
+    that names an auxiliary column for an algorithm which does not declare
+    ``uses_aux`` is a preflight error rather than a silently ignored key.
     """
 
     #: Registry key / output-folder name. Overridden by every concrete subclass.
     name: str = "base"
+
+    #: Does ``fit`` / ``predict`` take the auxiliary matrix ``Z``? See above.
+    uses_aux: bool = False
 
     def __init__(self, seed: int = 0, **params):
         self.seed = int(seed)

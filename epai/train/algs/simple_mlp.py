@@ -33,7 +33,7 @@ class _MLP(nn.Module):
         return self.net(x)
 
 
-class TorchMLPAlg(ClfAlgorithm):
+class SimpleMLPAlg(ClfAlgorithm):
     """A custom PyTorch MLP: standardise, then train an MLP under cross-entropy.
 
     Runs on CUDA when available, otherwise CPU. Params (all optional):
@@ -47,10 +47,10 @@ class TorchMLPAlg(ClfAlgorithm):
         improvement (default 10; set 0 to disable and always run ``epochs``).
     """
 
-    name = "torch_mlp"
+    name = "simple_mlp"
     N_CLASSES = 2
 
-    def fit(self, X: np.ndarray, y: np.ndarray) -> "TorchMLPAlg":
+    def fit(self, X: np.ndarray, y: np.ndarray) -> "SimpleMLPAlg":
         p = self.params
         hidden_dims = [int(h) for h in p.get("hidden_dims", [256, 64])]
         dropout = float(p.get("dropout", 0.1))

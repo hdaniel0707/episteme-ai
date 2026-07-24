@@ -1086,6 +1086,19 @@ def plot_clf_cd_results(exp_dir: Path) -> None:
     print(f"Plots saved to: {exp_dir}")
 
 
+def _cd_row_mark(row: dict) -> str:
+    """Prefix for a comparison row: ★ zero-shot baseline, ◆ hybrid, else none.
+
+    A row that is neither was trained on exactly the shared feature set, which
+    is the only case where its rank can be read straight off the figure.
+    """
+    if row.get("baseline"):
+        return "★ "
+    if row.get("hybrid"):
+        return "◆ "
+    return ""
+
+
 def _plot_cd_comparison(
     exp_dir: Path,
     rows: list[dict],
@@ -1111,12 +1124,17 @@ def _plot_cd_comparison(
       * ``row_label(r)`` -- the y-axis label for item ``r``.
 
     Zero-shot baselines (``baseline: true``) are marked with a ★ and hatched
-    bars so they never read as just another item.
+    bars so they never read as just another item. Hybrids (``hybrid: true``) are
+    marked more lightly -- a ◆ on the row label and their own scatter marker, but
+    plain bars -- because they were trained on extra information (the Binoculars
+    score on top of the shared feature set) and their rank should carry that
+    caveat without the bars becoming unreadable.
     """
     # Ranked by transfer: the whole point is which item survives leaving its
     # corpus, not which scores highest at home.
     order = sorted(rows, key=lambda r: r["transfer_mean"])
     is_baseline = np.array([bool(r.get("baseline")) for r in order])
+    is_hybrid = np.array([bool(r.get("hybrid")) for r in order])
     labels = [row_label(r) for r in order]
     in_domain = np.array([r["in_domain_mean"] for r in order])
     transfer = np.array([r["transfer_mean"] for r in order])
@@ -1136,7 +1154,9 @@ def _plot_cd_comparison(
                       color="orange", label="transfer (off-diagonal)")
     axes[0].bar_label(b1, fmt="%.3f", fontsize=7, padding=2)
     axes[0].bar_label(b2, fmt="%.3f", fontsize=7, padding=2)
-    # Hatch the baseline's bars so it never reads as just another item.
+    # Hatch the baseline's bars so it never reads as just another item. Hybrids
+    # are marked by the ◆ on their row label and by their marker in the scatter,
+    # which is enough -- hatching their bars as well drowns out the numbers.
     for idx in np.nonzero(is_baseline)[0]:
         for bar in (b1[idx], b2[idx]):
             bar.set_hatch("//")
@@ -1152,11 +1172,20 @@ def _plot_cd_comparison(
     axes[0].set_xlabel("Accuracy")
     axes[0].set_title("Ranked by transfer accuracy")
     handles, _ = axes[0].get_legend_handles_labels()
+    # Black glyphs matching the ★ / ◆ prefixes on the row labels, rather than the
+    # bar hatch: the prefix is what a reader scans for, and a coloured marker
+    # here would read as a second, different symbol.
     if is_baseline.any():
-        from matplotlib.patches import Patch
+        from matplotlib.lines import Line2D
         handles.append(
-            Patch(facecolor="white", edgecolor="black", hatch="//",
-                  label="zero-shot baseline")
+            Line2D([], [], linestyle="none", marker="*", color="black",
+                   markersize=11, label="zero-shot baseline")
+        )
+    if is_hybrid.any():
+        from matplotlib.lines import Line2D
+        handles.append(
+            Line2D([], [], linestyle="none", marker="D", color="black",
+                   markersize=6, label="hybrid (extra features)")
         )
     # Legend below the axes so it never sits over the bars / worst-cell marks.
     axes[0].legend(
@@ -1168,9 +1197,14 @@ def _plot_cd_comparison(
                  label="no loss under transfer")
     axes[1].axhline(CD_CHANCE, linestyle="--", color="red", linewidth=1.2, label="chance")
     axes[1].axvline(CD_CHANCE, linestyle="--", color="red", linewidth=1.2)
-    item_pts = ~is_baseline
+    item_pts = ~is_baseline & ~is_hybrid
     axes[1].scatter(in_domain[item_pts], transfer[item_pts], s=45, color="seagreen",
                     zorder=3, label=noun)
+    hybrid_pts = is_hybrid & ~is_baseline
+    if hybrid_pts.any():
+        axes[1].scatter(in_domain[hybrid_pts], transfer[hybrid_pts], s=85,
+                        marker="D", color="mediumpurple", edgecolor="black",
+                        linewidth=0.6, zorder=4, label="hybrid (extra features)")
     if is_baseline.any():
         axes[1].scatter(in_domain[is_baseline], transfer[is_baseline], s=130,
                         marker="*", color="crimson", edgecolor="black",
@@ -1243,12 +1277,17 @@ def _plot_cd_comparison(
                               edgecolor="black", linewidth=2.0)
             )
 
-    fig.text(0.01, 0.01,
-             "Boxed columns = in-domain (held-out split of the same corpus); the rest "
-             "are transfer to an unseen corpus.\nRows are ordered by mean transfer "
-             "accuracy, best first. ★ marks a zero-shot baseline (no classifier "
-             "trained).",
-             fontsize=7.5, color="dimgray")
+    note = (
+        "Boxed columns = in-domain (held-out split of the same corpus); the rest "
+        "are transfer to an unseen corpus.\nRows are ordered by mean transfer "
+        "accuracy, best first. ★ marks a zero-shot baseline (no classifier trained)."
+    )
+    if is_hybrid.any():
+        note += (
+            "\n◆ marks a hybrid: trained on extra features beyond the shared set, "
+            "so its row is not comparable on equal information."
+        )
+    fig.text(0.01, 0.01, note, fontsize=7.5, color="dimgray")
     fig.tight_layout(rect=(0, 0.05, 1, 1))
     fig.savefig(exp_dir / f"{noun}_comparison_matrix.png", dpi=150)
     plt.close(fig)
@@ -1293,7 +1332,7 @@ def plot_clf_cd_emb_comparison(exp_dir: Path, payload: dict) -> None:
         exp_dir, rows, names, label_of, alg_label,
         noun="embedding", subtitle=subtitle,
         row_label=lambda r: (
-            f"{'★ ' if r.get('baseline') else ''}{r['label']} ({r['feature_dim']}d)"
+            f"{_cd_row_mark(r)}{r['label']} ({r['feature_dim']}d)"
         ),
     )
 
@@ -1319,6 +1358,11 @@ def plot_clf_cd_alg_comparison(exp_dir: Path, payload: dict) -> None:
     feats = ", ".join(cfg.get("features", []))
     if len(feats) > 60:
         feats = feats[:57] + "…"
+    # Name the extra columns in the subtitle: the ◆ rows did not run on `feats`
+    # alone, and the figure should say so without needing the JSON.
+    aux = sorted({r["aux_column"] for r in rows if r.get("aux_column")})
+    if aux:
+        feats += f" (◆ also + {', '.join(aux)})"
     subtitle = (
         f"features: {feats} · {cfg['model']['n_runs']} seeds · "
         f"grouped by {cfg['data']['group_col']!r} · "
@@ -1327,7 +1371,7 @@ def plot_clf_cd_alg_comparison(exp_dir: Path, payload: dict) -> None:
     _plot_cd_comparison(
         exp_dir, rows, names, label_of, alg_label,
         noun="algorithm", subtitle=subtitle,
-        row_label=lambda r: f"{'★ ' if r.get('baseline') else ''}{r['label']}",
+        row_label=lambda r: f"{_cd_row_mark(r)}{r['label']}",
     )
 
 

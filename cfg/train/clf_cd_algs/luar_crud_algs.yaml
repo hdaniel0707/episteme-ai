@@ -22,11 +22,21 @@ seed: 42
 # so the run costs len(algorithms) x n_runs x len(datasets) fits. Each entry is
 # either a bare name or a mapping:
 #   name   -> registry key in epai/train/algs (logistic | svm | gradient_boosting
-#             | torch_mlp)
+#             | simple_mlp | binox_mlp)
 #   id     -> optional; output-folder name, set it to run one algorithm twice
 #             with different params without a collision (defaults to `name`)
 #   label  -> optional; shown on the figures (defaults to `name`)
 #   params -> optional; hyper-parameters handed to the algorithm
+#   binoculars -> optional; a column name (or `true` for `binoculars_score`)
+#             handed to the algorithm as a SECOND input beside `features`. Only
+#             algorithms built for it accept one (currently binox_mlp) -- the
+#             preflight rejects the key anywhere else rather than ignoring it.
+#             Such an entry is a HYBRID: it is marked with a ◆ in the ranking and
+#             on the figures, because it sees more than the shared feature set
+#             and its rank cannot be read as an architecture result. The column
+#             never enters `features`, so the plain algorithms are unchanged by
+#             it, but it does join the missing-value filter, so every algorithm
+#             in this config still trains and is scored on identical rows.
 algorithms:
   - name: logistic
     label: "Logistic Regression"
@@ -34,11 +44,11 @@ algorithms:
   - name: svm
     label: "SVM (RBF)"
     params: {C: 1.0, kernel: "rbf", gamma: "scale"}
-  - name: gradient_boosting
-    label: "Gradient Boosting"
-    params: {n_estimators: 100, learning_rate: 0.1, max_depth: 3}
-  - name: torch_mlp
-    label: "Torch MLP"
+  # - name: gradient_boosting
+  #   label: "Gradient Boosting"
+  #   params: {n_estimators: 100, learning_rate: 0.1, max_depth: 3}
+  - name: simple_mlp
+    label: "Simple MLP"
     params:
       hidden_dims: [256, 64]
       dropout: 0.1
@@ -47,6 +57,45 @@ algorithms:
       lr: 0.001
       weight_decay: 0.0001
       patience: 10
+
+  # Late fusion: the embedding is compressed by `pre_dims`, the Binoculars score
+  # is concatenated to that bottleneck, and `post_dims` classifies the pair. The
+  # score therefore never passes through the compression, which is the whole
+  # point -- at the input it would have to survive being squeezed to 8 dims.
+  - name: binox_mlp
+    id: binox_mlp_16
+    label: "MLP + Binoculars (upscale 16)"
+    binoculars: "binoculars_score"
+    params:
+      pre_dims: [256, 64]     # trunk, embedding only
+      post_dims: [16]            # head, after the score is concatenated
+      score_hidden: 16            # 0 = raw scalar; >0 = Linear→ReLU on the score
+      dropout: 0.1
+      epochs: 100
+      batch_size: 64
+      lr: 0.001
+      weight_decay: 0.0001
+      patience: 10
+
+  # The control for the entry above: `pre_dims: []` leaves the trunk a
+  # pass-through, so the score is concatenated at the INPUT (early fusion). Same
+  # class, same data, same seeds -- the only difference is where the score joins,
+  # which is what makes the comparison between these two rows meaningful.
+  - name: binox_mlp
+    id: binox_mlp_8
+    label: "MLP + Binoculars (upscale 8)"
+    binoculars: "binoculars_score"
+    params:
+      pre_dims: [256, 64]     # trunk, embedding only
+      post_dims: [16]            # head, after the score is concatenated
+      score_hidden: 8            # 0 = raw scalar; >0 = Linear→ReLU on the score
+      dropout: 0.1
+      epochs: 100
+      batch_size: 64
+      lr: 0.001
+      weight_decay: 0.0001
+      patience: 10
+
 
 # The FIXED design matrix every algorithm is trained on. Vector columns (e.g.
 # `emb_*`) contribute one dimension per entry; scalar columns contribute one.
