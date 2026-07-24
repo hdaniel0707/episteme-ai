@@ -57,30 +57,6 @@ algorithms:
       lr: 0.001
       weight_decay: 0.0001
       patience: 10
-
-  # Late fusion: the embedding is compressed by `pre_dims`, the Binoculars score
-  # is concatenated to that bottleneck, and `post_dims` classifies the pair. The
-  # score therefore never passes through the compression, which is the whole
-  # point -- at the input it would have to survive being squeezed to 8 dims.
-  - name: binox_mlp
-    id: binox_mlp_16
-    label: "MLP + Binoculars (upscale 16)"
-    binoculars: "binoculars_score"
-    params:
-      pre_dims: [256, 64]     # trunk, embedding only
-      post_dims: [16]            # head, after the score is concatenated
-      score_hidden: 16            # 0 = raw scalar; >0 = Linear→ReLU on the score
-      dropout: 0.1
-      epochs: 100
-      batch_size: 64
-      lr: 0.001
-      weight_decay: 0.0001
-      patience: 10
-
-  # The control for the entry above: `pre_dims: []` leaves the trunk a
-  # pass-through, so the score is concatenated at the INPUT (early fusion). Same
-  # class, same data, same seeds -- the only difference is where the score joins,
-  # which is what makes the comparison between these two rows meaningful.
   - name: binox_mlp
     id: binox_mlp_8
     label: "MLP + Binoculars (upscale 8)"
@@ -96,21 +72,35 @@ algorithms:
       weight_decay: 0.0001
       patience: 10
 
-
-# The FIXED design matrix every algorithm is trained on. Vector columns (e.g.
-# `emb_*`) contribute one dimension per entry; scalar columns contribute one.
-# A column missing from any dataset is reported by the preflight before training.
 features:
   - emb_luar_crud
 
-# Zero-shot Binoculars baseline (same as the embeddings script). No classifier is
-# trained: a single threshold on the Binoculars score is calibrated on each
-# source's TRAINING split (Youden's J) and applied unchanged to every corpus. It
-# becomes one more entry in the comparison (marked with a ★), a fixed reference
-# the trained algorithms are measured against. Set enabled: false to skip it.
+# Zero-shot Binoculars baselines (same as the embeddings script). No classifier
+# is trained by either; each becomes one more ★ row in the comparison, a fixed
+# reference the trained algorithms are measured against. Set enabled: false to
+# skip both.
+#
+#   binoculars_fitted            -> always runs. The cutoff is calibrated per
+#                                   source on its TRAINING split (Youden's J)
+#                                   and applied unchanged to every corpus. No
+#                                   model, but the threshold still comes from
+#                                   the source data, so it is not zero-shot in
+#                                   the strict sense.
+#   binoculars_vanilla_<value>   -> one per `vanilla_threshold` below. The cutoff
+#                                   is taken straight from this file and used
+#                                   everywhere, fit to nothing at all -- the only
+#                                   row in the table that saw no labels. Omit
+#                                   `vanilla_threshold` to skip it; give a list
+#                                   to compare several published cutoffs.
+#
+# Both take the same grouped split, seeds and group exclusion as the trained
+# algorithms, so every row of the comparison is scored on the same rows.
+# 0.9015310749276843 is the cutoff from the Binoculars paper (the accuracy mode;
+# the low-FPR mode uses a different one).
 binoculars_baseline:
   enabled: true
   column: "binoculars_score"
+  vanilla_threshold: [0.9015310749276843, 0.8536432310785527]
 
 data:
   # Labels are binarised to human vs machine: `human_label` -> 0, every other

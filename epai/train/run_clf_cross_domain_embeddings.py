@@ -34,7 +34,10 @@ every corpus's evaluation rows -- the held-out grouped test split on the
 diagonal, the unseen corpora off it. The split, seeds and group exclusion are
 the classifiers' exactly, so the baseline's numbers drop straight into the same
 matrix and comparison. It is opt-in per config via the ``binoculars_baseline``
-key.
+key, which runs two kinds of baseline: ``binoculars_fitted``, the source-calibrated
+threshold just described, and one ``binoculars_vanilla_<threshold>`` per fixed
+cutoff listed in ``vanilla_threshold`` -- the latter reads nothing off the data,
+so it is the only row in the table that is zero-shot in the strict sense.
 
 The preflight matters because the interesting failures here are slow ones. A
 run is fifteen embedders x nine matrix cells x three seeds; a column that is
@@ -101,7 +104,8 @@ BIN_SUFFIX = "__bin"
 # Zero-shot Binoculars baseline: no model is fitted, only a threshold on this
 # scalar score. The output lands in this subdirectory, alongside the embeddings.
 DEFAULT_BINOX_COL = "binoculars_score"
-BINOX_DIR_NAME = "binoculars"
+BINOX_FITTED_NAME = "binoculars_fitted"
+BINOX_VANILLA_PREFIX = "binoculars_vanilla_"
 
 # Classifiers build_clf_model knows about. Checked up front so a typo does not
 # survive until the first fit.
@@ -145,6 +149,65 @@ def binoculars_baseline_col(cfg: dict) -> str | None:
         return None
     col = spec.get("column", DEFAULT_BINOX_COL)
     return col if isinstance(col, str) and col.strip() else None
+
+
+def format_threshold(value: float) -> str:
+    """Compact rendering of a threshold, for labels and output-folder names."""
+    return f"{float(value):g}"
+
+
+def vanilla_thresholds(cfg: dict) -> list[float]:
+    """The fixed cutoffs the config asks for, from ``vanilla_threshold``.
+
+    Scalar or list; absent means no vanilla variant. Malformed entries are
+    dropped here and reported by ``check_config`` instead.
+    """
+    spec = cfg.get("binoculars_baseline")
+    if not isinstance(spec, dict):
+        return []
+    value = spec.get("vanilla_threshold")
+    if value is None:
+        return []
+    values = value if isinstance(value, (list, tuple)) else [value]
+    return [
+        float(v)
+        for v in values
+        if isinstance(v, (int, float)) and not isinstance(v, bool)
+    ]
+
+
+def binoculars_baseline_specs(cfg: dict) -> list[dict]:
+    """The Binoculars baseline variants to run, or [] when the baseline is off.
+
+    Two kinds, and the distinction matters when reading the comparison:
+
+      * ``binoculars_fitted`` -- the cutoff is calibrated per source on its
+        *training* split (Youden's J). No classifier is trained, but the
+        threshold is still fit on data, so it is not free of the source corpus;
+      * ``binoculars_vanilla_<threshold>`` -- a cutoff taken straight from the
+        config and applied everywhere, fit to nothing. The genuinely zero-shot
+        reference, and the only row in the table that saw no labels at all.
+
+    The fitted variant always runs; one vanilla variant runs per threshold in
+    ``vanilla_threshold``, so a config can compare several published cutoffs.
+    """
+    if not binoculars_baseline_col(cfg):
+        return []
+
+    specs = [
+        {
+            "variant": "fitted",
+            "threshold": None,
+            "name": BINOX_FITTED_NAME,
+            "label": BINOX_FITTED_NAME,
+        }
+    ]
+    for thr in vanilla_thresholds(cfg):
+        name = f"{BINOX_VANILLA_PREFIX}{format_threshold(thr)}"
+        specs.append(
+            {"variant": "vanilla", "threshold": float(thr), "name": name, "label": name}
+        )
+    return specs
 
 
 def raw_feature_col(feature: str) -> str:
@@ -205,6 +268,42 @@ class Report:
         return not self.errors
 
 
+def check_binoculars_baseline(cfg: dict, report: Report) -> None:
+    """Validate the ``binoculars_baseline`` block. Shared by both run scripts."""
+    bx = cfg.get("binoculars_baseline")
+    if bx is None:
+        return
+    if not isinstance(bx, dict):
+        report.error("'binoculars_baseline' must be a mapping")
+        return
+
+    if "enabled" in bx and not isinstance(bx["enabled"], bool):
+        report.error("'binoculars_baseline.enabled' must be a boolean")
+
+    col = bx.get("column", DEFAULT_BINOX_COL)
+    if not isinstance(col, str) or not col.strip():
+        report.error("'binoculars_baseline.column' must be a non-empty string")
+
+    thr = bx.get("vanilla_threshold")
+    if thr is not None:
+        values = thr if isinstance(thr, (list, tuple)) else [thr]
+        ok = bool(values) and all(
+            isinstance(v, (int, float)) and not isinstance(v, bool) for v in values
+        )
+        if not ok:
+            report.error(
+                "'binoculars_baseline.vanilla_threshold' must be a number or a "
+                "non-empty list of numbers"
+            )
+        elif len({format_threshold(v) for v in values}) != len(values):
+            # Each threshold names an output folder; two that render the same
+            # would overwrite one another.
+            report.error(
+                "'binoculars_baseline.vanilla_threshold' has entries that are "
+                f"indistinguishable once formatted: {values}"
+            )
+
+
 def check_config(cfg: dict, report: Report) -> None:
     """Validate one config's shape and values, without touching any file."""
     if not isinstance(cfg, dict):
@@ -251,16 +350,7 @@ def check_config(cfg: dict, report: Report) -> None:
     ):
         report.error("'extra_binary_text' must be a list of column names")
 
-    bx = cfg.get("binoculars_baseline")
-    if bx is not None:
-        if not isinstance(bx, dict):
-            report.error("'binoculars_baseline' must be a mapping")
-        else:
-            if "enabled" in bx and not isinstance(bx["enabled"], bool):
-                report.error("'binoculars_baseline.enabled' must be a boolean")
-            col = bx.get("column", DEFAULT_BINOX_COL)
-            if not isinstance(col, str) or not col.strip():
-                report.error("'binoculars_baseline.column' must be a non-empty string")
+    check_binoculars_baseline(cfg, report)
 
     data = cfg["data"]
     if not isinstance(data, dict):
@@ -663,9 +753,15 @@ def preflight_config(cfg: dict, emb_cols: list[str], report: Report) -> None:
         print("  invalid — skipping the data checks for this config")
         return
     binox = binoculars_baseline_col(cfg)
-    n_feature_sets = len(emb_cols) + (1 if binox else 0)
+    binox_variants = binoculars_baseline_specs(cfg)
+    n_feature_sets = len(emb_cols) + len(binox_variants)
     n_fits = n_feature_sets * cfg["model"]["n_runs"] * len(cfg["data"]["datasets"])
-    baseline_note = f" + binoculars baseline ({binox})" if binox else ""
+    baseline_note = (
+        f" + binoculars baselines on {binox} "
+        f"({', '.join(v['label'] for v in binox_variants)})"
+        if binox_variants
+        else ""
+    )
     bin_note = (
         f" + binarised text {binary_text_features(cfg)}"
         if binary_text_columns(cfg)
@@ -1034,15 +1130,31 @@ def evaluate_binoculars(scores: np.ndarray, y: np.ndarray, threshold: float) -> 
     }
 
 
-def run_binoculars_baseline(binox_col: str, cfg: dict, out_dir: Path) -> dict:
-    """Full source x target matrix for the zero-shot Binoculars baseline.
+def run_binoculars_baseline(
+    binox_col: str, cfg: dict, out_dir: Path, variant: dict | None = None
+) -> dict:
+    """Full source x target matrix for one zero-shot Binoculars baseline variant.
 
-    No classifier is trained. For each source a threshold is calibrated on its
-    training split and applied to every corpus's evaluation rows -- the held-out
-    grouped test split on the diagonal, the unseen corpora off it. The split,
-    seeds and group exclusion match ``run_embedding`` exactly, and the payload is
-    shaped identically, so it drops straight into the same figures and comparison.
+    No classifier is trained either way. ``variant`` comes from
+    ``binoculars_baseline_specs``; with ``threshold: None`` (the default) the
+    cutoff is calibrated per source on its training split, and with a number it
+    is that fixed value, used unchanged for every source and target.
+
+    Both take the *same* grouped split, seeds and group exclusion as
+    ``run_embedding``, even the fixed-threshold one which fits nothing: the
+    diagonal must still be a held-out split and the off-diagonal must still drop
+    target rows whose group was seen, or the rows would not line up with the
+    trained models they are compared against. The payload is shaped identically
+    to an embedding's, so it drops into the same figures and comparison.
     """
+    variant = variant or {
+        "variant": "fitted",
+        "threshold": None,
+        "name": BINOX_FITTED_NAME,
+        "label": BINOX_FITTED_NAME,
+    }
+    fixed_threshold = variant["threshold"]
+
     base_seed: int = cfg["seed"]
     group_col: str = cfg["data"]["group_col"]
     human_label: str = cfg["data"]["human_label"]
@@ -1084,7 +1196,13 @@ def run_binoculars_baseline(binox_col: str, cfg: dict, out_dir: Path) -> dict:
                 splitter.split(np.zeros((len(y_s), 1)), y_s, groups_s)
             )
             train_groups = set(groups_s[train_idx])
-            threshold = fit_binoculars_threshold(s_s[train_idx], y_s[train_idx])
+            # The vanilla variant never looks at the training split -- it is kept
+            # only so the evaluation rows match every other row of the table.
+            threshold = (
+                fit_binoculars_threshold(s_s[train_idx], y_s[train_idx])
+                if fixed_threshold is None
+                else float(fixed_threshold)
+            )
 
             seed_res[source] = {}
             for target in names:
@@ -1132,8 +1250,9 @@ def run_binoculars_baseline(binox_col: str, cfg: dict, out_dir: Path) -> dict:
                 "n": runs[0]["n"],
                 "excluded": runs[0]["excluded"],
                 "class_balance": runs[0]["class_balance"],
-                # Mean of the source-fit cutoffs over seeds; the same for every
-                # target of a source, but kept per cell for a uniform schema.
+                # Mean of the cutoffs over seeds; the same for every target of a
+                # source (and for every cell of the vanilla variant), but kept
+                # per cell for a uniform schema.
                 "threshold_mean": float(np.mean([r["threshold"] for r in runs])),
             }
 
@@ -1141,15 +1260,20 @@ def run_binoculars_baseline(binox_col: str, cfg: dict, out_dir: Path) -> dict:
     bx_cfg = dict(cfg)
     bx_cfg["features"] = [binox_col]
     bx_cfg["model"] = dict(cfg["model"])
-    bx_cfg["model"]["ml_alg"] = "binoculars (zero-shot)"
-    bx_cfg["alg_id"] = f"{cfg['alg_id']}__binoculars"
-    bx_cfg["alg_label"] = f"{cfg['alg_label']} — binoculars (zero-shot)"
+    bx_cfg["model"]["ml_alg"] = f"binoculars ({variant['variant']})"
+    bx_cfg["alg_id"] = f"{cfg['alg_id']}__{variant['name']}"
+    bx_cfg["alg_label"] = f"{cfg['alg_label']} — {variant['label']}"
 
     payload = {
         "alg_id": bx_cfg["alg_id"],
         "alg_label": bx_cfg["alg_label"],
-        "embedding": binox_col,
+        "embedding": variant["label"],
         "baseline": True,
+        "baseline_variant": variant["variant"],
+        "column": binox_col,
+        # None for the fitted variant, whose cutoff is per source and lives in
+        # each cell's 'threshold_mean' instead.
+        "threshold": None if fixed_threshold is None else float(fixed_threshold),
         "feature_dim": 1,
         "dataset_names": names,
         "dataset_labels": labels,
@@ -1164,10 +1288,16 @@ def run_binoculars_baseline(binox_col: str, cfg: dict, out_dir: Path) -> dict:
 
 
 def summarise_baseline(payload: dict) -> dict:
-    """The baseline's comparison row: an embedding row, relabelled and flagged."""
+    """A baseline's comparison row: an embedding row, relabelled and flagged.
+
+    The label is the variant's (``binoculars_fitted`` /
+    ``binoculars_vanilla_<threshold>``), so the two never collapse into one
+    indistinguishable "binoculars" row in the ranking.
+    """
     row = summarise_embedding(payload)
-    row["label"] = "binoculars (0-shot)"
+    row["label"] = payload.get("embedding", BINOX_FITTED_NAME)
     row["baseline"] = True
+    row["baseline_variant"] = payload.get("baseline_variant", "fitted")
     return row
 
 
@@ -1230,15 +1360,21 @@ def run_config(cfg_path: Path, cfg: dict, emb_cols: list[str], alg_dir: Path) ->
         plot_clf_cd_result(emb_dir)
         rows.append(summarise_embedding(payload))
 
-    # Zero-shot Binoculars baseline: no model, just a source-fit threshold. Run
-    # after the embeddings so it shows up as one more row in the comparison.
+    # Zero-shot Binoculars baselines: no model, just a threshold -- fit per source
+    # for the fitted variant, straight from the config for the vanilla ones. Run
+    # after the embeddings so they show up as extra rows in the comparison.
     binox_col = binoculars_baseline_col(cfg)
-    if binox_col:
-        tqdm.write(f"\n→ {binox_col} (zero-shot Binoculars baseline)")
-        binox_dir = alg_dir / BINOX_DIR_NAME
+    for variant in binoculars_baseline_specs(cfg):
+        note = (
+            "threshold fit per source"
+            if variant["threshold"] is None
+            else f"fixed threshold {format_threshold(variant['threshold'])}"
+        )
+        tqdm.write(f"\n→ {variant['label']}  ({binox_col}, {note})")
+        binox_dir = alg_dir / variant["name"]
         binox_dir.mkdir(parents=True, exist_ok=True)
 
-        payload = run_binoculars_baseline(binox_col, cfg, binox_dir)
+        payload = run_binoculars_baseline(binox_col, cfg, binox_dir, variant)
         print_matrix(payload["alg_label"], payload["summary"], payload["dataset_names"])
         plot_clf_cd_result(binox_dir)
         rows.append(summarise_baseline(payload))

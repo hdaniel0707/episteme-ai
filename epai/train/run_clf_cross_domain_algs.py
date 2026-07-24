@@ -25,8 +25,10 @@ embedding sweep. What is new:
     algorithms are unaffected) but joins the missing-value filter (so every
     algorithm still trains and is scored on identical rows);
   * one matrix per algorithm, written to ``<experiment>/<alg_id>/<algo_id>/``;
-  * an optional zero-shot Binoculars baseline (reused from the embeddings
-    script), one more matrix marked with a ★ in the comparison;
+  * optional Binoculars baselines (reused from the embeddings script), each one
+    more matrix marked with a ★ in the comparison: ``binoculars_fitted``, whose
+    cutoff is calibrated per source, and one ``binoculars_vanilla_<threshold>``
+    per fixed cutoff in the config, which is fit to nothing at all;
   * a comparison figure over algorithms (in-domain vs transfer, the scatter, and
     every source->target cell as a heatmap);
   * a preflight check that runs *before any training*, over *every* config.
@@ -50,13 +52,15 @@ from tqdm import tqdm
 from epai.train.algs import ALGORITHMS, build_algorithm
 from epai.train.run_clf_cross_domain import BINARY_CLASSES, print_matrix
 from epai.train.run_clf_cross_domain_embeddings import (
-    BINOX_DIR_NAME,
     DEFAULT_BINOX_COL,
     Prepared,
     Report,
     binoculars_baseline_col,
+    binoculars_baseline_specs,
+    check_binoculars_baseline,
     check_dataset,
     check_splits,
+    format_threshold,
     load_prepared,
     run_binoculars_baseline,
     summarise_baseline,
@@ -250,6 +254,8 @@ def check_config(cfg: dict, report: Report) -> None:
             except Exception as exc:  # a known name that still cannot be built
                 report.error(f"{s['id']}: cannot build {s['name']!r}: {exc}")
 
+    check_binoculars_baseline(cfg, report)
+
     data = cfg["data"]
     if not isinstance(data, dict):
         report.error("'data' must be a mapping")
@@ -349,12 +355,18 @@ def preflight_config(cfg: dict, report: Report) -> None:
         return
     specs = algorithm_specs(cfg)
     binox = binoculars_baseline_col(cfg)
+    binox_variants = binoculars_baseline_specs(cfg)
     n_fits = (
-        (len(specs) + (1 if binox else 0))
+        (len(specs) + len(binox_variants))
         * cfg["model"]["n_runs"]
         * len(cfg["data"]["datasets"])
     )
-    baseline_note = f" + binoculars baseline ({binox})" if binox else ""
+    baseline_note = (
+        f" + binoculars baselines on {binox} "
+        f"({', '.join(v['label'] for v in binox_variants)})"
+        if binox_variants
+        else ""
+    )
     print(
         f"  {len(cfg['data']['datasets'])} datasets, {len(specs)} algorithms"
         f"{baseline_note}, features={cfg['features']}, "
@@ -783,13 +795,19 @@ def run_config(cfg_path: Path, cfg: dict, alg_dir: Path) -> None:
             row["aux_column"] = spec["binoculars"]
         rows.append(row)
 
-    # Optional zero-shot Binoculars baseline (reused from the embeddings script).
+    # Optional zero-shot Binoculars baselines (reused from the embeddings
+    # script): the source-fit threshold, plus a fixed one per configured cutoff.
     binox_col = binoculars_baseline_col(cfg)
-    if binox_col:
-        tqdm.write(f"\n→ {binox_col} (zero-shot Binoculars baseline)")
-        binox_dir = alg_dir / BINOX_DIR_NAME
+    for variant in binoculars_baseline_specs(cfg):
+        note = (
+            "threshold fit per source"
+            if variant["threshold"] is None
+            else f"fixed threshold {format_threshold(variant['threshold'])}"
+        )
+        tqdm.write(f"\n→ {variant['label']}  ({binox_col}, {note})")
+        binox_dir = alg_dir / variant["name"]
         binox_dir.mkdir(parents=True, exist_ok=True)
-        payload = run_binoculars_baseline(binox_col, cfg, binox_dir)
+        payload = run_binoculars_baseline(binox_col, cfg, binox_dir, variant)
         print_matrix(payload["alg_label"], payload["summary"], payload["dataset_names"])
         plot_clf_cd_result(binox_dir)
         rows.append(summarise_baseline(payload))
