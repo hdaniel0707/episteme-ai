@@ -4,6 +4,7 @@ import numpy as np
 from scipy import stats
 import plotly.graph_objects as go
 import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 import json
 from sklearn.metrics import mean_squared_error, r2_score
 
@@ -1373,6 +1374,311 @@ def plot_clf_cd_alg_comparison(exp_dir: Path, payload: dict) -> None:
         noun="algorithm", subtitle=subtitle,
         row_label=lambda r: f"{_cd_row_mark(r)}{r['label']}",
     )
+
+
+########################################################################
+# TRAIN - LEAVE-ONE-OUT (POOLED) TRANSFER
+########################################################################
+
+# The two folds written by epai/ai_detection/train/run_clf_leave_one_out.py.
+LOO_MODES = [
+    ("lodo", "Leave-one-domain-out"),
+    ("logo", "Leave-one-generator-out"),
+]
+
+
+# Every bar in the leave-one-out figure is an accuracy, so they are all directly
+# comparable. The two model bars are solid, the Binoculars baselines hatched, so a
+# baseline never reads as another trained model.
+LOO_MODEL_SPLITS = [
+    ("model_in_domain_accuracy", "model in-domain", "lightsteelblue"),
+    ("model_out_domain_accuracy", "model out-of-domain", "steelblue"),
+]
+LOO_BASELINE_COLORS = ["orange", "goldenrod", "peru", "darkkhaki", "tan"]
+# In the gap figure the bar colour already encodes the sign of the gap, so the
+# baselines are told apart by hatch instead.
+LOO_GAP_HATCHES = [None, "//", "xx", "..", "\\\\"]
+
+
+def _loo_subtitle(cfg: dict) -> str:
+    return (
+        f"{cfg['model']['ml_alg']} · {', '.join(cfg['features'])} · "
+        f"{cfg['model']['n_runs']} seeds · train = pooled rest · "
+        f"in-domain test = {cfg['model'].get('indomain_test_size', 0.20):.0%} of "
+        f"training ids · chance = {CD_CHANCE*100:.0f}%"
+    )
+
+
+def _loo_baselines(payload: dict) -> list[tuple[str, str]]:
+    """The Binoculars baseline variants to draw, as (key, legend label) pairs.
+
+    Taken from the payload's declared order when present, else discovered from
+    the per-slice results, so a fold that skipped a baseline (all scores missing)
+    does not silently reorder the bars.
+    """
+    declared = payload.get("baselines") or []
+    names = [b["name"] for b in declared if isinstance(b, dict) and "name" in b]
+    labels = {b["name"]: b.get("label", b["name"]) for b in declared if "name" in b}
+
+    for mode, _ in LOO_MODES:
+        for agg in payload.get("results", {}).get(mode, {}).values():
+            for name, entry in (agg.get("baselines") or {}).items():
+                if name not in names:
+                    names.append(name)
+                labels.setdefault(name, entry.get("label", name))
+
+    # `binoculars_vanilla_0.901531` is too wide for a legend; the variant plus the
+    # cutoff is all the label has to carry.
+    def pretty(name: str) -> str:
+        return labels.get(name, name).replace("binoculars_", "binoculars ").replace("_", " ")
+
+    return [(name, pretty(name)) for name in names]
+
+
+def _loo_is_current(payload: dict) -> bool:
+    """True when the JSON has the in-domain / out-of-domain accuracies to plot."""
+    for mode, _ in LOO_MODES:
+        for agg in payload.get("results", {}).get(mode, {}).values():
+            return "model_in_domain_accuracy" in agg
+    return False
+
+
+def _loo_bar_panel(ax, mode_rows: dict, title: str, baselines: list[tuple[str, str]]):
+    """One grouped-bar panel: per held-out slice, four accuracies side by side.
+
+    In-domain (the ceiling), out-of-domain (the transfer number), and one bar per
+    Binoculars baseline on the same out-of-domain rows. A trailing 'mean' group
+    averages the slices.
+
+    Returns the handles/labels for a single figure-level legend: with two model
+    bars plus a baseline each, a per-axes legend would sit on top of the bars.
+    """
+    helds = list(mode_rows.keys())
+
+    def add_mean(vals):
+        clean = [v for v in vals if v is not None]
+        return vals + [float(np.mean(clean)) if clean else None]
+
+    def series_for(getter):
+        vals = [getter(mode_rows[h]) for h in helds]
+        means = add_mean([v["mean"] if v else None for v in vals])
+        stds = [(v["std"] or 0.0) if v else 0.0 for v in vals] + [0.0]
+        return means, stds
+
+    series = []
+    for key, label, color in LOO_MODEL_SPLITS:
+        means, stds = series_for(lambda agg, k=key: agg.get(k))
+        series.append((label, means, stds, color, None))
+    for i, (name, label) in enumerate(baselines):
+        means, stds = series_for(
+            lambda agg, n=name: (agg.get("baselines") or {}).get(n, {}).get(
+                "out_domain_accuracy"
+            )
+        )
+        series.append(
+            (label, means, stds, LOO_BASELINE_COLORS[i % len(LOO_BASELINE_COLORS)], "//")
+        )
+
+    groups = helds + ["mean"]
+    x = np.arange(len(groups))
+    w = 0.84 / len(series)
+    for i, (name, vals, errs, color, hatch) in enumerate(series):
+        xpos = x + (i - (len(series) - 1) / 2) * w
+        heights = [v if v is not None else 0.0 for v in vals]
+        bars = ax.bar(
+            xpos, heights, w, label=name, color=color,
+            yerr=errs, capsize=2,
+            hatch=hatch, edgecolor="black" if hatch else color,
+            linewidth=1.0 if hatch else 0.0,
+        )
+        ax.bar_label(
+            bars,
+            labels=[f"{v*100:.0f}" if v is not None else "" for v in vals],
+            fontsize=6.5 if len(series) > 4 else 7, padding=2,
+        )
+
+    ax.axhline(CD_CHANCE, linestyle="--", color="red", linewidth=1.2, label="chance")
+    # Divider before the averaged 'mean' group so it doesn't read as a slice.
+    ax.axvline(len(helds) - 0.5, color="lightgray", linewidth=1.0)
+    ax.set_xticks(x)
+    ax.set_xticklabels(
+        [
+            g
+            if g == "mean"
+            else f"{g}\n(in n={mode_rows[g]['in_domain_n']} · "
+                 f"out n={mode_rows[g]['out_domain_n']})"
+            for g in groups
+        ],
+        fontsize=7.5,
+    )
+    ax.set_ylim(0, 1.20)
+    ax.set_ylabel("Accuracy")
+    ax.set_title(title)
+    return ax.get_legend_handles_labels()
+
+
+def _save_loo_gap_figure(
+    out_dir: Path,
+    results: dict,
+    alg_label: str,
+    subtitle: str,
+    baselines: list[tuple[str, str]],
+) -> None:
+    """Diverging bars: out-of-domain model accuracy minus each Binoculars baseline.
+
+    This is the whole research question in one picture — blue where the pooled
+    trained model beats the baseline on an unseen slice, red where it loses. Every
+    number is an accuracy on the same held-out rows, so the gap is like-for-like.
+    """
+    slices: list[str] = []
+    gaps: dict[str, list[float | None]] = {name: [] for name, _ in baselines}
+    for mode, _ in LOO_MODES:
+        tag = "LODO" if mode == "lodo" else "LOGO"
+        for held, agg in results.get(mode, {}).items():
+            model = agg.get("model_out_domain_accuracy", {}).get("mean")
+            slices.append(f"{tag}: {held}")
+            for name, _ in baselines:
+                entry = (agg.get("baselines") or {}).get(name)
+                bino = entry["out_domain_accuracy"]["mean"] if entry else None
+                gaps[name].append(
+                    (model - bino) * 100.0 if model is not None and bino is not None else None
+                )
+    if not slices or not baselines:
+        return
+
+    n_series = len(baselines)
+    fig, ax = plt.subplots(
+        figsize=(9.0, max(3.6, 0.42 * len(slices) * n_series + 2.2))
+    )
+    y = np.arange(len(slices))[::-1]  # first slice on top
+    h = 0.84 / n_series
+    handles = []
+    for i, (name, label) in enumerate(baselines):
+        vals = [g if g is not None else 0.0 for g in gaps[name]]
+        hatch = LOO_GAP_HATCHES[i % len(LOO_GAP_HATCHES)]
+        ypos = y - (i - (n_series - 1) / 2) * h
+        bars = ax.barh(
+            ypos, vals, h,
+            color=["steelblue" if v >= 0 else "crimson" for v in vals],
+            edgecolor="black", linewidth=0.5, hatch=hatch,
+        )
+        ax.bar_label(
+            bars,
+            labels=[f"{g:+.1f}" if g is not None else "" for g in gaps[name]],
+            fontsize=7.5, padding=3,
+        )
+        # The bar colour carries the sign, not the series, so the legend key has
+        # to be a neutral swatch showing only this baseline's hatch.
+        handles.append(
+            Patch(facecolor="whitesmoke", edgecolor="black", hatch=hatch,
+                  label=f"vs {label}")
+        )
+
+    ax.axvline(0, color="black", linewidth=1.0)
+    ax.set_yticks(y)
+    ax.set_yticklabels(slices, fontsize=8)
+    ax.set_xlabel(
+        "out-of-domain model accuracy − Binoculars accuracy  (percentage points)"
+    )
+    ax.set_title(f"{alg_label} — does the trained model beat zero-shot OOD?\n{subtitle}")
+    finite = [g for col in gaps.values() for g in col if g is not None]
+    pad = max(5.0, max(abs(g) for g in finite) * 1.3) if finite else 5.0
+    ax.set_xlim(-pad, pad)
+    ax.legend(handles=handles, fontsize=7.5, loc="lower right")
+    fig.text(
+        0.01, 0.01,
+        "Blue = the pooled trained model wins on the held-out slice; "
+        "red = the Binoculars baseline wins.\nAll accuracies on the same "
+        "out-of-domain rows (fitted = threshold from the training pool, "
+        "vanilla = fixed cutoff, fit to nothing).",
+        fontsize=7.5, color="dimgray",
+    )
+    fig.tight_layout(rect=(0, 0.06, 1, 1))
+    fig.savefig(out_dir / "leave_one_out_gap.png", dpi=150)
+    plt.close(fig)
+
+
+def _save_clf_loo_figures(out_dir: Path, payload: dict) -> None:
+    """Save the leave-one-out bar figure and the model-vs-Binoculars gap figure."""
+    results = payload["results"]
+    cfg = payload["config"]
+    alg_label = payload.get("alg_label", payload.get("alg_id", out_dir.name))
+    subtitle = _loo_subtitle(cfg)
+
+    present = [(mode, title) for mode, title in LOO_MODES if results.get(mode)]
+    if not present:
+        print(f"No leave-one-out results to plot in {out_dir}")
+        return
+    if not _loo_is_current(payload):
+        print(
+            f"Skipping {out_dir}: leave_one_out.json predates the in-domain / "
+            f"out-of-domain split. Re-run run_clf_leave_one_out.py to regenerate it."
+        )
+        return
+
+    baselines = _loo_baselines(payload)
+
+    # Figure 1: grouped bars per fold (in-domain, out-of-domain, baselines).
+    fig, axes = plt.subplots(
+        1, len(present), figsize=(max(8.0, 7.0 * len(present)), 6.0), squeeze=False
+    )
+    keys: tuple = ([], [])
+    for ax, (mode, title) in zip(axes[0], present):
+        keys = _loo_bar_panel(ax, results[mode], title, baselines)
+
+    # One legend for the whole figure: the panels share their series, and at four
+    # or more bars per group a per-axes legend covers the bars it explains.
+    fig.legend(
+        keys[0], keys[1],
+        loc="lower center", ncol=min(len(keys[0]), 6), fontsize=8, frameon=False,
+        bbox_to_anchor=(0.5, 0.055),
+    )
+    fig.suptitle(f"{alg_label} — leave-one-out transfer\n{subtitle}")
+    note = (
+        "In-domain = held-out documents of the training pool (same domains and "
+        "generators as training) — the ceiling. Out-of-domain = the held-out slice."
+    )
+    if baselines:
+        note += (
+            "\nHatched = zero-shot Binoculars on the same out-of-domain rows; "
+            "'fitted' calibrates its cutoff on the training pool, 'vanilla' uses a "
+            "fixed cutoff and sees no labels at all."
+        )
+    fig.text(0.01, 0.005, note, fontsize=7.5, color="dimgray")
+    fig.tight_layout(rect=(0, 0.11, 1, 1))
+    fig.savefig(out_dir / "leave_one_out.png", dpi=150)
+    plt.close(fig)
+
+    # Figure 2: the head-to-head gap, only meaningful with a Binoculars baseline.
+    if baselines:
+        _save_loo_gap_figure(out_dir, results, alg_label, subtitle, baselines)
+
+
+def plot_clf_loo_result(alg_dir: Path) -> None:
+    """Plot one leave-one-out result directory from its ``leave_one_out.json``."""
+    result_path = alg_dir / "leave_one_out.json"
+    if not result_path.exists():
+        print(f"No leave_one_out.json in {alg_dir}")
+        return
+    with open(result_path) as f:
+        payload = json.load(f)
+    _save_clf_loo_figures(alg_dir, payload)
+
+
+def plot_clf_loo_results(exp_dir: Path) -> None:
+    """Plot every leave-one-out config in an experiment directory."""
+    alg_dirs = sorted(
+        d for d in exp_dir.iterdir()
+        if d.is_dir() and (d / "leave_one_out.json").exists()
+    )
+    if not alg_dirs:
+        print(f"No leave-one-out results found in {exp_dir}")
+        return
+
+    for alg_dir in alg_dirs:
+        plot_clf_loo_result(alg_dir)
+
+    print(f"Plots saved to: {exp_dir}")
 
 
 ########################################################################
