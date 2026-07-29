@@ -1,4 +1,12 @@
-"""Compare human vs AI Binoculars scores *within* parquets — one violin per file.
+"""Compare human vs AI detector scores *within* parquets — one violin per file.
+
+Works off any per-row detector score in the parquet: ``--metric binox`` reads the
+``binoculars_*`` columns, ``--metric llm_judge`` the ``llm_judge_score_*`` columns
+written by ``epai/ai_detection/llm_judge/add_llm_judge_scores.py``. The two differ
+only in which columns are read and in which direction means "AI" (Binoculars is
+*low* for machine text, the judge score is a *high* P(AI)); everything below —
+pairing, violins, histograms, ROC/PR, confusion — is the same either way, so the
+two baselines stay directly comparable.
 
 Every ``id`` in a ``*_binox*`` parquet appears once per ``generated_by`` group
 (``human``, ``gpt``, ``claude``, ...). For each parquet this script pairs, per
@@ -10,22 +18,24 @@ Pairing & distance
 -------------------
 For a target generator ``g`` the ``human`` and ``g`` subsets are merged on ``id``
 (unique within each generator). For each matched id the score vector across the
-``binoculars_*`` columns is taken for human and for ``g``; the pairwise distance
-is the Euclidean distance ``|human - g|`` (abs diff for the single-column case),
-and the signed difference ``human - g`` keeps direction. MSE = mean over all valid
-element pairs of ``(human - g)**2``. Ids present for only one side are reported.
+metric's columns is taken for human and for ``g``; the pairwise distance is the
+Euclidean distance ``|human - g|`` (abs diff for the single-column case), and the
+signed difference ``human - g`` keeps direction. MSE = mean over all valid element
+pairs of ``(human - g)**2``. Ids present for only one side are reported.
 
 Invalid pairs
 -------------
 If *either* element of a pair is null or not a real number, the pair is skipped,
-recorded, and reported in the closing summary statistics.
+recorded, and reported in the closing summary statistics. This is the normal case
+for ``--metric llm_judge``: the judge only scores the generators it was asked for,
+so every unjudged row simply drops out of the comparison.
 
 Targets
 -------
 Each parquet is given as ``PATH[:TARGET]``; ``TARGET`` defaults to ``gpt`` when
 omitted, so every file can be compared against a different generator.
 
-Figures + tables saved to results/binox_human_vs_ai/<parquet_stems>/:
+Figures + tables saved to results/<metric>_human_vs_ai/<parquet_stems>/:
   - human_vs_ai_distance_violin.png    — |human − g| per parquet, MSE annotated
   - human_vs_ai_signed_diff_violin.png — signed human − g (which side scores higher)
   - human_vs_ai_score_distributions.png — per parquet: human vs AI score histograms
@@ -37,13 +47,19 @@ Figures + tables saved to results/binox_human_vs_ai/<parquet_stems>/:
 
 Classification framing
 ----------------------
-Two classes: positive = AI (target), negative = human. Binoculars scores are
-lower for AI, so the rule is "predict AI when score <= threshold" (equivalently
-decision score = -score). The operating threshold is Youden's J optimum on the
-ROC curve. Classes are balanced (paired), so the PR chance baseline is 0.5.
+Two classes: positive = AI (target), negative = human. The decision rule follows
+the metric's direction: "predict AI when score <= threshold" for Binoculars (low
+⇒ machine, decision score = -score), "score >= threshold" for the LLM judge. The
+operating threshold is Youden's J optimum on the ROC curve. Classes are balanced
+(paired), so the PR chance baseline is 0.5.
 
 Usage:
     uv run python epai/ai_detection/analyse/analyse_binox_human_vs_ai.py data/parquet/wp_binox0.parquet
+
+    # LLM-judge scores instead of Binoculars, one judge column picked explicitly
+    uv run python epai/ai_detection/analyse/analyse_binox_human_vs_ai.py \
+        data/parquet/wp_binox0.parquet:gpt \
+        --metric llm_judge --score-cols llm_judge_score_gpt54_mini
 
     uv run python epai/ai_detection/analyse/analyse_binox_human_vs_ai.py \
         data/parquet/wp_binox0.parquet:gpt \
@@ -52,11 +68,21 @@ Usage:
         data/parquet/wp_gpt54mini_binox0.parquet:gpt_plain \
         data/parquet/essay_gpt54mini_binox0.parquet:gpt_plain \
         data/parquet/reuter_gpt54mini_binox0.parquet:gpt_plain
+    
+    uv run python epai/ai_detection/analyse/analyse_binox_human_vs_ai.py \
+        data/parquet/wp_binox0.parquet:gpt \
+        data/parquet/essay_binox0.parquet:gpt \
+        data/parquet/reuter_binox0.parquet:gpt \
+        data/parquet/wp_gpt54mini_binox0.parquet:gpt_plain \
+        data/parquet/essay_gpt54mini_binox0.parquet:gpt_plain \
+        data/parquet/reuter_gpt54mini_binox0.parquet:gpt_plain \
+        --metric llm_judge --score-cols llm_judge_score_gpt54_mini
 """
 
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -77,12 +103,57 @@ from sklearn.metrics import (
 )
 
 BASE_DIR = Path(__file__).parent.parent.parent.parent
-RESULTS_DIR = BASE_DIR / "results" / "binox_human_vs_ai"
+RESULTS_ROOT = BASE_DIR / "results"
 
 ID_COL = "id"
 GROUP_COL = "generated_by"
 HUMAN_GROUP = "human"
 DEFAULT_TARGET = "gpt"
+
+
+@dataclass(frozen=True)
+class Metric:
+    """One detector score: which columns hold it and which way means 'AI'.
+
+    Everything downstream is written against this, so adding a third detector is
+    one entry here rather than a fork of the script.
+    """
+
+    key: str  # --metric value; also names the results directory
+    prefix: str  # score columns are the ones starting with this
+    label: str  # axis label / legend wording
+    ai_is_high: bool  # True when a *high* score means machine-written
+    hist_range: tuple[float, float] | None = None  # fixed histogram x-range
+
+    @property
+    def results_dir(self) -> Path:
+        return RESULTS_ROOT / f"{self.key}_human_vs_ai"
+
+    @property
+    def rule(self) -> str:
+        """The decision rule as it reads in a title, e.g. 'score>=0.5 ⇒ AI'."""
+        return "score≥thr ⇒ AI" if self.ai_is_high else "score≤thr ⇒ AI"
+
+
+METRICS: dict[str, Metric] = {
+    "binox": Metric(
+        key="binox",
+        prefix="binoculars_",
+        label="Binoculars score",
+        ai_is_high=False,  # Binoculars: low ⇒ machine
+    ),
+    "llm_judge": Metric(
+        key="llm_judge",
+        prefix="llm_judge_score_",
+        label="LLM-judge P(AI)",
+        ai_is_high=True,  # the judge reports P(machine-generated)
+        hist_range=(0.0, 1.0),  # a probability: bin the whole range, always
+    ),
+}
+DEFAULT_METRIC = "binox"
+
+# Per parquet, how many skipped pairs are listed individually in the log.
+SKIPPED_DETAIL_LIMIT = 20
 
 
 class Tee:
@@ -105,9 +176,60 @@ class Tee:
 # ---------------------------------------------------------------------------
 
 
-def _binox_columns(df: pd.DataFrame) -> list[str]:
-    """Binoculars score columns present in the frame, sorted."""
-    return sorted(c for c in df.columns if c.startswith("binoculars_"))
+def _score_columns(
+    df: pd.DataFrame, metric: Metric, explicit: list[str] | None, path: Path
+) -> list[str]:
+    """The metric's score columns in ``df``, or the explicitly requested ones."""
+    if explicit:
+        missing = [c for c in explicit if c not in df.columns]
+        if missing:
+            raise SystemExit(
+                f"{path.name}: --score-cols {missing} not in the file "
+                f"(it has: {sorted(c for c in df.columns if c.startswith(metric.prefix))})"
+            )
+        return list(explicit)
+
+    cols = sorted(c for c in df.columns if c.startswith(metric.prefix))
+    if not cols:
+        raise SystemExit(
+            f"No '{metric.prefix}*' columns found in {path.name} for "
+            f"--metric {metric.key}."
+        )
+    return cols
+
+
+def _usable_columns(
+    cols: list[str],
+    human: pd.DataFrame,
+    tgt: pd.DataFrame,
+    path: Path,
+    explicit: bool,
+) -> list[str]:
+    """Keep only score columns that carry numbers on *both* sides.
+
+    A parquet can hold a judge column that was never filled in for this run (two
+    judges configured, one of them scored), and a single all-null column would
+    otherwise invalidate every pair and leave an empty plot with no explanation.
+    """
+    keep = [
+        c for c in cols
+        if pd.to_numeric(human[c], errors="coerce").notna().any()
+        and pd.to_numeric(tgt[c], errors="coerce").notna().any()
+    ]
+    dropped = [c for c in cols if c not in keep]
+    if not keep:
+        raise SystemExit(
+            f"{path.name}: none of {cols} has scores for both 'human' and the "
+            "target generator — was this parquet scored for both?"
+        )
+    if dropped:
+        if explicit:
+            raise SystemExit(
+                f"{path.name}: --score-cols {dropped} has no scores on one of "
+                "the two sides."
+            )
+        print(f"  [note] {path.name}: ignoring {dropped} (unscored on one side)")
+    return keep
 
 
 def _to_numeric(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
@@ -118,10 +240,13 @@ def _to_numeric(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
 class PairResult:
     """Human-vs-<target> comparison for one parquet file."""
 
-    def __init__(self, parquet: str, target: str, cols: list[str]) -> None:
+    def __init__(
+        self, parquet: str, target: str, cols: list[str], metric: Metric
+    ) -> None:
         self.parquet = parquet  # file stem, used for labels
         self.target = target
         self.cols = cols
+        self.metric = metric
         self.n_pairs = 0  # ids present for both human and target
         self.n_only_human = 0  # ids with a human row but no target row
         self.n_only_target = 0  # ids with a target row but no human row
@@ -132,7 +257,7 @@ class PairResult:
         self.mse = float("nan")
         self.skipped: list[dict] = []  # id + raw values of skipped pairs
 
-        # --- classification (human vs AI, positive = AI, AI ⇔ score < threshold) ---
+        # --- classification (human vs AI, positive = AI, cut in metric direction) ---
         self.has_clf = False
         self.roc_fpr = np.empty(0)
         self.roc_tpr = np.empty(0)
@@ -140,7 +265,7 @@ class PairResult:
         self.pr_precision = np.empty(0)
         self.pr_recall = np.empty(0)
         self.avg_precision = float("nan")
-        self.clf_threshold = float("nan")  # Binoculars score cut; score < cut ⇒ AI
+        self.clf_threshold = float("nan")  # score cut, read in the metric's direction
         self.accuracy = float("nan")
         self.f1 = float("nan")
         self.cm = np.zeros((2, 2), int)  # [[TN, FP], [FN, TP]] over [human, AI]
@@ -158,7 +283,13 @@ class PairResult:
         return len(self.skipped)
 
 
-def compute_for_spec(path: Path, target: str, out: Tee) -> PairResult:
+def compute_for_spec(
+    path: Path,
+    target: str,
+    metric: Metric,
+    score_cols: list[str] | None,
+    out: Tee,
+) -> PairResult:
     """Load one parquet and compute human-vs-``target`` per-id differences."""
     if not path.exists():
         raise SystemExit(f"Missing parquet: {path}")
@@ -167,9 +298,7 @@ def compute_for_spec(path: Path, target: str, out: Tee) -> PairResult:
     for col in (ID_COL, GROUP_COL):
         if col not in df.columns:
             raise SystemExit(f"Column '{col}' missing from {path.name}.")
-    cols = _binox_columns(df)
-    if not cols:
-        raise SystemExit(f"No 'binoculars_*' columns found in {path.name}.")
+    cols = _score_columns(df, metric, score_cols, path)
 
     human = df[df[GROUP_COL] == HUMAN_GROUP]
     tgt = df[df[GROUP_COL] == target]
@@ -180,6 +309,8 @@ def compute_for_spec(path: Path, target: str, out: Tee) -> PairResult:
             f"generator '{target}' not found in {path.name} "
             f"(available: {sorted(df[GROUP_COL].dropna().unique())})"
         )
+
+    cols = _usable_columns(cols, human, tgt, path, bool(score_cols))
 
     # id must be unique within each generator subset to pair unambiguously.
     for grp_label, sub in ((HUMAN_GROUP, human), (target, tgt)):
@@ -198,7 +329,7 @@ def compute_for_spec(path: Path, target: str, out: Tee) -> PairResult:
     )
     merged = left.merge(right, on=ID_COL, how="outer", indicator=True)
 
-    res = PairResult(path.stem, target, cols)
+    res = PairResult(path.stem, target, cols, metric)
     res.n_only_human = int((merged["_merge"] == "left_only").sum())
     res.n_only_target = int((merged["_merge"] == "right_only").sum())
     paired = merged[merged["_merge"] == "both"].reset_index(drop=True)
@@ -230,11 +361,12 @@ def compute_for_spec(path: Path, target: str, out: Tee) -> PairResult:
 
 
 def compute_classification(res: PairResult) -> None:
-    """Score human-vs-AI classification from the paired Binoculars scores.
+    """Score human-vs-AI classification from the paired detector scores.
 
-    Positive class = AI (the target generator). A *low* Binoculars score means
-    AI, so the model is "predict AI when score < threshold"; equivalently the
-    decision score fed to sklearn is ``-score`` (higher ⇒ more AI-like). The
+    Positive class = AI (the target generator). sklearn wants a decision score
+    that is *higher* for the positive class, so a metric where a low score means
+    AI (Binoculars) is fed as ``-score`` and its threshold flipped back at the
+    end; a metric where a high score means AI (the LLM judge) goes in as is. The
     operating threshold is Youden's J optimum on the ROC curve.
     """
     if res.human_scores.size == 0 or res.target_scores.size == 0:
@@ -244,18 +376,22 @@ def compute_classification(res: PairResult) -> None:
     y = np.concatenate(
         [np.zeros(res.human_scores.size, int), np.ones(res.target_scores.size, int)]
     )
-    decision = -scores  # higher ⇒ more AI-like
+    sign = 1.0 if res.metric.ai_is_high else -1.0
+    decision = sign * scores  # higher ⇒ more AI-like
 
     res.roc_fpr, res.roc_tpr, thr = roc_curve(y, decision)
     res.roc_auc = float(roc_auc_score(y, decision))
     res.pr_precision, res.pr_recall, _ = precision_recall_curve(y, decision)
     res.avg_precision = float(average_precision_score(y, decision))
 
-    # Youden's J optimal operating point → threshold on the raw Binoculars score.
+    # Youden's J optimal operating point → threshold on the raw score.
     j = res.roc_tpr - res.roc_fpr
     best_decision_thr = thr[int(np.argmax(j))]
-    res.clf_threshold = float(-best_decision_thr)  # predict AI when score <= this
-    y_pred = (scores <= res.clf_threshold).astype(int)
+    res.clf_threshold = float(sign * best_decision_thr)
+    y_pred = (
+        (scores >= res.clf_threshold) if res.metric.ai_is_high
+        else (scores <= res.clf_threshold)
+    ).astype(int)
     res.accuracy = float((y_pred == y).mean())
     res.f1 = float(f1_score(y, y_pred, zero_division=0))
     res.cm = confusion_matrix(y, y_pred, labels=[0, 1])
@@ -328,13 +464,14 @@ def plot_violins(results: list[PairResult], fig_dir: Path) -> None:
     if not usable:
         print("  [skip] no valid pairs for any parquet — nothing to plot")
         return
+    label = usable[0].metric.label
 
     # Figure 1 — magnitude of human/AI score gap, annotated with MSE.
     _violin_figure(
         usable,
         [r.distances for r in usable],
         ylabel="Pairwise distance  |human − AI|",
-        title="Human vs AI Binoculars distance (magnitude) per parquet",
+        title=f"Human vs AI {label} distance (magnitude) per parquet",
         annotate=lambda r: f"MSE={r.mse:.4g}",
         zero_line=False,
         fname="human_vs_ai_distance_violin.png",
@@ -346,7 +483,7 @@ def plot_violins(results: list[PairResult], fig_dir: Path) -> None:
         usable,
         [r.signed_diffs for r in usable],
         ylabel="Signed difference  (human − AI)",
-        title="Human vs AI signed difference per parquet  (>0 ⇒ human larger)",
+        title=f"Human vs AI {label} signed difference per parquet  (>0 ⇒ human larger)",
         annotate=lambda r: f"mean={r.signed_diffs.mean():+.4g}",
         zero_line=True,
         fname="human_vs_ai_signed_diff_violin.png",
@@ -355,11 +492,17 @@ def plot_violins(results: list[PairResult], fig_dir: Path) -> None:
 
 
 def plot_distributions(results: list[PairResult], fig_dir: Path) -> None:
-    """Per parquet, overlay the human and AI Binoculars score distributions."""
+    """Per parquet, overlay the human and AI score histograms.
+
+    The two histograms share one set of bins so the overlap is readable — that
+    overlap *is* the detector's error region, and how far apart the two humps sit
+    is the same information the ROC curve reports as AUC.
+    """
     usable = [r for r in results if r.n_valid > 0]
     if not usable:
         print("  [skip] no valid pairs for any parquet — no distributions to plot")
         return
+    metric = usable[0].metric
 
     ncols = min(3, len(usable))
     nrows = int(np.ceil(len(usable) / ncols))
@@ -370,9 +513,14 @@ def plot_distributions(results: list[PairResult], fig_dir: Path) -> None:
 
     for ax, r in zip(flat, usable):
         both = np.concatenate([r.human_scores, r.target_scores])
-        lo, hi = np.percentile(both, [1, 99])
-        if lo == hi:  # degenerate range guard
-            lo, hi = both.min(), both.max() or 1.0
+        if metric.hist_range is not None:
+            # A bounded score (a probability): always show the whole range, so
+            # panels stay comparable and a pile-up at 0 or 1 stays visible.
+            lo, hi = metric.hist_range
+        else:
+            lo, hi = np.percentile(both, [1, 99])
+            if lo == hi:  # degenerate range guard
+                lo, hi = both.min(), both.max() or 1.0
         bins = np.linspace(lo, hi, 40)
         ax.hist(
             r.human_scores, bins=bins, color="#4c72b0", alpha=0.6, density=True,
@@ -384,16 +532,26 @@ def plot_distributions(results: list[PairResult], fig_dir: Path) -> None:
         )
         ax.axvline(r.human_scores.mean(), color="#4c72b0", linestyle="--", linewidth=1.2)
         ax.axvline(r.target_scores.mean(), color="#d1495b", linestyle="--", linewidth=1.2)
-        ax.set_title(f"{r.parquet}\nhuman vs {r.target}", fontsize=10)
-        ax.set_xlabel("Binoculars score")
+        if r.has_clf:
+            ax.axvline(
+                r.clf_threshold, color="black", linestyle=":", linewidth=1.2,
+                label=f"threshold={r.clf_threshold:.3g}",
+            )
+        title = f"{r.parquet}\nhuman vs {r.target}"
+        if r.has_clf:
+            title += f"   AUC={r.roc_auc:.3f}"
+        ax.set_title(title, fontsize=10)
+        ax.set_xlabel(metric.label)
         ax.set_ylabel("Density")
+        if metric.hist_range is not None:
+            ax.set_xlim(*metric.hist_range)
         ax.legend(fontsize=8)
         ax.grid(True, axis="y", alpha=0.3)
 
     for ax in flat[len(usable):]:  # hide unused axes
         ax.axis("off")
 
-    fig.suptitle("Human vs AI Binoculars score distributions", fontsize=13)
+    fig.suptitle(f"Human vs AI {metric.label} distributions", fontsize=13)
     fig.tight_layout()
     fig_dir.mkdir(parents=True, exist_ok=True)
     fname = "human_vs_ai_score_distributions.png"
@@ -418,7 +576,7 @@ def plot_roc(results: list[PairResult], fig_dir: Path) -> None:
     ax.plot([0, 1], [0, 1], "k--", linewidth=1, alpha=0.6, label="chance (AUC=0.5)")
     ax.set_xlabel("False positive rate  (human classified as AI)")
     ax.set_ylabel("True positive rate  (AI detected)")
-    ax.set_title("Human vs AI detection ROC (Binoculars score)")
+    ax.set_title(f"Human vs AI detection ROC ({usable[0].metric.label})")
     ax.legend(fontsize=8, loc="lower right")
     ax.grid(True, alpha=0.3)
     ax.set_aspect("equal")
@@ -446,7 +604,7 @@ def plot_pr(results: list[PairResult], fig_dir: Path) -> None:
     ax.axhline(0.5, color="k", linestyle="--", linewidth=1, alpha=0.6, label="chance (AP=0.5)")
     ax.set_xlabel("Recall  (AI detected)")
     ax.set_ylabel("Precision")
-    ax.set_title("Human vs AI detection precision–recall (Binoculars score)")
+    ax.set_title(f"Human vs AI detection precision–recall ({usable[0].metric.label})")
     ax.legend(fontsize=8, loc="lower left")
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
@@ -486,9 +644,10 @@ def plot_confusion(results: list[PairResult], fig_dir: Path) -> None:
         ax.set_yticks([0, 1], labels=ticks)
         ax.set_xlabel("Predicted")
         ax.set_ylabel("Actual")
+        cmp_sign = "≥" if r.metric.ai_is_high else "≤"
         ax.set_title(
             f"{r.parquet} vs {r.target}\n"
-            f"score<{r.clf_threshold:.3f}⇒AI  acc={r.accuracy:.3f}  F1={r.f1:.3f}",
+            f"score{cmp_sign}{r.clf_threshold:.3f}⇒AI  acc={r.accuracy:.3f}  F1={r.f1:.3f}",
             fontsize=9,
         )
 
@@ -521,8 +680,10 @@ def _dist_stats(d: np.ndarray) -> dict:
 
 
 def report(results: list[PairResult], fig_dir: Path, out: Tee) -> None:
+    metric = results[0].metric
     out.print("=" * 70)
-    out.print("Human vs AI Binoculars comparison (per parquet)")
+    out.print(f"Human vs AI {metric.label} comparison (per parquet)")
+    out.print(f"metric: {metric.key}  ({metric.rule})")
     out.print(f"Generated: {datetime.now():%Y-%m-%d %H:%M:%S}")
     out.print("=" * 70)
 
@@ -552,12 +713,19 @@ def report(results: list[PairResult], fig_dir: Path, out: Tee) -> None:
             f"AP={r.avg_precision:.3f}  acc={r.accuracy:.3f}  F1={r.f1:.3f}"
         )
         out.print(
-            f"    threshold: score<={r.clf_threshold:.4g} ⇒ AI   "
+            f"    threshold: score{'>=' if r.metric.ai_is_high else '<='}"
+            f"{r.clf_threshold:.4g} ⇒ AI   "
             f"confusion  TP={tp} FP={fp} FN={fn} TN={tn}"
         )
+        if r.n_valid:
+            out.print(
+                f"  mean score  human={r.human_scores.mean():.4g}  "
+                f"{r.target}={r.target_scores.mean():.4g}"
+            )
         rows.append(
             {
                 "parquet": r.parquet,
+                "metric": r.metric.key,
                 "target": r.target,
                 "columns": ",".join(r.cols),
                 "n_pairs": r.n_pairs,
@@ -571,6 +739,8 @@ def report(results: list[PairResult], fig_dir: Path, out: Tee) -> None:
                 "dist_median": s["median"],
                 "dist_max": s["max"],
                 "mean_signed_diff": mean_signed,
+                "mean_human": float(r.human_scores.mean()) if r.n_valid else float("nan"),
+                "mean_target": float(r.target_scores.mean()) if r.n_valid else float("nan"),
                 "mse": r.mse,
                 "roc_auc": r.roc_auc,
                 "avg_precision": r.avg_precision,
@@ -595,10 +765,17 @@ def report(results: list[PairResult], fig_dir: Path, out: Tee) -> None:
             if not r.skipped:
                 continue
             out.print(f"\n  [{r.parquet}: human vs {r.target}] {r.n_skipped} skipped:")
-            for sk in r.skipped:
+            # An unscored generator skips *every* pair (normal for llm_judge),
+            # which would otherwise dump thousands of identical lines.
+            for sk in r.skipped[:SKIPPED_DETAIL_LIMIT]:
                 out.print(
                     f"    id={sk['id']}  human={sk['human']}  "
                     f"{r.target}={sk[r.target]}"
+                )
+            if r.n_skipped > SKIPPED_DETAIL_LIMIT:
+                out.print(
+                    f"    ... and {r.n_skipped - SKIPPED_DETAIL_LIMIT} more "
+                    "(listing capped)"
                 )
         out.print(f"\n  TOTAL skipped across parquets: {total_skipped}")
 
@@ -637,22 +814,39 @@ def parse_args() -> argparse.Namespace:
         help="One or more parquet specs 'PATH[:TARGET]'. TARGET defaults to "
         f"'{DEFAULT_TARGET}'. Each parquet becomes one violin.",
     )
+    parser.add_argument(
+        "--metric",
+        default=DEFAULT_METRIC,
+        choices=sorted(METRICS),
+        help="Which detector score to analyse (default: %(default)s). 'binox' "
+        "reads binoculars_* (low ⇒ AI), 'llm_judge' reads llm_judge_score_* "
+        "(high ⇒ AI).",
+    )
+    parser.add_argument(
+        "--score-cols",
+        nargs="+",
+        default=None,
+        metavar="COL",
+        help="Use exactly these score columns instead of every column matching "
+        "the metric's prefix — e.g. one judge model when the parquet holds two.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     specs = [_parse_spec(s) for s in args.specs]
+    metric = METRICS[args.metric]
 
     out = Tee()
     results: list[PairResult] = []
     for path, target in specs:
-        print(f"Comparing human vs '{target}' in {path.name} ...")
-        results.append(compute_for_spec(path, target, out))
+        print(f"Comparing human vs '{target}' in {path.name} ({metric.key}) ...")
+        results.append(compute_for_spec(path, target, metric, args.score_cols, out))
 
     # Directory named after the parquet stems involved (deduped, order kept).
     stems = list(dict.fromkeys(r.parquet for r in results))
-    fig_dir = RESULTS_DIR / "__".join(stems)
+    fig_dir = metric.results_dir / "__".join(stems)
     print()
     plot_violins(results, fig_dir)
     plot_distributions(results, fig_dir)

@@ -102,6 +102,27 @@ binoculars_baseline:
   column: "binoculars_score"
   vanilla_threshold: [0.9015310749276843, 0.8536432310785527]
 
+# The same two baselines on the LLM-judge score written by
+# epai/ai_detection/llm_judge/add_llm_judge_scores.py, with one difference that
+# matters: the judge reports P(machine-generated), so HIGH means machine here,
+# the opposite of Binoculars. The rule is `score >= threshold => machine`.
+#
+#   llm_judge_fitted           -> cutoff calibrated per source on its TRAINING
+#                                 split (Youden's J), same as the Binoculars one.
+#   llm_judge_vanilla_<value>  -> one per `vanilla_threshold`. Defaults to 0.5,
+#                                 the judge's own neutral point: the cutoff the
+#                                 prompt implies, fit to nothing. Set a list to
+#                                 compare several, or `[]` to skip the variant.
+#
+# The judge only scores the generators it was asked for, so rows with a Null
+# score drop out of THIS baseline (and only this one) -- the preflight prints the
+# scored/unscored row counts per dataset, and errors out if what is left is
+# single-class. Set enabled: false to skip both variants.
+llm_judge_baseline:
+  enabled: true
+  column: "llm_judge_score_gpt54_mini"
+  vanilla_threshold: [0.5]
+
 data:
   # Labels are binarised to human vs machine: `human_label` -> 0, every other
   # class -> 1. The corpora do not agree on generator names (`gpt` here,

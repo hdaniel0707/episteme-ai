@@ -101,11 +101,16 @@ EMB_PREFIX = "emb_"
 # be dropped into the design matrix as a 0/1 feature -- a leakage sanity check.
 BIN_SUFFIX = "__bin"
 
-# Zero-shot Binoculars baseline: no model is fitted, only a threshold on this
-# scalar score. The output lands in this subdirectory, alongside the embeddings.
+# Zero-shot score baselines: no model is fitted, only a threshold on one scalar
+# column. Each output lands in its own subdirectory, alongside the embeddings.
 DEFAULT_BINOX_COL = "binoculars_score"
 BINOX_FITTED_NAME = "binoculars_fitted"
 BINOX_VANILLA_PREFIX = "binoculars_vanilla_"
+
+# The LLM judge writes P(machine-generated) per row, so its direction is the
+# opposite of Binoculars' and 0.5 is the natural fit-nothing cutoff.
+DEFAULT_JUDGE_COL = "llm_judge_score_gpt54_mini"
+DEFAULT_JUDGE_VANILLA = (0.5,)
 
 # Classifiers build_clf_model knows about. Checked up front so a typo does not
 # survive until the first fit.
@@ -136,19 +141,82 @@ def embedding_columns(cfg: dict) -> list[str]:
     ]
 
 
-def binoculars_baseline_col(cfg: dict) -> str | None:
-    """The Binoculars column for the zero-shot baseline, or None if it is off.
+@dataclass(frozen=True)
+class BaselineKind:
+    """One family of zero-shot score baselines, as a config block describes it.
 
-    The baseline is opt-in: a config asks for it with a ``binoculars_baseline``
-    mapping (``enabled`` defaults to True when the key is present, ``column`` to
-    ``binoculars_score``). Malformed values are caught by ``check_config``; here
-    an off / absent / malformed baseline simply reads as None.
+    The two families differ in exactly three things — which config block turns
+    them on, which column holds the score, and which end of that score means
+    *machine*. Everything else (the fitted/vanilla split, the grouped evaluation,
+    the payload shape) is shared, so a third detector is one more entry here.
     """
-    spec = cfg.get("binoculars_baseline")
+
+    key: str  # names the output folders: <key>_fitted, <key>_vanilla_<thr>
+    cfg_key: str  # the config block that configures it
+    default_col: str
+    machine_is_high: bool  # True when a *high* score means machine-written
+    label: str  # human-readable, for preflight messages
+    default_vanilla: tuple[float, ...] = ()  # cutoffs used when none is given
+
+    @property
+    def fitted_name(self) -> str:
+        return f"{self.key}_fitted"
+
+    @property
+    def vanilla_prefix(self) -> str:
+        return f"{self.key}_vanilla_"
+
+    @property
+    def rule(self) -> str:
+        """The decision rule in words, for logs and figure labels."""
+        return "score >= threshold ⇒ machine" if self.machine_is_high else (
+            "score <= threshold ⇒ machine"
+        )
+
+
+BASELINE_KINDS: tuple[BaselineKind, ...] = (
+    BaselineKind(
+        key="binoculars",
+        cfg_key="binoculars_baseline",
+        default_col=DEFAULT_BINOX_COL,
+        machine_is_high=False,  # Binoculars: a LOW score means machine
+        label="Binoculars",
+    ),
+    BaselineKind(
+        key="llm_judge",
+        cfg_key="llm_judge_baseline",
+        default_col=DEFAULT_JUDGE_COL,
+        machine_is_high=True,  # the judge reports P(machine), so HIGH means machine
+        label="LLM judge",
+        default_vanilla=DEFAULT_JUDGE_VANILLA,
+    ),
+)
+
+
+def baseline_col(cfg: dict, kind: BaselineKind) -> str | None:
+    """The score column for one baseline family, or None if it is off.
+
+    Every baseline is opt-in: a config asks for it with its ``cfg_key`` mapping
+    (``enabled`` defaults to True when the key is present, ``column`` to the
+    kind's default). Malformed values are caught by ``check_score_baselines``;
+    here an off / absent / malformed baseline simply reads as None.
+    """
+    spec = cfg.get(kind.cfg_key)
     if not isinstance(spec, dict) or not spec.get("enabled", True):
         return None
-    col = spec.get("column", DEFAULT_BINOX_COL)
+    col = spec.get("column", kind.default_col)
     return col if isinstance(col, str) and col.strip() else None
+
+
+def baseline_columns(cfg: dict) -> list[str]:
+    """Every score column any enabled baseline reads, deduplicated."""
+    cols = [baseline_col(cfg, k) for k in BASELINE_KINDS]
+    return list(dict.fromkeys(c for c in cols if c))
+
+
+def binoculars_baseline_col(cfg: dict) -> str | None:
+    """The Binoculars baseline's column. Kept for callers that only want that one."""
+    return baseline_col(cfg, BASELINE_KINDS[0])
 
 
 def format_threshold(value: float) -> str:
@@ -156,15 +224,20 @@ def format_threshold(value: float) -> str:
     return f"{float(value):g}"
 
 
-def vanilla_thresholds(cfg: dict) -> list[float]:
-    """The fixed cutoffs the config asks for, from ``vanilla_threshold``.
+def vanilla_thresholds(cfg: dict, kind: BaselineKind) -> list[float]:
+    """The fixed cutoffs one baseline asks for, from its ``vanilla_threshold``.
 
-    Scalar or list; absent means no vanilla variant. Malformed entries are
-    dropped here and reported by ``check_config`` instead.
+    Scalar or list. An absent key falls back to the kind's ``default_vanilla``
+    (empty for Binoculars, whose published cutoffs are corpus-specific and must
+    be named explicitly; 0.5 for the judge, whose scale fixes the neutral point),
+    and an explicit ``vanilla_threshold: []`` skips the vanilla variant. Malformed
+    entries are dropped here and reported by ``check_score_baselines`` instead.
     """
-    spec = cfg.get("binoculars_baseline")
+    spec = cfg.get(kind.cfg_key)
     if not isinstance(spec, dict):
         return []
+    if "vanilla_threshold" not in spec:
+        return list(kind.default_vanilla)
     value = spec.get("vanilla_threshold")
     if value is None:
         return []
@@ -176,38 +249,84 @@ def vanilla_thresholds(cfg: dict) -> list[float]:
     ]
 
 
-def binoculars_baseline_specs(cfg: dict) -> list[dict]:
-    """The Binoculars baseline variants to run, or [] when the baseline is off.
+def baseline_kind_specs(cfg: dict, kind: BaselineKind) -> list[dict]:
+    """The variants of ONE baseline family, or [] when that family is off.
 
-    Two kinds, and the distinction matters when reading the comparison:
+    Two variants, and the distinction matters when reading the comparison:
 
-      * ``binoculars_fitted`` -- the cutoff is calibrated per source on its
+      * ``<kind>_fitted`` -- the cutoff is calibrated per source on its
         *training* split (Youden's J). No classifier is trained, but the
         threshold is still fit on data, so it is not free of the source corpus;
-      * ``binoculars_vanilla_<threshold>`` -- a cutoff taken straight from the
+      * ``<kind>_vanilla_<threshold>`` -- a cutoff taken straight from the
         config and applied everywhere, fit to nothing. The genuinely zero-shot
         reference, and the only row in the table that saw no labels at all.
 
-    The fitted variant always runs; one vanilla variant runs per threshold in
-    ``vanilla_threshold``, so a config can compare several published cutoffs.
+    The fitted variant always runs; one vanilla variant runs per threshold, so a
+    config can compare several published cutoffs.
     """
-    if not binoculars_baseline_col(cfg):
+    col = baseline_col(cfg, kind)
+    if not col:
         return []
 
+    common = {
+        "kind": kind.key,
+        "column": col,
+        "machine_is_high": kind.machine_is_high,
+    }
     specs = [
         {
+            **common,
             "variant": "fitted",
             "threshold": None,
-            "name": BINOX_FITTED_NAME,
-            "label": BINOX_FITTED_NAME,
+            "name": kind.fitted_name,
+            "label": kind.fitted_name,
         }
     ]
-    for thr in vanilla_thresholds(cfg):
-        name = f"{BINOX_VANILLA_PREFIX}{format_threshold(thr)}"
+    for thr in vanilla_thresholds(cfg, kind):
+        name = f"{kind.vanilla_prefix}{format_threshold(thr)}"
         specs.append(
-            {"variant": "vanilla", "threshold": float(thr), "name": name, "label": name}
+            {
+                **common,
+                "variant": "vanilla",
+                "threshold": float(thr),
+                "name": name,
+                "label": name,
+            }
         )
     return specs
+
+
+def describe_variant(variant: dict) -> str:
+    """One-line description of a baseline variant, for the run log.
+
+    Spells out the direction as well as the cutoff: the two families read their
+    threshold opposite ways, and a log line that only shows the number would be
+    ambiguous between them.
+    """
+    cutoff = (
+        "threshold fit per source"
+        if variant["threshold"] is None
+        else f"fixed threshold {format_threshold(variant['threshold'])}"
+    )
+    rule = (
+        "score>=thr ⇒ machine"
+        if variant.get("machine_is_high")
+        else "score<=thr ⇒ machine"
+    )
+    return f"{variant['column']}, {cutoff}, {rule}"
+
+
+def baseline_specs(cfg: dict) -> list[dict]:
+    """Every baseline variant a config asks for, across all families, in order."""
+    specs: list[dict] = []
+    for kind in BASELINE_KINDS:
+        specs.extend(baseline_kind_specs(cfg, kind))
+    return specs
+
+
+def binoculars_baseline_specs(cfg: dict) -> list[dict]:
+    """Only the Binoculars variants. Kept for callers that handle one family."""
+    return baseline_kind_specs(cfg, BASELINE_KINDS[0])
 
 
 def raw_feature_col(feature: str) -> str:
@@ -268,40 +387,54 @@ class Report:
         return not self.errors
 
 
-def check_binoculars_baseline(cfg: dict, report: Report) -> None:
-    """Validate the ``binoculars_baseline`` block. Shared by both run scripts."""
-    bx = cfg.get("binoculars_baseline")
+def check_baseline_block(cfg: dict, kind: BaselineKind, report: Report) -> None:
+    """Validate one baseline family's config block."""
+    bx = cfg.get(kind.cfg_key)
     if bx is None:
         return
     if not isinstance(bx, dict):
-        report.error("'binoculars_baseline' must be a mapping")
+        report.error(f"'{kind.cfg_key}' must be a mapping")
         return
 
     if "enabled" in bx and not isinstance(bx["enabled"], bool):
-        report.error("'binoculars_baseline.enabled' must be a boolean")
+        report.error(f"'{kind.cfg_key}.enabled' must be a boolean")
 
-    col = bx.get("column", DEFAULT_BINOX_COL)
+    col = bx.get("column", kind.default_col)
     if not isinstance(col, str) or not col.strip():
-        report.error("'binoculars_baseline.column' must be a non-empty string")
+        report.error(f"'{kind.cfg_key}.column' must be a non-empty string")
 
     thr = bx.get("vanilla_threshold")
     if thr is not None:
         values = thr if isinstance(thr, (list, tuple)) else [thr]
-        ok = bool(values) and all(
+        # An explicit empty list is the documented way to skip the variant.
+        if isinstance(thr, (list, tuple)) and not values:
+            return
+        ok = all(
             isinstance(v, (int, float)) and not isinstance(v, bool) for v in values
         )
         if not ok:
             report.error(
-                "'binoculars_baseline.vanilla_threshold' must be a number or a "
-                "non-empty list of numbers"
+                f"'{kind.cfg_key}.vanilla_threshold' must be a number or a "
+                "list of numbers"
             )
         elif len({format_threshold(v) for v in values}) != len(values):
             # Each threshold names an output folder; two that render the same
             # would overwrite one another.
             report.error(
-                "'binoculars_baseline.vanilla_threshold' has entries that are "
+                f"'{kind.cfg_key}.vanilla_threshold' has entries that are "
                 f"indistinguishable once formatted: {values}"
             )
+
+
+def check_score_baselines(cfg: dict, report: Report) -> None:
+    """Validate every baseline block. Shared by the run scripts."""
+    for kind in BASELINE_KINDS:
+        check_baseline_block(cfg, kind, report)
+
+
+def check_binoculars_baseline(cfg: dict, report: Report) -> None:
+    """Backwards-compatible alias for ``check_score_baselines``."""
+    check_score_baselines(cfg, report)
 
 
 def check_config(cfg: dict, report: Report) -> None:
@@ -419,13 +552,12 @@ def check_files(cfg: dict, emb_cols: list[str], report: Report) -> None:
 
     group_col = cfg["data"]["group_col"]
     extra = list(cfg.get("extra_features") or [])
-    binox = binoculars_baseline_col(cfg)
     needed = (
         [group_col, CLF_TARGET_COL]
         + emb_cols
         + extra
         + binary_text_columns(cfg)  # raw text columns; the __bin features derive from them
-        + ([binox] if binox else [])
+        + baseline_columns(cfg)
     )
 
     print(f"{'dataset':<22}{'rows':>9}{'cols':>7}  file")
@@ -655,6 +787,45 @@ def check_dataset(prep: Prepared, cfg: dict, emb_col: str, report: Report) -> bo
     return True
 
 
+def check_baseline_datasets(cfg: dict, report: Report) -> None:
+    """Per dataset, the rows each score baseline actually has a score for.
+
+    A baseline is filtered on its own column, not on ``features``, so a partly
+    filled column — the LLM judge only scores the generators it was asked for —
+    leaves it standing on fewer rows than the trained models. That is legitimate
+    (a baseline can only be read where it has scores) but it must be visible, and
+    a corpus whose scored rows are all one class cannot carry a comparison at
+    all, which ``check_dataset`` turns into an error before anything runs.
+    """
+    specs = baseline_specs(cfg)
+    if not specs:
+        return
+
+    group_col: str = cfg["data"]["group_col"]
+    human_label: str = cfg["data"]["human_label"]
+    columns = list(dict.fromkeys(s["column"] for s in specs))
+
+    print()
+    print("score baselines — the rows each one is actually scored on")
+    print(f"{'baseline column':<30}{'dataset':<20}{'scored':>8}{'unscored':>10}  classes")
+    print("-" * RULE)
+    for col in columns:
+        for spec in cfg["data"]["datasets"]:
+            try:
+                prep = load_prepared(spec, [col], group_col, human_label)
+            except Exception as exc:
+                report.error(
+                    f"{spec['name']}: cannot read {col}: {type(exc).__name__}: {exc}"
+                )
+                continue
+            print(
+                f"{col:<30}{prep.name:<20}{len(prep.df):>8}"
+                f"{prep.n_missing_dropped:>10}  "
+                f"{prep.class_counts if len(prep.df) else '-'}"
+            )
+            check_dataset(prep, cfg, col, report)
+
+
 def check_splits(
     preps: dict[str, Prepared], cfg: dict, emb_col: str, report: Report
 ) -> None:
@@ -752,14 +923,13 @@ def preflight_config(cfg: dict, emb_cols: list[str], report: Report) -> None:
         # The checks below index into the config; stop while it is still unsafe.
         print("  invalid — skipping the data checks for this config")
         return
-    binox = binoculars_baseline_col(cfg)
-    binox_variants = binoculars_baseline_specs(cfg)
-    n_feature_sets = len(emb_cols) + len(binox_variants)
+    baseline_variants = baseline_specs(cfg)
+    n_feature_sets = len(emb_cols) + len(baseline_variants)
     n_fits = n_feature_sets * cfg["model"]["n_runs"] * len(cfg["data"]["datasets"])
     baseline_note = (
-        f" + binoculars baselines on {binox} "
-        f"({', '.join(v['label'] for v in binox_variants)})"
-        if binox_variants
+        " + score baselines "
+        + ", ".join(f"{v['label']} ({v['column']})" for v in baseline_variants)
+        if baseline_variants
         else ""
     )
     bin_note = (
@@ -799,11 +969,13 @@ def preflight_config(cfg: dict, emb_cols: list[str], report: Report) -> None:
     feature_sets: list[tuple[str, list[str]]] = [
         (e, [e] + extra + bin_feats) for e in emb_cols
     ]
-    # The Binoculars baseline is one more feature set: a single scalar column,
-    # nothing appended (it is a threshold rule, not a model).
-    binox = binoculars_baseline_col(cfg)
-    if binox:
-        feature_sets.append((binox, [binox]))
+    # Each score baseline is one more feature set: a single scalar column,
+    # nothing appended (it is a threshold rule, not a model). Checking it here
+    # also surfaces a column that is only partly filled — the judge scores just
+    # the generators it was asked for, and those are the only rows its baseline
+    # can be read on.
+    for col in baseline_columns(cfg):
+        feature_sets.append((col, [col]))
 
     for feat_label, features in feature_sets:
         preps: dict[str, Prepared] = {}
@@ -1088,34 +1260,50 @@ def summarise_embedding(payload: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def fit_binoculars_threshold(scores: np.ndarray, y: np.ndarray) -> float:
-    """Youden's-J optimal Binoculars-score cutoff, fit on a source training split.
+def fit_score_threshold(
+    scores: np.ndarray, y: np.ndarray, machine_is_high: bool = False
+) -> float:
+    """Youden's-J optimal cutoff for a detector score, fit on a training split.
 
-    Positive class is machine (``y == 1``). A *low* Binoculars score means
-    machine, so the decision score fed to the ROC is ``-score`` (higher ⇒ more
-    machine-like) and the returned cutoff is on the raw score: predict machine
-    when ``score <= cutoff``. This is the rule used in
-    ``epai/ai_detection/analyse/analyse_binox_human_vs_ai.py``, except the threshold is
-    calibrated here on the *training* split rather than the evaluation set, so
-    the diagonal stays an honest held-out number and the off-diagonal is a real
-    transfer of the source's threshold to an unseen corpus.
+    Positive class is machine (``y == 1``). The ROC needs a decision score that
+    is *higher* for machine: Binoculars is low for machine so it goes in as
+    ``-score`` and the cutoff is flipped back ("predict machine when
+    ``score <= cutoff``"), while the LLM judge is already P(machine) and goes in
+    as is ("predict machine when ``score >= cutoff``"). This is the rule used in
+    ``epai/ai_detection/analyse/analyse_binox_human_vs_ai.py``, except the
+    threshold is calibrated here on the *training* split rather than the
+    evaluation set, so the diagonal stays an honest held-out number and the
+    off-diagonal is a real transfer of the source's threshold to an unseen corpus.
 
     Falls back to the score median if the split holds a single class (no ROC).
     """
     if np.unique(y).size < 2:
         return float(np.median(scores))
-    fpr, tpr, thr = roc_curve(y, -scores)
+    sign = 1.0 if machine_is_high else -1.0
+    fpr, tpr, thr = roc_curve(y, sign * scores)
     j = tpr - fpr
-    return float(-thr[int(np.argmax(j))])
+    return float(sign * thr[int(np.argmax(j))])
 
 
-def evaluate_binoculars(scores: np.ndarray, y: np.ndarray, threshold: float) -> dict:
-    """Score the ``score <= threshold ⇒ machine`` rule on one evaluation set.
+def fit_binoculars_threshold(scores: np.ndarray, y: np.ndarray) -> float:
+    """Backwards-compatible alias: the Binoculars direction (low ⇒ machine)."""
+    return fit_score_threshold(scores, y, machine_is_high=False)
+
+
+def evaluate_score_rule(
+    scores: np.ndarray,
+    y: np.ndarray,
+    threshold: float,
+    machine_is_high: bool = False,
+) -> dict:
+    """Score the threshold rule, read in the metric's direction, on one eval set.
 
     Same keys as ``run_clf_cross_domain.evaluate`` so the payload is identical in
     shape to an embedding's and the existing figures read it unchanged.
     """
-    y_pred = (scores <= threshold).astype(int)
+    y_pred = (
+        (scores >= threshold) if machine_is_high else (scores <= threshold)
+    ).astype(int)
     return {
         "accuracy": float(accuracy_score(y, y_pred)),
         "macro_f1": float(f1_score(y, y_pred, average="macro", zero_division=0)),
@@ -1130,15 +1318,19 @@ def evaluate_binoculars(scores: np.ndarray, y: np.ndarray, threshold: float) -> 
     }
 
 
-def run_binoculars_baseline(
-    binox_col: str, cfg: dict, out_dir: Path, variant: dict | None = None
-) -> dict:
-    """Full source x target matrix for one zero-shot Binoculars baseline variant.
+def evaluate_binoculars(scores: np.ndarray, y: np.ndarray, threshold: float) -> dict:
+    """Backwards-compatible alias: the Binoculars rule (score <= threshold ⇒ machine)."""
+    return evaluate_score_rule(scores, y, threshold, machine_is_high=False)
+
+
+def run_score_baseline(cfg: dict, out_dir: Path, variant: dict) -> dict:
+    """Full source x target matrix for one zero-shot score-baseline variant.
 
     No classifier is trained either way. ``variant`` comes from
-    ``binoculars_baseline_specs``; with ``threshold: None`` (the default) the
-    cutoff is calibrated per source on its training split, and with a number it
-    is that fixed value, used unchanged for every source and target.
+    ``baseline_specs`` and carries the column and the direction as well as the
+    cutoff; with ``threshold: None`` the cutoff is calibrated per source on its
+    training split, and with a number it is that fixed value, used unchanged for
+    every source and target.
 
     Both take the *same* grouped split, seeds and group exclusion as
     ``run_embedding``, even the fixed-threshold one which fits nothing: the
@@ -1146,14 +1338,15 @@ def run_binoculars_baseline(
     target rows whose group was seen, or the rows would not line up with the
     trained models they are compared against. The payload is shaped identically
     to an embedding's, so it drops into the same figures and comparison.
+
+    One caveat this cannot paper over: a score column that is Null for some rows
+    (the LLM judge only scores the generators it was asked for) makes those rows
+    disappear from the baseline's evaluation set. The row counts printed here and
+    in the preflight are what the baseline actually stands on.
     """
-    variant = variant or {
-        "variant": "fitted",
-        "threshold": None,
-        "name": BINOX_FITTED_NAME,
-        "label": BINOX_FITTED_NAME,
-    }
     fixed_threshold = variant["threshold"]
+    score_col: str = variant["column"]
+    machine_is_high: bool = bool(variant.get("machine_is_high", False))
 
     base_seed: int = cfg["seed"]
     group_col: str = cfg["data"]["group_col"]
@@ -1167,12 +1360,16 @@ def run_binoculars_baseline(
 
     data = {}
     for spec in specs:
-        prep = load_prepared(spec, [binox_col], group_col, human_label)
-        tqdm.write(f"  {spec['name']:<20} {len(prep.df):>6} rows  {prep.class_counts}")
+        prep = load_prepared(spec, [score_col], group_col, human_label)
+        unscored = prep.n_missing_dropped
+        note = f"  ({unscored} row(s) without a {score_col})" if unscored else ""
+        tqdm.write(
+            f"  {spec['name']:<20} {len(prep.df):>6} rows  {prep.class_counts}{note}"
+        )
         data[spec["name"]] = prep.df
 
     scores_all = {
-        name: df[binox_col].to_numpy(dtype=float) for name, df in data.items()
+        name: df[score_col].to_numpy(dtype=float) for name, df in data.items()
     }
 
     # per_seed[i][source][target] -> metrics
@@ -1199,7 +1396,7 @@ def run_binoculars_baseline(
             # The vanilla variant never looks at the training split -- it is kept
             # only so the evaluation rows match every other row of the table.
             threshold = (
-                fit_binoculars_threshold(s_s[train_idx], y_s[train_idx])
+                fit_score_threshold(s_s[train_idx], y_s[train_idx], machine_is_high)
                 if fixed_threshold is None
                 else float(fixed_threshold)
             )
@@ -1208,17 +1405,20 @@ def run_binoculars_baseline(
             for target in names:
                 if target == source:
                     # In-domain: the corpus's own held-out grouped test split.
-                    res = evaluate_binoculars(s_s[test_idx], y_s[test_idx], threshold)
+                    res = evaluate_score_rule(
+                        s_s[test_idx], y_s[test_idx], threshold, machine_is_high
+                    )
                     res["excluded"] = 0
                 else:
                     df_t = data[target]
                     # Target rows whose group was seen while calibrating would be
                     # a free hit, exactly as for the trained models, so drop them.
                     keep = ~df_t["group"].isin(train_groups).to_numpy()
-                    res = evaluate_binoculars(
+                    res = evaluate_score_rule(
                         scores_all[target][keep],
                         df_t.loc[keep, "y"].to_numpy(),
                         threshold,
+                        machine_is_high,
                     )
                     res["excluded"] = int((~keep).sum())
                 res["train_n"] = int(len(train_idx))
@@ -1258,9 +1458,9 @@ def run_binoculars_baseline(
 
     # Shaped like run_embedding's payload so plot_clf_cd_result works unchanged.
     bx_cfg = dict(cfg)
-    bx_cfg["features"] = [binox_col]
+    bx_cfg["features"] = [score_col]
     bx_cfg["model"] = dict(cfg["model"])
-    bx_cfg["model"]["ml_alg"] = f"binoculars ({variant['variant']})"
+    bx_cfg["model"]["ml_alg"] = f"{variant['kind']} ({variant['variant']})"
     bx_cfg["alg_id"] = f"{cfg['alg_id']}__{variant['name']}"
     bx_cfg["alg_label"] = f"{cfg['alg_label']} — {variant['label']}"
 
@@ -1270,7 +1470,9 @@ def run_binoculars_baseline(
         "embedding": variant["label"],
         "baseline": True,
         "baseline_variant": variant["variant"],
-        "column": binox_col,
+        "baseline_kind": variant["kind"],
+        "machine_is_high": machine_is_high,
+        "column": score_col,
         # None for the fitted variant, whose cutoff is per source and lives in
         # each cell's 'threshold_mean' instead.
         "threshold": None if fixed_threshold is None else float(fixed_threshold),
@@ -1287,17 +1489,29 @@ def run_binoculars_baseline(
     return payload
 
 
+def run_binoculars_baseline(
+    binox_col: str, cfg: dict, out_dir: Path, variant: dict | None = None
+) -> dict:
+    """Backwards-compatible wrapper: one Binoculars variant on ``binox_col``."""
+    variant = dict(variant or baseline_kind_specs(cfg, BASELINE_KINDS[0])[0])
+    variant.setdefault("kind", BASELINE_KINDS[0].key)
+    variant["column"] = binox_col
+    variant.setdefault("machine_is_high", BASELINE_KINDS[0].machine_is_high)
+    return run_score_baseline(cfg, out_dir, variant)
+
+
 def summarise_baseline(payload: dict) -> dict:
     """A baseline's comparison row: an embedding row, relabelled and flagged.
 
-    The label is the variant's (``binoculars_fitted`` /
-    ``binoculars_vanilla_<threshold>``), so the two never collapse into one
-    indistinguishable "binoculars" row in the ranking.
+    The label is the variant's (``binoculars_fitted`` / ``llm_judge_vanilla_0.5``
+    / ...), so variants never collapse into one indistinguishable "baseline" row
+    in the ranking.
     """
     row = summarise_embedding(payload)
     row["label"] = payload.get("embedding", BINOX_FITTED_NAME)
     row["baseline"] = True
     row["baseline_variant"] = payload.get("baseline_variant", "fitted")
+    row["baseline_kind"] = payload.get("baseline_kind", BASELINE_KINDS[0].key)
     return row
 
 
@@ -1360,23 +1574,17 @@ def run_config(cfg_path: Path, cfg: dict, emb_cols: list[str], alg_dir: Path) ->
         plot_clf_cd_result(emb_dir)
         rows.append(summarise_embedding(payload))
 
-    # Zero-shot Binoculars baselines: no model, just a threshold -- fit per source
-    # for the fitted variant, straight from the config for the vanilla ones. Run
+    # Zero-shot score baselines: no model, just a threshold -- fit per source for
+    # the fitted variant, straight from the config for the vanilla ones. Run
     # after the embeddings so they show up as extra rows in the comparison.
-    binox_col = binoculars_baseline_col(cfg)
-    for variant in binoculars_baseline_specs(cfg):
-        note = (
-            "threshold fit per source"
-            if variant["threshold"] is None
-            else f"fixed threshold {format_threshold(variant['threshold'])}"
-        )
-        tqdm.write(f"\n→ {variant['label']}  ({binox_col}, {note})")
-        binox_dir = alg_dir / variant["name"]
-        binox_dir.mkdir(parents=True, exist_ok=True)
+    for variant in baseline_specs(cfg):
+        tqdm.write(f"\n→ {variant['label']}  ({describe_variant(variant)})")
+        bl_dir = alg_dir / variant["name"]
+        bl_dir.mkdir(parents=True, exist_ok=True)
 
-        payload = run_binoculars_baseline(binox_col, cfg, binox_dir, variant)
+        payload = run_score_baseline(cfg, bl_dir, variant)
         print_matrix(payload["alg_label"], payload["summary"], payload["dataset_names"])
-        plot_clf_cd_result(binox_dir)
+        plot_clf_cd_result(bl_dir)
         rows.append(summarise_baseline(payload))
 
     specs = cfg["data"]["datasets"]

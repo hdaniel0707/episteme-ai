@@ -19,8 +19,8 @@ The input can be any folder from a single result directory up to the whole
 is exactly the folder you point it at.
 
 Run:
-    uv run python epai/train/replot_cross_domain.py results/clf_cd_algs
-    uv run python epai/train/replot_cross_domain.py results/clf_cd_emb
+    uv run python epai/ai_detection/train/replot_cross_domain.py results/clf_cd_algs
+    uv run python epai/ai_detection/train/replot_cross_domain.py results/clf_cd_emb
 """
 
 import argparse

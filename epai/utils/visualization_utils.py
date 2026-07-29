@@ -1087,6 +1087,58 @@ def plot_clf_cd_results(exp_dir: Path) -> None:
     print(f"Plots saved to: {exp_dir}")
 
 
+# Zero-shot baseline families, styled apart on the comparison figure. The two
+# read their score in opposite directions and are not the same claim, so they get
+# their own colour, hatch and legend entry rather than collapsing into one
+# "baseline" item. The hatches are deliberately sparse: they mark a bar as a
+# baseline without competing with the value printed on it.
+CD_BASELINE_STYLES: dict[str, dict] = {
+    "binoculars": {"label": "Binoculars baseline", "color": "crimson", "hatch": "/"},
+    "llm_judge": {"label": "LLM Judge baseline", "color": "darkviolet", "hatch": "\\"},
+}
+# A baseline whose family cannot be told (an older payload, a third detector).
+CD_BASELINE_FALLBACK = {
+    "label": "zero-shot baseline", "color": "black", "hatch": "-"
+}
+CD_HATCH_LINEWIDTH = 0.8  # bar outline *and* hatch stroke weight
+
+
+def _cd_baseline_style(row: dict) -> dict:
+    """Colour / hatch / legend label for one baseline row.
+
+    ``baseline_kind`` is written by the run scripts; the label prefix is the
+    fallback so comparison JSONs written before that key exist still plot with
+    the right family instead of dropping to the generic style.
+    """
+    kind = row.get("baseline_kind")
+    if kind not in CD_BASELINE_STYLES:
+        label = str(row.get("label", ""))
+        kind = next(
+            (k for k in CD_BASELINE_STYLES if label.startswith(k)), None
+        )
+    return CD_BASELINE_STYLES.get(kind, CD_BASELINE_FALLBACK)
+
+
+def _cd_baseline_legend_styles(order: list[dict], is_baseline) -> list[dict]:
+    """The distinct baseline styles present, in the order the families are listed.
+
+    Deduplicated so a family with three variants (fitted plus two cutoffs) still
+    contributes exactly one legend entry, and stable so the left and right panels
+    of a figure list the same families in the same order.
+    """
+    seen: dict[str, dict] = {}
+    for row, baseline in zip(order, is_baseline):
+        if not baseline:
+            continue
+        style = _cd_baseline_style(row)
+        seen.setdefault(style["label"], style)
+    ordering = [s["label"] for s in CD_BASELINE_STYLES.values()]
+    return sorted(
+        seen.values(),
+        key=lambda s: ordering.index(s["label"]) if s["label"] in ordering else len(ordering),
+    )
+
+
 def _cd_row_mark(row: dict) -> str:
     """Prefix for a comparison row: ★ zero-shot baseline, ◆ hybrid, else none.
 
@@ -1125,7 +1177,11 @@ def _plot_cd_comparison(
       * ``row_label(r)`` -- the y-axis label for item ``r``.
 
     Zero-shot baselines (``baseline: true``) are marked with a ★ and hatched
-    bars so they never read as just another item. Hybrids (``hybrid: true``) are
+    bars so they never read as just another item, and each *family* of baseline
+    (``baseline_kind``: Binoculars, LLM judge) gets its own colour, hatch and
+    legend entry on both panels -- they are opposite-direction rules on different
+    scores, so one merged "baseline" item would hide which is which. Hybrids
+    (``hybrid: true``) are
     marked more lightly -- a ◆ on the row label and their own scatter marker, but
     plain bars -- because they were trained on extra information (the Binoculars
     score on top of the shared feature set) and their rank should carry that
@@ -1155,35 +1211,44 @@ def _plot_cd_comparison(
                       color="orange", label="transfer (off-diagonal)")
     axes[0].bar_label(b1, fmt="%.3f", fontsize=7, padding=2)
     axes[0].bar_label(b2, fmt="%.3f", fontsize=7, padding=2)
-    # Hatch the baseline's bars so it never reads as just another item. Hybrids
-    # are marked by the ◆ on their row label and by their marker in the scatter,
-    # which is enough -- hatching their bars as well drowns out the numbers.
+    # Hatch the baseline's bars so it never reads as just another item, in its
+    # family's hatch and colour so the two baseline families are told apart at a
+    # glance. Hybrids are marked by the ◆ on their row label and by their marker
+    # in the scatter, which is enough -- hatching their bars as well drowns out
+    # the numbers.
     for idx in np.nonzero(is_baseline)[0]:
+        style = _cd_baseline_style(order[idx])
         for bar in (b1[idx], b2[idx]):
-            bar.set_hatch("//")
-            bar.set_edgecolor("black")
-            bar.set_linewidth(1.2)
+            bar.set_hatch(style["hatch"])
+            bar.set_edgecolor(style["color"])
+            bar.set_linewidth(CD_HATCH_LINEWIDTH)
     # Worst single transfer cell: a mean can hide one collapsed corpus pair.
     axes[0].scatter(transfer_min, y - h / 2, marker="|", s=90, color="black",
                     zorder=3, label="worst transfer cell")
     axes[0].axvline(CD_CHANCE, linestyle="--", color="red", linewidth=1.2, label="chance")
     axes[0].set_yticks(y)
     axes[0].set_yticklabels(labels, fontsize=8)
+    # Colour a baseline's row label -- and with it the ★ it carries -- in its
+    # family's colour, so the mark on the row, the hatch on its bars and the
+    # legend entry are all the same colour.
+    for tick, row, baseline in zip(axes[0].get_yticklabels(), order, is_baseline):
+        if baseline:
+            tick.set_color(_cd_baseline_style(row)["color"])
     axes[0].set_xlim(0.0, 1.18)
     axes[0].set_xlabel("Accuracy")
     axes[0].set_title("Ranked by transfer accuracy")
     handles, _ = axes[0].get_legend_handles_labels()
-    # Black glyphs matching the ★ / ◆ prefixes on the row labels, rather than the
-    # bar hatch: the prefix is what a reader scans for, and a coloured marker
-    # here would read as a second, different symbol.
-    if is_baseline.any():
-        from matplotlib.lines import Line2D
+    # Star glyphs matching the ★ prefixes on the row labels: one entry per
+    # baseline family present, in that family's colour, so the legend says which
+    # baseline a starred row is rather than only that it is one.
+    from matplotlib.lines import Line2D
+
+    for style in _cd_baseline_legend_styles(order, is_baseline):
         handles.append(
-            Line2D([], [], linestyle="none", marker="*", color="black",
-                   markersize=11, label="zero-shot baseline")
+            Line2D([], [], linestyle="none", marker="*", color=style["color"],
+                   markersize=11, label=style["label"])
         )
     if is_hybrid.any():
-        from matplotlib.lines import Line2D
         handles.append(
             Line2D([], [], linestyle="none", marker="D", color="black",
                    markersize=6, label="hybrid (extra features)")
@@ -1206,10 +1271,20 @@ def _plot_cd_comparison(
         axes[1].scatter(in_domain[hybrid_pts], transfer[hybrid_pts], s=85,
                         marker="D", color="mediumpurple", edgecolor="black",
                         linewidth=0.6, zorder=4, label="hybrid (extra features)")
-    if is_baseline.any():
-        axes[1].scatter(in_domain[is_baseline], transfer[is_baseline], s=130,
-                        marker="*", color="crimson", edgecolor="black",
-                        linewidth=0.6, zorder=4, label="zero-shot baseline")
+    # One star series per baseline family, matching the left panel's colours and
+    # legend wording, so a star on the scatter and a starred row in the ranking
+    # are recognisably the same thing.
+    for style in _cd_baseline_legend_styles(order, is_baseline):
+        pts = np.array(
+            [
+                bool(b) and _cd_baseline_style(r)["label"] == style["label"]
+                for r, b in zip(order, is_baseline)
+            ]
+        )
+        if pts.any():
+            axes[1].scatter(in_domain[pts], transfer[pts], s=130,
+                            marker="*", color=style["color"], edgecolor="black",
+                            linewidth=0.6, zorder=4, label=style["label"])
     for r, x_val, y_val in zip(order, in_domain, transfer):
         axes[1].annotate(r["label"], (x_val, y_val), textcoords="offset points",
                          xytext=(5, 4), fontsize=7.5)
@@ -1228,7 +1303,14 @@ def _plot_cd_comparison(
     fig.suptitle(f"{alg_label} — {noun} comparison\n{subtitle}")
     # bbox_inches="tight" so the below-axes legends are included, not clipped.
     fig.tight_layout(rect=(0, 0.02, 1, 1))
+    # The hatch stroke weight is an rcParam read at draw time, not an artist
+    # property, so it is set around this savefig only -- thin enough that the
+    # hatching marks a baseline without fighting the value printed on the bar --
+    # and restored so no other figure in the process inherits it.
+    prev_hatch_lw = plt.rcParams["hatch.linewidth"]
+    plt.rcParams["hatch.linewidth"] = CD_HATCH_LINEWIDTH
     fig.savefig(exp_dir / f"{noun}_comparison.png", dpi=150, bbox_inches="tight")
+    plt.rcParams["hatch.linewidth"] = prev_hatch_lw
     plt.close(fig)
 
     # Figure 2: every cell of every item, best transfer at the top.

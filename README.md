@@ -432,8 +432,12 @@ The Parquet is written after every embedder finishes — a crash does not throw 
 # 2D UMAP/PCA of embeddings coloured by generated_by
 python -m epai.ai_detection.analyse.analyse_emb_2d data/parquet/reuter_binox0.parquet --by-generator
 
-# Binoculars human vs. AI per-id score differences
+# Binoculars human vs. AI per-id score differences (violins, histograms, ROC/PR, confusion)
 uv run python epai/ai_detection/analyse/analyse_binox_human_vs_ai.py data/parquet/wp_binox0.parquet
+
+# ...the same analysis on the LLM-judge scores instead
+uv run python epai/ai_detection/analyse/analyse_binox_human_vs_ai.py \
+    data/parquet/wp_binox0.parquet:gpt_plain --metric llm_judge
 
 # Pairwise comparison between two Binoculars runs
 uv run python epai/ai_detection/analyse/analyse_binox_pairwise.py

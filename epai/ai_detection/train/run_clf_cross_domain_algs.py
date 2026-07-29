@@ -25,10 +25,14 @@ embedding sweep. What is new:
     algorithms are unaffected) but joins the missing-value filter (so every
     algorithm still trains and is scored on identical rows);
   * one matrix per algorithm, written to ``<experiment>/<alg_id>/<algo_id>/``;
-  * optional Binoculars baselines (reused from the embeddings script), each one
-    more matrix marked with a ★ in the comparison: ``binoculars_fitted``, whose
-    cutoff is calibrated per source, and one ``binoculars_vanilla_<threshold>``
-    per fixed cutoff in the config, which is fit to nothing at all;
+  * optional zero-shot score baselines (reused from the embeddings script), each
+    one more matrix marked with a ★ in the comparison. Two families, configured
+    by ``binoculars_baseline`` and ``llm_judge_baseline``, each contributing a
+    ``<kind>_fitted`` variant whose cutoff is calibrated per source and one
+    ``<kind>_vanilla_<threshold>`` per fixed cutoff, fit to nothing at all. The
+    families read their score in opposite directions -- Binoculars is *low* for
+    machine text, the LLM judge is P(machine) so it is *high* -- and the judge's
+    default vanilla cutoff is 0.5;
   * a comparison figure over algorithms (in-domain vs transfer, the scatter, and
     every source->target cell as a heatmap);
   * a preflight check that runs *before any training*, over *every* config.
@@ -55,14 +59,15 @@ from epai.ai_detection.train.run_clf_cross_domain_embeddings import (
     DEFAULT_BINOX_COL,
     Prepared,
     Report,
-    binoculars_baseline_col,
-    binoculars_baseline_specs,
-    check_binoculars_baseline,
+    baseline_columns,
+    baseline_specs,
+    check_baseline_datasets,
     check_dataset,
+    check_score_baselines,
     check_splits,
-    format_threshold,
+    describe_variant,
     load_prepared,
-    run_binoculars_baseline,
+    run_score_baseline,
     summarise_baseline,
     summarise_embedding,
 )
@@ -254,7 +259,7 @@ def check_config(cfg: dict, report: Report) -> None:
             except Exception as exc:  # a known name that still cannot be built
                 report.error(f"{s['id']}: cannot build {s['name']!r}: {exc}")
 
-    check_binoculars_baseline(cfg, report)
+    check_score_baselines(cfg, report)
 
     data = cfg["data"]
     if not isinstance(data, dict):
@@ -311,12 +316,11 @@ def check_files(cfg: dict, report: Report) -> None:
     import pyarrow.parquet as pq
 
     group_col = cfg["data"]["group_col"]
-    binox = binoculars_baseline_col(cfg)
     needed = list(
         dict.fromkeys(
             [group_col, CLF_TARGET_COL]
             + load_columns(cfg)  # features + every algorithm's auxiliary column
-            + ([binox] if binox else [])
+            + baseline_columns(cfg)
         )
     )
 
@@ -354,17 +358,16 @@ def preflight_config(cfg: dict, report: Report) -> None:
         print("  invalid — skipping the data checks for this config")
         return
     specs = algorithm_specs(cfg)
-    binox = binoculars_baseline_col(cfg)
-    binox_variants = binoculars_baseline_specs(cfg)
+    baseline_variants = baseline_specs(cfg)
     n_fits = (
-        (len(specs) + len(binox_variants))
+        (len(specs) + len(baseline_variants))
         * cfg["model"]["n_runs"]
         * len(cfg["data"]["datasets"])
     )
     baseline_note = (
-        f" + binoculars baselines on {binox} "
-        f"({', '.join(v['label'] for v in binox_variants)})"
-        if binox_variants
+        " + score baselines "
+        + ", ".join(f"{v['label']} ({v['column']})" for v in baseline_variants)
+        if baseline_variants
         else ""
     )
     print(
@@ -426,6 +429,12 @@ def preflight_config(cfg: dict, report: Report) -> None:
         )
         if ok:
             preps[prep.name] = prep
+
+    # The baselines are filtered on their own score column instead of `features`,
+    # so their row set is checked separately -- a partly filled column (the judge
+    # only scores the generators it was asked for) means they stand on fewer rows
+    # than the trained algorithms, and that has to be visible before the run.
+    check_baseline_datasets(cfg, report)
 
     if len(preps) != len(datasets):
         return  # a dataset already failed; its splits are not meaningful
@@ -795,21 +804,17 @@ def run_config(cfg_path: Path, cfg: dict, alg_dir: Path) -> None:
             row["aux_column"] = spec["binoculars"]
         rows.append(row)
 
-    # Optional zero-shot Binoculars baselines (reused from the embeddings
-    # script): the source-fit threshold, plus a fixed one per configured cutoff.
-    binox_col = binoculars_baseline_col(cfg)
-    for variant in binoculars_baseline_specs(cfg):
-        note = (
-            "threshold fit per source"
-            if variant["threshold"] is None
-            else f"fixed threshold {format_threshold(variant['threshold'])}"
-        )
-        tqdm.write(f"\n→ {variant['label']}  ({binox_col}, {note})")
-        binox_dir = alg_dir / variant["name"]
-        binox_dir.mkdir(parents=True, exist_ok=True)
-        payload = run_binoculars_baseline(binox_col, cfg, binox_dir, variant)
+    # Optional zero-shot score baselines (reused from the embeddings script): per
+    # enabled family, the source-fit threshold plus a fixed one per configured
+    # cutoff. Binoculars reads low ⇒ machine, the LLM judge high ⇒ machine; the
+    # variant carries its own direction, so both are run by the same loop.
+    for variant in baseline_specs(cfg):
+        tqdm.write(f"\n→ {variant['label']}  ({describe_variant(variant)})")
+        bl_dir = alg_dir / variant["name"]
+        bl_dir.mkdir(parents=True, exist_ok=True)
+        payload = run_score_baseline(cfg, bl_dir, variant)
         print_matrix(payload["alg_label"], payload["summary"], payload["dataset_names"])
-        plot_clf_cd_result(binox_dir)
+        plot_clf_cd_result(bl_dir)
         rows.append(summarise_baseline(payload))
 
     comparison = {
