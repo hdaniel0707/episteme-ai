@@ -5,6 +5,7 @@ from scipy import stats
 import plotly.graph_objects as go
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
+from matplotlib.offsetbox import AnnotationBbox, HPacker, TextArea
 import json
 from sklearn.metrics import mean_squared_error, r2_score
 
@@ -1101,6 +1102,15 @@ CD_BASELINE_FALLBACK = {
     "label": "zero-shot baseline", "color": "black", "hatch": "-"
 }
 CD_HATCH_LINEWIDTH = 0.8  # bar outline *and* hatch stroke weight
+# The hatch is only a "this is a baseline" flag, so it is drawn in translucent
+# black: it sits behind the numbers instead of competing with them, and the
+# family is carried by the hatch pattern plus the coloured ★ on the row label.
+CD_HATCH_COLOR = (0.0, 0.0, 0.0, 0.35)
+# Items trained on the shared feature set, and hybrids, are the same kind of
+# thing (a trained classifier), so they share a colour and are told apart by
+# marker shape -- ● vs ◆ -- not by hue, which is reserved for the baselines.
+CD_ITEM_COLOR = "seagreen"
+CD_HYBRID_COLOR = CD_ITEM_COLOR
 
 
 def _cd_baseline_style(row: dict) -> dict:
@@ -1176,11 +1186,13 @@ def _plot_cd_comparison(
         embeddings share an algorithm, algorithms share a feature set).
       * ``row_label(r)`` -- the y-axis label for item ``r``.
 
-    Zero-shot baselines (``baseline: true``) are marked with a ★ and hatched
-    bars so they never read as just another item, and each *family* of baseline
-    (``baseline_kind``: Binoculars, LLM judge) gets its own colour, hatch and
-    legend entry on both panels -- they are opposite-direction rules on different
-    scores, so one merged "baseline" item would hide which is which. Hybrids
+    Zero-shot baselines (``baseline: true``) are marked with a ★ and faintly
+    hatched bars so they never read as just another item, and each *family* of
+    baseline (``baseline_kind``: Binoculars, LLM judge) gets its own colour, hatch
+    pattern and legend entry on both panels -- they are opposite-direction rules
+    on different scores, so one merged "baseline" item would hide which is which.
+    The colour is carried by the ★ and the legend only; the hatch itself is
+    translucent black so it stays a background texture. Hybrids
     (``hybrid: true``) are
     marked more lightly -- a ◆ on the row label and their own scatter marker, but
     plain bars -- because they were trained on extra information (the Binoculars
@@ -1212,28 +1224,57 @@ def _plot_cd_comparison(
     axes[0].bar_label(b1, fmt="%.3f", fontsize=7, padding=2)
     axes[0].bar_label(b2, fmt="%.3f", fontsize=7, padding=2)
     # Hatch the baseline's bars so it never reads as just another item, in its
-    # family's hatch and colour so the two baseline families are told apart at a
-    # glance. Hybrids are marked by the ◆ on their row label and by their marker
-    # in the scatter, which is enough -- hatching their bars as well drowns out
-    # the numbers.
+    # family's hatch pattern so the two baseline families are told apart at a
+    # glance. The stroke is translucent black rather than the family colour: the
+    # colour lives on the ★ and in the legend, and a faint hatch stays a
+    # background texture instead of swallowing the bar. Hybrids are marked by the
+    # ◆ on their row label and by their marker in the scatter, which is enough --
+    # hatching their bars as well drowns out the numbers.
     for idx in np.nonzero(is_baseline)[0]:
         style = _cd_baseline_style(order[idx])
         for bar in (b1[idx], b2[idx]):
             bar.set_hatch(style["hatch"])
-            bar.set_edgecolor(style["color"])
+            bar.set_edgecolor(CD_HATCH_COLOR)
             bar.set_linewidth(CD_HATCH_LINEWIDTH)
     # Worst single transfer cell: a mean can hide one collapsed corpus pair.
     axes[0].scatter(transfer_min, y - h / 2, marker="|", s=90, color="black",
                     zorder=3, label="worst transfer cell")
     axes[0].axvline(CD_CHANCE, linestyle="--", color="red", linewidth=1.2, label="chance")
     axes[0].set_yticks(y)
-    axes[0].set_yticklabels(labels, fontsize=8)
-    # Colour a baseline's row label -- and with it the ★ it carries -- in its
-    # family's colour, so the mark on the row, the hatch on its bars and the
-    # legend entry are all the same colour.
-    for tick, row, baseline in zip(axes[0].get_yticklabels(), order, is_baseline):
-        if baseline:
-            tick.set_color(_cd_baseline_style(row)["color"])
+    # Only the ★ / ◆ is coloured -- the name itself stays black, so the colour on
+    # the row means "baseline family", not "this row is special in some way". A
+    # tick label is a single Text artist and cannot hold two colours, so each row
+    # label is drawn instead as a packed box (coloured mark + black name)
+    # right-aligned on the axis where the tick label would have been.
+    axes[0].set_yticklabels([""] * len(order))
+    for idx, row in enumerate(order):
+        prefix = _cd_row_mark(row)
+        mark = prefix.strip()
+        parts = [
+            TextArea(labels[idx][len(prefix):],
+                     textprops=dict(color="black", fontsize=8))
+        ]
+        if mark:
+            mark_color = (
+                _cd_baseline_style(row)["color"] if row.get("baseline")
+                else CD_HYBRID_COLOR
+            )
+            parts.insert(
+                0, TextArea(mark, textprops=dict(color=mark_color, fontsize=10))
+            )
+        axes[0].add_artist(
+            AnnotationBbox(
+                HPacker(children=parts, align="center", pad=0.0, sep=3.0),
+                (0.0, y[idx]),
+                xycoords=("axes fraction", "data"),
+                xybox=(-6.0, 0.0),
+                boxcoords="offset points",
+                box_alignment=(1.0, 0.5),
+                frameon=False,
+                pad=0.0,
+                annotation_clip=False,
+            )
+        )
     axes[0].set_xlim(0.0, 1.18)
     axes[0].set_xlabel("Accuracy")
     axes[0].set_title("Ranked by transfer accuracy")
@@ -1250,7 +1291,7 @@ def _plot_cd_comparison(
         )
     if is_hybrid.any():
         handles.append(
-            Line2D([], [], linestyle="none", marker="D", color="black",
+            Line2D([], [], linestyle="none", marker="D", color=CD_HYBRID_COLOR,
                    markersize=6, label="hybrid (extra features)")
         )
     # Legend below the axes so it never sits over the bars / worst-cell marks.
@@ -1264,12 +1305,14 @@ def _plot_cd_comparison(
     axes[1].axhline(CD_CHANCE, linestyle="--", color="red", linewidth=1.2, label="chance")
     axes[1].axvline(CD_CHANCE, linestyle="--", color="red", linewidth=1.2)
     item_pts = ~is_baseline & ~is_hybrid
-    axes[1].scatter(in_domain[item_pts], transfer[item_pts], s=45, color="seagreen",
-                    zorder=3, label=noun)
+    axes[1].scatter(in_domain[item_pts], transfer[item_pts], s=45,
+                    color=CD_ITEM_COLOR, zorder=3, label=noun)
     hybrid_pts = is_hybrid & ~is_baseline
+    # Same green as the plain items: a hybrid is still a trained classifier, so it
+    # is set apart by the ◆ shape (and the ◆ on its row) rather than by hue.
     if hybrid_pts.any():
         axes[1].scatter(in_domain[hybrid_pts], transfer[hybrid_pts], s=85,
-                        marker="D", color="mediumpurple", edgecolor="black",
+                        marker="D", color=CD_HYBRID_COLOR, edgecolor="black",
                         linewidth=0.6, zorder=4, label="hybrid (extra features)")
     # One star series per baseline family, matching the left panel's colours and
     # legend wording, so a star on the scatter and a starred row in the ranking
