@@ -26,7 +26,16 @@ seed: 42
 #   id     -> optional; output-folder name, set it to run one algorithm twice
 #             with different params without a collision (defaults to `name`)
 #   label  -> optional; shown on the figures (defaults to `name`)
-#   params -> optional; hyper-parameters handed to the algorithm
+#   params -> optional; hyper-parameters handed to the algorithm. Only names the
+#             algorithm actually reads are accepted -- the preflight rejects
+#             anything else (with a "did you mean" for near-misses) instead of
+#             ignoring it, so a hyper-parameter block copied out of a sweep
+#             leaderboard either takes effect or fails loudly. simple_mlp and
+#             binox_mlp accept exactly the space
+#             epai/ai_detection/train/sweep_clf_cross_domain.py searches, so a
+#             winning trial's params paste in unchanged. The resolved set (yours
+#             plus the defaults) is printed before each matrix and saved to
+#             cross_domain.json as `resolved_params`.
 #   binoculars -> optional; a column name (or `true` for `binoculars_score`)
 #             handed to the algorithm as a SECOND input beside `features`. Only
 #             algorithms built for it accept one (currently binox_mlp) -- the
@@ -38,15 +47,17 @@ seed: 42
 #             it, but it does join the missing-value filter, so every algorithm
 #             in this config still trains and is scored on identical rows.
 algorithms:
-  # - name: logistic
-  #   label: "Logistic Regression"
-  #   params: {C: 1.0, max_iter: 1000}
-  # - name: svm
-  #   label: "SVM (RBF)"
-  #   params: {C: 1.0, kernel: "rbf", gamma: "scale"}
-  # - name: gradient_boosting
-  #   label: "Gradient Boosting"
-  #   params: {n_estimators: 100, learning_rate: 0.1, max_depth: 3}
+  - name: logistic
+    label: "Logistic Regression"
+    params: {C: 1.0, max_iter: 1000}
+  - name: svm
+    label: "SVM (RBF)"
+    params: {C: 1.0, kernel: "rbf", gamma: "scale"}
+  - name: gradient_boosting
+    label: "Gradient Boosting"
+    params: {n_estimators: 100, learning_rate: 0.1, max_depth: 3}
+  # The untuned MLP, kept as the control: it is the only honest reference for
+  # what the sweep below actually bought.
   - name: simple_mlp
     label: "Simple MLP"
     params:
@@ -57,6 +68,38 @@ algorithms:
       lr: 0.001
       weight_decay: 0.0001
       patience: 10
+
+  # Best trial of the luar_mlp_reg sweep (results/sweep_clf_cd/luar_mlp_reg,
+  # trial 8581ac0a4d, stage 2 / 3 seeds), ranked on mean transfer accuracy with
+  # a 0.80 in-domain floor: transfer 0.793, in-domain 0.994 on the DEV pool.
+  #
+  # Read that margin with the sweep's own caveat in mind: the search ranked 291
+  # trials on the 2 off-diagonal cells of essay/reuter, and wp_gpt54mini was held
+  # out of it entirely. wp is in `datasets` below, so the cells involving it here
+  # are the first honest look the tuned setting gets -- expect them to be worse
+  # than the dev cells, and treat any remaining gain over the control above as
+  # the result. Regenerate this block with:
+  #   python -m epai.ai_detection.train.sweep_clf_cross_domain \
+  #       --cfg cfg/ai_detection/train/sweep/luar_mlp_reg.yaml --params
+  - name: simple_mlp
+    id: simple_mlp_swept
+    label: "Simple MLP (swept)"
+    params:
+      hidden_dims: [256]
+      normalize: "standard"
+      norm_layer: "layernorm"
+      val_frac: 0.0
+      val_metric: "loss"
+      dropout: 0.21662856624267898
+      input_dropout: 0.061218972697383835
+      weight_decay: 0.0054492461553935344
+      label_smoothing: 0.05
+      mixup_alpha: 0.4
+      lr: 0.00010208333947051273
+      batch_size: 128
+      epochs: 200
+      patience: 15
+
   - name: binox_mlp
     id: binox_mlp_8
     label: "MLP + Binoculars (upscale 8)"

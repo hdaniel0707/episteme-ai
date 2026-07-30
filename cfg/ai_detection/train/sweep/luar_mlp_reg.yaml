@@ -1,0 +1,145 @@
+# Regularisation sweep for the MLP on luar_crud, scored on cross-domain transfer.
+#
+# Run by epai/ai_detection/train/sweep_clf_cross_domain.py. Unlike the configs in
+# clf_cd_algs/, this file is NOT a list of algorithms to compare -- it is one
+# algorithm plus a space of hyper-parameters to search over. Everything about the
+# data, the split and the features comes from `base`.
+#
+#   python -m epai.ai_detection.train.sweep_clf_cross_domain --cfg cfg/ai_detection/train/sweep/luar_mlp_reg.yaml
+#   python -m epai.ai_detection.train.sweep_clf_cross_domain --cfg ... --report
+#   python -m epai.ai_detection.train.sweep_clf_cross_domain --cfg ... --final
+#
+# The sweep is resumable: it appends every finished trial to
+# results/sweep_clf_cd/<sweep_id>/trials.jsonl and skips what is already there, so
+# re-running after a kill continues rather than restarts.
+
+sweep_id: "luar_mlp_reg"
+
+# The cross-domain config supplying the corpora, features, group column and
+# split. Its `algorithms` list is ignored during the search (the sweep has its
+# own algorithm, below) but is re-used by --final as the untuned reference the
+# tuned model is ranked against.
+base: "cfg/ai_detection/train/clf_cd_algs/luar_crud_algs.yaml"
+
+seed: 1234
+
+# The algorithm every trial instantiates. `params` come from `search` below.
+# Set `binoculars: "binoculars_score"` and name: binox_mlp to sweep the hybrid
+# instead -- then add pre_dims / post_dims / score_hidden to the search space in
+# place of hidden_dims.
+algorithm:
+  name: simple_mlp
+  # binoculars: "binoculars_score"
+
+# Corpora removed from the search ENTIRELY -- not trained on, not evaluated on,
+# no compute spent on them -- so that --final has a corpus the tuning never saw.
+#
+# Why this matters more than it looks: the base config has 3 corpora, giving 6
+# off-diagonal cells. A few hundred trials ranked on 6 numbers will find a setting
+# that looks several points better purely by fitting their noise. Holding one out
+# is what makes the final number believable.
+#
+# The cost is real: 2 dev corpora leave only 2 transfer cells to optimise, which
+# is a thin selection signal. The proper fix is more corpora -- add the three
+# original (non-gpt54mini) essay/reuter/wp parquets to the base config's
+# `datasets` and hold out two. Set `holdout: []` to search on all three instead,
+# accepting that the winning margin is then optimistic; the leaderboard says so
+# in that case rather than letting it pass quietly.
+holdout: ["wp_gpt54mini"]
+
+# What the search maximises.
+#   transfer_min  -> the WORST off-diagonal cell. The one to optimise if the
+#                    detector has to hold up on a corpus you have not seen;
+#                    a mean hides one collapsed target behind two good ones.
+#   transfer_mean -> average off-diagonal accuracy.
+#   gap           -> in-domain minus transfer (pair with direction: min).
+#
+# min_in_domain is a floor, not a target: a model that has collapsed to always
+# predicting one class scores the majority share on every corpus, which can beat
+# a real classifier's worst transfer cell. Anything below the floor is recorded
+# as rejected and never ranked.
+objective:
+  metric: transfer_mean
+  direction: max
+  min_in_domain: 0.80
+
+# Successive halving: run everything cheaply on one seed, then spend real seeds
+# only on the survivors. Roughly 3x the configs for the same wall clock. The
+# stage-2 numbers are the ones to read -- a single seed is a noisy estimate and
+# stage 1 is only there to throw away the obvious losers.
+halving:
+  enabled: true
+  stage1_n_runs: 1
+  keep_frac: 0.25
+  stage2_n_runs: 3
+
+strategy: random   # random | grid  (grid needs every axis discrete)
+n_trials: 200
+
+# The search space. Each axis is one of:
+#   [a, b, c]                              -> choice (shorthand)
+#   {kind: choice, values: [...]}          -> choice
+#   {kind: const, value: x}                -> fixed for every trial
+#   {kind: uniform, low: , high: }         -> real, uniform
+#   {kind: loguniform, low: , high: }      -> real, uniform in log space
+#   {kind: int_uniform, low: , high: }     -> integer, inclusive
+#   {kind: int_loguniform, low: , high: }  -> integer, uniform in log space
+#
+# Anything not listed here keeps the algorithm's default, and the defaults are
+# exactly the pre-sweep behaviour, so an axis you delete reverts to what the
+# hand-written configs were doing.
+search:
+
+  # --- the two that matter most for transfer -----------------------------
+  #
+  # How the design matrix is normalised before it reaches the network.
+  #   standard     -> the old default. Fits mean/std on the SOURCE corpus and
+  #                   applies them to every target, so any shift in the
+  #                   embedding's location or scale is fed into the first layer.
+  #   l2           -> each row scaled to unit length. A per-row operation, so it
+  #                   carries no corpus statistics across the domain boundary at
+  #                   all. The usual treatment for LUAR-style embeddings.
+  #   l2+standard  -> both, in that order.
+  #   none         -> raw.
+  normalize: ["standard", "l2", "l2+standard", "none"]
+
+  # Hold this fraction of the training rows out (grouped by id, so a document and
+  # its rewrites stay together) and early-stop on it, restoring the best weights.
+  # 0.0 is the old behaviour: early stopping watches the TRAINING loss, which
+  # fires once the model stops fitting the training set better, i.e. after it has
+  # overfit. It is kept in the space as the control, not because it is sensible.
+  val_frac: [0.0, 0.15, 0.25]
+  val_metric: ["loss", "accuracy"]
+
+  # --- architecture -------------------------------------------------------
+  #
+  # [] is a linear probe on the embedding. Worth keeping in the space: on
+  # embedding features it frequently transfers better than anything deeper, and
+  # if it wins that is the result, not a bug in the sweep.
+  hidden_dims:
+    kind: choice
+    values:
+      - []
+      - [64]
+      - [256]
+      - [256, 64]
+      - [512, 128]
+      - [512, 128, 32]
+
+  norm_layer: ["none", "layernorm"]   # LayerNorm only; BatchNorm's running stats
+                                      # are the source corpus's, which is the very
+                                      # problem `normalize: standard` has
+
+  # --- regularisation -----------------------------------------------------
+  dropout: {kind: uniform, low: 0.0, high: 0.6}
+  input_dropout: {kind: uniform, low: 0.0, high: 0.4}   # on the raw embedding
+  weight_decay: {kind: loguniform, low: 1.0e-6, high: 1.0e-1}
+  label_smoothing: [0.0, 0.05, 0.1, 0.2]   # targets overconfidence, which is
+                                           # exactly how these models fail off-domain
+  mixup_alpha: [0.0, 0.0, 0.2, 0.4]        # 0 twice: keep "off" at 50% prior
+
+  # --- optimisation -------------------------------------------------------
+  lr: {kind: loguniform, low: 1.0e-4, high: 1.0e-2}
+  batch_size: [32, 64, 128]
+  epochs: {kind: const, value: 200}    # generous; early stopping decides the rest
+  patience: {kind: const, value: 15}

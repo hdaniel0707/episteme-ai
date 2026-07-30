@@ -17,7 +17,12 @@ embedding sweep. What is new:
   * algorithms are pluggable ``ClfAlgorithm`` subclasses under ``epai/train/algs``
     (logistic, svm, gradient_boosting, simple_mlp, binox_mlp), selected by
     ``name`` and configured with per-entry ``params``. Each owns its own
-    preprocessing;
+    preprocessing, and each declares which ``params`` it reads: an entry naming
+    anything else is a preflight error rather than a silently ignored key, so the
+    hyper-parameters ``sweep_clf_cross_domain.py`` finds can be transcribed into a
+    config here and either take effect or fail loudly. The resolved set (the
+    entry's params plus the algorithm's defaults) is printed before each matrix
+    and stored in its ``cross_domain.json``;
   * an entry may set ``binoculars`` to hand that algorithm the Binoculars score
     as a second input beside the shared design matrix -- a *hybrid*, marked with
     a ◆ in the ranking and on the figures because it is not ranked on the same
@@ -147,6 +152,26 @@ def algorithm_specs(cfg: dict) -> list[dict]:
     return specs
 
 
+def resolved_params(spec: dict, seed: int) -> dict:
+    """Every hyper-parameter one entry will actually train with, defaults included.
+
+    A config carries only what it overrides, so ``spec["params"]`` alone does not
+    say which model ran -- and the interesting settings now come from
+    ``sweep_clf_cross_domain.py``, transcribed by hand. Asking the algorithm to
+    resolve them makes that visible: it is printed before each matrix and stored
+    in the payload as ``resolved_params``, so a results directory records the
+    model that was fitted rather than the diff against defaults.
+
+    Constructing the algorithm is cheap (no network is built until ``fit``), and
+    it never raises here: the preflight has already rejected anything unbuildable,
+    and a run that got this far must not die over a display string.
+    """
+    try:
+        return build_algorithm(spec["name"], seed, **spec["params"]).resolved_params()
+    except Exception:
+        return dict(spec["params"])
+
+
 def aux_columns(cfg: dict) -> list[str]:
     """Every auxiliary column any algorithm in this config asks for, deduplicated.
 
@@ -254,8 +279,14 @@ def check_config(cfg: dict, report: Report) -> None:
                     f"'binoculars: {DEFAULT_BINOX_COL}' on this entry"
                 )
 
+            # Build it and check its hyper-parameter *values* here, so a name the
+            # algorithm does not read (a mistranscribed sweep winner) or an
+            # out-of-range value fails now rather than inside the first fit --
+            # or, worse, trains the default model while the config claims
+            # otherwise. See ClfAlgorithm's docstring.
             try:
-                build_algorithm(s["name"], cfg.get("seed", 0), **s["params"])
+                alg = build_algorithm(s["name"], cfg.get("seed", 0), **s["params"])
+                alg.validate_params()
             except Exception as exc:  # a known name that still cannot be built
                 report.error(f"{s['id']}: cannot build {s['name']!r}: {exc}")
 
@@ -555,11 +586,16 @@ def run_algorithm(
     labels: dict,
     features: list[str],
     out_dir: Path,
+    save_models: bool = True,
 ) -> dict:
     """Full source x target matrix for one algorithm. Returns the saved payload.
 
     ``X_all`` / ``data`` are loaded once by ``run_config`` and shared across
     algorithms, since every algorithm sees the same fixed feature set.
+
+    ``save_models`` writes one pickled model per (seed, source). The hyper-parameter
+    sweep turns it off: it fits thousands of throwaway candidates and only the
+    winner is ever reloaded, so keeping them all would cost gigabytes for nothing.
     """
     base_seed: int = cfg["seed"]
     n_runs: int = cfg["model"]["n_runs"]
@@ -584,7 +620,8 @@ def run_algorithm(
     for i in tqdm(range(n_runs), desc="Seeds", leave=False):
         seed = base_seed + i
         seed_model_dir = out_dir / str(i) / "model"
-        seed_model_dir.mkdir(parents=True, exist_ok=True)
+        if save_models:
+            seed_model_dir.mkdir(parents=True, exist_ok=True)
         seed_res: dict[str, dict] = {}
 
         for source in names:
@@ -602,6 +639,11 @@ def run_algorithm(
 
             # A fresh algorithm per (seed, source); each owns its preprocessing.
             alg = build_algorithm(name, seed, **params)
+            # Groups for the training rows only. An algorithm that carves its own
+            # validation split out of them (the torch ones, under `val_frac`) needs
+            # these to keep a document and its rewrites on one side of that split,
+            # the same guarantee the outer split above gives. Ignored by the rest.
+            alg.set_fit_groups(groups_s[train_idx])
             fit_alg(
                 alg,
                 X_s[train_idx],
@@ -638,13 +680,14 @@ def run_algorithm(
             # Persist last: the torch algorithms' save() moves the model to CPU,
             # so saving before the predictions above would drop them off the GPU.
             # Best-effort.
-            try:
-                alg.save(seed_model_dir / f"{source}.joblib")
-            except Exception as exc:  # persistence must never abort a long run
-                tqdm.write(
-                    f"{YELLOW}  ⚠️  could not save {name} for {source} "
-                    f"(seed {seed}): {type(exc).__name__}: {exc}{RESET}"
-                )
+            if save_models:
+                try:
+                    alg.save(seed_model_dir / f"{source}.joblib")
+                except Exception as exc:  # persistence must never abort a long run
+                    tqdm.write(
+                        f"{YELLOW}  ⚠️  could not save {name} for {source} "
+                        f"(seed {seed}): {type(exc).__name__}: {exc}{RESET}"
+                    )
 
         per_seed.append(seed_res)
 
@@ -689,6 +732,10 @@ def run_algorithm(
         "embedding": spec["label"],
         "algorithm": name,
         "params": params,
+        # What the config asked for is `params`; this is what the algorithm made
+        # of it, defaults filled in. Keeping both means a matrix can be traced
+        # back to the exact model without re-deriving any default.
+        "resolved_params": resolved_params(spec, base_seed),
         "binoculars": binox_col,
         "feature_dim": feature_dim,
         "dataset_names": names,
@@ -781,8 +828,14 @@ def run_config(cfg_path: Path, cfg: dict, alg_dir: Path) -> None:
     rows: list[dict] = []
     for spec in tqdm(specs, desc="Algorithms", unit="alg", leave=False):
         hybrid_note = f" + {spec['binoculars']}" if spec["binoculars"] else ""
+        tqdm.write(f"\n→ {spec['id']}  ({spec['name']}{hybrid_note})")
+        # The resolved set, not the config's diff against the defaults: when the
+        # params came out of a sweep leaderboard this is the line that confirms
+        # the transcription took effect.
+        eff = resolved_params(spec, cfg["seed"])
         tqdm.write(
-            f"\n→ {spec['id']}  ({spec['name']}{hybrid_note}, params={spec['params']})"
+            "   params: "
+            + ", ".join(f"{k}={v}" for k, v in sorted(eff.items()))
         )
         out_dir = alg_dir / spec["id"]
         out_dir.mkdir(parents=True, exist_ok=True)

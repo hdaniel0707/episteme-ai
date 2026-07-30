@@ -25,6 +25,14 @@ class LogisticAlg(ClfAlgorithm):
     """
 
     name = "logistic"
+    PARAMS = ("C", "max_iter", "l1_ratio", "solver")
+
+    def resolved_params(self) -> dict:
+        out = {"C": self.params.get("C", 1.0), "max_iter": self.params.get("max_iter", 1000)}
+        # Only reported when set, mirroring fit: sklearn's own defaults apply
+        # otherwise and naming them here would misreport what ran.
+        out.update({k: self.params[k] for k in ("l1_ratio", "solver") if k in self.params})
+        return out
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> "LogisticAlg":
         kwargs = dict(

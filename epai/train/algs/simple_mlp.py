@@ -8,24 +8,32 @@ import joblib
 import numpy as np
 import torch
 import torch.nn as nn
-from sklearn.preprocessing import StandardScaler
-from torch.utils.data import DataLoader, TensorDataset
 
+from ._torch_common import (
+    TRAIN_HPARAM_NAMES,
+    FeatureNormalizer,
+    TrainHParams,
+    hparams_dict,
+    mlp_layers,
+    parse_dims,
+    read_hparams,
+    train_torch_model,
+)
 from .base import ClfAlgorithm
 
 
 class _MLP(nn.Module):
-    """Plain MLP: (Linear → ReLU → Dropout) per hidden layer, then a logit head."""
+    """Plain MLP: ``[input dropout]`` then a hidden stack, then a logit head.
+
+    An empty ``hidden_dims`` collapses this to a linear probe on the features --
+    kept reachable on purpose; see :func:`mlp_layers`.
+    """
 
     def __init__(
-        self, in_dim: int, hidden_dims: list[int], n_classes: int, dropout: float
+        self, in_dim: int, hidden_dims: list[int], n_classes: int, hp: TrainHParams
     ):
         super().__init__()
-        layers: list[nn.Module] = []
-        prev = in_dim
-        for h in hidden_dims:
-            layers += [nn.Linear(prev, h), nn.ReLU(), nn.Dropout(dropout)]
-            prev = h
+        layers, prev = mlp_layers(in_dim, hidden_dims, hp)
         layers.append(nn.Linear(prev, n_classes))
         self.net = nn.Sequential(*layers)
 
@@ -34,80 +42,79 @@ class _MLP(nn.Module):
 
 
 class SimpleMLPAlg(ClfAlgorithm):
-    """A custom PyTorch MLP: standardise, then train an MLP under cross-entropy.
+    """A custom PyTorch MLP: normalise, then train an MLP under cross-entropy.
 
-    Runs on CUDA when available, otherwise CPU. Params (all optional):
-      * ``hidden_dims`` -- layer widths (default ``[256, 64]``);
-      * ``dropout`` -- dropout probability (default 0.1);
-      * ``epochs`` -- max epochs (default 100);
-      * ``batch_size`` -- minibatch size (default 64);
-      * ``lr`` -- AdamW learning rate (default 1e-3);
-      * ``weight_decay`` -- AdamW weight decay (default 1e-4);
-      * ``patience`` -- early-stop after this many epochs without a training-loss
-        improvement (default 10; set 0 to disable and always run ``epochs``).
+    Runs on CUDA when available, otherwise CPU. Architecture params:
+      * ``hidden_dims`` -- layer widths (default ``[256, 64]``; ``[]`` gives a
+        linear probe).
+
+    Every other hyper-parameter is shared with :mod:`binox_mlp` and documented on
+    :class:`epai.train.algs._torch_common.TrainHParams`. In brief:
+      * ``normalize`` -- ``none`` | ``standard`` | ``l2``, combined with ``+``
+        (default ``standard``). ``standard`` carries the *source* corpus's mean
+        and scale onto every target; ``l2`` is per-row and carries nothing;
+      * ``val_frac`` -- hold this fraction of the training rows out (grouped) and
+        early-stop on it, restoring the best weights (default 0, which instead
+        early-stops on the training loss -- the old behaviour);
+      * ``val_metric`` -- ``loss`` or ``accuracy`` (default ``loss``);
+      * ``dropout`` / ``input_dropout`` -- between hidden layers / on the raw
+        feature vector (defaults 0.1 / 0.0);
+      * ``norm_layer`` -- ``none`` or ``layernorm`` (default ``none``);
+      * ``label_smoothing``, ``mixup_alpha``, ``grad_clip`` -- default 0, off;
+      * ``epochs``, ``batch_size``, ``lr``, ``weight_decay``, ``patience`` --
+        defaults 100, 64, 1e-3, 1e-4, 10.
+
+    The defaults reproduce this class's behaviour before the shared trainer was
+    introduced, so existing configs are unaffected.
+
+    ``PARAMS`` is ``hidden_dims`` plus every field of ``TrainHParams``, which is
+    exactly the space ``sweep_clf_cross_domain.py`` searches -- so a winning trial's
+    params paste straight into a ``clf_cd_algs`` config entry, and a name that does
+    not belong there is a preflight error rather than a silently ignored key.
     """
 
     name = "simple_mlp"
     N_CLASSES = 2
+    PARAMS = ("hidden_dims",) + TRAIN_HPARAM_NAMES
+
+    def _hidden_dims(self) -> list[int]:
+        """The layer widths, parsed and validated. ``[]`` is a linear probe."""
+        return parse_dims(self.params.get("hidden_dims", [256, 64]), "hidden_dims")
+
+    def validate_params(self) -> None:
+        read_hparams(self.params)  # ranges and enums
+        self._hidden_dims()
+
+    def resolved_params(self) -> dict:
+        return {"hidden_dims": self._hidden_dims(), **hparams_dict(read_hparams(self.params))}
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> "SimpleMLPAlg":
-        p = self.params
-        hidden_dims = [int(h) for h in p.get("hidden_dims", [256, 64])]
-        dropout = float(p.get("dropout", 0.1))
-        epochs = int(p.get("epochs", 100))
-        batch_size = int(p.get("batch_size", 64))
-        lr = float(p.get("lr", 1e-3))
-        weight_decay = float(p.get("weight_decay", 1e-4))
-        patience = int(p.get("patience", 10))
+        hp = read_hparams(self.params)
+        hidden_dims = self._hidden_dims()
 
         # Seed torch and numpy so a run is reproducible for a given seed.
         torch.manual_seed(self.seed)
         np.random.seed(self.seed)
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.scaler = StandardScaler()
-        Xs = self.scaler.fit_transform(X).astype(np.float32)
+        self.normalizer = FeatureNormalizer(hp.normalize)
+        Xs = self.normalizer.fit_transform(X)
 
-        X_t = torch.from_numpy(Xs).to(self.device)
-        y_t = torch.from_numpy(np.asarray(y, dtype=np.int64)).to(self.device)
-
-        self.model = _MLP(X_t.shape[1], hidden_dims, self.N_CLASSES, dropout).to(
-            self.device
+        self.model = _MLP(Xs.shape[1], hidden_dims, self.N_CLASSES, hp).to(self.device)
+        self.history_ = train_torch_model(
+            self.model,
+            [Xs],
+            y,
+            hp,
+            self.device,
+            self.seed,
+            groups=self.fit_groups_,
         )
-        opt = torch.optim.AdamW(
-            self.model.parameters(), lr=lr, weight_decay=weight_decay
-        )
-        loss_fn = nn.CrossEntropyLoss()
-        loader = DataLoader(
-            TensorDataset(X_t, y_t), batch_size=batch_size, shuffle=True
-        )
-
-        best = float("inf")
-        no_improve = 0
-        self.model.train()
-        for _ in range(epochs):
-            epoch_loss = 0.0
-            for xb, yb in loader:
-                opt.zero_grad()
-                loss = loss_fn(self.model(xb), yb)
-                loss.backward()
-                opt.step()
-                epoch_loss += loss.item()
-            epoch_loss /= max(len(loader), 1)
-
-            if patience:  # early stop on training loss (no val split per source)
-                if best - epoch_loss > 1e-4:
-                    best = epoch_loss
-                    no_improve = 0
-                else:
-                    no_improve += 1
-                    if no_improve >= patience:
-                        break
         return self
 
     @torch.no_grad()
     def predict(self, X: np.ndarray) -> np.ndarray:
-        Xs = self.scaler.transform(X).astype(np.float32)
+        Xs = self.normalizer.transform(X)
         X_t = torch.from_numpy(Xs).to(self.device)
         self.model.eval()
         logits = self.model(X_t)

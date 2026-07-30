@@ -18,6 +18,14 @@ class GradientBoostingAlg(ClfAlgorithm):
     """
 
     name = "gradient_boosting"
+    PARAMS = ("n_estimators", "learning_rate", "max_depth")
+
+    def resolved_params(self) -> dict:
+        return {
+            "n_estimators": self.params.get("n_estimators", 100),
+            "learning_rate": self.params.get("learning_rate", 0.1),
+            "max_depth": self.params.get("max_depth", 3),
+        }
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> "GradientBoostingAlg":
         self.model = GradientBoostingClassifier(

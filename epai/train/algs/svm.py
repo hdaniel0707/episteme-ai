@@ -20,6 +20,14 @@ class SVMAlg(ClfAlgorithm):
     """
 
     name = "svm"
+    PARAMS = ("C", "kernel", "gamma")
+
+    def resolved_params(self) -> dict:
+        return {
+            "C": self.params.get("C", 1.0),
+            "kernel": self.params.get("kernel", "rbf"),
+            "gamma": self.params.get("gamma", "scale"),
+        }
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> "SVMAlg":
         self.model = make_pipeline(

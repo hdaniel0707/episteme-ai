@@ -15,9 +15,19 @@ import joblib
 import numpy as np
 import torch
 import torch.nn as nn
-from sklearn.preprocessing import StandardScaler
-from torch.utils.data import DataLoader, TensorDataset
 
+from ._torch_common import (
+    TRAIN_HPARAM_NAMES,
+    FeatureNormalizer,
+    TrainHParams,
+    hidden_block,
+    hparams_dict,
+    mlp_layers,
+    parse_dims,
+    parse_normalize,
+    read_hparams,
+    train_torch_model,
+)
 from .base import ClfAlgorithm
 
 
@@ -25,13 +35,15 @@ class _BinoxMLP(nn.Module):
     """Trunk over the embedding → concat the score → head → logits.
 
     ``pre_dims`` sizes the trunk, ``post_dims`` the head, both as
-    (Linear → ReLU → Dropout) blocks. An empty ``pre_dims`` leaves the trunk as
-    a pass-through, which is exactly early fusion (the score concatenated at the
-    input) -- the control this architecture is meant to be measured against.
+    (Linear → [LayerNorm] → ReLU → Dropout) blocks. An empty ``pre_dims`` leaves
+    the trunk as a pass-through, which is exactly early fusion (the score
+    concatenated at the input) -- the control this architecture is meant to be
+    measured against.
 
     Dropout is applied to the trunk's output but never to the score: zeroing the
     score on a fraction of the steps would teach the model not to depend on it,
-    which is the opposite of the point.
+    which is the opposite of the point. ``input_dropout`` likewise reaches only
+    the embedding, at the very front of the trunk.
     """
 
     def __init__(
@@ -42,17 +54,12 @@ class _BinoxMLP(nn.Module):
         post_dims: list[int],
         score_hidden: int,
         n_classes: int,
-        dropout: float,
+        hp: TrainHParams,
     ):
         super().__init__()
 
-        layers: list[nn.Module] = []
-        prev = in_dim
-        for h in pre_dims:
-            layers += [nn.Linear(prev, h), nn.ReLU(), nn.Dropout(dropout)]
-            prev = h
+        layers, trunk_dim = mlp_layers(in_dim, pre_dims, hp)
         self.trunk = nn.Sequential(*layers)
-        trunk_dim = prev
 
         # A bare Linear on the score would be pointless -- an affine function of
         # one scalar that the next layer's weights simply absorb. With the ReLU
@@ -66,13 +73,13 @@ class _BinoxMLP(nn.Module):
             self.score = nn.Identity()
             score_dim = aux_dim
 
-        layers = []
+        head: list[nn.Module] = []
         prev = trunk_dim + score_dim
         for h in post_dims:
-            layers += [nn.Linear(prev, h), nn.ReLU(), nn.Dropout(dropout)]
+            head += hidden_block(prev, h, hp.dropout, hp.norm_layer)
             prev = h
-        layers.append(nn.Linear(prev, n_classes))
-        self.head = nn.Sequential(*layers)
+        head.append(nn.Linear(prev, n_classes))
+        self.head = nn.Sequential(*head)
 
     def forward(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
         return self.head(torch.cat([self.trunk(x), self.score(z)], dim=1))
@@ -83,31 +90,70 @@ class BinoxMLPAlg(ClfAlgorithm):
 
     Takes the auxiliary column the config's ``binoculars`` key names, as a
     second matrix ``Z`` alongside the design matrix ``X`` (see ``uses_aux``).
-    Runs on CUDA when available, otherwise CPU. Params (all optional):
+    Runs on CUDA when available, otherwise CPU. Architecture params:
       * ``pre_dims`` -- trunk widths, applied to the embedding before the score
         is concatenated (default ``[256, 64, 8]``; ``[]`` gives early fusion);
       * ``post_dims`` -- head widths, applied after the concatenation
         (default ``[16]``);
       * ``score_hidden`` -- project the score through ``Linear → ReLU`` to this
         width before concatenating (default 0, i.e. use the raw scalar);
-      * ``dropout`` -- dropout probability (default 0.1);
-      * ``epochs`` -- max epochs (default 100);
-      * ``batch_size`` -- minibatch size (default 64);
-      * ``lr`` -- AdamW learning rate (default 1e-3);
-      * ``weight_decay`` -- AdamW weight decay (default 1e-4);
-      * ``patience`` -- early-stop after this many epochs without a training-loss
-        improvement (default 10; set 0 to disable and always run ``epochs``).
+      * ``aux_normalize`` -- how the score matrix is normalised (default
+        ``standard``; see below).
 
-    ``X`` and ``Z`` are standardised by two separate scalers, both fitted on the
-    *source* corpus's training split. The score's distribution shifts between
-    corpora, so under transfer it arrives standardised by statistics that are
+    Every other hyper-parameter is shared with :mod:`simple_mlp` and documented
+    on :class:`epai.train.algs._torch_common.TrainHParams` -- ``normalize``,
+    ``val_frac``, ``dropout``, ``input_dropout``, ``norm_layer``,
+    ``label_smoothing``, ``mixup_alpha``, ``epochs``, ``batch_size``, ``lr``,
+    ``weight_decay``, ``patience``. Defaults reproduce this class's behaviour
+    before the shared trainer existed.
+
+    ``X`` and ``Z`` are normalised separately, both fitted on the *source*
+    corpus's training split. The score's distribution shifts between corpora, so
+    under the default ``standard`` it arrives standardised by statistics that are
     not the target's -- deliberately, since the zero-shot baseline calibrates its
-    threshold on the source split too, which keeps the two comparable.
+    threshold on the source split too, which keeps the two comparable. ``Z`` has
+    its own ``aux_normalize`` rather than following ``normalize`` because it is a
+    single column: a per-row ``l2`` on one column collapses it to its sign, which
+    the normaliser rejects outright rather than doing quietly.
     """
 
     name = "binox_mlp"
     uses_aux = True
     N_CLASSES = 2
+    PARAMS = (
+        "pre_dims",
+        "post_dims",
+        "score_hidden",
+        "aux_normalize",
+    ) + TRAIN_HPARAM_NAMES
+
+    def _arch(self) -> dict:
+        """This class's own params, parsed and validated. Shared by fit and preflight."""
+        p = self.params
+        try:
+            score_hidden = int(p.get("score_hidden", 0))
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"score_hidden must be an int (0 = raw scalar), got "
+                f"{p.get('score_hidden')!r}"
+            ) from None
+        if score_hidden < 0:
+            raise ValueError(f"score_hidden must be >= 0 (0 disables), got {score_hidden}")
+        aux_normalize = p.get("aux_normalize", "standard")
+        parse_normalize(aux_normalize)  # raises on an unknown step
+        return {
+            "pre_dims": parse_dims(p.get("pre_dims", [256, 64, 8]), "pre_dims"),
+            "post_dims": parse_dims(p.get("post_dims", [16]), "post_dims"),
+            "score_hidden": score_hidden,
+            "aux_normalize": aux_normalize,
+        }
+
+    def validate_params(self) -> None:
+        read_hparams(self.params)  # ranges and enums
+        self._arch()
+
+    def resolved_params(self) -> dict:
+        return {**self._arch(), **hparams_dict(read_hparams(self.params))}
 
     def _clean_aux(self, Z: np.ndarray) -> np.ndarray:
         """Replace non-finite scores with the training median of their column.
@@ -131,15 +177,10 @@ class BinoxMLPAlg(ClfAlgorithm):
             )
 
         p = self.params
-        pre_dims = [int(h) for h in p.get("pre_dims", [256, 64, 8])]
-        post_dims = [int(h) for h in p.get("post_dims", [16])]
-        score_hidden = int(p.get("score_hidden", 0))
-        dropout = float(p.get("dropout", 0.1))
-        epochs = int(p.get("epochs", 100))
-        batch_size = int(p.get("batch_size", 64))
-        lr = float(p.get("lr", 1e-3))
-        weight_decay = float(p.get("weight_decay", 1e-4))
-        patience = int(p.get("patience", 10))
+        hp = read_hparams(p)
+        arch = self._arch()
+        pre_dims, post_dims = arch["pre_dims"], arch["post_dims"]
+        score_hidden = arch["score_hidden"]
 
         # Seed torch and numpy so a run is reproducible for a given seed.
         torch.manual_seed(self.seed)
@@ -153,53 +194,29 @@ class BinoxMLPAlg(ClfAlgorithm):
         finite = np.where(np.isfinite(Z_raw), Z_raw, np.nan)
         self.aux_fill_ = np.nan_to_num(np.nanmedian(finite, axis=0), nan=0.0)
 
-        self.scaler = StandardScaler()
-        self.aux_scaler = StandardScaler()
-        Xs = self.scaler.fit_transform(X).astype(np.float32)
-        Zs = self.aux_scaler.fit_transform(self._clean_aux(Z)).astype(np.float32)
-
-        X_t = torch.from_numpy(Xs).to(self.device)
-        Z_t = torch.from_numpy(Zs).to(self.device)
-        y_t = torch.from_numpy(np.asarray(y, dtype=np.int64)).to(self.device)
+        self.normalizer = FeatureNormalizer(hp.normalize)
+        self.aux_normalizer = FeatureNormalizer(arch["aux_normalize"])
+        Xs = self.normalizer.fit_transform(X)
+        Zs = self.aux_normalizer.fit_transform(self._clean_aux(Z))
 
         self.model = _BinoxMLP(
-            X_t.shape[1],
-            Z_t.shape[1],
+            Xs.shape[1],
+            Zs.shape[1],
             pre_dims,
             post_dims,
             score_hidden,
             self.N_CLASSES,
-            dropout,
+            hp,
         ).to(self.device)
-        opt = torch.optim.AdamW(
-            self.model.parameters(), lr=lr, weight_decay=weight_decay
+        self.history_ = train_torch_model(
+            self.model,
+            [Xs, Zs],
+            y,
+            hp,
+            self.device,
+            self.seed,
+            groups=self.fit_groups_,
         )
-        loss_fn = nn.CrossEntropyLoss()
-        loader = DataLoader(
-            TensorDataset(X_t, Z_t, y_t), batch_size=batch_size, shuffle=True
-        )
-
-        best = float("inf")
-        no_improve = 0
-        self.model.train()
-        for _ in range(epochs):
-            epoch_loss = 0.0
-            for xb, zb, yb in loader:
-                opt.zero_grad()
-                loss = loss_fn(self.model(xb, zb), yb)
-                loss.backward()
-                opt.step()
-                epoch_loss += loss.item()
-            epoch_loss /= max(len(loader), 1)
-
-            if patience:  # early stop on training loss (no val split per source)
-                if best - epoch_loss > 1e-4:
-                    best = epoch_loss
-                    no_improve = 0
-                else:
-                    no_improve += 1
-                    if no_improve >= patience:
-                        break
         return self
 
     @torch.no_grad()
@@ -209,8 +226,8 @@ class BinoxMLPAlg(ClfAlgorithm):
                 f"{type(self).__name__} needs the auxiliary Binoculars column at "
                 f"predict time as well"
             )
-        Xs = self.scaler.transform(X).astype(np.float32)
-        Zs = self.aux_scaler.transform(self._clean_aux(Z)).astype(np.float32)
+        Xs = self.normalizer.transform(X)
+        Zs = self.aux_normalizer.transform(self._clean_aux(Z))
         X_t = torch.from_numpy(Xs).to(self.device)
         Z_t = torch.from_numpy(Zs).to(self.device)
         self.model.eval()
