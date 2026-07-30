@@ -3,10 +3,10 @@
 Works off any per-row detector score in the parquet: ``--metric binox`` reads the
 ``binoculars_*`` columns, ``--metric llm_judge`` the ``llm_judge_score_*`` columns
 written by ``epai/ai_detection/llm_judge/add_llm_judge_scores.py``. The two differ
-only in which columns are read and in which direction means "AI" (Binoculars is
-*low* for machine text, the judge score is a *high* P(AI)); everything below —
-pairing, violins, histograms, ROC/PR, confusion — is the same either way, so the
-two baselines stay directly comparable.
+only in which columns are read: both are *low* for machine text (Binoculars by
+construction, the judge because it reports P(human), 1.0 ⇒ human). Everything
+below — pairing, violins, histograms, ROC/PR, confusion — is the same either way,
+so the two baselines stay directly comparable.
 
 Every ``id`` in a ``*_binox*`` parquet appears once per ``generated_by`` group
 (``human``, ``gpt``, ``claude``, ...). For each parquet this script pairs, per
@@ -145,8 +145,8 @@ METRICS: dict[str, Metric] = {
     "llm_judge": Metric(
         key="llm_judge",
         prefix="llm_judge_score_",
-        label="LLM-judge P(AI)",
-        ai_is_high=True,  # the judge reports P(machine-generated)
+        label="LLM-judge P(human)",
+        ai_is_high=False,  # the judge reports P(human), so low ⇒ machine
         hist_range=(0.0, 1.0),  # a probability: bin the whole range, always
     ),
 }
@@ -820,7 +820,7 @@ def parse_args() -> argparse.Namespace:
         choices=sorted(METRICS),
         help="Which detector score to analyse (default: %(default)s). 'binox' "
         "reads binoculars_* (low ⇒ AI), 'llm_judge' reads llm_judge_score_* "
-        "(high ⇒ AI).",
+        "(also low ⇒ AI: the judge reports P(human)).",
     )
     parser.add_argument(
         "--score-cols",

@@ -1,17 +1,25 @@
-"""LLM-as-a-judge baseline: ask an LLM whether each text is AI-written.
+"""LLM-as-a-judge baseline: ask an LLM whether each text is human-written.
 
 Reads a Parquet, walks its rows, and for each one sends *only* the ``text``
-column to a judge model that returns P(machine-generated) in [0, 1]. The score
+column to a judge model that returns P(human-written) in [0, 1]. The score
 lands in a new ``llm_judge_score_{model}`` column; nothing else in the file is
 touched, so this sits next to ``binoculars_score`` as a second zero-training
 baseline and can be compared with it on the same threshold sweeps.
+
+**1.0 means human, 0.0 means machine.** That is the same direction as
+``binoculars_score`` (low ⇒ machine), so both baselines read the same way and a
+threshold rule is ``score <= thr ⇒ machine`` for either. Scores written by an
+earlier version of this script are P(machine) -- the opposite -- and the column
+name does not distinguish the two, so a file scored before the flip has to be
+re-judged: drop the stale column with ``delete_parquet_columns.py`` in this
+folder and run this script again.
 
 The judge sees the document and nothing else -- no label, no ``generated_by``,
 no domain, no neighbouring rows -- which is the point: the score has to be
 earned from the text alone, exactly like the Binoculars score it is compared
 against. It is a probability rather than a verdict, so ROC-AUC is available and
 the operating point stays tunable after the fact (a hard verdict is just
-``score >= 0.5``).
+``score <= 0.5``).
 
 Only rows whose ``generated_by`` is in ``DEFAULT_GENERATED_BY`` are judged
 (``--generated-by`` overrides the list, ``--generated-by all`` judges every
@@ -117,14 +125,7 @@ SYSTEM_PROMPT = """You are a forensic linguist specialising in the detection of 
 
 You will be shown one document and nothing else: no title, no author, no source, no metadata, no context. Judge the text on its own evidence.
 
-Your task is to estimate the probability that the document was written by a large language model rather than by a human.
-
-Evidence that tends to indicate machine authorship:
-- Even, predictable rhythm; uniform sentence and paragraph lengths.
-- Fluent but generic vocabulary; hedged, balanced, non-committal framing.
-- Tidy scaffolding: explicit enumeration, symmetrical structure, a summarising closing sentence that adds nothing new.
-- Broad, safe claims in place of specific detail; no verifiable particulars, names, numbers, or first-hand observation.
-- Absence of typos, false starts, inconsistent punctuation, or idiosyncratic formatting.
+Your task is to estimate the probability that the document was written by a human rather than by a large language model.
 
 Evidence that tends to indicate human authorship:
 - Uneven pacing, digressions, sentences that change direction mid-way.
@@ -133,8 +134,15 @@ Evidence that tends to indicate human authorship:
 - Domain habits and shorthand a general-purpose model would not reach for.
 - Personal voice or lived detail that is not reconstructable from general knowledge.
 
+Evidence that tends to indicate machine authorship:
+- Even, predictable rhythm; uniform sentence and paragraph lengths.
+- Fluent but generic vocabulary; hedged, balanced, non-committal framing.
+- Tidy scaffolding: explicit enumeration, symmetrical structure, a summarising closing sentence that adds nothing new.
+- Broad, safe claims in place of specific detail; no verifiable particulars, names, numbers, or first-hand observation.
+- Absence of typos, false starts, inconsistent punctuation, or idiosyncratic formatting.
+
 Calibration rules:
-- Return a probability, not a verdict. 0.0 means certainly human, 1.0 means certainly machine, 0.5 means the text carries no usable evidence either way.
+- Return a probability, not a verdict. 1.0 means certainly human, 0.0 means certainly machine, 0.5 means the text carries no usable evidence either way.
 - Use the whole range, and reserve values below 0.1 or above 0.9 for documents where the evidence is genuinely strong.
 - Do not assume any particular mix of human and machine documents; judge each one on its own.
 - Polished, competent writing is not by itself evidence of machine authorship, and a short or dull document is not either.
@@ -155,11 +163,11 @@ class JudgeVerdict(BaseModel):
     # The [0, 1] range is stated in the description rather than as ge/le: the
     # OpenAI strict-schema subset rejects `minimum`/`maximum`, and a model that
     # answered 1.2 anyway would raise here instead of being clamped in judge_row.
-    ai_probability: float = Field(
+    human_probability: float = Field(
         description=(
             "Probability, between 0.0 and 1.0, that the document was written by "
-            "a large language model. 0.0 = certainly human, 1.0 = certainly "
-            "machine."
+            "a human. 1.0 = certainly human, 0.0 = certainly machine (written "
+            "by a large language model)."
         ),
     )
 
@@ -309,7 +317,7 @@ class Judge:
         raise ValueError(f"Unsupported provider: {self.provider}")
 
     def __call__(self, text: str) -> float:
-        """P(machine-generated) for one document. Raises on a failed call."""
+        """P(human-written) for one document. Raises on a failed call."""
         if self.provider == "openai":
             return self._score_openai(text)
         if self.provider == "anthropic":
@@ -330,7 +338,7 @@ class Judge:
         parsed = response.choices[0].message.parsed
         if parsed is None:
             raise ValueError("model returned no parsable verdict")
-        return float(parsed.ai_probability)
+        return float(parsed.human_probability)
 
     def _score_anthropic(self, text: str) -> float:
         # Same forced-tool trick as epai/utils/genai_utils.py: it is the way to
@@ -344,18 +352,18 @@ class Judge:
                     "name": "report_probability",
                     "description": (
                         "Report the probability that the document was written "
-                        "by a large language model."
+                        "by a human rather than by a large language model."
                     ),
                     "input_schema": {
                         "type": "object",
                         "properties": {
-                            "ai_probability": {
+                            "human_probability": {
                                 "type": "number",
                                 "minimum": 0.0,
                                 "maximum": 1.0,
                             }
                         },
-                        "required": ["ai_probability"],
+                        "required": ["human_probability"],
                     },
                 }
             ],
@@ -363,9 +371,9 @@ class Judge:
             messages=[{"role": "user", "content": USER_TEMPLATE.format(text=text)}],
         )
         block = next((b for b in response.content if b.type == "tool_use"), None)
-        if block is None or "ai_probability" not in block.input:
+        if block is None or "human_probability" not in block.input:
             raise ValueError("model returned no parsable verdict")
-        return float(block.input["ai_probability"])
+        return float(block.input["human_probability"])
 
     def _score_gemini(self, text: str) -> float:
         from google.genai import types
@@ -382,7 +390,7 @@ class Judge:
         parsed = response.parsed
         if parsed is None:
             raise ValueError("model returned no parsable verdict")
-        return float(parsed.ai_probability)
+        return float(parsed.human_probability)
 
 
 @dataclass
@@ -532,7 +540,17 @@ def count_scored(df: pd.DataFrame, col: str, judgeable: np.ndarray) -> int:
 
 
 def confirm_recompute(n_scored: int) -> bool:
-    """Ask whether to re-judge rows that already have a score. Default: no."""
+    """Ask whether to re-judge rows that already have a score. Default: no.
+
+    Worth a second thought on a file scored before this script switched to
+    P(human): those values are P(machine), the column name is the same either
+    way, and keeping them mixes both conventions in one column.
+    """
+    print(
+        "NOTE  scores written before this script switched to P(human) are "
+        "P(machine) — the opposite direction — and are indistinguishable from "
+        "new ones. Re-judge (or drop the column) if this file predates the flip."
+    )
     answer = input(
         f"{n_scored} judgeable row(s) already have a score for this judge. "
         "Re-judge them? [y/N]: "
@@ -571,6 +589,7 @@ def print_findings(
     print("Judge")
     print(f"  alias         : {alias}")
     print(f"  api model     : {judge_model}")
+    print("  score         : P(human)  —  1.0 ⇒ human, 0.0 ⇒ machine")
     print(f"  column        : {col}  ({'exists' if col in df.columns else 'new'})")
     print(f"  already scored: {n_scored}")
     print(f"  to judge now  : {len(positions)}")
@@ -595,11 +614,15 @@ def evaluate(df: pd.DataFrame, col: str) -> None:
     if not known.any():
         return
 
-    y_true = (truth[known] != "human").astype(int)
+    # The score is P(human), so 'human' is the positive class here and the
+    # verdict is `score >= 0.5 ⇒ human`. A judge that separates the two groups at
+    # all puts the human rows at the HIGH end.
+    y_true = (truth[known] == "human").astype(int)
     y_score = np.array([s for s in scores[known]], dtype=float)
 
     print()
     print("Sanity check against 'generated_by' (not a substitute for the train scripts)")
+    print("  score is P(human): 1.0 ⇒ human, 0.0 ⇒ machine")
     for name in sorted(set(truth[known])):
         group = y_score[truth[known] == name]
         print(f"  mean score, {name:<12}: {group.mean():.3f}  (n={len(group)})")

@@ -107,8 +107,9 @@ DEFAULT_BINOX_COL = "binoculars_score"
 BINOX_FITTED_NAME = "binoculars_fitted"
 BINOX_VANILLA_PREFIX = "binoculars_vanilla_"
 
-# The LLM judge writes P(machine-generated) per row, so its direction is the
-# opposite of Binoculars' and 0.5 is the natural fit-nothing cutoff.
+# The LLM judge writes P(human) per row -- 1.0 ⇒ human, 0.0 ⇒ machine -- so a LOW
+# score means machine, the same direction as Binoculars. 0.5 is the natural
+# fit-nothing cutoff.
 DEFAULT_JUDGE_COL = "llm_judge_score_gpt54_mini"
 DEFAULT_JUDGE_VANILLA = (0.5,)
 
@@ -186,7 +187,7 @@ BASELINE_KINDS: tuple[BaselineKind, ...] = (
         key="llm_judge",
         cfg_key="llm_judge_baseline",
         default_col=DEFAULT_JUDGE_COL,
-        machine_is_high=True,  # the judge reports P(machine), so HIGH means machine
+        machine_is_high=False,  # the judge reports P(human), so LOW means machine
         label="LLM judge",
         default_vanilla=DEFAULT_JUDGE_VANILLA,
     ),
@@ -1266,10 +1267,12 @@ def fit_score_threshold(
     """Youden's-J optimal cutoff for a detector score, fit on a training split.
 
     Positive class is machine (``y == 1``). The ROC needs a decision score that
-    is *higher* for machine: Binoculars is low for machine so it goes in as
+    is *higher* for machine, so a score that is *low* for machine goes in as
     ``-score`` and the cutoff is flipped back ("predict machine when
-    ``score <= cutoff``"), while the LLM judge is already P(machine) and goes in
-    as is ("predict machine when ``score >= cutoff``"). This is the rule used in
+    ``score <= cutoff``"). Both current baselines are that way round: Binoculars
+    by construction, the LLM judge because it reports P(human). A detector that
+    scored P(machine) would pass ``machine_is_high=True`` and go in as is
+    ("predict machine when ``score >= cutoff``"). This is the rule used in
     ``epai/ai_detection/analyse/analyse_binox_human_vs_ai.py``, except the
     threshold is calibrated here on the *training* split rather than the
     evaluation set, so the diagonal stays an honest held-out number and the

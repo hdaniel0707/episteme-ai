@@ -146,9 +146,9 @@ binoculars_baseline:
   vanilla_threshold: [0.9015310749276843, 0.8536432310785527]
 
 # The same two baselines on the LLM-judge score written by
-# epai/ai_detection/llm_judge/add_llm_judge_scores.py, with one difference that
-# matters: the judge reports P(machine-generated), so HIGH means machine here,
-# the opposite of Binoculars. The rule is `score >= threshold => machine`.
+# epai/ai_detection/llm_judge/add_llm_judge_scores.py. The judge reports P(human)
+# -- 1.0 => human, 0.0 => machine -- so LOW means machine, the same direction as
+# Binoculars, and the rule is `score <= threshold => machine`.
 #
 #   llm_judge_fitted           -> cutoff calibrated per source on its TRAINING
 #                                 split (Youden's J), same as the Binoculars one.

@@ -34,10 +34,10 @@ embedding sweep. What is new:
     one more matrix marked with a ★ in the comparison. Two families, configured
     by ``binoculars_baseline`` and ``llm_judge_baseline``, each contributing a
     ``<kind>_fitted`` variant whose cutoff is calibrated per source and one
-    ``<kind>_vanilla_<threshold>`` per fixed cutoff, fit to nothing at all. The
-    families read their score in opposite directions -- Binoculars is *low* for
-    machine text, the LLM judge is P(machine) so it is *high* -- and the judge's
-    default vanilla cutoff is 0.5;
+    ``<kind>_vanilla_<threshold>`` per fixed cutoff, fit to nothing at all. Both
+    families read their score the same way round -- *low* means machine text for
+    Binoculars by construction and for the LLM judge because it reports P(human)
+    -- and the judge's default vanilla cutoff is 0.5;
   * a comparison figure over algorithms (in-domain vs transfer, the scatter, and
     every source->target cell as a heatmap);
   * a preflight check that runs *before any training*, over *every* config.
