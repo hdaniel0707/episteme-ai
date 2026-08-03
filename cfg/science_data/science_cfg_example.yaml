@@ -1,0 +1,85 @@
+# Science-domain AI-detection corpus — one config for the whole pipeline.
+#
+# Unlike the other pipelines (which use one config directory per stage), every
+# stage here reads this single file. That is deliberate: the fetch stage's
+# stop-condition and the filter stage's admission test MUST agree, or the
+# "exactly N per domain after filtering" guarantee is void. One file, one set
+# of thresholds, no drift.
+#
+# Run order:
+#   python -m epai.science_data.fetch.fetch_s2            --cfg cfg/science_data/science_cfg_example.yaml
+#   python -m epai.science_data.filter.filter_abstracts   --cfg cfg/science_data/science_cfg_example.yaml
+#   python -m epai.science_data.prompt.make_prompts       --cfg cfg/science_data/science_cfg_example.yaml
+#   python -m epai.science_data.generate.generate_ai      --cfg cfg/science_data/science_cfg_example.yaml
+
+dataset_id: "science_v1"
+
+# ---------------------------------------------------------------- fetch ----
+fetch:
+  # Kept per domain. The fetcher stops a domain as soon as it has this many
+  # admissible records, so raising it costs API calls but never a re-scrape.
+  target_per_domain: 10
+
+  # Fetch this multiple of `target_per_domain` before stopping. 1.0 is exact
+  # and correct; the default 1.2 buys ~200 spare rows per domain as insurance
+  # against a filter rule you add later, at negligible cost.
+  overfetch: 1.2
+
+  # "relevance" (paper/search, proven, capped at 1000 hits per query) or
+  # "bulk" (paper/search/bulk, uncapped but term-matched and unordered).
+  # With 5 queries per domain and a target of 1000, relevance search has ample
+  # headroom; switch to bulk only if a domain reports a shortfall.
+  search_mode: "relevance"
+
+  # Seconds to sleep between queries, on top of the per-page delay in s2_utils.
+  query_delay: 1.5
+
+# --------------------------------------------------------------- filter ----
+# Absolute thresholds only — see the module docstring of
+# epai/science_data/rules.py for why corpus-relative rules are forbidden here.
+filter:
+  year_min: 1900
+  year_max: 2020          # pre-ChatGPT: keeps LLM-written text out of the human class
+  min_words: 80
+  max_words: 400
+  min_title_words: 3
+  require_citation_count: true   # drops null citationCount, keeps genuine zeros
+  min_english_stopwords: 4
+  max_non_latin_ratio: 0.10
+
+  # How the surplus from `overfetch` is trimmed back to target_per_domain.
+  # "head" keeps fetch order (fully deterministic); "sample" draws at random
+  # using `seed`.
+  trim_mode: "head"
+  seed: 42
+
+# --------------------------------------------------------------- prompt ----
+prompt:
+  # "llm_spec"  — a model writes a constrained content spec from title +
+  #               abstract, so the generated abstract is about the same *work*.
+  #               Matches how the essay/wp Ghostbuster prompts were built.
+  # "title_only"— deterministic, zero leakage, but produces a vaguer prompt
+  #               than the other three corpora use. Kept for ablation.
+  mode: "llm_spec"
+  model: "gpt-5.4-mini"
+  max_workers: 8
+
+# ------------------------------------------------------------- generate ----
+generate:
+  max_workers: 8
+
+  # Add entries here to bring in more generators later. Shards are keyed by
+  # (id, model, prompt_name), so a new generator only issues the calls it is
+  # missing — the existing rows are never regenerated.
+  generators:
+    - model: "gpt-5.4-mini"
+      prompt_name: "plain"
+      # `generated_by` value written to the parquet. "gpt_plain" matches the
+      # Ghostbuster corpora, so this dataset drops straight into the existing
+      # cross-domain configs and into the "gpt" family prefix that
+      # analyse_text_lengths.py and cfg/colors.yaml key on.
+      label: "gpt_plain"
+
+  # Drop any paper for which some generator failed, so every id carries a
+  # complete set of rows. Applied at export, not during generation.
+  require_all_generators: true

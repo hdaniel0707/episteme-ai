@@ -1,0 +1,33 @@
+# Search queries per domain for the science_data fetch stage.
+#
+# Same shape as cfg/citation_impact/fetch/*.yaml, kept in a separate file from
+# the thresholds so the domain list can be swapped without touching the rules
+# that fetch and filter must agree on.
+#
+# Two things to know before editing:
+#
+#   - Domain ORDER is significant. A paper matching queries in two domains is
+#     assigned first-domain-wins, so reordering this file reassigns the
+#     overlapping papers. analyse_fetch.py reports how many that is.
+#   - Queries within a domain are drawn round-robin, not by fixed quota, so a
+#     narrow query that runs dry costs nothing — the others absorb its share.
+#     Prefer more queries per domain over broader ones.
+#
+# With relevance search each query is capped at 1000 hits, so a domain's
+# ceiling is roughly (queries × 1000 × filter yield). Five queries at the ~50%
+# yield typical of S2 abstracts leaves ample headroom for 1000 kept per domain.
+
+queries_domains:
+  Physics:
+    - "quantum mechanics particle physics"
+    - "condensed matter solid state physics"
+    - "thermodynamics statistical mechanics"
+    - "electromagnetism optics photonics"
+    - "nuclear physics plasma"
+
+  Chemistry:
+    - "organic synthesis reaction mechanisms"
+    - "physical chemistry thermodynamics kinetics"
+    - "inorganic coordination chemistry"
+    - "analytical chemistry spectroscopy"
+    - "computational chemistry molecular simulation"
