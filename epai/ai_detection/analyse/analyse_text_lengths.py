@@ -22,9 +22,12 @@ Outputs saved to results/text_lengths/<parquet_stem>/:
   - text_lengths_ecdf.png          — empirical CDFs per group, words | tokens
 
 Usage:
-    uv run python epai/analyse/analyse_text_lengths.py data/parquet/wp_binox0.parquet
-    uv run python epai/analyse/analyse_text_lengths.py \
+    uv run python epai/ai_detection/analyse/analyse_text_lengths.py data/parquet/wp_gpt54mini_binox0_red_200w.parquet
+    uv run python epai/ai_detection/analyse/analyse_text_lengths.py data/parquet/wp_binox0.parquet
+    uv run python epai/ai_detection/analyse/analyse_text_lengths.py \
         data/parquet/reuter_gpt54mini_binox0.parquet --tokenizer allenai/specter2_base
+
+    
 """
 
 from __future__ import annotations

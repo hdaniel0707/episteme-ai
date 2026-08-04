@@ -91,6 +91,7 @@ EMBEDDERS = [
     "openai_large",
 ]
 
+
 # Texts per forward pass. Sized for a 40GB A100 running inference only (no
 # gradients): the BERT-base sized encoders sit around 2-4GB at this batch with
 # 512-token inputs, so there is plenty of headroom left. Lower it if a model runs
