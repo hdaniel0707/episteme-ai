@@ -57,7 +57,7 @@ BASE_DIR = Path(__file__).parent.parent.parent.parent
 RESULTS_DIR = BASE_DIR / "results" / "clf_cd"
 
 ### INPUTS ###############################
-CFG_DIR = BASE_DIR / "cfg" / "ai_detection" / "train" / "clf_cd" / "hd2"
+CFG_DIR = BASE_DIR / "cfg" / "ai_detection" / "train" / "clf_cd" / "norm" / "raw"
 ##########################################
 
 # Binarised target: human -> 0, any generator -> 1.

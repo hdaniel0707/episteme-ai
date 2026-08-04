@@ -1,0 +1,53 @@
+# Baseline arm of the normalisation experiment: the ORIGINAL parquets.
+#
+# This exists so the normalised matrix has a same-embedder, same-seed, same-split
+# partner to be compared against. The published matrix in
+# results/clf_cd/clf_cd_20260721_121101/ is emb_specter2; this one is luar_crud,
+# so reading the normalised run against it isolates normalisation rather than
+# normalisation-plus-a-change-of-embedder.
+#
+# Run both arms in one go by pointing CFG_DIR in
+# epai/ai_detection/train/run_clf_cross_domain.py at this directory:
+#     CFG_DIR = BASE_DIR / "cfg" / "ai_detection" / "train" / "clf_cd" / "norm"
+alg_id: "RAW_luar_crud"
+alg_label: "raw text + luar_crud"
+
+seed: 42
+
+data:
+  human_label: "human"
+  group_col: "id"
+
+  datasets:
+    - name: "essay"
+      label: "essay"
+      parquet_path: "data/parquet/essay_binox0.parquet"
+      drop_classes: ["claude", "gpt_prompt1", "gpt_prompt2", "gpt_semantic", "gpt_writing"]
+    - name: "reuter"
+      label: "reuter"
+      parquet_path: "data/parquet/reuter_binox0.parquet"
+      drop_classes: ["claude", "gpt_prompt1", "gpt_prompt2", "gpt_semantic", "gpt_writing"]
+    - name: "wp"
+      label: "wp"
+      parquet_path: "data/parquet/wp_binox0.parquet"
+      drop_classes: ["claude", "gpt_prompt1", "gpt_prompt2", "gpt_semantic", "gpt_writing"]
+    - name: "essay_gpt54mini"
+      label: "essay (gpt54mini)"
+      parquet_path: "data/parquet/essay_gpt54mini_binox0.parquet"
+      drop_classes: []
+    - name: "reuter_gpt54mini"
+      label: "reuter (gpt54mini)"
+      parquet_path: "data/parquet/reuter_gpt54mini_binox0.parquet"
+      drop_classes: []
+    - name: "wp_gpt54mini"
+      label: "wp (gpt54mini)"
+      parquet_path: "data/parquet/wp_gpt54mini_binox0.parquet"
+      drop_classes: []
+
+features:
+  - emb_luar_crud
+
+model:
+  ml_alg: "logistic"
+  n_runs: 3
+  test_size: 0.30
