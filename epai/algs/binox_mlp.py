@@ -101,7 +101,7 @@ class BinoxMLPAlg(ClfAlgorithm):
         ``standard``; see below).
 
     Every other hyper-parameter is shared with :mod:`simple_mlp` and documented
-    on :class:`epai.train.algs._torch_common.TrainHParams` -- ``normalize``,
+    on :class:`epai.algs._torch_common.TrainHParams` -- ``normalize``,
     ``val_frac``, ``dropout``, ``input_dropout``, ``norm_layer``,
     ``label_smoothing``, ``mixup_alpha``, ``epochs``, ``batch_size``, ``lr``,
     ``weight_decay``, ``patience``. Defaults reproduce this class's behaviour

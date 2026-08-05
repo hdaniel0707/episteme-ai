@@ -37,8 +37,7 @@ fighting each other for threads. Both are applied before torch is imported,
 which is why the command line is parsed at module level.
 
 Where an embedding is recomputed on top of an existing one, the summary reports
-cosine(old, new) with the same buckets as
-``epai/ai_detection/prepare/recompute_embedding.py`` -- identical / drifted / changed -- since
+cosine(old, new) in three buckets -- identical / drifted / changed -- since
 re-running a model on the same text rarely reproduces bit-identical floats.
 
 Run:
@@ -212,9 +211,14 @@ import torch  # noqa: E402
 from dotenv import load_dotenv  # noqa: E402
 from tqdm import tqdm  # noqa: E402
 
-from epai.ai_detection.prepare.recompute_embedding import DRIFT_COS, IDENTICAL_COS  # noqa: E402
 from epai.utils.embedding_utils import EMB_TYPES, add_embedding  # noqa: E402
 from epai.utils.parquet_utils import load_parquet, save_parquet  # noqa: E402
+
+# How far a recomputed vector may move and still count as the same vector.
+# Re-running a model on the same text rarely reproduces bit-identical floats, so
+# tiny drift is separated from real change instead of testing for equality.
+IDENTICAL_COS = 0.999999
+DRIFT_COS = 0.99
 
 load_dotenv()
 
@@ -335,12 +339,7 @@ def apply_limit(embeddable: np.ndarray, limit: int | None) -> np.ndarray:
 
 
 def cosine_summary(old_values: list, new_values: list) -> dict[str, object]:
-    """Classify each recomputed row by how far the new vector moved.
-
-    Same thresholds as epai/ai_detection/prepare/recompute_embedding.py: re-running a model on
-    the same text rarely reproduces bit-identical floats, so tiny drift is
-    separated from real change instead of testing for equality.
-    """
+    """Classify each recomputed row by how far the new vector moved."""
     stats: dict[str, object] = {
         "compared": 0,  # rows with an old and a new vector of equal dimension
         "new": 0,  # old value was Null (nothing to compare against)

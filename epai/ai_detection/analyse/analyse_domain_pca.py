@@ -74,15 +74,13 @@ import matplotlib.pyplot as plt  # noqa: E402  (after the Agg backend is chosen)
 from mpl_toolkits.mplot3d import Axes3D  # noqa: E402,F401  (registers '3d')
 
 from epai.utils.config_utils import RESET, YELLOW  # noqa: E402
+from epai.utils.corpus_utils import DOMAIN_COL, ID_COL, UID_COL  # noqa: E402
 from epai.utils.parquet_utils import load_parquet  # noqa: E402
 from epai.utils.train_utils import CLF_TARGET_COL, drop_missing_rows  # noqa: E402
 
 BASE_DIR = Path(__file__).parent.parent.parent.parent
 RESULTS_DIR = BASE_DIR / "results" / "analyse_domain_pca"
 
-DOMAIN_COL = "domain"
-ID_COL = "id"
-UID_COL = "uid"
 TEXT_COL = "text"
 HUMAN_LABEL = "human"
 SCORE_PREFIXES = ("binoculars_score", "llm_judge_score")

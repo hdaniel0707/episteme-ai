@@ -1,0 +1,48 @@
+# Cross-domain transfer control for the human-vs-machine classifier.
+#
+# One domain, two generators: a pure GENERATOR shift with the corpus held
+# fixed, the complement of original_logistic.yaml.
+#
+# Every dataset is one DOMAIN of a combined parquet built by
+#   uv run python epai/ai_detection/prepare/combine_domains.py \
+#       data/parquet/essay_binox0.parquet data/parquet/reuter_binox0.parquet \
+#       data/parquet/wp_binox0.parquet -o data/parquet/ghostbuster_gpt35t.parquet
+# which already dropped the generators this experiment does not use, so
+# `drop_classes` is empty everywhere. Run with:
+#   uv run python epai/ai_detection/train/run_clf_cross_domain.py --cfg cfg/ai_detection/train/clf_cd/ghostbuster/essay_logistic.yaml
+alg_id: "essay_logistic"
+alg_label: "essay + logistic"
+
+seed: 42
+
+data:
+  # Labels are binarised to human vs machine: `human_label` -> 0, every other
+  # class -> 1. The corpora do not agree on generator names (`gpt` in the
+  # originals, `gpt_plain` in the gpt54mini regenerations), so only this binary
+  # view is comparable across them.
+  human_label: "human"
+
+  # Column whose rows must stay in the SAME split. `id` is the PAIR key: a
+  # source prompt and every rewrite of it share one, and splitting them apart
+  # would show the model the same source text on both sides. It also guards
+  # transfer -- the originals and their gpt54mini regenerations share ids, so
+  # target rows whose group was seen in training are excluded (and counted).
+  group_col: "id"
+
+  datasets:
+    - name: "essay"
+      label: "essay"
+      parquet_path: "data/parquet/ghostbuster_gpt35t.parquet"
+      domain: "essay"
+    - name: "essay_gpt54mini"
+      label: "essay (gpt54mini)"
+      parquet_path: "data/parquet/ghostbuster_gpt54mini.parquet"
+      domain: "essay"
+
+features:
+  - emb_specter2
+
+model:
+  ml_alg: "logistic"  # gradient_boosting | logistic | svm | mlp
+  n_runs: 3
+  test_size: 0.30

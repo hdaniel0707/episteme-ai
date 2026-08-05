@@ -26,14 +26,24 @@ Two things this controls for that a naive transfer eval gets wrong:
     model on human rows it trained on. Target rows whose group appears in the
     source's training split are therefore excluded, and the count is reported.
 
+A corpus is a ``CorpusSpec`` -- a parquet plus an optional ``domain`` -- so the
+six datasets of a full matrix are six slices of two combined files rather than
+six separate parquets. See ``epai/utils/corpus_utils.py``.
+
 Run:
-    python -m epai.ai_detection.train.run_clf_cross_domain
+    uv run python epai/ai_detection/train/run_clf_cross_domain.py
+    uv run python epai/ai_detection/train/run_clf_cross_domain.py \
+        --cfg cfg/ai_detection/train/clf_cd/gpt35t_luar_crud.yaml
+    uv run python epai/ai_detection/train/run_clf_cross_domain.py \
+        --cfg-dir cfg/ai_detection/train/clf_cd --no-plots
 """
 
+import argparse
 from datetime import datetime
 from pathlib import Path
 import shutil
 import json
+import sys
 
 import joblib
 import numpy as np
@@ -43,8 +53,27 @@ from sklearn.model_selection import GroupShuffleSplit
 from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 
-from epai.utils.config_utils import collect_configs, load_cd_config
-from epai.utils.parquet_utils import load_parquet
+from epai.utils.config_utils import (
+    add_config_args,
+    load_cd_config,
+    rel,
+    resolve_configs,
+)
+from epai.utils.corpus_utils import (
+    CorpusSpec,
+    check_corpus_files,
+    check_dataset_specs,
+    dataset_specs,
+    read_corpus,
+)
+from epai.utils.preflight_utils import (
+    RULE,
+    Report,
+    check_identity,
+    check_model_block,
+    load_yaml,
+    print_report,
+)
 from epai.utils.train_utils import (
     CLF_TARGET_COL,
     build_clf_model,
@@ -54,33 +83,33 @@ from epai.utils.train_utils import (
 from epai.utils.visualization_utils import plot_clf_cd_results
 
 BASE_DIR = Path(__file__).parent.parent.parent.parent
-RESULTS_DIR = BASE_DIR / "results" / "clf_cd"
-
-### INPUTS ###############################
-CFG_DIR = BASE_DIR / "cfg" / "ai_detection" / "train" / "clf_cd" / "norm" / "raw"
-##########################################
+DEFAULT_CFG_DIR = BASE_DIR / "cfg" / "ai_detection" / "train" / "clf_cd" / "ghostbuster"
+DEFAULT_RESULTS_DIR = BASE_DIR / "results" / "clf_cd"
 
 # Binarised target: human -> 0, any generator -> 1.
 BINARY_CLASSES = ["human", "machine"]
 
 
-def load_dataset(spec: dict, features: list[str], group_col: str, human_label: str) -> pd.DataFrame:
-    """Load one corpus, drop unwanted generators, and binarise the target."""
-    df = load_parquet(BASE_DIR / spec["parquet_path"])
-    df = drop_missing_rows(
-        df, features + [CLF_TARGET_COL, group_col], group_col=group_col
-    )
+def load_dataset(
+    spec: CorpusSpec, features: list[str], group_col: str, human_label: str
+) -> pd.DataFrame:
+    """Load one corpus, drop unusable rows, and binarise the target.
 
-    drop_classes = spec.get("drop_classes", [])
-    if drop_classes:
-        df = df[~df[CLF_TARGET_COL].isin(drop_classes)].reset_index(drop=True)
+    The domain filter and drop_classes are applied by ``read_corpus`` first, so
+    a row this run will not use cannot take its group down in the missing-value
+    drop below.
+    """
+    load = read_corpus(spec)
+    df = drop_missing_rows(
+        load.df, features + [CLF_TARGET_COL, group_col], group_col=group_col
+    )
 
     # The corpora disagree on generator names, so only this binary view is
     # comparable across them.
     df["y"] = (df[CLF_TARGET_COL] != human_label).astype(int)
 
     counts = df[CLF_TARGET_COL].value_counts().to_dict()
-    tqdm.write(f"  {spec['name']:<17} {len(df):>5} rows  {counts}")
+    tqdm.write(f"  {spec.name:<17} {len(df):>5} rows  {counts}  ← {spec.source}")
     return df
 
 
@@ -97,12 +126,50 @@ def evaluate(model, scaler, X: np.ndarray, y: np.ndarray) -> dict:
     }
 
 
-def run_cross_domain() -> str:
-    experiment_id = "clf_cd_" + datetime.now().strftime("%Y%m%d_%H%M%S")
-    EXP_DIR = RESULTS_DIR / experiment_id
-    EXP_DIR.mkdir(parents=True, exist_ok=True)
+def preflight(cfg_paths: list[Path]) -> tuple[Report, list[tuple[Path, dict]]]:
+    """Check every config before the first fit: shape, files, columns, domains."""
+    report = Report()
+    loaded: list[tuple[Path, dict]] = []
 
-    cfg_paths = collect_configs(CFG_DIR)
+    print("=" * RULE)
+    print(f"PREFLIGHT — {len(cfg_paths)} config(s)")
+    print("=" * RULE)
+
+    for cfg_path in cfg_paths:
+        report.context = cfg_path.name
+        print(f"\n{cfg_path}")
+        cfg = load_yaml(cfg_path, report)
+        if cfg is None:
+            continue
+
+        n_errors = len(report.errors)
+        check_identity(cfg, report)
+        if "features" not in cfg:
+            report.error("missing top-level key 'features'")
+        elif not isinstance(cfg["features"], (list, tuple)) or not cfg["features"]:
+            report.error("'features' must be a non-empty list of column names")
+        check_dataset_specs(cfg, report)
+        check_model_block(cfg, report)
+        if len(report.errors) > n_errors:
+            print("  invalid — skipping the file checks for this config")
+            continue
+
+        specs = dataset_specs(cfg, BASE_DIR)
+        needed = list(cfg["features"]) + [
+            CLF_TARGET_COL, cfg["data"]["group_col"]
+        ]
+        check_corpus_files(specs, needed, report, rule=RULE)
+        loaded.append((cfg_path, cfg))
+
+    report.context = ""
+    return report, loaded
+
+
+def run_cross_domain(
+    cfg_paths: list[Path], results_dir: Path, experiment_id: str
+) -> str:
+    EXP_DIR = results_dir / experiment_id
+    EXP_DIR.mkdir(parents=True, exist_ok=True)
 
     for cfg_path in tqdm(cfg_paths, desc="Configs"):
         cfg = load_cd_config(cfg_path)
@@ -111,7 +178,7 @@ def run_cross_domain() -> str:
         features: list[str] = cfg["features"]
         group_col: str = cfg["data"]["group_col"]
         human_label: str = cfg["data"]["human_label"]
-        specs: list[dict] = cfg["data"]["datasets"]
+        specs: list[CorpusSpec] = dataset_specs(cfg, BASE_DIR)
         ml_alg: str = cfg["model"]["ml_alg"]
         n_runs: int = cfg["model"]["n_runs"]
         test_size: float = cfg["model"].get("test_size", 0.30)
@@ -131,11 +198,11 @@ def run_cross_domain() -> str:
         tqdm.write(f"{'='*72}")
 
         data = {
-            spec["name"]: load_dataset(spec, features, group_col, human_label)
+            spec.name: load_dataset(spec, features, group_col, human_label)
             for spec in specs
         }
-        names = [spec["name"] for spec in specs]
-        labels = {spec["name"]: spec.get("label", spec["name"]) for spec in specs}
+        names = [spec.name for spec in specs]
+        labels = {spec.name: spec.label for spec in specs}
 
         # Features must live in one shared space to be transferable: the same
         # columns, in the same order, for every corpus.
@@ -277,12 +344,36 @@ def print_matrix(alg_label: str, summary: dict, names: list[str]) -> None:
     print("  chance means the in-domain score is corpus-specific, not 'AI-ness'.")
 
 
-def main() -> None:
-    experiment_id = run_cross_domain()
-    print(f"\nDone. Results saved to: {RESULTS_DIR / experiment_id}")
-    plot_clf_cd_results(RESULTS_DIR / experiment_id)
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description=__doc__.splitlines()[0],
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    add_config_args(p, DEFAULT_CFG_DIR, DEFAULT_RESULTS_DIR)
+    p.add_argument("--no-plots", action="store_true",
+                   help="Write the matrices and JSON but skip the figures.")
+    p.add_argument("--skip-preflight", action="store_true",
+                   help="Start training without checking the configs first.")
+    return p.parse_args()
 
-    # plot_clf_cd_results(RESULTS_DIR / "clf_cd_20260714_120000")
+
+def main() -> None:
+    args = parse_args()
+    cfg_paths = resolve_configs(args)
+
+    if not args.skip_preflight:
+        report, _ = preflight(cfg_paths)
+        print_report(report, "every config, dataset and column")
+        if not report.ok:
+            sys.exit(1)
+
+    experiment_id = "clf_cd_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_cross_domain(cfg_paths, args.results_dir, experiment_id)
+
+    exp_dir = args.results_dir / experiment_id
+    print(f"\nDone. Results saved to: {rel(exp_dir)}")
+    if not args.no_plots:
+        plot_clf_cd_results(exp_dir)
 
 
 if __name__ == "__main__":

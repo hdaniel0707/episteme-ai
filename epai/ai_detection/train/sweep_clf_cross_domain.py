@@ -77,14 +77,12 @@ from epai.ai_detection.train.plot_sweep import (
     draw_plots,
     read_trials_file,
 )
-from epai.utils.config_utils import RESET, YELLOW
+from epai.utils.config_utils import RESET, YELLOW, rel
+from epai.utils.corpus_utils import dataset_specs
 from epai.utils.train_utils import stack_features
 
-RESULTS_DIR = BASE_DIR / "results" / "sweep_clf_cd"
-
-### INPUTS ###############################
-CFG_DIR = BASE_DIR / "cfg" / "ai_detection" / "train" / "sweep"
-##########################################
+DEFAULT_RESULTS_DIR = BASE_DIR / "results" / "sweep_clf_cd"
+DEFAULT_CFG_DIR = BASE_DIR / "cfg" / "ai_detection" / "train" / "sweep"
 
 GREEN = "\033[92m"
 RED = "\033[91m"
@@ -686,8 +684,8 @@ def run_final(
 # ---------------------------------------------------------------------------
 
 
-def resolve_cfg_path(arg: str | None) -> Path:
-    """The sweep config to use: the one named, or the only one in CFG_DIR."""
+def resolve_cfg_path(arg: str | None, cfg_dir: Path = DEFAULT_CFG_DIR) -> Path:
+    """The sweep config to use: the one named, or the only one in ``cfg_dir``."""
     if arg:
         path = Path(arg)
         if not path.is_absolute():
@@ -697,14 +695,14 @@ def resolve_cfg_path(arg: str | None) -> Path:
             sys.exit(1)
         return path
 
-    candidates = sorted(CFG_DIR.glob("*.yaml")) + sorted(CFG_DIR.glob("*.yml"))
+    candidates = sorted(cfg_dir.glob("*.yaml")) + sorted(cfg_dir.glob("*.yml"))
     if len(candidates) == 1:
         return candidates[0]
     if not candidates:
-        print(f"{YELLOW}ERROR: no sweep configs in {CFG_DIR}{RESET}", file=sys.stderr)
+        print(f"{YELLOW}ERROR: no sweep configs in {cfg_dir}{RESET}", file=sys.stderr)
     else:
         print(
-            f"{YELLOW}ERROR: {len(candidates)} sweep configs in {CFG_DIR}; name one "
+            f"{YELLOW}ERROR: {len(candidates)} sweep configs in {cfg_dir}; name one "
             f"with --cfg:{RESET}\n  "
             + "\n  ".join(str(p.relative_to(BASE_DIR)) for p in candidates),
             file=sys.stderr,
@@ -713,9 +711,18 @@ def resolve_cfg_path(arg: str | None) -> Path:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("--cfg", help="sweep config YAML (default: the only one in cfg/.../sweep)")
-    p.add_argument("--out", help="sweep directory (default: results/sweep_clf_cd/<sweep_id>)")
+    p = argparse.ArgumentParser(
+        description=__doc__.split("\n")[0],
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    p.add_argument("--cfg", help="sweep config YAML (default: the only one in --cfg-dir)")
+    p.add_argument("--cfg-dir", type=Path, default=DEFAULT_CFG_DIR,
+                   help=f"directory searched when --cfg is omitted "
+                        f"(default: {rel(DEFAULT_CFG_DIR)})")
+    p.add_argument("--results-dir", type=Path, default=DEFAULT_RESULTS_DIR,
+                   help=f"where sweep directories are created "
+                        f"(default: {rel(DEFAULT_RESULTS_DIR)})")
+    p.add_argument("--out", help="sweep directory (default: <results-dir>/<sweep_id>)")
     p.add_argument("--n-trials", type=int, help="override the config's n_trials")
     p.add_argument(
         "--report", action="store_true", help="print the leaderboard and exit"
@@ -743,14 +750,14 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    cfg_path = resolve_cfg_path(args.cfg)
+    cfg_path = resolve_cfg_path(args.cfg, args.cfg_dir)
     sweep_cfg = load_sweep_config(cfg_path)
     base_path, base_cfg = resolve_base_config(sweep_cfg, cfg_path)
 
     out_dir = (
         Path(args.out)
         if args.out
-        else RESULTS_DIR / sweep_cfg["sweep_id"]
+        else args.results_dir / sweep_cfg["sweep_id"]
     )
     if not out_dir.is_absolute():
         out_dir = BASE_DIR / out_dir
@@ -793,8 +800,9 @@ def main() -> None:
     columns = load_columns(cfg_dev)
     group_col = base_cfg["data"]["group_col"]
     human_label = base_cfg["data"]["human_label"]
-    names = [s["name"] for s in dev_specs]
-    labels = {s["name"]: s.get("label", s["name"]) for s in dev_specs}
+    dev_corpora = dataset_specs(cfg_dev, BASE_DIR)
+    names = [s.name for s in dev_corpora]
+    labels = {s.name: s.label for s in dev_corpora}
 
     print("=" * RULE)
     print(f"  SWEEP      : {sweep_cfg['sweep_id']}  ({cfg_path.relative_to(BASE_DIR)})")
@@ -834,10 +842,10 @@ def main() -> None:
 
     # ---- load the corpora once -------------------------------------------
     data = {}
-    for spec in dev_specs:
+    for spec in dev_corpora:
         prep = load_prepared(spec, columns, group_col, human_label)
-        print(f"  {spec['name']:<24} {len(prep.df):>6} rows  {prep.class_counts}")
-        data[spec["name"]] = prep.df
+        print(f"  {spec.name:<24} {len(prep.df):>6} rows  {prep.class_counts}")
+        data[spec.name] = prep.df
     X_all = {name: stack_features(df, features)[0] for name, df in data.items()}
 
     with open(out_dir / "sweep_config.yaml", "w") as f:

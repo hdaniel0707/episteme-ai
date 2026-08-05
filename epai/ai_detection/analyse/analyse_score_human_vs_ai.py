@@ -54,28 +54,18 @@ operating threshold is Youden's J optimum on the ROC curve. Classes are balanced
 (paired), so the PR chance baseline is 0.5.
 
 Usage:
-    uv run python epai/ai_detection/analyse/analyse_binox_human_vs_ai.py data/parquet/wp_binox0.parquet
+    # every domain of a combined parquet, one violin each
+    uv run python epai/ai_detection/analyse/analyse_score_human_vs_ai.py \
+        data/parquet/ghostbuster_gpt35t.parquet:gpt
 
-    # LLM-judge scores instead of Binoculars, one judge column picked explicitly
-    uv run python epai/ai_detection/analyse/analyse_binox_human_vs_ai.py \
-        data/parquet/wp_binox0.parquet:gpt \
-        --metric llm_judge --score-cols llm_judge_score_gpt54_mini
+    # both generators side by side, all six corpora
+    uv run python epai/ai_detection/analyse/analyse_score_human_vs_ai.py \
+        data/parquet/ghostbuster_gpt35t.parquet:gpt \
+        data/parquet/ghostbuster_gpt54mini.parquet:gpt_plain
 
-    uv run python epai/ai_detection/analyse/analyse_binox_human_vs_ai.py \
-        data/parquet/wp_binox0.parquet:gpt \
-        data/parquet/essay_binox0.parquet:gpt \
-        data/parquet/reuter_binox0.parquet:gpt \
-        data/parquet/wp_gpt54mini_binox0.parquet:gpt_plain \
-        data/parquet/essay_gpt54mini_binox0.parquet:gpt_plain \
-        data/parquet/reuter_gpt54mini_binox0.parquet:gpt_plain
-    
-    uv run python epai/ai_detection/analyse/analyse_binox_human_vs_ai.py \
-        data/parquet/wp_binox0.parquet:gpt \
-        data/parquet/essay_binox0.parquet:gpt \
-        data/parquet/reuter_binox0.parquet:gpt \
-        data/parquet/wp_gpt54mini_binox0.parquet:gpt_plain \
-        data/parquet/essay_gpt54mini_binox0.parquet:gpt_plain \
-        data/parquet/reuter_gpt54mini_binox0.parquet:gpt_plain \
+    # one domain, LLM-judge scores instead of Binoculars
+    uv run python epai/ai_detection/analyse/analyse_score_human_vs_ai.py \
+        data/parquet/ghostbuster_gpt35t.parquet:gpt --domains wp \
         --metric llm_judge --score-cols llm_judge_score_gpt54_mini
 """
 
@@ -93,6 +83,8 @@ matplotlib.use("Agg")  # headless: write files, never open a window
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+
+from epai.utils.corpus_utils import CorpusSpec, read_corpus, specs_from_paths
 from sklearn.metrics import (
     average_precision_score,
     confusion_matrix,
@@ -284,17 +276,18 @@ class PairResult:
 
 
 def compute_for_spec(
-    path: Path,
+    spec: CorpusSpec,
     target: str,
     metric: Metric,
     score_cols: list[str] | None,
     out: Tee,
 ) -> PairResult:
-    """Load one parquet and compute human-vs-``target`` per-id differences."""
+    """Load one corpus and compute human-vs-``target`` per-id differences."""
+    path = spec.path
     if not path.exists():
         raise SystemExit(f"Missing parquet: {path}")
 
-    df = pd.read_parquet(path)
+    df = read_corpus(spec, quiet=True).df
     for col in (ID_COL, GROUP_COL):
         if col not in df.columns:
             raise SystemExit(f"Column '{col}' missing from {path.name}.")
@@ -329,7 +322,7 @@ def compute_for_spec(
     )
     merged = left.merge(right, on=ID_COL, how="outer", indicator=True)
 
-    res = PairResult(path.stem, target, cols, metric)
+    res = PairResult(spec.name, target, cols, metric)
     res.n_only_human = int((merged["_merge"] == "left_only").sum())
     res.n_only_target = int((merged["_merge"] == "right_only").sum())
     paired = merged[merged["_merge"] == "both"].reset_index(drop=True)
@@ -815,6 +808,15 @@ def parse_args() -> argparse.Namespace:
         f"'{DEFAULT_TARGET}'. Each parquet becomes one violin.",
     )
     parser.add_argument(
+        "--domains",
+        nargs="*",
+        default=None,
+        metavar="DOMAIN",
+        help="Domains to take from each parquet spec — one violin per (file, "
+        "domain). Default: every domain a combined file holds; a file with no "
+        "domain column becomes a single violin.",
+    )
+    parser.add_argument(
         "--metric",
         default=DEFAULT_METRIC,
         choices=sorted(METRICS),
@@ -841,10 +843,14 @@ def main() -> None:
     out = Tee()
     results: list[PairResult] = []
     for path, target in specs:
-        print(f"Comparing human vs '{target}' in {path.name} ({metric.key}) ...")
-        results.append(compute_for_spec(path, target, metric, args.score_cols, out))
+        for corpus in specs_from_paths([path], args.domains, base_dir=BASE_DIR):
+            print(f"Comparing human vs '{target}' in {corpus.source} "
+                  f"({metric.key}) ...")
+            results.append(
+                compute_for_spec(corpus, target, metric, args.score_cols, out)
+            )
 
-    # Directory named after the parquet stems involved (deduped, order kept).
+    # Directory named after the corpora involved (deduped, order kept).
     stems = list(dict.fromkeys(r.parquet for r in results))
     fig_dir = metric.results_dir / "__".join(stems)
     print()

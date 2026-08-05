@@ -9,7 +9,7 @@
 # figure ranks the embeddings against each other.
 #
 # Every YAML in cfg/train/clf_cd_emb/ is run by
-# epai/train/run_clf_cross_domain_embeddings.py, so `alg_id` must be unique
+# epai/ai_detection/train/run_clf_cross_domain_embeddings.py, so `alg_id` must be unique
 # across the folder -- it names the output directory under
 # results/clf_cd_emb/<experiment_id>/<alg_id>/<emb_column>/
 alg_id: "gpt54mini_logistic"
@@ -31,7 +31,7 @@ embeddings:
   - emb_minilm
   - emb_e5
   - emb_bge
-  - emb_qwen3
+  # - emb_qwen3
   # raw LM baseline
   - emb_roberta
   # style / authorship
@@ -40,8 +40,8 @@ embeddings:
   - emb_luar
   - emb_luar_crud
   # api
-  - emb_openai_small
-  - emb_openai_large
+  # - emb_openai_small
+  # - emb_openai_large
 
 # Extra columns appended to EVERY embedding's design matrix (e.g.
 # ["binoculars_score"]). They shift all embeddings equally, so the comparison
@@ -81,19 +81,21 @@ data:
   # during training are excluded from the evaluation (and the count is reported).
   group_col: "id"
 
+  # Every dataset is one domain of this file, so the path is set once
+  # here instead of being repeated per entry. An entry may still name
+  # its own `parquet_path` to pull one corpus from somewhere else.
+  parquet_path: "data/parquet/ghostbuster_gpt54mini.parquet"
+
   datasets:
-    - name: "essay_gpt54mini"                                          # short key used in the matrix
-      label: "essay (gpt54mini)"                                       # optional, shown on the figures
-      parquet_path: "data/parquet/essay_gpt54mini_binox0.parquet"      # relative to the project root
-      drop_classes: []                                                 # e.g. ["claude", "gpt_prompt1"]
+    - name: "essay_gpt54mini"        # short key used in the matrix
+      label: "essay (gpt54mini)"      # optional, shown on the figures
+      domain: "essay"
     - name: "reuter_gpt54mini"
       label: "reuter (gpt54mini)"
-      parquet_path: "data/parquet/reuter_gpt54mini_binox0.parquet"
-      drop_classes: []
+      domain: "reuter"
     - name: "wp_gpt54mini"
       label: "wp (gpt54mini)"
-      parquet_path: "data/parquet/wp_gpt54mini_binox0.parquet"
-      drop_classes: []
+      domain: "wp"
 
 model:
   ml_alg: "logistic"  # gradient_boosting | logistic | svm | mlp

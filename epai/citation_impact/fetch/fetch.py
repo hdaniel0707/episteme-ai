@@ -31,7 +31,7 @@ PAPER_FIELDS = (
 
 BASE_DIR = Path(__file__).parent.parent.parent.parent
 DB_DIR = BASE_DIR / "data"
-DB_PATH = DB_DIR / "sql" / "0523_A_100.db"
+DB_PATH = DB_DIR / "sql" / "X_0804_A.db"
 CFG_PATH = BASE_DIR / "cfg" / "citation_impact" / "fetch" / "hd" / "fetch_cfg_reduced.yaml"
 
 with open(CFG_PATH) as f:

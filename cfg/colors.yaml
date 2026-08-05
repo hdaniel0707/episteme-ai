@@ -1,7 +1,7 @@
 # Consistent colors per source / LLM family across all plots.
 #
 # Read by epai/utils/color_utils.py, which is used by both
-# epai/utils/visualization_utils.py and epai/analyse_naip.py.
+# epai/utils/visualization_utils.py and epai/citation_impact/analyse/analyse_naip.py.
 #
 # A label (e.g. a `generated_by` value) is matched to a family by LONGEST
 # matching prefix, so specific variants like `gpt_prompt1` win over `gpt`.

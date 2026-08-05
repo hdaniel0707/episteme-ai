@@ -1425,7 +1425,7 @@ def plot_clf_cd_emb_comparison(exp_dir: Path, payload: dict) -> None:
     """Compare the embeddings of one cross-domain experiment.
 
     ``payload`` is the ``embedding_comparison.json`` written by
-    ``epai/train/run_clf_cross_domain_embeddings.py``: one entry per embedding,
+    ``epai/ai_detection/train/run_clf_cross_domain_embeddings.py``: one entry per embedding,
     each holding its full source x target accuracy matrix and the in-domain /
     transfer means taken from it.
 
@@ -1467,7 +1467,7 @@ def plot_clf_cd_alg_comparison(exp_dir: Path, payload: dict) -> None:
     """Compare the algorithms of one cross-domain experiment.
 
     ``payload`` is the ``algorithm_comparison.json`` written by
-    ``epai/train/run_clf_cross_domain_algs.py``: one entry per algorithm, on a
+    ``epai/ai_detection/train/run_clf_cross_domain_algs.py``: one entry per algorithm, on a
     single shared feature set, each holding its source x target accuracy matrix.
     Draws the same two figures as the embedding comparison (``algorithm_comparison
     .png`` and ``algorithm_comparison_matrix.png``) ranked by transfer accuracy.

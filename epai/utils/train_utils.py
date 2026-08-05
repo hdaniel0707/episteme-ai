@@ -9,7 +9,6 @@ from sklearn.neural_network import MLPRegressor
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.svm import SVR
 from tqdm import tqdm
-from epai.train.autoencoder import AERegressor
 from epai.utils.config_utils import YELLOW, RESET
 
 CLF_TARGET_COL = "generated_by"
@@ -138,8 +137,6 @@ def build_model(ml_alg: str, base_seed: int):
             warm_start=True,
             random_state=base_seed,
         )
-    if ml_alg == "ae":
-        return AERegressor(random_state=base_seed)
     raise ValueError(
         f"Unknown ml_alg: {ml_alg!r}. Choose from: gradient_boosting, linear, svm, mlp"
     )

@@ -25,15 +25,47 @@ data:
   # during training are excluded from the evaluation (and the count is reported).
   group_col: "id"
 
+  # A dataset is a parquet plus an optional `domain`, read by
+  # epai/utils/corpus_utils.py:
+  #
+  #   name          short key used in the matrix; must be unique in this file
+  #   label         optional, shown on the figures (defaults to `name`)
+  #   parquet_path  relative to the project root. May be set ONCE here under
+  #                 `data` (see below) and left out of the entries; an entry
+  #                 that names its own wins.
+  #   domain        optional. One domain of a file built by
+  #                 prepare/combine_domains.py. Omit it to use the WHOLE file,
+  #                 which is what a per-corpus parquet holds — both forms work,
+  #                 and a config written before the combined files still runs.
+  #                 A domain that is not in the file is a preflight error that
+  #                 lists the ones that are.
+  #   drop_classes  optional generators to skip, e.g. ["claude", "gpt_prompt1"].
+  #                 Also settable once under `data`. Usually empty now:
+  #                 combine_domains.py drops them when the combined file is
+  #                 built, so what is on disk is what is used.
+  #
+  # TWO SHAPES, pick by where the corpora live:
+  #
+  # (a) every dataset is a domain of ONE file — set the path once:
+  #
+  #       parquet_path: "data/parquet/ghostbuster_gpt54mini.parquet"
+  #       datasets:
+  #         - {name: "essay",  domain: "essay"}
+  #         - {name: "reuter", domain: "reuter"}
+  #         - {name: "wp",     domain: "wp"}
+  #
+  # (b) the matrix spans SEVERAL files (two generators, or the per-corpus
+  #     parquets) — name the file per entry, as below. Mixing a default with
+  #     overrides is legal but reads worse than being explicit.
   datasets:
-    - name: "essay"                                     # short key used in the matrix
-      label: "Essay"                                    # optional, shown on the figures
-      parquet_path: "data/parquet/essay_binox0.parquet" # relative to the project root
-      drop_classes: []                                  # e.g. ["claude", "gpt_prompt1"]
+    - name: "essay"
+      label: "Essay"
+      parquet_path: "data/parquet/ghostbuster_gpt35t.parquet"
+      domain: "essay"
     - name: "essay_gpt54mini"
       label: "Essay (gpt54mini)"
-      parquet_path: "data/parquet/essay_gpt54mini_binox0.parquet"
-      drop_classes: []
+      parquet_path: "data/parquet/ghostbuster_gpt54mini.parquet"
+      domain: "essay"
 
 features:
   - emb_specter2

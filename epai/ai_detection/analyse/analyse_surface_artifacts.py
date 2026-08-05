@@ -45,12 +45,17 @@ Nothing is written back to the corpora; the parquets are only read.
 Usage:
     # all six corpora, using the same dataset list and drop_classes as training
     uv run python epai/ai_detection/analyse/analyse_surface_artifacts.py \
-        --config cfg/ai_detection/train/clf_cd/hd2/ALL_logistic.yaml \
+        --config cfg/ai_detection/train/clf_cd/ghostbuster/ALL_logistic.yaml \
         --compare-matrix results/clf_cd/clf_cd_20260721_121101/ALL_logistic/cross_domain.json
 
-    # ad-hoc, straight from parquet paths
+    # ad-hoc: a combined parquet becomes one corpus per domain it holds
     uv run python epai/ai_detection/analyse/analyse_surface_artifacts.py \
-        data/parquet/essay_binox0.parquet data/parquet/wp_gpt54mini_binox0.parquet
+        data/parquet/ghostbuster_gpt35t.parquet
+
+    # two files, one domain each
+    uv run python epai/ai_detection/analyse/analyse_surface_artifacts.py \
+        data/parquet/ghostbuster_gpt35t.parquet \
+        data/parquet/ghostbuster_gpt54mini.parquet --domains essay
 
     # after normalising, to confirm the artifacts are actually gone
     uv run python epai/ai_detection/analyse/analyse_surface_artifacts.py \
@@ -78,6 +83,12 @@ import pandas as pd
 from matplotlib.colors import LinearSegmentedColormap
 
 from epai.utils.config_utils import load_cd_config
+from epai.utils.corpus_utils import (
+    CorpusSpec,
+    dataset_specs,
+    read_corpus,
+    specs_from_paths,
+)
 
 BASE_DIR = Path(__file__).parent.parent.parent.parent
 RESULTS_DIR = BASE_DIR / "results" / "surface_artifacts"
@@ -1015,17 +1026,13 @@ def _plot_alignment_panel(
 # ---------------------------------------------------------------------------
 
 
-def load_corpus(
-    name: str, parquet_path: Path, drop_classes: list[str], out: Tee
-) -> tuple[list[str], np.ndarray]:
+def load_corpus(spec: CorpusSpec, out: Tee) -> tuple[list[str], np.ndarray]:
     """One corpus as (texts, binary labels), binarised human=0 / machine=1."""
-    df = pd.read_parquet(parquet_path)
+    name = spec.name
+    df = read_corpus(spec, quiet=True).df
     for col in (TEXT_COL, TARGET_COL):
         if col not in df.columns:
-            raise SystemExit(f"{parquet_path.name}: missing column {col!r}.")
-
-    if drop_classes:
-        df = df[~df[TARGET_COL].isin(drop_classes)]
+            raise SystemExit(f"{spec.path.name}: missing column {col!r}.")
 
     df = df[df[TEXT_COL].notna()]
     df = df[df[TEXT_COL].astype(str).str.strip() != ""]
@@ -1040,20 +1047,26 @@ def load_corpus(
     return texts, y
 
 
-def datasets_from_args(args: argparse.Namespace, out: Tee) -> list[tuple[str, Path, list[str]]]:
-    """(name, parquet path, drop_classes) per corpus, from --config or positionals."""
+def datasets_from_args(args: argparse.Namespace, out: Tee) -> list[CorpusSpec]:
+    """The corpora to audit, from --config or from the positional parquets.
+
+    Both routes end at the same CorpusSpec list the training side uses, so a
+    corpus means exactly what it means in a cross-domain run: a file, and
+    optionally one domain of it.
+    """
     if args.config:
         cfg = load_cd_config(Path(args.config))
-        specs = cfg["data"]["datasets"]
+        specs = dataset_specs(cfg, BASE_DIR)
         out.print(f"Config: {args.config}   ({len(specs)} datasets)")
-        return [
-            (s["name"], BASE_DIR / s["parquet_path"], list(s.get("drop_classes", [])))
-            for s in specs
-        ]
+        return specs
 
     drop = list(DEFAULT_DROP_CLASSES) if args.drop_classes is None else args.drop_classes
-    out.print(f"Parquets given on the command line; drop_classes={drop}")
-    return [(Path(p).stem, Path(p), drop) for p in args.parquets]
+    specs = specs_from_paths(args.parquets, args.domains, drop, BASE_DIR)
+    out.print(
+        f"Parquets given on the command line; drop_classes={drop}; "
+        f"corpora={[s.name for s in specs]}"
+    )
+    return specs
 
 
 # ---------------------------------------------------------------------------
@@ -1083,13 +1096,24 @@ def report_corpus(frame: pd.DataFrame, name: str, top_n: int, out: Tee) -> None:
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument(
-        "parquets", nargs="*", help="Parquet files to audit (ignored when --config is given)."
+        "parquets", nargs="*", type=Path,
+        help="Parquet files to audit (ignored when --config is given). A combined "
+        "file is split into one corpus per domain unless --domains narrows it.",
+    )
+    ap.add_argument(
+        "--domains",
+        nargs="*",
+        default=None,
+        metavar="DOMAIN",
+        help="Domains to audit from each positional parquet (default: every "
+        "domain the file has; files with no domain column are audited whole).",
     )
     ap.add_argument(
         "--config",
         default=None,
-        help="Cross-domain YAML config; takes the dataset list and drop_classes "
-        "from it so the audit sees exactly what the classifier was trained on.",
+        help="Cross-domain YAML config; takes the dataset list, domains and "
+        "drop_classes from it so the audit sees exactly what the classifier "
+        "was trained on.",
     )
     ap.add_argument(
         "--drop-classes",
@@ -1155,11 +1179,12 @@ def main() -> None:
     labels_by_corpus: dict[str, np.ndarray] = {}
     frames: list[pd.DataFrame] = []
 
-    for name, path, drop in specs:
-        if not path.is_file():
-            out.print(f"  {name:<20} SKIPPED — not found: {path}")
+    for spec in specs:
+        name = spec.name
+        if not spec.path.is_file():
+            out.print(f"  {name:<20} SKIPPED — not found: {spec.path}")
             continue
-        texts, y = load_corpus(name, path, drop, out)
+        texts, y = load_corpus(spec, out)
         if len(set(y.tolist())) < 2:
             out.print(f"  {name:<20} SKIPPED — only one class present.")
             continue

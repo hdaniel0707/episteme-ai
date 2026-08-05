@@ -14,7 +14,7 @@ embedding sweep. What is new:
   * the *algorithm* varies, not the features: every algorithm is trained on the
     same ``features`` design matrix (loaded and stacked once, reused across
     algorithms), so any difference in the matrix is the algorithm's;
-  * algorithms are pluggable ``ClfAlgorithm`` subclasses under ``epai/train/algs``
+  * algorithms are pluggable ``ClfAlgorithm`` subclasses under ``epai/algs``
     (logistic, svm, gradient_boosting, simple_mlp, binox_mlp), selected by
     ``name`` and configured with per-entry ``params``. Each owns its own
     preprocessing, and each declares which ``params`` it reads: an entry naming
@@ -42,10 +42,16 @@ embedding sweep. What is new:
     every source->target cell as a heatmap);
   * a preflight check that runs *before any training*, over *every* config.
 
+A corpus is a ``CorpusSpec`` -- a parquet plus an optional ``domain`` -- read by
+``epai/utils/corpus_utils.py``, so one combined file can supply every dataset.
+
 Run:
-    python -m epai.ai_detection.train.run_clf_cross_domain_algs
+    uv run python epai/ai_detection/train/run_clf_cross_domain_algs.py
+    uv run python epai/ai_detection/train/run_clf_cross_domain_algs.py \
+        --cfg cfg/ai_detection/train/clf_cd_algs/luar_crud_algs.yaml --dry-run
 """
 
+import argparse
 from datetime import datetime
 from pathlib import Path
 import json
@@ -58,12 +64,11 @@ from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
 from sklearn.model_selection import GroupShuffleSplit
 from tqdm import tqdm
 
-from epai.train.algs import ALGORITHMS, build_algorithm
+from epai.algs import ALGORITHMS, build_algorithm
 from epai.ai_detection.train.run_clf_cross_domain import BINARY_CLASSES, print_matrix
 from epai.ai_detection.train.run_clf_cross_domain_embeddings import (
     DEFAULT_BINOX_COL,
     Prepared,
-    Report,
     baseline_columns,
     baseline_specs,
     check_baseline_datasets,
@@ -76,7 +81,27 @@ from epai.ai_detection.train.run_clf_cross_domain_embeddings import (
     summarise_baseline,
     summarise_embedding,
 )
-from epai.utils.config_utils import RESET, YELLOW, collect_configs
+from epai.utils.config_utils import (
+    RESET,
+    YELLOW,
+    add_config_args,
+    rel,
+    resolve_configs,
+)
+from epai.utils.corpus_utils import (
+    CorpusSpec,
+    check_corpus_files,
+    check_dataset_specs,
+    dataset_specs,
+)
+from epai.utils.preflight_utils import (
+    RULE,
+    Report,
+    check_identity,
+    check_model_block,
+    load_yaml,
+    print_report,
+)
 from epai.utils.train_utils import CLF_TARGET_COL, stack_features
 from epai.utils.visualization_utils import (
     plot_clf_cd_alg_comparison,
@@ -84,15 +109,8 @@ from epai.utils.visualization_utils import (
 )
 
 BASE_DIR = Path(__file__).parent.parent.parent.parent
-RESULTS_DIR = BASE_DIR / "results" / "clf_cd_algs"
-
-### INPUTS ###############################
-CFG_DIR = BASE_DIR / "cfg" / "ai_detection" / "train" / "clf_cd_algs"
-##########################################
-
-RED = "\033[91m"
-GREEN = "\033[92m"
-RULE = 78
+DEFAULT_CFG_DIR = BASE_DIR / "cfg" / "ai_detection" / "train" / "clf_cd_algs"
+DEFAULT_RESULTS_DIR = BASE_DIR / "results" / "clf_cd_algs"
 
 
 # ---------------------------------------------------------------------------
@@ -220,10 +238,7 @@ def check_config(cfg: dict, report: Report) -> None:
     if report.errors:
         return  # everything below indexes into these keys
 
-    if not isinstance(cfg["alg_id"], str) or not cfg["alg_id"].strip():
-        report.error("'alg_id' must be a non-empty string")
-    if not isinstance(cfg["seed"], int):
-        report.error(f"'seed' must be an int, got {type(cfg['seed']).__name__}")
+    check_identity(cfg, report)
 
     features = cfg["features"]
     if not isinstance(features, (list, tuple)) or not features:
@@ -291,50 +306,9 @@ def check_config(cfg: dict, report: Report) -> None:
                 report.error(f"{s['id']}: cannot build {s['name']!r}: {exc}")
 
     check_score_baselines(cfg, report)
-
-    data = cfg["data"]
-    if not isinstance(data, dict):
-        report.error("'data' must be a mapping")
-    else:
-        for key in ("human_label", "group_col", "datasets"):
-            if key not in data:
-                report.error(f"data is missing {key!r}")
-        ds = data.get("datasets") or []
-        if not isinstance(ds, (list, tuple)) or len(ds) < 2:
-            report.error(f"cross-domain needs at least 2 datasets, got {len(ds)}")
-        else:
-            names = []
-            for i, spec in enumerate(ds):
-                if not isinstance(spec, dict):
-                    report.error(f"datasets[{i}] must be a mapping")
-                    continue
-                for key in ("name", "parquet_path"):
-                    if key not in spec:
-                        report.error(f"datasets[{i}] is missing {key!r}")
-                drop = spec.get("drop_classes") or []
-                if not isinstance(drop, (list, tuple)):
-                    report.error(f"datasets[{i}] 'drop_classes' must be a list")
-                names.append(spec.get("name"))
-            dupes = sorted({n for n in names if names.count(n) > 1})
-            if dupes:
-                report.error(f"dataset names must be unique, repeated: {dupes}")
-
-    model = cfg["model"]
-    if not isinstance(model, dict):
-        report.error("'model' must be a mapping")
-        return
-
-    n_runs = model.get("n_runs")
-    if not isinstance(n_runs, int) or n_runs < 1:
-        report.error(f"'n_runs' must be an int >= 1, got {n_runs!r}")
-
-    test_size = model.get("test_size", 0.30)
-    if not isinstance(test_size, (int, float)) or not 0.0 < float(test_size) < 1.0:
-        report.error(f"'test_size' must be in (0, 1), got {test_size!r}")
-
-    min_rows = cfg.get("min_rows", 50)
-    if not isinstance(min_rows, int) or min_rows < 1:
-        report.error(f"'min_rows' must be an int >= 1, got {min_rows!r}")
+    check_dataset_specs(cfg, report)
+    # ml_alg lives per-entry in `algorithms` here, not in `model`.
+    check_model_block(cfg, report, check_alg=False)
 
 
 # ---------------------------------------------------------------------------
@@ -343,9 +317,7 @@ def check_config(cfg: dict, report: Report) -> None:
 
 
 def check_files(cfg: dict, report: Report) -> None:
-    """Every parquet exists, opens, and holds every column the run will ask for."""
-    import pyarrow.parquet as pq
-
+    """Every corpus exists, opens, holds its columns, and has its domain."""
     group_col = cfg["data"]["group_col"]
     needed = list(
         dict.fromkeys(
@@ -354,30 +326,7 @@ def check_files(cfg: dict, report: Report) -> None:
             + baseline_columns(cfg)
         )
     )
-
-    print(f"{'dataset':<22}{'rows':>9}{'cols':>7}  file")
-    print("-" * RULE)
-    for spec in cfg["data"]["datasets"]:
-        path = BASE_DIR / spec["parquet_path"]
-        if not path.is_file():
-            report.error(f"{spec['name']}: parquet not found: {path}")
-            print(f"{spec['name']:<22}{'-':>9}{'-':>7}  {path}  MISSING")
-            continue
-        try:
-            pf = pq.ParquetFile(path)  # footer only -- cheap on large files
-            columns = list(pf.schema_arrow.names)
-            n_rows = pf.metadata.num_rows
-        except Exception as exc:
-            report.error(
-                f"{spec['name']}: cannot read {path}: {type(exc).__name__}: {exc}"
-            )
-            print(f"{spec['name']:<22}{'-':>9}{'-':>7}  {path}  UNREADABLE")
-            continue
-
-        print(f"{spec['name']:<22}{n_rows:>9}{len(columns):>7}  {path}")
-        missing = [c for c in needed if c not in columns]
-        if missing:
-            report.error(f"{spec['name']}: missing column(s) {missing}")
+    check_corpus_files(dataset_specs(cfg, BASE_DIR), needed, report, rule=RULE)
 
 
 def preflight_config(cfg: dict, report: Report) -> None:
@@ -430,7 +379,7 @@ def preflight_config(cfg: dict, report: Report) -> None:
     human_label: str = cfg["data"]["human_label"]
     features = list(cfg["features"])
     columns = load_columns(cfg)
-    datasets = cfg["data"]["datasets"]
+    datasets = dataset_specs(cfg, BASE_DIR)
 
     print(
         f"{'dataset':<22}{'rows':>7}{'dropped':>9}{'dim':>7}{'groups':>8}  classes"
@@ -444,7 +393,7 @@ def preflight_config(cfg: dict, report: Report) -> None:
             prep = load_prepared(spec, columns, group_col, human_label)
         except Exception as exc:
             report.error(
-                f"{spec['name']}: failed to load: {type(exc).__name__}: {exc}"
+                f"{spec.name}: failed to load: {type(exc).__name__}: {exc}"
             )
             continue
 
@@ -488,17 +437,14 @@ def preflight(cfg_paths: list[Path]) -> tuple[Report, list[tuple[Path, dict]]]:
     loaded: list[tuple[Path, dict]] = []
 
     print("=" * RULE)
-    print(f"PREFLIGHT — {len(cfg_paths)} config(s) in {CFG_DIR}")
+    print(f"PREFLIGHT — {len(cfg_paths)} config(s)")
     print("=" * RULE)
 
     for cfg_path in cfg_paths:
         report.context = cfg_path.name
-        print(f"\n{'-' * RULE}\n{cfg_path.name}\n{'-' * RULE}")
-        try:
-            with open(cfg_path) as f:
-                cfg = yaml.safe_load(f)
-        except Exception as exc:
-            report.error(f"cannot parse YAML: {type(exc).__name__}: {exc}")
+        print(f"\n{'-' * RULE}\n{cfg_path}\n{'-' * RULE}")
+        cfg = load_yaml(cfg_path, report)
+        if cfg is None:
             continue
 
         preflight_config(cfg, report)
@@ -509,35 +455,9 @@ def preflight(cfg_paths: list[Path]) -> tuple[Report, list[tuple[Path, dict]]]:
     alg_ids = [cfg.get("alg_id") for _, cfg in loaded if isinstance(cfg, dict)]
     dupes = sorted({a for a in alg_ids if a is not None and alg_ids.count(a) > 1})
     if dupes:
-        report.error(f"alg_id must be unique across {CFG_DIR}, repeated: {dupes}")
+        report.error(f"alg_id must be unique across the configs run, repeated: {dupes}")
 
     return report, loaded
-
-
-def print_report(report: Report) -> None:
-    print()
-    print("=" * RULE)
-    if report.warnings:
-        print(f"{YELLOW}Warnings ({len(report.warnings)}){RESET}")
-        for message in report.warnings:
-            print(f"  {YELLOW}⚠️  {message}{RESET}")
-        print()
-    if report.errors:
-        print(f"{RED}Preflight FAILED — {len(report.errors)} problem(s){RESET}")
-        for message in report.errors:
-            print(f"  {RED}✗ {message}{RESET}")
-        print(f"{RED}Nothing was trained; fix the above and re-run.{RESET}")
-    else:
-        print(
-            f"{GREEN}Preflight OK — every config, dataset, algorithm and split "
-            f"checks out.{RESET}"
-        )
-    print("=" * RULE)
-
-
-# ---------------------------------------------------------------------------
-# Training
-# ---------------------------------------------------------------------------
 
 
 def fit_alg(alg, X: np.ndarray, y: np.ndarray, Z: np.ndarray | None):
@@ -792,12 +712,12 @@ def run_config(cfg_path: Path, cfg: dict, alg_dir: Path) -> None:
 
     group_col: str = cfg["data"]["group_col"]
     human_label: str = cfg["data"]["human_label"]
-    specs_ds: list[dict] = cfg["data"]["datasets"]
+    specs_ds: list[CorpusSpec] = dataset_specs(cfg, BASE_DIR)
     features = list(cfg["features"])
     columns = load_columns(cfg)
     aux = aux_columns(cfg)
-    names = [spec["name"] for spec in specs_ds]
-    labels = {spec["name"]: spec.get("label", spec["name"]) for spec in specs_ds}
+    names = [spec.name for spec in specs_ds]
+    labels = {spec.name: spec.label for spec in specs_ds}
     specs = algorithm_specs(cfg)
 
     tqdm.write("\n" + "=" * RULE)
@@ -821,8 +741,8 @@ def run_config(cfg_path: Path, cfg: dict, alg_dir: Path) -> None:
     data = {}
     for spec in specs_ds:
         prep = load_prepared(spec, columns, group_col, human_label)
-        tqdm.write(f"  {spec['name']:<20} {len(prep.df):>6} rows  {prep.class_counts}")
-        data[spec["name"]] = prep.df
+        tqdm.write(f"  {spec.name:<20} {len(prep.df):>6} rows  {prep.class_counts}")
+        data[spec.name] = prep.df
     X_all = {name: stack_features(df, features)[0] for name, df in data.items()}
 
     rows: list[dict] = []
@@ -891,23 +811,38 @@ def run_config(cfg_path: Path, cfg: dict, alg_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description=__doc__.splitlines()[0],
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    add_config_args(p, DEFAULT_CFG_DIR, DEFAULT_RESULTS_DIR)
+    p.add_argument("--dry-run", action="store_true",
+                   help="Run the preflight and stop, without training anything.")
+    return p.parse_args()
+
+
 def main() -> None:
-    cfg_paths = collect_configs(CFG_DIR)
+    args = parse_args()
+    cfg_paths = resolve_configs(args)
 
     # Every config is checked before any of them trains.
     report, loaded = preflight(cfg_paths)
-    print_report(report)
+    print_report(report, "every config, dataset, algorithm and split")
     if not report.ok:
         sys.exit(1)
+    if args.dry_run:
+        print("\nDry run — nothing was trained.")
+        return
 
     experiment_id = "clf_cd_algs_" + datetime.now().strftime("%Y%m%d_%H%M%S")
-    exp_dir = RESULTS_DIR / experiment_id
+    exp_dir = args.results_dir / experiment_id
     exp_dir.mkdir(parents=True, exist_ok=True)
 
     for cfg_path, cfg in tqdm(loaded, desc="Configs", unit="cfg"):
         run_config(cfg_path, cfg, exp_dir / cfg["alg_id"])
 
-    print(f"\nDone. Results saved to: {exp_dir}")
+    print(f"\nDone. Results saved to: {rel(exp_dir)}")
 
 
 if __name__ == "__main__":

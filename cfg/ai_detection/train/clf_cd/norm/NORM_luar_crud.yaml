@@ -17,6 +17,15 @@
 # PREDICTION: the below-chance cells (macro-F1 0.33-0.37 in the specter2 run)
 # rise to ~0.50 and the diagonal falls. A diagonal still at 98% means a second
 # artifact survived and step 1 has to be repeated on the normalised text.
+#
+# NOTE — this pair is the one experiment still reading PER-CORPUS parquets. Its
+# arms must differ only by the normalisation, and no combined file exists for
+# the normalised text yet, so both sides stay on the six separate files (a
+# dataset with no `domain` key is the whole file, which is what these hold).
+# To move it onto the combined layout, rebuild both arms with
+#   uv run python epai/ai_detection/prepare/combine_domains.py \
+#       data/parquet/essay_binox0_norm.parquet ... -o data/parquet/ghostbuster_gpt35t_norm.parquet
+# and add `domain:` to each dataset, as in ../ghostbuster/*.yaml.
 alg_id: "NORM_luar_crud"
 alg_label: "normalised text + luar_crud"
 

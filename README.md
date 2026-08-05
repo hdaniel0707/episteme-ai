@@ -4,10 +4,11 @@ A research platform for studying AI-generated text in scientific literature. The
 
 | Pipeline | Short name | Goal |
 |---|---|---|
-| **Citation Impact** | `epai/citation_impact/` | Fetch academic papers from Semantic Scholar, enrich them with LLM-generated synthetic variants, and train models to predict citation impact. |
-| **AI Detection** | `epai/ai_detection/` | Prepare AI-vs-human text corpora (Ghostbuster / Denario), compute embeddings, and train classifiers that distinguish human from machine-generated text. |
+| **Citation Impact** | `epai/citation_impact/` | Fetch academic papers from Semantic Scholar and enrich them with LLM-generated synthetic variants and NAIP impact scores. Data pipeline only — its training stage has been removed. |
+| **AI Detection** | `epai/ai_detection/` | Prepare AI-vs-human text corpora (Ghostbuster / Denario), compute embeddings and detector scores, and train classifiers that distinguish human from machine-generated text. The active pipeline. |
+| **Science Data** | `epai/science_data/` | Build a *new* AI-vs-human corpus from Semantic Scholar abstracts under the Ghostbuster protocol: fetch → filter → prompt → generate. The generator sees only the prompt, never the human text. |
 
-Both pipelines draw on the shared library under `epai/utils/`, `epai/train/`, and `epai/analyse/`.
+All three draw on the shared library under `epai/utils/` and `epai/algs/`.
 
 ---
 
@@ -25,16 +26,15 @@ Both pipelines draw on the shared library under `epai/utils/`, `epai/train/`, an
   - [Stage 4 — Fetch NAIP Scores](#stage-4--fetch-naip-scores)
   - [Stage 5 — Analyse Data](#stage-5--analyse-data)
   - [Stage 6 — Analyse NAIP](#stage-6--analyse-naip)
-  - [Stage 7 — Training (Regression / Repr Learning)](#stage-7--training-regression--repr-learning)
-  - [Stage 8 — Analyse Experiments](#stage-8--analyse-experiments)
 - [Pipeline 2 — AI Detection](#pipeline-2--ai-detection)
   - [Stage A — Prepare Corpora](#stage-a--prepare-corpora)
-  - [Stage B — Embed](#stage-b--embed)
-  - [Stage C — Analyse Embeddings / Binoculars](#stage-c--analyse-embeddings--binoculars)
-  - [Stage D — Training (Classification)](#stage-d--training-classification)
+  - [Stage B — Embed and Score](#stage-b--embed-and-score)
+  - [Stage C — Combine the corpora into one file](#stage-c--combine-the-corpora-into-one-file)
+  - [Stage D — Analyse](#stage-d--analyse)
+  - [Stage E — Training (Cross-domain classification)](#stage-e--training-cross-domain-classification)
+- [Pipeline 3 — Science Data](#pipeline-3--science-data)
 - [Shared Library](#shared-library)
 - [Configuration Reference](#configuration-reference)
-- [Key Concepts for Students](#key-concepts-for-students)
 
 ---
 
@@ -48,35 +48,44 @@ episteme-ai/
 │   │   ├── db/summarise_db.py     #   Stage 2: EDA on raw SQLite
 │   │   ├── prepare/prepare_data.py#   Stage 3: SQLite → Parquet, LLM rephrasing
 │   │   ├── score/add_naip_scores.py#  Stage 4: add NAIP impact scores
-│   │   ├── analyse/               #   Stages 5–6: EDA on Parquet & NAIP scores
-│   │   └── train/                 #   Stage 7: run_reg.py, run_repr.py
+│   │   └── analyse/               #   Stages 5–6: EDA on Parquet & NAIP scores
 │   │
 │   ├── ai_detection/              # Pipeline 2 — AI vs human text detection
 │   │   ├── fetch/fetch_denario.py #   Download Denario papers
 │   │   ├── prepare/               #   prepare_{reuter,wp,essay,denario}.py,
-│   │   │                          #   recompute_embedding.py, merge_parquets.py
+│   │   │                          #   combine_domains.py, normalize_text.py,
+│   │   │                          #   truncate_text.py
 │   │   ├── embed/add_embeddings.py#   Add multiple embedding columns to a Parquet
-│   │   ├── analyse/               #   Binoculars analysis, 2D embedding vis, corpus QA
-│   │   └── train/                 #   run_clf.py, run_clf_cross_domain*.py,
+│   │   ├── llm_judge/             #   LLM-as-judge scores
+│   │   ├── analyse/               #   PCA/geometry, surface artifacts, score EDA
+│   │   └── train/                 #   run_clf_cross_domain*.py, sweep_*.py,
 │   │                              #   replot_cross_domain.py
 │   │
-│   ├── train/                     # Shared: algs/ (classifiers/regressors), autoencoder.py
-│   ├── analyse/                   # Shared: analyse_exp.py, analyse_exp_compare.py
+│   ├── science_data/              # Pipeline 3 — build a new corpus, Ghostbuster protocol
+│   │   ├── fetch/fetch_s2.py      #   Stage 1: Semantic Scholar → raw parquet
+│   │   ├── filter/                #   Stage 2: admission rules → N per domain
+│   │   ├── prompt/make_prompts.py #   Stage 3: one generation prompt per paper
+│   │   ├── generate/generate_ai.py#   Stage 4: prompt → AI abstract
+│   │   └── analyse/               #   per-stage reports
+│   │
+│   ├── algs/                      # Shared: pluggable classifier algorithms
 │   └── utils/                     # Shared: all utility modules
 │
 ├── cfg/
 │   ├── citation_impact/
-│   │   ├── fetch/                 # Semantic Scholar query configs
-│   │   └── train/reg/, repr/      # Regression / repr-learning experiment configs
-│   └── ai_detection/
-│       └── train/clf/, clf_cd/,   # Classification experiment configs
-│                clf_cd_algs/, clf_cd_emb/
+│   │   └── fetch/                 # Semantic Scholar query configs
+│   ├── ai_detection/
+│   │   └── train/clf_cd/,         # Cross-domain experiment configs
+│   │       clf_cd_algs/,          #   (clf_cd/ghostbuster/ = the combined-parquet set)
+│   │       clf_cd_emb/, sweep/
+│   └── science_data/              # Corpus-building config + query lists
 │
 ├── store/                         # Versioned datasets tracked with Git LFS
 │   └── data/parquet/, sql/
 ├── data/                          # Local working data (gitignored)
 │   ├── sql/                       # SQLite databases (citation impact pipeline)
-│   ├── parquet/                   # Parquet datasets (both pipelines)
+│   ├── parquet/                   # Parquet datasets (citation impact + AI detection)
+│   ├── science/                   # Science-data corpus + per-domain shards
 │   ├── ghostbuster-data*/         # Raw Ghostbuster text corpora
 │   └── papers/                    # Downloaded Denario PDFs
 └── results/                       # All experiment outputs (gitignored)
@@ -176,11 +185,20 @@ Parquet files produced by the citation-impact pipeline follow a `<id>[_AI][_naip
 - `_AI` suffix — the file contains both human and LLM-rephrased rows
 - `_naip` suffix — NAIP scores have been added
 
-Parquet files produced by the AI-detection pipeline follow a `<corpus>[_<variant>][_binox<N>].parquet` pattern:
+Parquet files produced by the AI-detection pipeline come in two shapes.
+
+Per-corpus files, `<corpus>[_<variant>][_binox<N>][_norm|_red_<len>].parquet`:
 
 - `<corpus>` — one of `reuter`, `wp`, `essay`, `denario_papers`
-- `_<variant>` — e.g. `_gpt54mini` for the GPT-4o-mini variant
+- `_<variant>` — e.g. `_gpt54mini` for the GPT-4o-mini regeneration
 - `_binox<N>` — Binoculars scores have been added (N = run index)
+- `_norm` — text normalised by `prepare/normalize_text.py`
+- `_red_<len>[w]` — text truncated by `prepare/truncate_text.py`
+
+Combined files, `ghostbuster_<generator>.parquet`, written by
+`prepare/combine_domains.py`: several corpora in one file, one per `domain`.
+This is what the training and analysis scripts read now — a *corpus* is a
+`(file, domain)` pair rather than a file.
 
 ---
 
@@ -197,15 +215,11 @@ Parquet files produced by the AI-detection pipeline follow a `<corpus>[_<variant
    ↓  data/parquet/<id>_AI_naip.parquet
 [analyse_data.py]              ← optional: EDA on processed Parquet
 [analyse_naip.py]              ← optional: EDA on NAIP scores
-   ↓
-┌──────────────────────────────────────┐
-│  Training (pick one or more)         │
-│  run_reg.py   → results/reg/         │
-│  run_repr.py  → results/repr/        │
-└──────────────────────────────────────┘
-   ↓
-[analyse_exp.py + analyse_exp_compare.py]  ← called automatically after training
 ```
+
+> **Note:** the training stage of this pipeline (`run_reg.py`, `run_repr.py`) and its
+> plotting library (`epai/analyse/`) have been removed. What remains is the data
+> pipeline: fetch → summarise → prepare → score → analyse.
 
 ### Stage 1 — Fetch
 
@@ -309,96 +323,72 @@ EDA on NAIP-enriched datasets. Produces score distributions per `generated_by` g
 
 ---
 
-### Stage 7 — Training (Regression / Repr Learning)
-
-All training scripts follow the same pattern: load YAML configs → run N seeds → save results as JSON + model `.joblib` → auto-run analysis.
-
-**Configs live in:** `cfg/citation_impact/train/`
-
-#### Regression (`run_reg.py`)
-
-**Output:** `results/reg/<experiment_id>/`
-
-```bash
-python -m epai.citation_impact.train.run_reg
-```
-
-Predicts `log1p(citation_count)` from paper features. Metrics per seed: RMSE and R² on train/val/test.
-
-Available models (`ml_alg` in config): `gradient_boosting`, `linear`, `svm`, `mlp`, `ae`
-
-Available features: `embedding`, `emb_specter2`, `year`, `best_author_h_index`, `author_count`, `page_count`
-
-#### Representation Learning (`run_repr.py`)
-
-**Output:** `results/repr/<experiment_id>/`
-
-```bash
-python -m epai.citation_impact.train.run_repr
-```
-
-Trains the `AERegressor` in `epai/train/autoencoder.py`: a deep autoencoder (768→512→256→128→256→512→768) whose 128-dim latent space is used as input to a Ridge regression head predicting `log1p(citation_count)`.
-
----
-
-### Stage 8 — Analyse Experiments
-
-These two scripts from `epai/analyse/` are called automatically at the end of each training script. They can also be run standalone.
-
-- `analyse_exp.py` — per-algorithm plots (loss curves, feature importance, metrics summary, pred vs. gt scatter)
-- `analyse_exp_compare.py` — cross-algorithm comparison (grouped bar charts, overlaid CI bands, feature importances)
-
----
-
 ## Pipeline 2 — AI Detection
 
 ```
-[prepare_{reuter,wp,essay,denario}.py]   ← Stage A: raw text → Parquet
+[prepare_{reuter,wp,essay,denario}.py]   ← Stage A: raw text → Parquet (one per corpus)
    ↓  data/parquet/<corpus>.parquet
-[merge_parquets.py]                      ← optional: combine corpora
-[recompute_embedding.py]                 ← optional: verify embedding stability
-   ↓
-[add_embeddings.py]                      ← Stage B: add embedding columns
+[add_embeddings.py]                      ← Stage B: add emb_* columns
+[add_llm_judge_scores.py]                ←          add llm_judge_score_* columns
    ↓  data/parquet/<corpus>_binox*.parquet
-[analyse_binox_*.py]                     ← Stage C: EDA — Binoculars scores & embeddings
-[analyse_emb_2d.py]
-[analyse_parquet_*.py]
+[combine_domains.py]                     ← Stage C: the per-corpus files → ONE file
+   ↓  data/parquet/ghostbuster_<generator>.parquet   (uid, id, domain, text, …)
+[analyse_domain_pca.py]                  ← Stage D: EDA on the combined file
+[analyse_emb_class_stats.py] [analyse_surface_artifacts.py]
+[analyse_text_lengths.py]    [analyse_score_human_vs_ai.py]
    ↓
 ┌────────────────────────────────────────────────────────────┐
-│  Classification (pick one or more)                         │
-│  run_clf.py                → results/clf/                  │
-│  run_clf_cross_domain.py   → results/clf_cd/               │
-│  run_clf_cross_domain_algs.py  → results/clf_cd_algs/      │
+│  Cross-domain classification (pick one)                    │
+│  run_clf_cross_domain.py            → results/clf_cd/      │
+│  run_clf_cross_domain_algs.py       → results/clf_cd_algs/ │
 │  run_clf_cross_domain_embeddings.py → results/clf_cd_emb/  │
+│  sweep_clf_cross_domain.py          → results/sweep_clf_cd/│
 └────────────────────────────────────────────────────────────┘
+```
+
+**One parquet, one dataloader, one preflight.** A *corpus* is no longer a file: it
+is a `CorpusSpec` — a parquet plus an optional `domain` — defined in
+`epai/utils/corpus_utils.py` and read by `read_corpus()`. Every training and
+analysis script goes through it, so essay/reuter/wp are three slices of one
+combined file rather than three paths repeated in every config. A dataset entry
+with no `domain` key means the whole file, so configs written against the old
+per-corpus parquets still run unchanged.
+
+Every script is a normal CLI with defaults — no module-level constants to edit
+between runs:
+
+```bash
+uv run python epai/ai_detection/train/run_clf_cross_domain.py                  # defaults
+uv run python epai/ai_detection/train/run_clf_cross_domain.py --cfg <one.yaml> # one config
+uv run python epai/ai_detection/train/run_clf_cross_domain.py --cfg-dir <dir>  # a folder
 ```
 
 ### Stage A — Prepare Corpora
 
-All prepare scripts read raw text files from `data/ghostbuster-data*/` (or `data/papers/denario/`) and produce a structured Parquet with columns: `id`, `text`, `generated_by`, embedding columns.
+All prepare scripts read raw text files from `data/ghostbuster-data*/` (or
+`data/papers/denario/`) and produce a Parquet with `id`, `text`, `generated_by`
+and an `emb_specter2` column.
 
 ```bash
-python -m epai.ai_detection.prepare.prepare_reuter
-python -m epai.ai_detection.prepare.prepare_wp
-python -m epai.ai_detection.prepare.prepare_essay
-python -m epai.ai_detection.prepare.prepare_denario
+uv run python epai/ai_detection/prepare/prepare_reuter.py
+uv run python epai/ai_detection/prepare/prepare_wp.py
+uv run python epai/ai_detection/prepare/prepare_essay.py
+uv run python epai/ai_detection/prepare/prepare_denario.py
+
+# any source directory / output path, and a fast smoke run
+uv run python epai/ai_detection/prepare/prepare_essay.py \
+    --source-dir data/ghostbuster-data/essay -o data/parquet/essay.parquet \
+    --limit 20 --no-embedding
 ```
 
 To fetch the Denario papers first:
 ```bash
-python epai/ai_detection/fetch/fetch_denario.py
+uv run python epai/ai_detection/fetch/fetch_denario.py
 ```
-
-To combine multiple Parquets into one:
-```bash
-python -m epai.ai_detection.prepare.merge_parquets data/parquet/a.parquet data/parquet/b.parquet
-```
-
-**Configs live in:** `cfg/ai_detection/train/`
 
 ---
 
-### Stage B — Embed
+### Stage B — Embed and Score
 
 **Script:** `epai/ai_detection/embed/add_embeddings.py`
 **Output:** overwrites / extends the input Parquet with new `emb_*` columns
@@ -424,78 +414,130 @@ Adds multiple embedding columns in one pass. Supported embedders (subset, see `E
 
 The Parquet is written after every embedder finishes — a crash does not throw away completed embeddings.
 
+```bash
+# LLM-as-judge P(human) per row
+uv run python epai/ai_detection/llm_judge/add_llm_judge_scores.py data/parquet/reuter_binox0.parquet
+```
+
 ---
 
-### Stage C — Analyse Embeddings / Binoculars
+### Stage C — Combine the corpora into one file
+
+**Script:** `epai/ai_detection/prepare/combine_domains.py`
 
 ```bash
-# 2D UMAP/PCA of embeddings coloured by generated_by
-python -m epai.ai_detection.analyse.analyse_emb_2d data/parquet/reuter_binox0.parquet --by-generator
+uv run python epai/ai_detection/prepare/combine_domains.py \
+    data/parquet/essay_binox0.parquet \
+    data/parquet/reuter_binox0.parquet \
+    data/parquet/wp_binox0.parquet \
+    -o data/parquet/ghostbuster_gpt35t.parquet
+```
 
-# Binoculars human vs. AI per-id score differences (violins, histograms, ROC/PR, confusion)
-uv run python epai/ai_detection/analyse/analyse_binox_human_vs_ai.py data/parquet/wp_binox0.parquet
+Output schema: `uid`, `id`, `domain`, `text`, `generated_by`, `binoculars_score`,
+`llm_judge_score*`, `emb_*`. Two keys with two jobs — **`uid` identifies a row,
+`id` identifies a pair** (a source prompt and every rewrite of it share one), so
+every split groups on `id` and the two halves of a pair never straddle a fold.
+The domain is read back off the id prefix, `--drop-generated-by` removes the
+prompt-variant generations, and `--drop-incomplete` removes rows with no
+embedding. The run ends with a statistics block.
 
-# ...the same analysis on the LLM-judge scores instead
-uv run python epai/ai_detection/analyse/analyse_binox_human_vs_ai.py \
-    data/parquet/wp_binox0.parquet:gpt_plain --metric llm_judge
+Text transforms that produce new corpora:
+```bash
+uv run python epai/ai_detection/prepare/normalize_text.py <parquet>...   # strip surface artifacts
+uv run python epai/ai_detection/prepare/truncate_text.py <parquet> -n 200 --unit words
+```
 
-# Pairwise comparison between two Binoculars runs
-uv run python epai/ai_detection/analyse/analyse_binox_pairwise.py
+---
 
-# Corpus QA (row/column counts, missing values)
-uv run python epai/ai_detection/analyse/analyse_parquet_compare.py data/parquet/a.parquet data/parquet/b.parquet
-uv run python epai/ai_detection/analyse/analyse_parquet_summary.py data/parquet/reuter_binox0.parquet
+### Stage D — Analyse
 
-# Text length distributions
-uv run python epai/ai_detection/analyse/analyse_text_lengths.py
+Every analysis takes parquets positionally and `--domains` to pick slices of a
+combined file; with no `--domains` a combined file becomes one corpus per domain
+it holds.
 
-# Count and flag empty .txt files in a raw-data folder
+```bash
+# PCA in 2D and 3D (PNG + interactive HTML) plus the corpus and geometry statistics
+uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
+    data/parquet/ghostbuster_gpt35t.parquet --feature emb_luar_crud
+
+# class geometry: how much of the in-domain score is one direction?
+uv run python epai/ai_detection/analyse/analyse_emb_class_stats.py \
+    data/parquet/ghostbuster_gpt54mini.parquet
+
+# what a classifier could learn from the raw text alone, with the sign per corpus
+uv run python epai/ai_detection/analyse/analyse_surface_artifacts.py \
+    --config cfg/ai_detection/train/clf_cd/ghostbuster/ALL_logistic.yaml
+
+# detector scores, human vs AI: violins, ROC/PR, confusion
+uv run python epai/ai_detection/analyse/analyse_score_human_vs_ai.py \
+    data/parquet/ghostbuster_gpt35t.parquet:gpt
+
+# text length distributions per domain
+uv run python epai/ai_detection/analyse/analyse_text_lengths.py \
+    data/parquet/ghostbuster_gpt35t.parquet
+
+# corpus QA
+uv run python epai/ai_detection/embed/summary_parquet.py data/parquet/ghostbuster_gpt35t.parquet
 uv run python epai/ai_detection/analyse/analyse_txt_folder.py data/ghostbuster-data/essay
 ```
 
 ---
 
-### Stage D — Training (Classification)
+### Stage E — Training (Cross-domain classification)
 
-#### In-domain classification (`run_clf.py`)
-
-**Output:** `results/clf/<experiment_id>/`
-
-```bash
-python -m epai.ai_detection.train.run_clf
-```
-
-Classifies whether a text is human-written or generated by a specific model/style based on the `generated_by` label column and `emb_specter2` embeddings. Metrics: accuracy and per-class F1. Splits are stratified.
+Every runner shares the same three arguments — `--cfg`, `--cfg-dir`,
+`--results-dir` — and the same preflight: every config's shape, every parquet,
+every column and every `domain` is checked before the first model is fitted, and
+all problems are reported together.
 
 #### Cross-domain transfer control (`run_clf_cross_domain.py`)
 
-**Output:** `results/clf_cd/<experiment_id>/`
+**Configs:** `cfg/ai_detection/train/clf_cd/ghostbuster/` · **Output:** `results/clf_cd/<experiment_id>/`
 
 ```bash
-python -m epai.ai_detection.train.run_clf_cross_domain
+uv run python epai/ai_detection/train/run_clf_cross_domain.py
+uv run python epai/ai_detection/train/run_clf_cross_domain.py \
+    --cfg cfg/ai_detection/train/clf_cd/ghostbuster/ALL_logistic.yaml
 ```
 
-Trains on each corpus in turn and evaluates on all of them, producing a source × target accuracy matrix. The off-diagonal shows how well the classifier transfers to unseen corpora — distinguishing "learned machine-generated-ness" from "learned corpus artifacts".
+Trains on each corpus in turn and evaluates on all of them, producing a source ×
+target accuracy matrix. The off-diagonal shows how well the classifier transfers
+to unseen corpora — distinguishing "learned machine-generated-ness" from
+"learned corpus artifacts".
 
 #### Cross-domain × algorithm sweep (`run_clf_cross_domain_algs.py`)
 
-**Output:** `results/clf_cd_algs/<experiment_id>/`
+**Configs:** `cfg/ai_detection/train/clf_cd_algs/` · **Output:** `results/clf_cd_algs/<experiment_id>/`
 
 ```bash
-python -m epai.ai_detection.train.run_clf_cross_domain_algs
+uv run python epai/ai_detection/train/run_clf_cross_domain_algs.py --dry-run   # preflight only
+uv run python epai/ai_detection/train/run_clf_cross_domain_algs.py
 ```
 
-Same as the cross-domain control but sweeps across ML algorithms (logistic, SVM, gradient boosting, MLP, Binoculars-MLP) on one fixed feature set. Each algorithm gets its own matrix and a comparison ranking.
+Same matrix, swept across ML algorithms (logistic, SVM, gradient boosting, MLP,
+Binoculars-MLP) on one fixed feature set, plus zero-shot Binoculars / LLM-judge
+baselines. Each algorithm gets its own matrix and a comparison ranking.
 
 #### Cross-domain × embedding sweep (`run_clf_cross_domain_embeddings.py`)
 
-**Output:** `results/clf_cd_emb/<experiment_id>/`
+**Configs:** `cfg/ai_detection/train/clf_cd_emb/` · **Output:** `results/clf_cd_emb/<experiment_id>/`
 
 ```bash
-python -m epai.ai_detection.train.run_clf_cross_domain_embeddings
+uv run python epai/ai_detection/train/run_clf_cross_domain_embeddings.py
 ```
 
-Same as the cross-domain control but sweeps across all embedding columns in the config. Each embedder gets its own matrix and a final comparison figure. Includes a zero-shot Binoculars baseline.
+Same matrix, swept across every embedding column in the config. Each embedder
+gets its own matrix and a final comparison figure.
+
+#### Hyper-parameter search (`sweep_clf_cross_domain.py`)
+
+**Configs:** `cfg/ai_detection/train/sweep/` · **Output:** `results/sweep_clf_cd/<sweep_id>/`
+
+```bash
+uv run python epai/ai_detection/train/sweep_clf_cross_domain.py --cfg cfg/ai_detection/train/sweep/luar_mlp_reg.yaml
+uv run python epai/ai_detection/train/sweep_clf_cross_domain.py --report   # leaderboard
+uv run python epai/ai_detection/train/sweep_clf_cross_domain.py --final    # winner on the full matrix
+```
 
 To regenerate figures from saved results without retraining:
 ```bash
@@ -505,13 +547,54 @@ uv run python epai/ai_detection/train/replot_cross_domain.py results/clf_cd_emb
 
 ---
 
+## Pipeline 3 — Science Data
+
+A newer corpus builder: instead of reusing Ghostbuster's essays and news, it
+assembles an AI-vs-human corpus of *scientific abstracts*. The protocol is the
+part that matters — each generator sees only a prompt derived from the paper,
+never the human abstract, so the AI class does not inherit the human text's
+content and structure the way a rephrasing setup does.
+
+```
+[fetch_s2.py]        ← Stage 1: Semantic Scholar → data/science/<id>_raw.parquet
+   ↓                            (stops on the POST-filter count, per domain)
+[filter_abstracts.py]← Stage 2: admission rules → exactly N per domain
+   ↓
+[make_prompts.py]    ← Stage 3: one generation prompt per paper
+   ↓
+[generate_ai.py]     ← Stage 4: prompt → AI abstract, checkpointed per call
+   ↓  data/science/<id>.parquet
+[analyse_{fetch,filter,prompts,generation}.py]   ← per-stage reports
+```
+
+All five stages read one config (`cfg/science_data/science_cfg_example.yaml`),
+with the domain/query lists in a separate file so they can be swapped
+independently:
+
+```bash
+uv run python -m epai.science_data.fetch.fetch_s2 \
+    --cfg cfg/science_data/science_cfg_example.yaml \
+    --queries cfg/science_data/queries_example.yaml
+uv run python -m epai.science_data.filter.filter_abstracts --cfg cfg/science_data/science_cfg_example.yaml
+uv run python -m epai.science_data.prompt.make_prompts    --cfg cfg/science_data/science_cfg_example.yaml
+uv run python -m epai.science_data.generate.generate_ai   --cfg cfg/science_data/science_cfg_example.yaml
+uv run python -m epai.science_data.analyse.analyse_fetch  --cfg cfg/science_data/science_cfg_example.yaml
+```
+
+Once exported, the corpus joins the AI-detection pipeline at Stage B (embed) —
+and `prepare/combine_domains.py` can fold it in beside the Ghostbuster domains.
+
+---
+
 ## Shared Library
 
-The `epai/utils/`, `epai/train/`, and `epai/analyse/` modules are used by both pipelines and should not be modified for pipeline-specific purposes.
+The `epai/utils/` and `epai/algs/` modules are shared and should not be modified for pipeline-specific purposes.
 
 | Module | Purpose |
 |---|---|
-| `epai/utils/config_utils.py` | Load and collect YAML experiment configs |
+| `epai/utils/config_utils.py` | Load and collect YAML experiment configs; the shared `--cfg` / `--cfg-dir` / `--results-dir` CLI arguments |
+| `epai/utils/corpus_utils.py` | **The one dataloader.** `CorpusSpec` (a parquet + an optional `domain`), `read_corpus`, and the dataset/file/domain preflight checks |
+| `epai/utils/preflight_utils.py` | **The one preflight.** `Report`, `print_report`, and the config-shape checks every runner shares |
 | `epai/utils/cuda_util.py` | Check CUDA availability |
 | `epai/utils/dimred_utils.py` | PCA, KernelPCA, UMAP wrappers |
 | `epai/utils/embedding_utils.py` | SPECTER2 / SciBERT / OpenAI embedding computation |
@@ -520,12 +603,9 @@ The `epai/utils/`, `epai/train/`, and `epai/analyse/` modules are used by both p
 | `epai/utils/parquet_utils.py` | Parquet save/load helpers |
 | `epai/utils/s2_utils.py` | Semantic Scholar API client |
 | `epai/utils/sqlite_utils.py` | SQLite schema, save, and load helpers |
-| `epai/utils/train_utils.py` | Feature assembly and model factory |
+| `epai/utils/train_utils.py` | Missing-value rules (`drop_missing_rows`), feature stacking, and the classifier factory (`build_clf_model`) |
 | `epai/utils/visualization_utils.py` | Plotly and matplotlib plot functions |
-| `epai/train/algs/` | Pluggable classifier/regressor subclasses |
-| `epai/train/autoencoder.py` | `AERegressor`: PyTorch autoencoder + Ridge regression head |
-| `epai/analyse/analyse_exp.py` | Per-algorithm plots (lib, called by training scripts) |
-| `epai/analyse/analyse_exp_compare.py` | Cross-algorithm comparison plots (lib) |
+| `epai/algs/` | Pluggable `ClfAlgorithm` subclasses (logistic, svm, gradient_boosting, simple_mlp, binox_mlp), each owning its own preprocessing and hyper-parameters |
 
 ---
 
@@ -543,71 +623,41 @@ queries_domains:
     - "natural language processing large language models"
 ```
 
-### Regression / repr-learning configs (`cfg/citation_impact/train/`)
+### Science-data config (`cfg/science_data/science_cfg_example.yaml`)
+
+One annotated YAML drives all five stages of pipeline 3, with the domain and
+query lists in `queries_example.yaml` so they can be swapped independently.
+
+### Classification configs (`cfg/ai_detection/train/clf_cd/`, `clf_cd_algs/`, `clf_cd_emb/`, `sweep/`)
 
 ```yaml
-alg_id: "A1"
-alg_label: "SPECTER + year + h-index"
+alg_id: "A1"                 # names the output directory under results/<family>/
+alg_label: "SPECTER2"        # shown on the figures
 seed: 42
 data:
-  parquet_path: "data/parquet/my_dataset.parquet"
-features:
-  - embedding
-  - year
-  - best_author_h_index
-model:
-  ml_alg: "gradient_boosting"
-  n_runs: 3
-```
-
-### Classification configs (`cfg/ai_detection/train/clf/`, `clf_cd/`, etc.)
-
-```yaml
-alg_id: "A1"
-alg_label: "SPECTER2"
-seed: 42
-data:
-  parquet_path: "data/parquet/reuter_binox0.parquet"
-  drop_classes: []
-features:
+  human_label: "human"       # everything else binarises to "machine"
+  group_col: "id"            # rows sharing this never straddle a split
+  parquet_path: "data/parquet/ghostbuster_gpt35t.parquet"   # default for every dataset
+  datasets:                  # one entry per corpus; every one is trained on in turn
+    - name: "essay"
+      label: "essay"
+      domain: "essay"        # one domain of the combined file
+    - name: "reuter"
+      label: "reuter"
+      domain: "reuter"
+features:                    # `embeddings:` (a list) in the clf_cd_emb configs
   - emb_specter2
 model:
-  ml_alg: "logistic"
+  ml_alg: "logistic"         # gradient_boosting | logistic | svm | mlp
   n_runs: 3
+  test_size: 0.30
 ```
 
----
+`parquet_path` (and `drop_classes`) may be set once under `data`, as above, or
+per dataset — an entry that names its own wins. Set it once when every corpus is
+a domain of one file; name it per entry when the matrix spans several files, as
+`clf_cd/ghostbuster/ALL_logistic.yaml` does with two generators.
 
-## Key Concepts for Students
-
-### Why log1p(citation_count)?
-
-Citation counts follow a heavy-tailed distribution — a handful of papers accumulate tens of thousands of citations while most receive just a few. Training a regression model on raw counts causes the loss to be dominated by outliers. `log1p(x) = log(1 + x)` compresses the scale and handles zero-citation papers gracefully (`log(0)` is undefined, `log1p(0) = 0`).
-
-### What is a SPECTER embedding?
-
-SPECTER and SPECTER2 are transformer models trained on the citation graph of academic papers. Given a paper's title and abstract, the model outputs a 768-dimensional vector such that papers that frequently cite each other end up close together. Using this as a feature lets downstream ML models reason about a paper's topic and scientific community without manual feature engineering.
-
-### What does the autoencoder do?
-
-The `AERegressor` in `epai/train/autoencoder.py` learns a **compressed representation** of 768-dim input embeddings. The encoder progressively reduces dimensionality (768→512→256→128); the decoder reconstructs the original from this 128-dim bottleneck. After training on reconstruction alone, the bottleneck layer is used as input to a Ridge regression head that predicts `log1p(citation_count)`.
-
-### What is the citation-impact classification task testing?
-
-When LLMs rephrase abstracts, they shift the text's semantic embedding even if the scientific meaning is preserved. The classification task asks: **can a model distinguish human-written from LLM-rephrased abstracts using only their embeddings?** If yes, LLM-generated scientific text carries a detectable stylistic signature at the embedding level.
-
-### What is the AI-detection cross-domain task testing?
-
-In-domain accuracy for the classification task is very high (~97–99%). The open question is what signal the classifier has actually learned: **machine-generated-ness** (which should transfer to unseen corpora) vs. **corpus artifacts** (which would collapse to ~50% under transfer). The cross-domain scripts produce a source × target matrix to answer this.
-
-### What is NAIP?
-
-NAIP (Newborn Article Impact Predictor) is an external model on HuggingFace that predicts the likely long-term impact of a paper from its title and abstract alone. The `naip_final_score` (0–1) is the normalised TNCSI_sp score. Adding NAIP scores lets you study whether LLM-rephrased abstracts are rated as more or less impactful than the human originals.
-
-### Train / Val / Test split
-
-All training scripts use a 70 / 15 / 15 split. The `StandardScaler` is always fitted on the **training set only** and then applied to validation and test — this prevents data leakage. Results are averaged across `n_runs` independent random seeds.
-
-### Experiment IDs and reproducibility
-
-Each training run generates a timestamped experiment ID (e.g. `reg_20260519_143022`). All config files, per-seed JSON result files, trained model `.joblib` files, and figures are saved under that ID.
+Omit `domain` to use the whole file — that is what a per-corpus parquet holds, so
+configs written before `combine_domains.py` still run. A `domain` that is not in
+the file is a preflight error listing the ones that are.

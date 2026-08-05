@@ -1,6 +1,6 @@
 r"""Class geometry of the embeddings: why is in-domain detection ~98%?
 
-The companion question to ``analyse_emb_2d.py``. That script *shows* the two
+The companion question to ``analyse_domain_pca.py``. That script *shows* the two
 clouds; this one measures them, and specifically measures the one quantity the
 scatter plot cannot show: how much of the in-domain score comes from a single
 direction (one systematic shift between human and machine text) versus from the
@@ -87,14 +87,14 @@ Outputs saved to results/emb_class_stats/<name>/:
   - *.png                          — the figures for the above
 
 Usage:
+    # one combined parquet = three corpora, one per domain
     uv run python epai/ai_detection/analyse/analyse_emb_class_stats.py \
-        data/parquet/essay_gpt54mini_binox0.parquet \
-        data/parquet/reuter_gpt54mini_binox0.parquet \
-        data/parquet/wp_gpt54mini_binox0.parquet
+        data/parquet/ghostbuster_gpt54mini.parquet
 
-    # a different embedder (the classifier's geometry changes with it)
+    # one domain of it, with a different embedder (the geometry changes with it)
     uv run python epai/ai_detection/analyse/analyse_emb_class_stats.py \
-        data/parquet/wp_gpt54mini_binox0.parquet --emb-col emb_luar_crud
+        data/parquet/ghostbuster_gpt54mini.parquet --domains wp \
+        --emb-col emb_luar_crud
 
     # does the separation survive truncation? run the length ablation variants
     # and compare the `centroid` / `full` accuracies across them
@@ -122,6 +122,7 @@ from sklearn.model_selection import GroupShuffleSplit
 from sklearn.preprocessing import StandardScaler
 
 from epai.utils.color_utils import group_color
+from epai.utils.corpus_utils import CorpusSpec, read_corpus, specs_from_paths
 from epai.utils.train_utils import CLF_TARGET_COL, drop_missing_rows
 
 BASE_DIR = Path(__file__).parent.parent.parent.parent
@@ -150,7 +151,7 @@ POPULATION_LABELS = {
     "between": "between classes",
 }
 POPULATION_COLORS = {
-    "within_human": "#2563eb",  # blue, matching analyse_emb_2d
+    "within_human": "#2563eb",  # blue
     "within_machine": "#dc2626",  # red
     "between": "#6b7280",  # grey
 }
@@ -249,11 +250,12 @@ def select_groups(
 
 
 def load_corpus(
-    path: Path, emb_col: str, families: tuple[str, ...], out: Tee
+    spec: CorpusSpec, emb_col: str, families: tuple[str, ...], out: Tee
 ) -> Corpus:
-    """Read one parquet into the human-vs-machine view."""
-    out.print(f"\n{path.name}")
-    df = pd.read_parquet(path)
+    """Read one corpus -- a parquet, or one domain of it -- into the binary view."""
+    path = spec.path
+    out.print(f"\n{spec.source}")
+    df = read_corpus(spec, quiet=True).df
     out.print(f"  loaded {len(df)} rows")
 
     for col in (emb_col, GROUP_COL, ID_COL):
@@ -286,7 +288,7 @@ def load_corpus(
 
     out.print(f"  usable: {len(df)} rows, {X.shape[1]} dims, "
               f"human={int((y == 0).sum())} machine={int((y == 1).sum())}")
-    return Corpus(path.stem, X, y, ids, machine_labels)
+    return Corpus(spec.name, X, y, ids, machine_labels)
 
 
 # ---------------------------------------------------------------------------
@@ -1041,7 +1043,11 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("parquets", nargs="+", type=Path,
-                   help="Parquet files to analyse, e.g. data/parquet/*_gpt54mini_binox0.parquet")
+                   help="Parquet file(s) to analyse. A combined file becomes one "
+                        "corpus per domain unless --domains narrows it.")
+    p.add_argument("--domains", nargs="*", default=None, metavar="DOMAIN",
+                   help="Domains to take from each parquet (default: every domain "
+                        "the file has; a file with no domain column is used whole).")
     p.add_argument("--emb-col", default=DEFAULT_EMB_COL,
                    help="Embedding column to analyse. Statistics are only comparable "
                         "within one embedder — raw magnitudes differ between columns.")
@@ -1062,12 +1068,13 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def output_name(paths: list[Path], emb_col: str, explicit: str | None) -> str:
+def output_name(specs: list[CorpusSpec], emb_col: str, explicit: str | None) -> str:
     if explicit:
         return explicit
-    stems = "__".join(p.stem for p in paths)
+    parts = [s.name for s in specs]
+    stems = "__".join(parts)
     if len(stems) > 100:
-        stems = f"{paths[0].stem}__and_{len(paths) - 1}_more"
+        stems = f"{parts[0]}__and_{len(parts) - 1}_more"
     return f"{stems}__{emb_col}"
 
 
@@ -1077,14 +1084,15 @@ def main() -> None:
         if not p.is_file():
             raise SystemExit(f"Parquet file not found: {p}")
 
+    specs = specs_from_paths(args.parquets, args.domains, base_dir=BASE_DIR)
     spaces = list(SPACES) if args.space == "both" else [args.space]
-    fig_dir = RESULTS_DIR / output_name(args.parquets, args.emb_col, args.name)
+    fig_dir = RESULTS_DIR / output_name(specs, args.emb_col, args.name)
 
     out = Tee()
     report_header(args.parquets, args.emb_col, args, out)
 
     corpora = [
-        load_corpus(p, args.emb_col, tuple(args.groups), out) for p in args.parquets
+        load_corpus(spec, args.emb_col, tuple(args.groups), out) for spec in specs
     ]
 
     class_rows: list[dict] = []

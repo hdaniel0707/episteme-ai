@@ -24,7 +24,7 @@ class ClfAlgorithm(ABC):
         selects it by and the folder its results land in);
       * declare ``PARAMS``, the hyper-parameter names it reads (see below);
       * implement ``fit(X, y)`` and ``predict(X)``;
-      * register it in ``epai/train/algs/__init__.py``;
+      * register it in ``epai/algs/__init__.py``;
       * optionally override ``save`` if the default joblib pickle is unsuitable.
 
     ``params`` captures whatever keyword arguments the config passed, so an

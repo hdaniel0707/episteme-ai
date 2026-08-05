@@ -49,7 +49,7 @@ class SimpleMLPAlg(ClfAlgorithm):
         linear probe).
 
     Every other hyper-parameter is shared with :mod:`binox_mlp` and documented on
-    :class:`epai.train.algs._torch_common.TrainHParams`. In brief:
+    :class:`epai.algs._torch_common.TrainHParams`. In brief:
       * ``normalize`` -- ``none`` | ``standard`` | ``l2``, combined with ``+``
         (default ``standard``). ``standard`` carries the *source* corpus's mean
         and scale onto every target; ``l2`` is per-row and carries nothing;

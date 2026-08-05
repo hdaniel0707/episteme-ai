@@ -1,7 +1,7 @@
 """Shared color mapping for source / LLM families.
 
 Colors live in the external config cfg/colors.yaml so that every plotting script
-(epai/utils/visualization_utils.py, epai/analyse_naip.py, ...) stays consistent.
+(epai/utils/visualization_utils.py, epai/citation_impact/analyse/analyse_naip.py, ...) stays consistent.
 Labels are matched to a family by longest matching prefix, so specific variants
 such as ``gpt_prompt1`` win over the generic ``gpt`` entry.
 """

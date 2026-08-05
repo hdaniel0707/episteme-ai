@@ -10,7 +10,7 @@
 # figure ranks the algorithms against each other.
 #
 # Every YAML in cfg/train/clf_cd_algs/ is run by
-# epai/train/run_clf_cross_domain_algs.py, so `alg_id` must be unique across the
+# epai/ai_detection/train/run_clf_cross_domain_algs.py, so `alg_id` must be unique across the
 # folder -- it names the output directory under
 # results/clf_cd_algs/<experiment_id>/<alg_id>/<algorithm_id>/
 alg_id: "luar_crud_algs"
@@ -21,7 +21,7 @@ seed: 42
 # The algorithms to compare. One full cross-domain matrix is produced per entry,
 # so the run costs len(algorithms) x n_runs x len(datasets) fits. Each entry is
 # either a bare name or a mapping:
-#   name   -> registry key in epai/train/algs (logistic | svm | gradient_boosting
+#   name   -> registry key in epai/algs (logistic | svm | gradient_boosting
 #             | simple_mlp | binox_mlp)
 #   id     -> optional; output-folder name, set it to run one algorithm twice
 #             with different params without a collision (defaults to `name`)
@@ -53,9 +53,9 @@ algorithms:
   - name: svm
     label: "SVM (RBF)"
     params: {C: 1.0, kernel: "rbf", gamma: "scale"}
-  - name: gradient_boosting
-    label: "Gradient Boosting"
-    params: {n_estimators: 100, learning_rate: 0.1, max_depth: 3}
+  # - name: gradient_boosting
+  #   label: "Gradient Boosting"
+  #   params: {n_estimators: 100, learning_rate: 0.1, max_depth: 3}
   # The untuned MLP, kept as the control: it is the only honest reference for
   # what the sweep below actually bought.
   - name: simple_mlp
@@ -179,19 +179,21 @@ data:
   # during training are excluded from the evaluation (and the count is reported).
   group_col: "id"
 
+  # Every dataset is one domain of this file, so the path is set once
+  # here instead of being repeated per entry. An entry may still name
+  # its own `parquet_path` to pull one corpus from somewhere else.
+  parquet_path: "data/parquet/ghostbuster_gpt54mini.parquet"
+
   datasets:
-    - name: "essay_gpt54mini"                                          # short key used in the matrix
-      label: "essay (gpt54mini)"                                       # optional, shown on the figures
-      parquet_path: "data/parquet/essay_gpt54mini_binox0.parquet"      # relative to the project root
-      drop_classes: []                                                 # e.g. ["claude", "gpt_prompt1"]
+    - name: "essay_gpt54mini"        # short key used in the matrix
+      label: "essay (gpt54mini)"      # optional, shown on the figures
+      domain: "essay"
     - name: "reuter_gpt54mini"
       label: "reuter (gpt54mini)"
-      parquet_path: "data/parquet/reuter_gpt54mini_binox0.parquet"
-      drop_classes: []
+      domain: "reuter"
     - name: "wp_gpt54mini"
       label: "wp (gpt54mini)"
-      parquet_path: "data/parquet/wp_gpt54mini_binox0.parquet"
-      drop_classes: []
+      domain: "wp"
 
 model:
   n_runs: 3

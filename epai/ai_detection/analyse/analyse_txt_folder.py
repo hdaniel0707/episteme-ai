@@ -12,9 +12,9 @@ not raw text).
 Output log saved to results/txt_check/<folder_name>/check.log
 
 Usage:
-    uv run python epai/analyse/analyse_txt_folder.py data/ghostbuster-data/essay
-    uv run python epai/analyse/analyse_txt_folder.py data/ghostbuster-data/reuter
-    uv run python epai/analyse/analyse_txt_folder.py data/ghostbuster-data/wp
+    uv run python epai/ai_detection/analyse/analyse_txt_folder.py data/ghostbuster-data/essay
+    uv run python epai/ai_detection/analyse/analyse_txt_folder.py data/ghostbuster-data/reuter
+    uv run python epai/ai_detection/analyse/analyse_txt_folder.py data/ghostbuster-data/wp
 """
 
 from __future__ import annotations

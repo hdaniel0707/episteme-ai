@@ -14,11 +14,13 @@ All remaining columns (embedding, citation_count, year, venue, queries,
 author_count, best_author_h_index, emb_specter2) are Null.
 
 Run:
-    python -m epai.ai_detection.prepare.prepare_denario
+    uv run python epai/ai_detection/prepare/prepare_denario.py
+    uv run python epai/ai_detection/prepare/prepare_denario.py --db data/sql/denario_papers.db -o data/parquet/denario_papers.parquet
 """
 
 import hashlib
 import sqlite3
+import argparse
 from pathlib import Path
 
 import pandas as pd
@@ -29,15 +31,11 @@ from epai.utils.parquet_utils import save_parquet
 BASE_DIR = Path(__file__).parent.parent.parent.parent
 DB_DIR = BASE_DIR / "data"
 
-######################################
-DB_ID = "denario_papers"
-DB_PATH = DB_DIR / "sql" / (DB_ID + ".db")
-PARQUET_PATH = DB_DIR / "parquet" / (DB_ID + ".parquet")
+DEFAULT_DB_ID = "denario_papers"
+DEFAULT_DB = DB_DIR / "sql" / (DEFAULT_DB_ID + ".db")
+DEFAULT_OUT = DB_DIR / "parquet" / (DEFAULT_DB_ID + ".parquet")
 
 GENERATED_BY = "denario"  # Denario papers are AI-generated end-to-end
-DEBUG = False  # if True, only process the first 5 rows
-ADD_EMB_SPECTER2 = True
-######################################
 
 # Canonical column order, matching the main datasets.
 REFERENCE_COLUMNS = [
@@ -105,18 +103,35 @@ def to_dataset_schema(raw: pd.DataFrame, source_db: str) -> pd.DataFrame:
     return out[REFERENCE_COLUMNS]
 
 
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description=__doc__.splitlines()[0],
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    p.add_argument("--db", type=Path, default=DEFAULT_DB,
+                   help="SQLite database to read the papers from.")
+    p.add_argument("-o", "--out", type=Path, default=DEFAULT_OUT,
+                   help="Output parquet path.")
+    p.add_argument("--limit", type=int, default=None, metavar="N",
+                   help="Only keep the first N rows (a quick smoke test).")
+    p.add_argument("--no-embedding", action="store_true",
+                   help="Leave emb_specter2 empty instead of computing it.")
+    return p.parse_args()
+
+
 def main() -> None:
-    raw = load_denario(DB_PATH)
-    if DEBUG:
-        raw = raw.head(5)
-    print(f"Loaded {len(raw)} rows from {DB_PATH}")
+    args = parse_args()
+    raw = load_denario(args.db)
+    if args.limit:
+        raw = raw.head(args.limit)
+    print(f"Loaded {len(raw)} rows from {args.db}")
 
-    df = to_dataset_schema(raw, source_db=DB_PATH.stem)
+    df = to_dataset_schema(raw, source_db=args.db.stem)
 
-    if ADD_EMB_SPECTER2:
+    if not args.no_embedding:
         df = add_embedding(df, emb_type="specter2")
 
-    save_parquet(df, PARQUET_PATH)
+    save_parquet(df, args.out)
 
 
 if __name__ == "__main__":

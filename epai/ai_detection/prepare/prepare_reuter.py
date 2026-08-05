@@ -25,9 +25,11 @@ generated_by) — mirroring how paper_id links human/LLM rows in the other
 datasets, which downstream analyses (e.g. human-vs-LLM distance) rely on.
 
 Run:
-    python -m epai.ai_detection.prepare.prepare_reuter
+    uv run python epai/ai_detection/prepare/prepare_reuter.py
+    uv run python epai/ai_detection/prepare/prepare_reuter.py --source-dir data/ghostbuster-data/reuter -o data/parquet/reuter.parquet
 """
 
+import argparse
 from pathlib import Path
 
 import pandas as pd
@@ -38,16 +40,12 @@ from epai.utils.parquet_utils import save_parquet
 BASE_DIR = Path(__file__).parent.parent.parent.parent
 DATA_DIR = BASE_DIR / "data"
 
-######################################
-REUTER_DIR = DATA_DIR / "ghostbuster-data-gpt54" / "reuter"
-PARQUET_PATH = DATA_DIR / "parquet" / "reuter_gpt54mini.parquet"
+DEFAULT_SOURCE_DIR = DATA_DIR / "ghostbuster-data-gpt54" / "reuter"
+DEFAULT_OUT = DATA_DIR / "parquet" / "reuter_gpt54mini.parquet"
 
 # Subdirectories inside each author folder that are not articles.
 IGNORE_SUBDIRS = {"logprobs", "headlines"}
 
-DEBUG = False  # if True, only process the first 20 files
-ADD_EMB_SPECTER2 = True
-######################################
 
 # Canonical column order for this dataset.
 REFERENCE_COLUMNS = ["id", "author", "text", "generated_by", "emb_specter2"]
@@ -98,19 +96,37 @@ def add_text_embedding(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description=__doc__.splitlines()[0],
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    p.add_argument("--source-dir", type=Path, default=DEFAULT_SOURCE_DIR,
+                   help="Directory of source .txt files to collect.")
+    p.add_argument("-o", "--out", type=Path, default=DEFAULT_OUT,
+                   help="Output parquet path.")
+    p.add_argument("--limit", type=int, default=None, metavar="N",
+                   help="Only keep the first N rows (a quick smoke test).")
+    p.add_argument("--no-embedding", action="store_true",
+                   help="Leave emb_specter2 empty instead of computing it "
+                        "(the slow step; add_embeddings.py can fill it later).")
+    return p.parse_args()
+
+
 def main() -> None:
-    df = load_reuter(REUTER_DIR)
-    if DEBUG:
-        df = df.head(20)
-    print(f"Loaded {len(df)} articles from {REUTER_DIR}")
+    args = parse_args()
+    df = load_reuter(args.source_dir)
+    if args.limit:
+        df = df.head(args.limit)
+    print(f"Loaded {len(df)} articles from {args.source_dir}")
     print(df["generated_by"].value_counts())
 
-    if ADD_EMB_SPECTER2:
-        df = add_text_embedding(df)
-    else:
+    if args.no_embedding:
         df["emb_specter2"] = pd.Series([None] * len(df), dtype="object")
+    else:
+        df = add_text_embedding(df)
 
-    save_parquet(df[REFERENCE_COLUMNS], PARQUET_PATH)
+    save_parquet(df[REFERENCE_COLUMNS], args.out)
 
 
 if __name__ == "__main__":

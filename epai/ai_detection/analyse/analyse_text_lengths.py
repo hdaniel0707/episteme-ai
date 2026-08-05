@@ -13,7 +13,8 @@ Two length measures per row:
     <hf-model-id>`` (e.g. ``allenai/specter2_base``, the model behind the
     ``emb_specter2`` column) to count with a real HuggingFace tokenizer instead.
 
-Outputs saved to results/text_lengths/<parquet_stem>/:
+Outputs saved to results/text_lengths/<corpus>/, one directory per corpus
+(a domain of a combined parquet, or a whole per-corpus file):
   - text_lengths_summary.log       — everything printed to the terminal
   - text_lengths_summary.csv       — one row per (group, metric) with the stats
   - text_lengths_per_row.csv       — id / group / word_count / token_count
@@ -22,12 +23,18 @@ Outputs saved to results/text_lengths/<parquet_stem>/:
   - text_lengths_ecdf.png          — empirical CDFs per group, words | tokens
 
 Usage:
-    uv run python epai/ai_detection/analyse/analyse_text_lengths.py data/parquet/wp_gpt54mini_binox0_red_200w.parquet
-    uv run python epai/ai_detection/analyse/analyse_text_lengths.py data/parquet/wp_binox0.parquet
+    # every domain of a combined parquet, one report each
     uv run python epai/ai_detection/analyse/analyse_text_lengths.py \
-        data/parquet/reuter_gpt54mini_binox0.parquet --tokenizer allenai/specter2_base
+        data/parquet/ghostbuster_gpt54mini.parquet
 
-    
+    # one domain, counted with a real tokenizer
+    uv run python epai/ai_detection/analyse/analyse_text_lengths.py \
+        data/parquet/ghostbuster_gpt54mini.parquet --domains reuter \
+        --tokenizer allenai/specter2_base
+
+    # a per-corpus file (no domain column) is analysed whole
+    uv run python epai/ai_detection/analyse/analyse_text_lengths.py \
+        data/parquet/wp_gpt54mini_binox0_red_200w.parquet
 """
 
 from __future__ import annotations
@@ -46,6 +53,7 @@ import numpy as np
 import pandas as pd
 
 from epai.utils.color_utils import group_color
+from epai.utils.corpus_utils import CorpusSpec, read_corpus, specs_from_paths
 
 BASE_DIR = Path(__file__).parent.parent.parent.parent
 RESULTS_DIR = BASE_DIR / "results" / "text_lengths"
@@ -332,13 +340,13 @@ def plot_ecdf(df: pd.DataFrame, groups: list[str], fig_dir: Path, stem: str) -> 
 def report(
     df: pd.DataFrame,
     groups: list[str],
-    path: Path,
+    spec: CorpusSpec,
     tokenizer_spec: str,
     fig_dir: Path,
     out: Tee,
 ) -> None:
     out.print("\n" + "=" * 78)
-    out.print(f"Word / token count summary: {path}")
+    out.print(f"Word / token count summary: {spec.source}")
     out.print(f"Generated: {datetime.now():%Y-%m-%d %H:%M:%S}")
     out.print(f"Tokenizer: {tokenizer_spec}")
     out.print("=" * 78)
@@ -363,7 +371,7 @@ def report(
                 + "".join(f"{s['p' + str(p)]:>9.0f}" for p in PERCENTILES)
                 + f"{s['max']:>9.0f}{s['sum']:>13,.0f}"
             )
-            rows.append({"parquet": path.stem, "group": g, "metric": metric} | s)
+            rows.append({"corpus": spec.name, "group": g, "metric": metric} | s)
 
         # Human-vs-each-generator deltas, the comparison this script exists for.
         if groups and groups[0].lower().startswith("human"):
@@ -401,7 +409,13 @@ def report(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("parquet_file", help="Path to the parquet file to analyse.")
+    parser.add_argument("parquets", nargs="+", type=Path,
+                        help="Parquet file(s) to analyse. A combined file is "
+                             "analysed once per domain unless --domains narrows it.")
+    parser.add_argument("--domains", nargs="*", default=None, metavar="DOMAIN",
+                        help="Domains to analyse from each parquet (default: every "
+                             "domain the file has; a file with no domain column is "
+                             "analysed whole).")
     parser.add_argument(
         "--groups",
         nargs="+",
@@ -418,33 +432,35 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
-    path = Path(args.parquet_file)
-    if not path.is_file():
-        raise SystemExit(f"Parquet file not found: {path}")
-
-    df = pd.read_parquet(path)
+def analyse_one(spec: CorpusSpec, args: argparse.Namespace) -> None:
+    """One corpus: its own figures, report and output directory."""
+    df = read_corpus(spec, quiet=True).df
     for col in (TEXT_COL, GROUP_COL):
         if col not in df.columns:
-            raise SystemExit(f"Column '{col}' missing from {path.name}.")
+            raise SystemExit(f"Column '{col}' missing from {spec.path.name}.")
 
     out = Tee()
-    out.print(f"Loaded {len(df)} rows ← {path}")
+    out.print(f"Loaded {len(df)} rows ← {spec.source}")
 
     subset, groups = select_groups(df, tuple(args.groups), out)
     subset = compute_lengths(subset, args.tokenizer, out)
     out.print(f"Analysing {len(subset)} rows across {len(groups)} group(s).")
 
-    fig_dir = RESULTS_DIR / path.stem
+    fig_dir = RESULTS_DIR / spec.name
     print()
-    plot_histograms(subset, groups, fig_dir, path.stem)
-    plot_violins(subset, groups, fig_dir, path.stem)
-    plot_ecdf(subset, groups, fig_dir, path.stem)
-    report(subset, groups, path, args.tokenizer, fig_dir, out)
+    plot_histograms(subset, groups, fig_dir, spec.name)
+    plot_violins(subset, groups, fig_dir, spec.name)
+    plot_ecdf(subset, groups, fig_dir, spec.name)
+    report(subset, groups, spec, args.tokenizer, fig_dir, out)
 
     out.save(fig_dir / "text_lengths_summary.log")
     print(f"\nAll outputs saved to {fig_dir}")
+
+
+def main() -> None:
+    args = parse_args()
+    for spec in specs_from_paths(args.parquets, args.domains, base_dir=BASE_DIR):
+        analyse_one(spec, args)
 
 
 if __name__ == "__main__":
