@@ -58,8 +58,9 @@ episteme-ai/
 │   │   ├── embed/add_embeddings.py#   Add multiple embedding columns to a Parquet
 │   │   ├── llm_judge/             #   LLM-as-judge scores
 │   │   ├── analyse/               #   PCA/geometry, surface artifacts, score EDA
-│   │   └── train/                 #   run_clf_cross_domain*.py, sweep_*.py,
-│   │                              #   replot_cross_domain.py
+│   │   └── train/                 #   run_clf_cross_domain.py + replot_cross_domain.py,
+│   │                              #   run_clf_in_domain.py    + replot_in_domain.py,
+│   │                              #   run_sweep_cross_domain.py + replot_sweep.py
 │   │
 │   ├── science_data/              # Pipeline 3 — build a new corpus, Ghostbuster protocol
 │   │   ├── fetch/fetch_s2.py      #   Stage 1: Semantic Scholar → raw parquet
@@ -75,9 +76,9 @@ episteme-ai/
 │   ├── citation_impact/
 │   │   └── fetch/                 # Semantic Scholar query configs
 │   ├── ai_detection/
-│   │   └── train/clf_cd/,         # Cross-domain experiment configs
-│   │       clf_cd_algs/,          #   (clf_cd/ghostbuster/ = the combined-parquet set)
-│   │       clf_cd_emb/, sweep/
+│   │   └── train/clf_cd/,         # One annotated sample config each:
+│   │       train/clf_id/,         #   clf_cd_example.yaml, clf_id_example.yaml,
+│   │       train/sweep/           #   sweep_example.yaml
 │   └── science_data/              # Corpus-building config + query lists
 │
 ├── store/                         # Versioned datasets tracked with Git LFS
@@ -338,11 +339,10 @@ EDA on NAIP-enriched datasets. Produces score distributions per `generated_by` g
 [analyse_text_lengths.py]    [analyse_score_human_vs_ai.py]
    ↓
 ┌────────────────────────────────────────────────────────────┐
-│  Cross-domain classification (pick one)                    │
-│  run_clf_cross_domain.py            → results/clf_cd/      │
-│  run_clf_cross_domain_algs.py       → results/clf_cd_algs/ │
-│  run_clf_cross_domain_embeddings.py → results/clf_cd_emb/  │
-│  sweep_clf_cross_domain.py          → results/sweep_clf_cd/│
+│  Classification                                            │
+│  run_clf_cross_domain.py   transfer → results/clf_cd/      │
+│  run_clf_in_domain.py      one corpus → results/clf_id/    │
+│  run_sweep_cross_domain.py          → results/sweep_clf_cd/│
 └────────────────────────────────────────────────────────────┘
 ```
 
@@ -466,7 +466,7 @@ uv run python epai/ai_detection/analyse/analyse_emb_class_stats.py \
 
 # what a classifier could learn from the raw text alone, with the sign per corpus
 uv run python epai/ai_detection/analyse/analyse_surface_artifacts.py \
-    --config cfg/ai_detection/train/clf_cd/ghostbuster/ALL_logistic.yaml
+    --config cfg/ai_detection/train/clf_cd/clf_cd_example.yaml
 
 # detector scores, human vs AI: violins, ROC/PR, confusion
 uv run python epai/ai_detection/analyse/analyse_score_human_vs_ai.py \
@@ -492,12 +492,12 @@ all problems are reported together.
 
 #### Cross-domain transfer control (`run_clf_cross_domain.py`)
 
-**Configs:** `cfg/ai_detection/train/clf_cd/ghostbuster/` · **Output:** `results/clf_cd/<experiment_id>/`
+**Config:** `cfg/ai_detection/train/clf_cd/clf_cd_example.yaml` · **Output:** `results/clf_cd/<experiment_id>/`
 
 ```bash
-uv run python epai/ai_detection/train/run_clf_cross_domain.py
-uv run python epai/ai_detection/train/run_clf_cross_domain.py \
-    --cfg cfg/ai_detection/train/clf_cd/ghostbuster/ALL_logistic.yaml
+uv run python epai/ai_detection/train/run_clf_cross_domain.py             # the sample config
+uv run python epai/ai_detection/train/run_clf_cross_domain.py --dry-run   # preflight only
+uv run python epai/ai_detection/train/run_clf_cross_domain.py --cfg a.yaml b.yaml
 ```
 
 Trains on each corpus in turn and evaluates on all of them, producing a source ×
@@ -505,44 +505,126 @@ target accuracy matrix. The off-diagonal shows how well the classifier transfers
 to unseen corpora — distinguishing "learned machine-generated-ness" from
 "learned corpus artifacts".
 
-#### Cross-domain × algorithm sweep (`run_clf_cross_domain_algs.py`)
+The folder holds exactly one config: `clf_cd_example.yaml`, which is both a
+working experiment and the annotated reference for every key. Copy it to start a
+new one — each run also writes its config into its own results directory, so a
+finished experiment carries its config with it.
 
-**Configs:** `cfg/ai_detection/train/clf_cd_algs/` · **Output:** `results/clf_cd_algs/<experiment_id>/`
+##### Sweeping an axis
 
-```bash
-uv run python epai/ai_detection/train/run_clf_cross_domain_algs.py --dry-run   # preflight only
-uv run python epai/ai_detection/train/run_clf_cross_domain_algs.py
+The same script sweeps either axis, because a run is a list of **variants** and a
+variant is one feature set crossed with one algorithm:
+
+A run is the cross product of `feature_sets` × `algorithms`, and **every
+`feature_sets` entry is one design matrix** — whether it names one column or
+five. Hold an axis at a single entry to ask the obvious question of the other:
+
+| config | variants |
+|---|---|
+| one feature set + several `algorithms` | one per algorithm — *which model transfers best* |
+| several feature sets + one algorithm | one per set — *which representation does* |
+| one of each | a single matrix, the plain control |
+
+Because an entry may stack several columns, one run can also ablate what a set
+*contains* — the same embedding with and without a detector score beside it,
+scored on identical rows and ranked side by side:
+
+```yaml
+feature_sets:
+  - emb_luar_crud                                    # one column
+  - [emb_luar_crud, emb_specter2]                    # both, stacked into one matrix
+  - {columns: [emb_luar_crud, binoculars_score], id: luar_binox}
+algorithms: [logistic, simple_mlp]                   # -> 6 variants
 ```
 
-Same matrix, swept across ML algorithms (logistic, SVM, gradient boosting, MLP,
-Binoculars-MLP) on one fixed feature set, plus zero-shot Binoculars / LLM-judge
-baselines. Each algorithm gets its own matrix and a comparison ranking.
+Both axes may vary at once, giving one matrix per pair. Every variant gets its
+own directory and figures plus a row in a comparison that ranks them by transfer
+accuracy, and optional zero-shot Binoculars / LLM-judge baselines join that table
+as ★ rows. Algorithms are the `epai/algs` registry — logistic, SVM, gradient
+boosting, MLP, Binoculars-MLP — each declaring the hyper-parameters it reads, so
+a `params` block either takes effect or fails in preflight.
 
-#### Cross-domain × embedding sweep (`run_clf_cross_domain_embeddings.py`)
+Each feature set is loaded and stacked **once** and reused by every algorithm
+trained on it, so an N × M run costs N corpus reads, not N × M.
 
-**Configs:** `cfg/ai_detection/train/clf_cd_emb/` · **Output:** `results/clf_cd_emb/<experiment_id>/`
+Output directories follow whichever axis varies: `<alg_id>/emb_luar/` for a
+feature sweep, `<alg_id>/logistic/` for an algorithm sweep,
+`<alg_id>/emb_luar__logistic/` only when both move.
+
+#### In-domain control (`run_clf_in_domain.py`)
+
+**Config:** `cfg/ai_detection/train/clf_id/clf_id_example.yaml` · **Output:** `results/clf_id/<experiment_id>/`
 
 ```bash
-uv run python epai/ai_detection/train/run_clf_cross_domain_embeddings.py
+uv run python epai/ai_detection/train/run_clf_in_domain.py             # the sample config
+uv run python epai/ai_detection/train/run_clf_in_domain.py --dry-run   # preflight only
 ```
 
-Same matrix, swept across every embedding column in the config. Each embedder
-gets its own matrix and a final comparison figure.
+Trains on **one** corpus — all of it by default — and scores the held-out grouped
+split of that same corpus. It asks "how well does this separate human from
+machine text *here*", not "does it transfer", and the ~97–99% it reports is an
+upper bound on a deployed detector rather than an estimate of one. That gap is
+exactly what the cross-domain script exists to measure, so this is its control,
+not its replacement.
 
-#### Hyper-parameter search (`sweep_clf_cross_domain.py`)
+Same config shape as a `clf_cd` config — the same `feature_sets` × `algorithms`
+cross product, the same `model` block, the same ★ baselines — with one
+difference: `data` **is** the corpus rather than a list of them, since there is
+no matrix to fill. A `datasets:` list here is a preflight error naming the other
+runner.
 
-**Configs:** `cfg/ai_detection/train/sweep/` · **Output:** `results/sweep_clf_cd/<sweep_id>/`
+```yaml
+data:
+  parquet_path: "data/parquet/ghostbuster_gpt54mini.parquet"
+  human_label: "human"
+  group_col: "id"
+  # where: {domain: essay}   # optional; omit to train on ALL the data
+```
+
+Every variant is scored on the held-out rows **and** on the rows it trained on,
+so the ranking carries a `gap` column — train minus test accuracy, i.e. what
+failed to generalise even inside the corpus:
+
+```
+algorithm                    dim     train      test     gap   test n
+  SVM (RBF)                  512    100.0%     99.5%     0.5     1799
+  Logistic Regression        512     99.9%     98.7%     1.2     1799
+★ binoculars_fitted            1     86.8%     86.4%     0.4     1799
+```
+
+`report_by: [domain, generated_by]` breaks the split down by any column and draws
+it as a second panel on the comparison figure. Those columns are read and kept
+aligned with the design matrix but never stacked into it — the model must not see
+`domain`. Worth setting whenever a run pools subsets: `GroupShuffleSplit` groups
+but does **not** stratify, so proportions hold only in expectation (~±1.6 points
+per domain at this corpus size), and nothing else in the output would say.
+
+The ± over seeds is not a confidence interval — the seeds resample one corpus, so
+the test halves overlap and the spread understates the sampling error.
+
+The split, the binarised target, the missing-value rule and the metrics are
+shared with the matrix run (`epai/utils/cd_core.py`), so a variant's held-out
+score here is the same number as that variant's diagonal cell over there.
+
+#### Hyper-parameter search (`run_sweep_cross_domain.py`)
+
+**Config:** `cfg/ai_detection/train/sweep/sweep_example.yaml` · **Output:** `results/sweep_clf_cd/<sweep_id>/`
 
 ```bash
-uv run python epai/ai_detection/train/sweep_clf_cross_domain.py --cfg cfg/ai_detection/train/sweep/luar_mlp_reg.yaml
-uv run python epai/ai_detection/train/sweep_clf_cross_domain.py --report   # leaderboard
-uv run python epai/ai_detection/train/sweep_clf_cross_domain.py --final    # winner on the full matrix
+uv run python epai/ai_detection/train/run_sweep_cross_domain.py            # the sample config
+uv run python epai/ai_detection/train/run_sweep_cross_domain.py --report   # leaderboard
+uv run python epai/ai_detection/train/run_sweep_cross_domain.py --final    # winner on the full matrix
 ```
+
+Every trial is one variant of the runner above — same split, same target, same
+group-exclusion rule — so the winner's numbers drop straight into the same
+comparison as a hand-written config.
 
 To regenerate figures from saved results without retraining:
 ```bash
-uv run python epai/ai_detection/train/replot_cross_domain.py results/clf_cd_algs
-uv run python epai/ai_detection/train/replot_cross_domain.py results/clf_cd_emb
+uv run python epai/ai_detection/train/replot_cross_domain.py results/clf_cd
+uv run python epai/ai_detection/train/replot_in_domain.py results/clf_id
+uv run python epai/ai_detection/train/replot_sweep.py results/sweep_clf_cd/luar_mlp_reg
 ```
 
 ---
@@ -603,7 +685,9 @@ The `epai/utils/` and `epai/algs/` modules are shared and should not be modified
 | `epai/utils/parquet_utils.py` | Parquet save/load helpers |
 | `epai/utils/s2_utils.py` | Semantic Scholar API client |
 | `epai/utils/sqlite_utils.py` | SQLite schema, save, and load helpers |
-| `epai/utils/train_utils.py` | Missing-value rules (`drop_missing_rows`), feature stacking, and the classifier factory (`build_clf_model`) |
+| `epai/utils/train_utils.py` | Missing-value rules (`drop_missing_rows`), feature stacking, split helpers |
+| `epai/utils/cd_core.py` | The experiment engine: corpus loading, the grouped split, metrics, seed aggregation, the zero-shot score baselines, and the preflight data/split checks — shared by both runners and the sweep |
+| `epai/utils/variant_utils.py` | The two config axes (`feature_sets` × `algorithms`), the `Variant` they produce, and the config validation both runners share |
 | `epai/utils/visualization_utils.py` | Plotly and matplotlib plot functions |
 | `epai/algs/` | Pluggable `ClfAlgorithm` subclasses (logistic, svm, gradient_boosting, simple_mlp, binox_mlp), each owning its own preprocessing and hyper-parameters |
 
@@ -628,7 +712,7 @@ queries_domains:
 One annotated YAML drives all five stages of pipeline 3, with the domain and
 query lists in `queries_example.yaml` so they can be swapped independently.
 
-### Classification configs (`cfg/ai_detection/train/clf_cd/`, `clf_cd_algs/`, `clf_cd_emb/`, `sweep/`)
+### Classification configs (`clf_cd/`, `clf_id/`, `sweep/` — one sample each)
 
 ```yaml
 alg_id: "A1"                 # names the output directory under results/<family>/
@@ -641,23 +725,42 @@ data:
   datasets:                  # one entry per corpus; every one is trained on in turn
     - name: "essay"
       label: "essay"
-      domain: "essay"        # one domain of the combined file
+      where: {domain: "essay"}   # which rows of the file this corpus is
     - name: "reuter"
       label: "reuter"
-      domain: "reuter"
-features:                    # `embeddings:` (a list) in the clf_cd_emb configs
-  - emb_specter2
+      where: {domain: "reuter"}
+feature_sets:                # ONE design matrix per entry. An entry is a column,
+  - emb_specter2             # a list of columns stacked together, or a mapping
+                             # {columns: [...], id: ..., label: ...}
+algorithms:                  # one classifier per entry; crossed with the above
+  - logistic                 # a registry key from epai/algs, or a mapping with
+                             # id / label / params / binoculars
 model:
-  ml_alg: "logistic"         # gradient_boosting | logistic | svm | mlp
   n_runs: 3
   test_size: 0.30
 ```
 
 `parquet_path` (and `drop_classes`) may be set once under `data`, as above, or
 per dataset — an entry that names its own wins. Set it once when every corpus is
-a domain of one file; name it per entry when the matrix spans several files, as
-`clf_cd/ghostbuster/ALL_logistic.yaml` does with two generators.
+a domain of one file; name it per entry when the matrix spans several files (two
+generators, or the per-corpus parquets).
 
-Omit `domain` to use the whole file — that is what a per-corpus parquet holds, so
-configs written before `combine_domains.py` still run. A `domain` that is not in
-the file is a preflight error listing the ones that are.
+`where` is a mapping of column → the value (or list of values) to keep, ANDed
+across columns. `domain` is nothing special — just the column
+`combine_domains.py` happens to write — so the matrix can run across generators,
+sources or years instead:
+
+```yaml
+datasets:
+  - {name: essay_gpt,    where: {domain: essay, generated_by: [human, gpt]}}
+  - {name: essay_claude, where: {domain: essay, generated_by: [human, claude]}}
+```
+
+That asks whether a detector transfers to an LLM it never saw, with the domain
+held fixed. `domain: essay` is kept as shorthand for `where: {domain: essay}`.
+
+Omit `where` to use the whole file — that is what a per-corpus parquet holds, so
+configs written before `combine_domains.py` still run. Values are compared as
+strings, and a value that is not in the file is a preflight error listing the
+ones that are. `drop_classes` is the complement: what to remove rather than what
+to keep.

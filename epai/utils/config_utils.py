@@ -13,8 +13,11 @@ METRIC_KEYS = ["train_rmse", "train_r2", "val_rmse", "val_r2", "test_rmse", "tes
 
 # Cross-domain configs train on one corpus and test on the others, so they carry
 # a list of datasets instead of a single parquet_path.
+REQUIRED_CD_KEYS = {"alg_id", "alg_label", "seed", "data", "model"}
 REQUIRED_CD_DATA_KEYS = {"datasets", "group_col", "human_label"}
 REQUIRED_CD_DATASET_KEYS = {"name", "parquet_path"}
+# The feature axis: a list whose every entry is one design matrix.
+CD_FEATURE_KEY = "feature_sets"
 
 
 def collect_configs(cfg_dir: Path) -> list[Path]:
@@ -110,14 +113,26 @@ def load_cd_config(path: Path) -> dict:
     Same shape as a `clf` config, except `data` holds a list of `datasets` (each
     trained on in turn and evaluated against all the others) rather than a single
     `parquet_path`, plus the `group_col` and `human_label` needed to make the
-    corpora comparable.
+    corpora comparable. The feature axis is `feature_sets`, a list whose every
+    entry is one design matrix, and the classifiers live in the `algorithms` list
+    rather than in `model.ml_alg`.
+
+    Structural only: this is what a *reader* of such a config needs (which
+    corpora does it name?), and it is deliberately looser than the runner's own
+    preflight, which validates every algorithm entry, baseline block and split
+    before training. Use this to consume a config, not to trust one.
     """
     with open(path) as f:
         cfg = yaml.safe_load(f)
 
-    missing = REQUIRED_KEYS - cfg.keys()
+    missing = REQUIRED_CD_KEYS - cfg.keys()
     if missing:
         raise ValueError(f"{YELLOW}{path}: missing top-level keys: {missing}{RESET}")
+
+    if CD_FEATURE_KEY not in cfg:
+        raise ValueError(
+            f"{YELLOW}{path}: missing the feature axis {CD_FEATURE_KEY!r}.{RESET}"
+        )
 
     missing_data = REQUIRED_CD_DATA_KEYS - cfg["data"].keys()
     if missing_data:
@@ -139,8 +154,7 @@ def load_cd_config(path: Path) -> dict:
     if len(set(names)) != len(names):
         raise ValueError(f"{YELLOW}{path}: dataset names must be unique: {names}{RESET}")
 
-    missing_model = REQUIRED_MODEL_KEYS - cfg["model"].keys()
-    if missing_model:
-        raise ValueError(f"{YELLOW}{path}: missing model keys: {missing_model}{RESET}")
+    if "n_runs" not in cfg["model"]:
+        raise ValueError(f"{YELLOW}{path}: missing model key: 'n_runs'{RESET}")
 
     return cfg

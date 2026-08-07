@@ -1,0 +1,338 @@
+# Cross-domain (transfer) classification — the annotated sample config.
+#
+# The only config in this folder, and both things at once: a working experiment
+# (the luar_crud algorithm comparison, the base the sweep searches over) and the
+# reference for every key run_clf_cross_domain.py accepts. Copy it to start a new
+# experiment; each finished run also writes its own config.yaml next to its
+# results, so past experiments carry their configs with them.
+#
+# Every dataset below is trained on in turn and evaluated on ALL of them,
+# producing a source x target accuracy matrix:
+#   diagonal     -> in-domain, held-out grouped test split
+#   off-diagonal -> transfer: the model never saw this corpus / this generator
+#
+# THE TWO AXES. A run is the cross product of two lists, and one element of it --
+# one feature set with one algorithm -- is a VARIANT:
+#
+#   feature_sets: [a, b]      one design matrix per entry
+#   algorithms:   [x, y]      one classifier per entry
+#                             -> 4 variants: a+x, a+y, b+x, b+y
+#
+# EVERY `feature_sets` ENTRY IS ONE MATRIX, whether it names one column or five.
+# So hold an axis at a single entry to ask the obvious question of the other:
+#
+#   one feature set, several algorithms  -> which model transfers best  (as below)
+#   several feature sets, one algorithm  -> which representation does
+#   one of each                          -> a single matrix, the plain control
+#   several of both                      -> every pair, ranked together
+#
+# Each variant gets its own directory and figures, and a final comparison ranks
+# them all by transfer accuracy. Naming follows whichever axis actually varies:
+# <alg_id>/<algo_id>/ for the run below, <alg_id>/<feature_set_id>/ for a feature
+# sweep, and <alg_id>/<feature_set_id>__<algo_id>/ only when both move.
+#
+# Run:
+#   uv run python epai/ai_detection/train/run_clf_cross_domain.py            # this file
+#   uv run python epai/ai_detection/train/run_clf_cross_domain.py --dry-run  # preflight only
+#   uv run python epai/ai_detection/train/run_clf_cross_domain.py --cfg <other.yaml>
+
+# alg_id names the output directory under results/clf_cd/<experiment_id>/<alg_id>/.
+# It must be unique across the configs run together, or two of them would write
+# into the same place.
+alg_id: "luar_crud_algs"
+alg_label: "luar_crud — algorithm comparison"
+
+seed: 42
+
+data:
+  # Labels are binarised to human vs machine: `human_label` -> 0, every other
+  # class -> 1. The corpora do not agree on generator names (`gpt` here,
+  # `gpt_plain` there), so only this binary view is comparable across them.
+  human_label: "human"
+
+  # Column whose rows must stay in the SAME split. In the Ghostbuster corpora the
+  # human original and every LLM rewrite of a source document share one `id`.
+  # It also guards transfer: `essay` and `essay_gpt54mini` are built from the
+  # same human sources and share their ids, so target rows whose group was seen
+  # during training are excluded from the evaluation (and the count is reported).
+  group_col: "id"
+
+  # A dataset is a parquet plus an optional row filter, read by
+  # epai/utils/corpus_utils.py:
+  #
+  #   name          short key used in the matrix; must be unique in this file
+  #   label         optional, shown on the figures (defaults to `name`)
+  #   parquet_path  relative to the project root. May be set ONCE here under
+  #                 `data`, as below, and left out of the entries; an entry that
+  #                 names its own wins. Set it once when every corpus is a slice
+  #                 of one file; name it per entry when the matrix spans several
+  #                 files (two generators, or the per-corpus parquets).
+  #   where         optional. Which rows of the file this corpus is: a mapping of
+  #                 column -> the value, or list of values, to KEEP. Several
+  #                 columns are ANDed. Omit it to use the WHOLE file, which is
+  #                 what a per-corpus parquet holds — so a config written before
+  #                 the combined files still runs. Also settable once under
+  #                 `data` as a default for every entry.
+  #                 `domain` is nothing special, just the column
+  #                 prepare/combine_domains.py happens to write; `domain: essay`
+  #                 is kept as shorthand for `where: {domain: essay}`.
+  #                 Values are compared as strings (`year: 2024` matches an int
+  #                 column), and a value that is not in the file is a preflight
+  #                 error listing the ones that are.
+  #   drop_classes  optional generators to skip, e.g. ["claude", "gpt_prompt1"].
+  #                 The complement of `where` — what to remove rather than what
+  #                 to keep. Also settable once under `data`. Usually empty now:
+  #                 combine_domains.py drops them when the combined file is
+  #                 built, so what is on disk is what is used.
+  #
+  # BECAUSE `where` TAKES ANY COLUMN, the matrix need not run across domains at
+  # all. Cutting on the generator instead asks whether a detector transfers to an
+  # LLM it never saw, holding the domain fixed:
+  #
+  #   datasets:
+  #     - {name: essay_gpt,    where: {domain: essay, generated_by: [human, gpt]}}
+  #     - {name: essay_claude, where: {domain: essay, generated_by: [human, claude]}}
+  #
+  # The corpora of one run need not even be cut on the same column, so a raw arm
+  # and a normalised arm (two parquet_paths, no `where`) sit in one matrix too.
+  parquet_path: "data/parquet/ghostbuster_gpt54mini.parquet"
+
+  datasets:
+    - name: "essay_gpt54mini"         # short key used in the matrix
+      label: "essay (gpt54mini)"      # optional, shown on the figures
+      where: {domain: "essay"}
+    - name: "reuter_gpt54mini"
+      label: "reuter (gpt54mini)"
+      where: {domain: "reuter"}
+    - name: "wp_gpt54mini"
+      label: "wp (gpt54mini)"
+      where: {domain: "wp"}
+
+# ---------------------------------------------------------------------------
+# The feature axis
+# ---------------------------------------------------------------------------
+
+# One design matrix per entry. An entry takes any of three forms:
+#
+#   - emb_luar_crud                            a one-column matrix
+#   - [emb_luar_crud, binoculars_score]        one matrix, both columns stacked
+#   - {columns: [...], id: ..., label: ...}    the same, named explicitly
+#
+# The mapping form mirrors an `algorithms` entry: `id` names the output folder,
+# `label` is what appears on the figures. Without them the id is the column names
+# joined by `+` and the label is the same with the `emb_` prefixes stripped.
+#
+# Column names are taken LITERALLY — nothing is prefixed for you, since a set may
+# mix an embedding with a scalar score. A column missing from any dataset is a
+# preflight error, raised before any training starts.
+#
+# One entry, as here, holds the representation fixed and makes the run below an
+# ALGORITHM comparison: any difference in the ranking is the algorithm's.
+feature_sets:
+  - emb_luar_crud
+
+# Several entries compare representations instead. Swap this in for the above:
+#
+# feature_sets:
+#   # content-heavy
+#   - emb_specter2
+#   - emb_scincl
+#   - emb_scibert
+#   # general semantic
+#   - emb_mpnet
+#   - emb_minilm
+#   - emb_e5
+#   - emb_bge
+#   # raw LM baseline
+#   - emb_roberta
+#   # style / authorship
+#   - emb_styledistance
+#   - emb_style_wegmann
+#   - emb_luar
+#   - emb_luar_crud
+#
+# ...and because an entry may stack several columns, one run can also ablate what
+# a set contains — the same embedding with and without the detector score beside
+# it, scored on identical rows and ranked side by side:
+#
+# feature_sets:
+#   - emb_luar_crud
+#   - {columns: [emb_luar_crud, binoculars_score], id: luar_binox, label: "LUAR + Binoculars"}
+
+# Extra columns appended to EVERY feature set (e.g. ["binoculars_score"]). They
+# shift all variants equally, so a comparison stays fair — which is the
+# difference from putting a column in one entry above, where only that entry
+# gets it and the comparison is precisely about having it. Usually empty.
+extra_features: []
+
+# LEAKAGE SANITY CHECK / positive control. Text columns listed here are
+# binarised human-vs-machine (human -> 0, any generator -> 1, same rule as the
+# target) and appended to EVERY feature set as a 0/1 feature. `generated_by`
+# binarises to the label itself, so a working pipeline should score ~100%
+# in-domain AND under transfer; anything less points to a bug in the split /
+# scaling / transfer / eval path. Leave empty ([]) for real experiments — this
+# deliberately leaks the answer. The score baselines ignore it.
+extra_binary_text: []
+
+# ---------------------------------------------------------------------------
+# The algorithm axis
+# ---------------------------------------------------------------------------
+
+# One full cross-domain matrix per entry, so the run costs
+# len(feature sets) x len(algorithms) x n_runs x len(datasets) fits. Each entry
+# is either a bare registry key or a mapping:
+#   name   -> registry key in epai/algs (logistic | svm | gradient_boosting
+#             | simple_mlp | binox_mlp)
+#   id     -> optional; output-folder name, set it to run one algorithm twice
+#             with different params without a collision (defaults to `name`)
+#   label  -> optional; shown on the figures (defaults to `name`)
+#   params -> optional; hyper-parameters handed to the algorithm. Only names the
+#             algorithm actually reads are accepted -- the preflight rejects
+#             anything else (with a "did you mean" for near-misses) instead of
+#             ignoring it, so a hyper-parameter block copied out of a sweep
+#             leaderboard either takes effect or fails loudly. simple_mlp and
+#             binox_mlp accept exactly the space
+#             epai/ai_detection/train/run_sweep_cross_domain.py searches, so a
+#             winning trial's params paste in unchanged. The resolved set (yours
+#             plus the defaults) is printed before each matrix and saved to
+#             cross_domain.json as `resolved_params`.
+#   binoculars -> optional; a column name (or `true` for `binoculars_score`)
+#             handed to the algorithm as a SECOND input beside `features`. Only
+#             algorithms built for it accept one (currently binox_mlp) -- the
+#             preflight rejects the key anywhere else rather than ignoring it.
+#             Such an entry is a HYBRID: it is marked with a ◆ in the ranking and
+#             on the figures, because it sees more than the shared feature set
+#             and its rank cannot be read as an architecture result. The column
+#             never enters the feature set, so the plain algorithms are unchanged
+#             by it, but it does join the missing-value filter, so every algorithm
+#             in this config still trains and is scored on identical rows.
+algorithms:
+  - name: logistic
+    label: "Logistic Regression"
+    params: {C: 1.0, max_iter: 1000}
+  - name: svm
+    label: "SVM (RBF)"
+    params: {C: 1.0, kernel: "rbf", gamma: "scale"}
+  # - name: gradient_boosting
+  #   label: "Gradient Boosting"
+  #   params: {n_estimators: 100, learning_rate: 0.1, max_depth: 3}
+  # The untuned MLP, kept as the control: it is the only honest reference for
+  # what the sweep below actually bought.
+  - name: simple_mlp
+    label: "Simple MLP"
+    params:
+      hidden_dims: [256, 64]
+      dropout: 0.1
+      epochs: 100
+      batch_size: 64
+      lr: 0.001
+      weight_decay: 0.0001
+      patience: 10
+
+  # Best trial of the luar_mlp_reg sweep (results/sweep_clf_cd/luar_mlp_reg,
+  # trial 8581ac0a4d, stage 2 / 3 seeds), ranked on mean transfer accuracy with
+  # a 0.80 in-domain floor: transfer 0.793, in-domain 0.994 on the DEV pool.
+  #
+  # Read that margin with the sweep's own caveat in mind: the search ranked 291
+  # trials on the 2 off-diagonal cells of essay/reuter, and wp_gpt54mini was held
+  # out of it entirely. wp is in `datasets` above, so the cells involving it here
+  # are the first honest look the tuned setting gets -- expect them to be worse
+  # than the dev cells, and treat any remaining gain over the control above as
+  # the result. Regenerate this block with:
+  #   python -m epai.ai_detection.train.run_sweep_cross_domain \
+  #       --cfg cfg/ai_detection/train/sweep/sweep_example.yaml --params
+  - name: simple_mlp
+    id: simple_mlp_swept
+    label: "Simple MLP (swept)"
+    params:
+      hidden_dims: [256]
+      normalize: "standard"
+      norm_layer: "layernorm"
+      val_frac: 0.0
+      val_metric: "loss"
+      dropout: 0.21662856624267898
+      input_dropout: 0.061218972697383835
+      weight_decay: 0.0054492461553935344
+      label_smoothing: 0.05
+      mixup_alpha: 0.4
+      lr: 0.00010208333947051273
+      batch_size: 128
+      epochs: 200
+      patience: 15
+
+  - name: binox_mlp
+    id: binox_mlp_8
+    label: "MLP + Binoculars (upscale 8)"
+    binoculars: "binoculars_score"
+    params:
+      pre_dims: [256, 64]     # trunk, embedding only
+      post_dims: [16]            # head, after the score is concatenated
+      score_hidden: 8            # 0 = raw scalar; >0 = Linear→ReLU on the score
+      dropout: 0.1
+      epochs: 100
+      batch_size: 64
+      lr: 0.001
+      weight_decay: 0.0001
+      patience: 10
+
+model:
+  n_runs: 3           # seeds; the matrix is the mean over them
+  test_size: 0.30     # held-out fraction; used for the in-domain diagonal
+
+# ---------------------------------------------------------------------------
+# Optional zero-shot score baselines
+# ---------------------------------------------------------------------------
+
+# No classifier is trained by either family; each variant becomes one more ★ row
+# in the comparison, a fixed reference the trained variants are measured against.
+# Drop the key or set enabled: false to skip a family.
+#
+#   <kind>_fitted            -> always runs. The cutoff is calibrated per source
+#                               on its TRAINING split (Youden's J) and applied
+#                               unchanged to every corpus. No model, but the
+#                               threshold still comes from the source data, so it
+#                               is not zero-shot in the strict sense.
+#   <kind>_vanilla_<value>   -> one per `vanilla_threshold`. The cutoff is taken
+#                               straight from this file and used everywhere, fit
+#                               to nothing at all -- the only rows in the table
+#                               that saw no labels. Omit `vanilla_threshold` to
+#                               skip it; give a list to compare several published
+#                               cutoffs, or [] to skip the variant.
+#
+# Both take the same grouped split, seeds and group exclusion as the trained
+# variants, so every row of the comparison is scored on the same rows.
+# 0.9015310749276843 is the cutoff from the Binoculars paper (the accuracy mode;
+# the low-FPR mode uses a different one).
+binoculars_baseline:
+  enabled: true
+  column: "binoculars_score"
+  vanilla_threshold: [0.9015310749276843, 0.8536432310785527]
+
+# The same two baselines on the LLM-judge score written by
+# epai/ai_detection/llm_judge/add_llm_judge_scores.py. The judge reports P(human)
+# -- 1.0 => human, 0.0 => machine -- so LOW means machine, the same direction as
+# Binoculars, and the rule is `score <= threshold => machine`. Its
+# `vanilla_threshold` defaults to 0.5, the judge's own neutral point.
+#
+# The judge only scores the generators it was asked for, so rows with a Null
+# score drop out of THIS baseline (and only this one) -- the preflight prints the
+# scored/unscored row counts per dataset, and errors out if what is left is
+# single-class.
+llm_judge_baseline:
+  enabled: true
+  column: "llm_judge_score_gpt54_mini"
+  vanilla_threshold: [0.5]
+
+# ---------------------------------------------------------------------------
+# Preflight guards (checked before training; never affect the fitting itself)
+# ---------------------------------------------------------------------------
+
+# Refuse to start if a (dataset, feature set) pair keeps fewer than this many
+# usable rows. Guards against a column that exists but is mostly Null, which
+# would otherwise train on a handful of rows and still look like a full run.
+min_rows: 50
+
+# Warn (do not abort) when a class is rarer than this share of a dataset. The
+# figures are read against a 50% chance line, which stops being the right anchor
+# once the classes are badly skewed.
+min_class_share: 0.10

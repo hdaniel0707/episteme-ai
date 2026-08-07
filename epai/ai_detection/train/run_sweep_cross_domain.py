@@ -1,13 +1,13 @@
 """Hyper-parameter search over one algorithm's cross-domain transfer.
 
-``run_clf_cross_domain_algs.py`` compares a handful of algorithms you wrote out
-by hand. This drives the same machinery over hundreds of sampled
-hyper-parameter settings instead, so a long regularisation search is one command
-on a server rather than a folder of hand-edited YAML.
+``run_clf_cross_domain.py`` compares a handful of variants you wrote out by
+hand. This drives the same machinery over hundreds of sampled hyper-parameter
+settings instead, so a long regularisation search is one command on a server
+rather than a folder of hand-edited YAML.
 
 It reuses the runner rather than reimplementing it: the corpora are loaded and
-stacked once, then every trial becomes one ``algorithms`` entry handed to
-``run_algorithm``. So a trial is scored by exactly the same grouped split,
+stacked once, then every trial becomes one ``Variant`` handed to
+``run_variant``. So a trial is scored by exactly the same grouped split,
 binarised target and group-exclusion rule as a normal run, and the winner's
 numbers are directly comparable to every matrix already in ``results/``.
 
@@ -32,16 +32,16 @@ estimate and the honest reading of a sweep gain is "hypothesis", not "result".
 
 Run:
     # search (resumable: re-running continues where it stopped)
-    python -m epai.ai_detection.train.sweep_clf_cross_domain --cfg cfg/ai_detection/train/sweep/luar_mlp_reg.yaml
+    python -m epai.ai_detection.train.run_sweep_cross_domain   # the only cfg in cfg/.../sweep/
 
     # look at what it found so far, from another shell, while it runs
-    python -m epai.ai_detection.train.sweep_clf_cross_domain --cfg ... --report
+    python -m epai.ai_detection.train.run_sweep_cross_domain --cfg ... --report
 
-    # print the winner as a clf_cd_algs 'algorithms' entry, ready to paste
-    python -m epai.ai_detection.train.sweep_clf_cross_domain --cfg ... --params
+    # print the winner as an 'algorithms' entry, ready to paste into a clf_cd config
+    python -m epai.ai_detection.train.run_sweep_cross_domain --cfg ... --params
 
     # re-run the winner on the full matrix, holdout included, with baselines and figures
-    python -m epai.ai_detection.train.sweep_clf_cross_domain --cfg ... --final
+    python -m epai.ai_detection.train.run_sweep_cross_domain --cfg ... --final
 """
 
 from __future__ import annotations
@@ -60,25 +60,26 @@ import numpy as np
 import yaml
 from tqdm import tqdm
 
-from epai.ai_detection.train.run_clf_cross_domain_algs import (
+from epai.ai_detection.train.run_clf_cross_domain import (
     BASE_DIR,
-    load_columns,
     preflight_config,
-    print_report,
-    run_algorithm,
     run_config,
+    run_variant,
 )
-from epai.ai_detection.train.run_clf_cross_domain_embeddings import (
-    Report,
-    load_prepared,
-    summarise_embedding,
+from epai.utils.variant_utils import (
+    Variant,
+    build_feature_sets,
+    spec_binox_col,
+    variant_columns,
 )
-from epai.ai_detection.train.plot_sweep import (
+from epai.ai_detection.train.replot_sweep import (
     draw_plots,
     read_trials_file,
 )
+from epai.utils.cd_core import load_prepared, summarise_variant
 from epai.utils.config_utils import RESET, YELLOW, rel
 from epai.utils.corpus_utils import dataset_specs
+from epai.utils.preflight_utils import Report, print_report
 from epai.utils.train_utils import stack_features
 
 DEFAULT_RESULTS_DIR = BASE_DIR / "results" / "sweep_clf_cd"
@@ -89,7 +90,7 @@ RED = "\033[91m"
 DIM = "\033[2m"
 RULE = 100
 
-#: Metrics of ``summarise_embedding`` a sweep may rank on.
+#: Metrics of ``cd_core.summarise_variant`` a sweep may rank on.
 OBJECTIVE_METRICS = {
     "transfer_mean",
     "transfer_min",
@@ -165,10 +166,8 @@ def resolve_base_config(sweep_cfg: dict, sweep_path: Path) -> tuple[Path, dict]:
     """Load the cross-domain config the sweep varies.
 
     Read the same way the runner reads it -- plain YAML, then the runner's own
-    ``preflight_config``. Deliberately *not* ``config_utils.load_cd_config``:
-    that validator requires ``model.ml_alg``, which a clf_cd_algs config does not
-    carry (the algorithm lives in the ``algorithms`` list instead), so it rejects
-    exactly the configs this sweep exists to search over.
+    ``preflight_config`` -- so the sweep can never accept a base config the
+    runner would reject, or the reverse.
     """
     base_path = BASE_DIR / sweep_cfg["base"]
     if not base_path.is_file():
@@ -338,7 +337,7 @@ def varying_keys(space: dict) -> list[str]:
 
 
 #: Load trials.jsonl, skipping any line that will not parse. Defined in
-#: ``plot_sweep`` so the folder-reading half of a sweep can be used without
+#: ``replot_sweep`` so the folder-reading half of a sweep can be used without
 #: importing the training stack, and aliased here because this is where the
 #: resume logic that depends on it lives.
 read_trials = read_trials_file
@@ -368,7 +367,7 @@ def score_trial(payload: dict, objective: dict) -> tuple[float | None, dict, str
     metrics -- knowing *how* it failed is worth as much as the score -- but
     carries no objective and never enters the ranking.
     """
-    metrics = summarise_embedding(payload)
+    metrics = summarise_variant(payload)
     value = float(metrics[objective["metric"]])
 
     floor = float(objective.get("min_in_domain", 0.0))
@@ -397,6 +396,7 @@ def run_trial(
     names: list[str],
     labels: dict,
     features: list[str],
+    fs_id: str,
     out_dir: Path,
 ) -> dict:
     """Fit and score one hyper-parameter setting. Never raises.
@@ -407,13 +407,18 @@ def run_trial(
     """
     trial_id = params_id(params)
     alg_cfg = sweep_cfg["algorithm"]
-    spec = {
-        "id": trial_id,
-        "name": alg_cfg["name"],
-        "label": f"trial {trial_id}",
-        "params": dict(params),
-        "binoculars": alg_cfg.get("binoculars") or None,
-    }
+    # One trial is one variant of the ordinary runner: same grouped split, same
+    # binarised target, same group-exclusion rule, so the winner's numbers are
+    # directly comparable to every matrix already in results/.
+    variant = Variant(
+        id=trial_id,
+        label=f"trial {trial_id}",
+        fs_id=fs_id,
+        features=list(features),
+        alg_name=alg_cfg["name"],
+        params=dict(params),
+        aux_col=spec_binox_col(alg_cfg),
+    )
     cfg_trial = dict(cfg_dev)
     cfg_trial["model"] = {**cfg_dev["model"], "n_runs": n_runs}
     cfg_trial["alg_id"] = f"{sweep_cfg['sweep_id']}_s{stage}"
@@ -429,14 +434,13 @@ def run_trial(
     trial_dir = out_dir / "trials" / f"s{stage}_{trial_id}"
     trial_dir.mkdir(parents=True, exist_ok=True)
     try:
-        payload = run_algorithm(
-            spec,
+        payload = run_variant(
+            variant,
             cfg_trial,
             X_all,
             data,
             names,
             labels,
-            features,
             trial_dir,
             save_models=False,
         )
@@ -588,7 +592,8 @@ def print_best_params(sweep_cfg: dict, records: list[dict]) -> None:
     ``sweep_summary.json`` by hand, and a mistyped *value* is invisible where a
     mistyped *name* is now caught (the algorithms declare which params they read,
     so the runner's preflight rejects anything else). This closes the other half:
-    the block is emitted in the exact shape ``clf_cd_algs`` configs take.
+    the block is emitted in the exact shape a clf_cd config's ``algorithms``
+    entries take.
     """
     best = best_trial(records, sweep_cfg["objective"])
     if best is None:
@@ -634,7 +639,7 @@ def run_final(
 ) -> None:
     """Re-run the winner on the FULL matrix -- holdout included -- with baselines.
 
-    Goes through ``run_config`` rather than ``run_algorithm`` so the winner lands
+    Goes through ``run_config`` rather than ``run_variant`` so the winner lands
     in the usual layout with the usual figures, ranked against the Binoculars and
     LLM-judge baselines exactly as a hand-written config would be.
     """
@@ -730,7 +735,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--params",
         action="store_true",
-        help="print the winner as a clf_cd_algs 'algorithms' entry and exit",
+        help="print the winner as an 'algorithms' config entry and exit",
     )
     p.add_argument(
         "--final",
@@ -789,15 +794,29 @@ def main() -> None:
 
     cfg_dev = dict(base_cfg)
     cfg_dev["data"] = {**base_cfg["data"], "datasets": dev_specs}
-    # load_columns reads `features` plus whatever auxiliary column the algorithms
-    # ask for, so give it the sweep's algorithm entry rather than the base's list.
+    # The base config's own `algorithms` list is replaced by the one entry being
+    # searched, so the preflight below validates the sweep's algorithm (notably
+    # that a hybrid was given its auxiliary column) and the column set is the one
+    # the trials will actually be filtered on.
     alg_entry = {"name": sweep_cfg["algorithm"]["name"]}
     if sweep_cfg["algorithm"].get("binoculars"):
         alg_entry["binoculars"] = sweep_cfg["algorithm"]["binoculars"]
     cfg_dev["algorithms"] = [alg_entry]
 
-    features = list(base_cfg["features"])
-    columns = load_columns(cfg_dev)
+    # A sweep varies hyper-parameters on ONE design matrix: the corpora are
+    # loaded and stacked once and reused by every trial, which is most of why a
+    # few hundred trials are affordable at all. A base config that sweeps
+    # embeddings as well has no single matrix to hold fixed.
+    fsets = build_feature_sets(cfg_dev)
+    if len(fsets) != 1:
+        raise SystemExit(
+            f"{base_path}: a sweep needs exactly one feature set, but this base "
+            f"config's 'feature_sets' has {len(fsets)} entries. Cut it to one, or "
+            f"sweep each feature set in its own run."
+        )
+    features = list(fsets[0].columns)
+    fs_id = fsets[0].id
+    columns = variant_columns(fsets[0], cfg_dev)
     group_col = base_cfg["data"]["group_col"]
     human_label = base_cfg["data"]["human_label"]
     dev_corpora = dataset_specs(cfg_dev, BASE_DIR)
@@ -886,7 +905,7 @@ def main() -> None:
     for params in tqdm(todo, desc="Stage 1", unit="trial"):
         record = run_trial(
             params, 1, stage1_runs, sweep_cfg, cfg_dev, X_all, data,
-            names, labels, features, out_dir,
+            names, labels, features, fs_id, out_dir,
         )
         append_trial(trials_path, record)
         records.append(record)
@@ -915,7 +934,7 @@ def main() -> None:
         for params in tqdm(todo2, desc="Stage 2", unit="trial"):
             record = run_trial(
                 params, 2, stage2_runs, sweep_cfg, cfg_dev, X_all, data,
-                names, labels, features, out_dir,
+                names, labels, features, fs_id, out_dir,
             )
             append_trial(trials_path, record)
             records.append(record)
@@ -947,7 +966,7 @@ def main() -> None:
             )
         print(f"\nDone. {len(records)} trials in {trials_path}")
         print(
-            f"Next: python -m epai.ai_detection.train.sweep_clf_cross_domain "
+            f"Next: python -m epai.ai_detection.train.run_sweep_cross_domain "
             f"--cfg {cfg_path.relative_to(BASE_DIR)} --final"
         )
 

@@ -1,6 +1,6 @@
 """Report and figures for a finished (or running) hyper-parameter sweep folder.
 
-``sweep_clf_cross_domain.py`` draws its figures as a side effect of searching,
+``run_sweep_cross_domain.py`` draws its figures as a side effect of searching,
 which means getting them back later costs you the sweep config, the base config
 it points at, and an import of the whole training stack -- torch included -- to
 render four PNGs. This script is the other direction: point it at a results
@@ -20,14 +20,14 @@ nothing heavier, so depending on it costs the sweep nothing.
 Run (``--no-sync`` because ``uv run`` otherwise syncs the environment to the lock
 file, which a reporting script has no business doing):
     # one folder, by path or by sweep id -- either resolves from any directory
-    uv run python -m epai.ai_detection.train.plot_sweep results/sweep_clf_cd/luar_mlp_reg
-    uv run python -m epai.ai_detection.train.plot_sweep luar_mlp_reg
+    uv run python -m epai.ai_detection.train.replot_sweep results/sweep_clf_cd/luar_mlp_reg
+    uv run python -m epai.ai_detection.train.replot_sweep luar_mlp_reg
 
     # several at once, and the per-trial table as well as the digest
-    uv run python -m epai.ai_detection.train.plot_sweep luar_mlp_reg other --leaderboard
+    uv run python -m epai.ai_detection.train.replot_sweep luar_mlp_reg other --leaderboard
 
     # what is available
-    uv run python -m epai.ai_detection.train.plot_sweep
+    uv run python -m epai.ai_detection.train.replot_sweep
 """
 
 from __future__ import annotations
@@ -369,7 +369,7 @@ def report_sweep(out_dir: Path, args: argparse.Namespace) -> bool:
         # Imported here, not at module scope: it lives in the sweep script, which
         # pulls in the algorithms and therefore torch. A folder report should not
         # need a training stack unless it is asked for this table.
-        from epai.ai_detection.train.sweep_clf_cross_domain import print_leaderboard
+        from epai.ai_detection.train.run_sweep_cross_domain import print_leaderboard
 
         print_leaderboard(records, sweep_cfg, limit=args.limit)
     return True

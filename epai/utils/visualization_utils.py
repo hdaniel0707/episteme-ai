@@ -1180,8 +1180,9 @@ def _plot_cd_comparison(
     and draw the same two figures. Only the wording, the row label and the output
     filenames differ, so those are the parameters:
 
-      * ``noun`` -- "embedding" or "algorithm"; used in titles, the scatter
-        legend and the ``<noun>_comparison[_matrix].png`` filenames.
+      * ``noun`` -- what the varying axis is called ("feature set", "algorithm",
+        "variant"); used in titles, the scatter legend, and — with its spaces
+        turned to underscores — the ``<noun>_comparison[_matrix].png`` filenames.
       * ``subtitle`` -- the caller's one-line description (the sweep differs:
         embeddings share an algorithm, algorithms share a feature set).
       * ``row_label(r)`` -- the y-axis label for item ``r``.
@@ -1201,6 +1202,9 @@ def _plot_cd_comparison(
     """
     # Ranked by transfer: the whole point is which item survives leaving its
     # corpus, not which scores highest at home.
+    # The noun reads as prose in the titles ("per feature set"), so it is only
+    # squashed where it has to be a filename.
+    slug = noun.replace(" ", "_")
     order = sorted(rows, key=lambda r: r["transfer_mean"])
     is_baseline = np.array([bool(r.get("baseline")) for r in order])
     is_hybrid = np.array([bool(r.get("hybrid")) for r in order])
@@ -1352,7 +1356,7 @@ def _plot_cd_comparison(
     # and restored so no other figure in the process inherits it.
     prev_hatch_lw = plt.rcParams["hatch.linewidth"]
     plt.rcParams["hatch.linewidth"] = CD_HATCH_LINEWIDTH
-    fig.savefig(exp_dir / f"{noun}_comparison.png", dpi=150, bbox_inches="tight")
+    fig.savefig(exp_dir / f"{slug}_comparison.png", dpi=150, bbox_inches="tight")
     plt.rcParams["hatch.linewidth"] = prev_hatch_lw
     plt.close(fig)
 
@@ -1415,30 +1419,67 @@ def _plot_cd_comparison(
         )
     fig.text(0.01, 0.01, note, fontsize=7.5, color="dimgray")
     fig.tight_layout(rect=(0, 0.05, 1, 1))
-    fig.savefig(exp_dir / f"{noun}_comparison_matrix.png", dpi=150)
+    fig.savefig(exp_dir / f"{slug}_comparison_matrix.png", dpi=150)
     plt.close(fig)
 
     print(f"Comparison plots saved to: {exp_dir}")
 
 
-def plot_clf_cd_emb_comparison(exp_dir: Path, payload: dict) -> None:
-    """Compare the embeddings of one cross-domain experiment.
+def plot_clf_cd_comparison(exp_dir: Path, payload: dict) -> None:
+    """Compare the variants of one cross-domain experiment.
 
-    ``payload`` is the ``embedding_comparison.json`` written by
-    ``epai/ai_detection/train/run_clf_cross_domain_embeddings.py``: one entry per embedding,
-    each holding its full source x target accuracy matrix and the in-domain /
+    ``payload`` is the ``variant_comparison.json`` written by
+    ``epai/ai_detection/train/run_clf_cross_domain.py``: one entry per variant --
+    a feature set crossed with an algorithm, plus any zero-shot baselines -- each
+    holding its full source x target accuracy matrix and the in-domain /
     transfer means taken from it.
 
-    Two figures:
+    Two figures, named after whichever axis the run actually varied
+    (``payload["noun"]``: embedding, algorithm, or variant when both moved):
 
-      * ``embedding_comparison.png`` -- in-domain vs transfer per embedding,
-        ranked, next to the same two numbers as a scatter. The scatter is what
-        separates "this embedding is good" from "this embedding is good *at this
-        corpus*": points near the diagonal keep their score off-domain, points
-        far below it have learned the corpus.
-      * ``embedding_comparison_matrix.png`` -- every source->target cell of every
-        embedding in one heatmap, for the cases the means average away (one
-        corpus pair that collapses while the rest hold up).
+      * ``<noun>_comparison.png`` -- in-domain vs transfer per variant, ranked,
+        next to the same two numbers as a scatter. The scatter is what separates
+        "this variant is good" from "this variant is good *at this corpus*":
+        points near the diagonal keep their score off-domain, points far below it
+        have learned the corpus.
+      * ``<noun>_comparison_matrix.png`` -- every source->target cell of every
+        variant in one heatmap, for the cases the means average away (one corpus
+        pair that collapses while the rest hold up).
+    """
+    rows: list[dict] = payload.get("variants") or []
+    if not rows:
+        print(f"No results to compare in {exp_dir}")
+        return
+
+    noun = payload.get("noun", "variant")
+    # The width is worth a column only when it varies: a pure algorithm sweep
+    # shares one feature set, so printing the same "(768d)" on every row would be
+    # noise where on an embedding sweep it is half the point.
+    dims = {r.get("feature_dim") for r in rows}
+    show_dim = len(dims) > 1
+
+    _plot_cd_comparison(
+        exp_dir,
+        rows,
+        payload["dataset_names"],
+        payload.get("dataset_labels", {}),
+        payload.get("alg_label", payload.get("alg_id", exp_dir.name)),
+        noun=noun,
+        subtitle=payload.get("subtitle", ""),
+        row_label=lambda r: (
+            f"{_cd_row_mark(r)}{r['label']}"
+            + (f" ({r['feature_dim']}d)" if show_dim else "")
+        ),
+    )
+
+
+def plot_clf_cd_emb_comparison(exp_dir: Path, payload: dict) -> None:
+    """LEGACY: an ``embedding_comparison.json`` from before the runners merged.
+
+    The embedding sweep is now one shape of :func:`plot_clf_cd_comparison`, which
+    is what new runs write. This stays so ``replot_cross_domain.py`` can still
+    redraw the result trees already in ``results/clf_cd_emb/``, whose payload
+    keys its rows under ``embeddings`` and carries no ``subtitle``.
     """
     rows: list[dict] = payload["embeddings"]
     if not rows:
@@ -1464,13 +1505,12 @@ def plot_clf_cd_emb_comparison(exp_dir: Path, payload: dict) -> None:
 
 
 def plot_clf_cd_alg_comparison(exp_dir: Path, payload: dict) -> None:
-    """Compare the algorithms of one cross-domain experiment.
+    """LEGACY: an ``algorithm_comparison.json`` from before the runners merged.
 
-    ``payload`` is the ``algorithm_comparison.json`` written by
-    ``epai/ai_detection/train/run_clf_cross_domain_algs.py``: one entry per algorithm, on a
-    single shared feature set, each holding its source x target accuracy matrix.
-    Draws the same two figures as the embedding comparison (``algorithm_comparison
-    .png`` and ``algorithm_comparison_matrix.png``) ranked by transfer accuracy.
+    The algorithm sweep is now one shape of :func:`plot_clf_cd_comparison`, which
+    is what new runs write. This stays so ``replot_cross_domain.py`` can still
+    redraw the result trees already in ``results/clf_cd_algs/``, whose payload
+    keys its rows under ``algorithms`` and carries no ``subtitle``.
     """
     rows: list[dict] = payload["algorithms"]
     if not rows:
@@ -1502,10 +1542,308 @@ def plot_clf_cd_alg_comparison(exp_dir: Path, payload: dict) -> None:
 
 
 ########################################################################
+# TRAIN - IN-DOMAIN CLASSIFICATION (one corpus, held-out split)
+########################################################################
+
+# Written by epai/ai_detection/train/run_clf_in_domain.py. One corpus, one
+# held-out split, so there is no matrix and no transfer axis -- the figures say
+# what a variant scores at home and nothing about anywhere else. They reuse the
+# cross-domain marks (★ baseline, ◆ hybrid) and the 50% chance line so the two
+# figure sets can sit side by side without the symbols changing meaning.
+
+
+def _id_rows(payload: dict) -> list[dict]:
+    return payload.get("variants") or []
+
+
+def plot_clf_id_result(out_dir: Path) -> None:
+    """One variant's confusion matrix, from its ``in_domain.json``.
+
+    Counts are the mean over seeds, so they are not integers; the annotation
+    shows the row-normalised share as well, which is what actually reads -- 40
+    false positives means nothing until you know whether the class had 50 rows
+    or 5000.
+    """
+    result_path = out_dir / "in_domain.json"
+    if not result_path.exists():
+        print(f"No in_domain.json in {out_dir}")
+        return
+    with open(result_path) as f:
+        payload = json.load(f)
+
+    classes = payload.get("classes", ["human", "machine"])
+    cm = np.array(payload["summary"]["confusion_mean"], dtype=float)
+    s = payload["summary"]
+    alg_label = payload.get("alg_label", out_dir.name)
+
+    fig, ax = plt.subplots(figsize=(5.6, 5.0))
+    # Row-normalised: the colour answers "what share of this true class landed
+    # here", which is comparable across an unbalanced corpus. The counts stay in
+    # the text.
+    rows_sum = cm.sum(axis=1, keepdims=True)
+    shares = np.divide(cm, rows_sum, out=np.zeros_like(cm), where=rows_sum > 0)
+    im = ax.imshow(shares, vmin=0.0, vmax=1.0, cmap="Blues")
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04).set_label("Share of true class")
+
+    ax.set_xticks(range(len(classes)), classes)
+    ax.set_yticks(range(len(classes)), classes)
+    ax.set_xlabel("Predicted", fontweight="bold")
+    ax.set_ylabel("True", fontweight="bold")
+    # The confusion matrix is the held-out one; the train score is in the title
+    # so the cell counts are read next to how much of the fit survived the split.
+    gap = s.get("overfit_gap")
+    gap_note = (
+        f" · train {s['train_accuracy_mean']*100:.1f}% (gap {gap*100:+.1f})"
+        if gap is not None
+        else ""
+    )
+    ax.set_title(
+        f"{alg_label}\nheld-out split · acc {s['accuracy_mean']*100:.1f}% "
+        f"± {s['accuracy_std']*100:.1f}{gap_note}",
+        fontsize=10,
+    )
+    for i in range(cm.shape[0]):
+        for j in range(cm.shape[1]):
+            ax.text(
+                j, i, f"{cm[i, j]:.0f}\n{shares[i, j]*100:.1f}%",
+                ha="center", va="center", fontsize=10,
+                color="white" if shares[i, j] > 0.55 else "black",
+            )
+    fig.text(
+        0.01, 0.01,
+        f"Mean over {len(payload.get('per_seed', []))} seed(s); "
+        f"{s['train_n']} train / {s['n']} test rows. In-domain only.",
+        fontsize=7.5, color="dimgray",
+    )
+    fig.tight_layout(rect=(0, 0.04, 1, 1))
+    fig.savefig(out_dir / "in_domain_confusion.png", dpi=150)
+    plt.close(fig)
+    print(f"Plot saved to: {out_dir}")
+
+
+# Train and test are the same measurement on two row sets, so they are one hue
+# at two weights rather than two colours -- the eye should read "same thing,
+# seen twice", and the gap between the bar ends is the quantity of interest.
+ID_TRAIN_COLOR = "#a9c6e8"
+ID_TEST_COLOR = "#2a78d6"
+
+# Vertical space reserved below the axes, in INCHES -- the plotting area above
+# scales with the number of variants, so an axes-relative offset does not stay
+# clear of the x-label when it does. Sized to the content rather than to a worst
+# case: a one-row legend gets one row of space.
+ID_LEGEND_ROW_IN = 0.20  # one row of legend entries at fontsize 8
+ID_LEGEND_PAD_IN = 0.04
+ID_FOOTNOTE_LINE_IN = 7.5 * 1.2 / 72  # one line at fontsize 7.5, 1.2 line spacing
+ID_FOOTNOTE_LINES = 3
+ID_MARGIN_IN = 0.04  # canvas edge to the footnote
+ID_GAP_IN = 0.07  # between x-label / legend / footnote
+
+
+def _id_footnote_in() -> float:
+    """Height of the footnote strip: the text, its bottom margin and one gap."""
+    return ID_MARGIN_IN + ID_FOOTNOTE_LINES * ID_FOOTNOTE_LINE_IN + ID_GAP_IN
+
+
+def _id_legend_in(n_entries: int, ncol_max: int = 3) -> float:
+    """Height of the legend strip, for the number of entries actually drawn."""
+    ncol = max(1, min(n_entries, ncol_max))
+    rows = -(-n_entries // ncol)  # ceil
+    return rows * ID_LEGEND_ROW_IN + ID_LEGEND_PAD_IN + ID_GAP_IN
+
+
+def _plot_split_composition(ax, composition: dict) -> None:
+    """Train vs test share per value, for every ``report_by`` column.
+
+    One row per (column, value), two bars: the share of the training rows and of
+    the test rows that fall in it. Equal-length pairs mean the split is
+    representative -- which is the only thing this panel is for, since
+    ``GroupShuffleSplit`` groups but does not stratify and nothing else in the
+    run would say.
+    """
+    labels, train, test = [], [], []
+    for col, per_value in composition.items():
+        for value, c in per_value.items():
+            labels.append(f"{col}={value}")
+            train.append(c["train_share"])
+            test.append(c["test_share"])
+    if not labels:
+        return
+
+    y = np.arange(len(labels))
+    h = 0.38
+    b1 = ax.barh(y + h / 2, train, h, color=ID_TRAIN_COLOR, label="train")
+    b2 = ax.barh(y - h / 2, test, h, color=ID_TEST_COLOR, label="test")
+    ax.bar_label(b1, fmt="%.1f%%", labels=[f"{v*100:.1f}%" for v in train],
+                 fontsize=7, padding=2)
+    ax.bar_label(b2, fmt="%.1f%%", labels=[f"{v*100:.1f}%" for v in test],
+                 fontsize=7, padding=2)
+    ax.set_yticks(y, labels, fontsize=8)
+    ax.set_xlim(0.0, max(max(train + test) * 1.25, 0.1))
+    ax.set_xlabel("Share of that half's rows")
+    ax.set_title("Is the held-out half representative?", fontsize=10)
+    ax.legend(fontsize=8, loc="lower right", frameon=False)
+
+
+def plot_clf_id_comparison(exp_dir: Path, payload: dict) -> None:
+    """Rank the variants of one in-domain experiment, train against test.
+
+    ``payload`` is the ``in_domain_comparison.json`` written by
+    ``run_clf_in_domain.py``. The two bars per row are the SAME metric on the
+    two row sets -- accuracy on the training rows and on the held-out ones -- so
+    the distance between them is what the model failed to generalise even inside
+    its own corpus. (They used to be accuracy and macro F1, which on a balanced
+    binary task are the same number to three decimals: two identical bars saying
+    one thing.)
+
+    A second panel appears when the config sets ``report_by``: the composition of
+    each half by that column, which is how you see whether a pooled run's test
+    split actually resembles its training split.
+
+    There is deliberately no in-domain-vs-transfer scatter here; with no transfer
+    number there is nothing to plot against.
+    """
+    rows = _id_rows(payload)
+    if not rows:
+        print(f"No results to compare in {exp_dir}")
+        return
+
+    noun = payload.get("noun", "variant")
+    slug = noun.replace(" ", "_")
+    alg_label = payload.get("alg_label", payload.get("alg_id", exp_dir.name))
+    order = sorted(rows, key=lambda r: r["accuracy_mean"])
+
+    labels = [f"{_cd_row_mark(r)}{r['label']}" for r in order]
+    test = np.array([r["accuracy_mean"] for r in order])
+    test_std = np.array([r["accuracy_std"] for r in order])
+    is_baseline = np.array([bool(r.get("baseline")) for r in order])
+    # Payloads written before the train pass existed carry no train score. Drawing
+    # a NaN bar would label it "nan"; drop the series instead so an older result
+    # replots as what it is -- held-out accuracy alone.
+    has_train = all(r.get("train_accuracy_mean") is not None for r in order)
+    train = np.array([r.get("train_accuracy_mean", np.nan) for r in order])
+    train_std = np.array([r.get("train_accuracy_std", 0.0) for r in order])
+
+    # Merge the composition of every feature set: with one feature set (the usual
+    # case) that is just its table; with several, identical splits collapse and
+    # differing ones are worth seeing side by side.
+    composition: dict = {}
+    for _fs_id, per_col in (payload.get("split_composition") or {}).items():
+        for col, per_value in per_col.items():
+            composition.setdefault(col, {}).update(per_value)
+
+    # The plotting area grows with the number of variants; the legend and the
+    # footnote below it do not. Reserving that strip in INCHES rather than as a
+    # fraction of the axes is the whole point -- a fraction that clears the
+    # x-label on a tall chart lands on top of it on a short one.
+    plot_h = max(2.6, 0.42 * len(order) + 1.0)
+    if composition:
+        n_comp = sum(len(v) for v in composition.values())
+        plot_h = max(plot_h, 0.36 * n_comp + 1.0)
+
+    # What the legend will hold: the bar series, the chance line, and one star per
+    # baseline family present. Counted here rather than after plotting, so the
+    # strip is sized to the rows that actually get drawn.
+    n_legend = (2 if has_train else 1) + 1 + len(
+        _cd_baseline_legend_styles(order, is_baseline)
+    )
+    legend_in, footnote_in = _id_legend_in(n_legend), _id_footnote_in()
+    fig_h = plot_h + legend_in + footnote_in
+
+    if composition:
+        fig, axes = plt.subplots(
+            1, 2, figsize=(15.0, fig_h), gridspec_kw={"width_ratios": [1.45, 1.0]}
+        )
+        ax, ax_comp = axes
+    else:
+        fig, ax = plt.subplots(figsize=(9.5, fig_h))
+        ax_comp = None
+
+    y = np.arange(len(order))
+    h = 0.38 if has_train else 0.55
+    bars = []
+    if has_train:
+        b1 = ax.barh(y + h / 2, train, h, xerr=train_std, capsize=2,
+                     color=ID_TRAIN_COLOR, label="train (fitted on these rows)")
+        ax.bar_label(b1, fmt="%.3f", fontsize=7, padding=2)
+        bars.append(b1)
+    b2 = ax.barh(y - h / 2 if has_train else y, test, h, xerr=test_std, capsize=2,
+                 color=ID_TEST_COLOR, label="test (held out)")
+    ax.bar_label(b2, fmt="%.3f", fontsize=7, padding=2)
+    bars.append(b2)
+    # Baselines keep the cross-domain hatch, per family, so a starred row means
+    # the same thing in both figure sets.
+    for idx in np.nonzero(is_baseline)[0]:
+        style = _cd_baseline_style(order[idx])
+        for bar in (b[idx] for b in bars):
+            bar.set_hatch(style["hatch"])
+            bar.set_edgecolor(CD_HATCH_COLOR)
+            bar.set_linewidth(CD_HATCH_LINEWIDTH)
+    # The gap is the point of the panel, so it is written where it happens rather
+    # than left to be eyeballed off two bar ends.
+    for idx, r in enumerate(order):
+        gap = r.get("overfit_gap")
+        if gap is None or not np.isfinite(gap):
+            continue
+        ax.annotate(
+            f"gap {gap*100:+.1f}", (max(train[idx], test[idx]), y[idx]),
+            textcoords="offset points", xytext=(46, -3), fontsize=7,
+            color="dimgray",
+        )
+    ax.axvline(CD_CHANCE, linestyle="--", color="red", linewidth=1.2, label="chance")
+    ax.set_yticks(y, labels, fontsize=8)
+    ax.set_xlim(0.0, 1.22)
+    ax.set_xlabel("Accuracy")
+    ax.set_title("Ranked by held-out accuracy", fontsize=10)
+
+    handles, _ = ax.get_legend_handles_labels()
+    from matplotlib.lines import Line2D
+
+    for style in _cd_baseline_legend_styles(order, is_baseline):
+        handles.append(
+            Line2D([], [], linestyle="none", marker="*", color=style["color"],
+                   markersize=11, label=style["label"])
+        )
+    if ax_comp is not None:
+        _plot_split_composition(ax_comp, composition)
+
+    fig.suptitle(f"{alg_label} — {noun} comparison\n{payload.get('subtitle', '')}")
+    # va="bottom" so the block grows UP from the anchor and stays inside the
+    # reserved strip; the default baseline alignment would hang the 2nd and 3rd
+    # lines off the bottom of the canvas.
+    fig.text(
+        0.01, ID_MARGIN_IN / fig_h, va="bottom",
+        s="In-domain only: both bars are the SAME corpus, split in two. The gap is "
+        "what did not generalise even within it.\nThe held-out score is an upper "
+        "bound on a deployed detector, not an estimate of one — see "
+        "run_clf_cross_domain.py for the transfer question.\n"
+        "Error bars are the spread over seeds on overlapping splits, which "
+        "understates the sampling error; they are not confidence intervals.",
+        fontsize=7.5, color="dimgray",
+    )
+    # Lay the axes out inside what is left above the strip, THEN put the legend in
+    # it: reading the axes position afterwards centres the legend under the panel
+    # it describes rather than under the whole figure.
+    fig.tight_layout(rect=(0, (legend_in + footnote_in) / fig_h, 1, 1))
+    pos = ax.get_position()
+    ax.legend(
+        handles=handles, fontsize=8, loc="lower center",
+        bbox_to_anchor=((pos.x0 + pos.x1) / 2, footnote_in / fig_h),
+        bbox_transform=fig.transFigure,
+        ncol=max(1, min(len(handles), 3)), frameon=False,
+    )
+    prev = plt.rcParams["hatch.linewidth"]
+    plt.rcParams["hatch.linewidth"] = CD_HATCH_LINEWIDTH
+    fig.savefig(exp_dir / f"{slug}_comparison.png", dpi=150, bbox_inches="tight")
+    plt.rcParams["hatch.linewidth"] = prev
+    plt.close(fig)
+    print(f"Comparison plot saved to: {exp_dir}")
+
+
+########################################################################
 # TRAIN - HYPER-PARAMETER SWEEP OVER CROSS-DOMAIN TRANSFER
 ########################################################################
 
-# Written by epai/ai_detection/train/sweep_clf_cross_domain.py. These figures
+# Written by epai/ai_detection/train/run_sweep_cross_domain.py. These figures
 # describe the SEARCH -- what the space contains, what moved the objective, how
 # much of the ranking is noise -- which the per-run cross-domain figures above
 # cannot show: they see one model, not the two hundred that were rejected.

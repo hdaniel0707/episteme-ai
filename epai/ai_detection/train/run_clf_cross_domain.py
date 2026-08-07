@@ -14,120 +14,303 @@ evaluated on all of them, producing a source x target accuracy matrix:
     off-diagonal  -> transfer: never saw this corpus / this generator
 
 A classifier that has learned a general notion of machine text keeps a healthy
-off-diagonal. One that has learned corpus artifacts collapses towards 50%.
+off-diagonal. One that has learned corpus artifacts collapses towards 50%. The
+mechanics of that matrix -- the grouped split, the binarised target, the
+exclusion of target rows whose group was seen in training -- live in
+``epai/utils/cd_core.py`` and are identical for everything below.
 
-Two things this controls for that a naive transfer eval gets wrong:
+VARIANTS
+--------
+What this script varies is *what* goes through the matrix. A run is the cross
+product of two lists, and one element of it -- one feature set with one
+algorithm -- is a **variant**:
 
-  * Labels are binarised to human vs machine. The corpora do not share class
-    names (`gpt` in the Ghostbuster sets, `gpt_plain` in the gpt54mini ones), so
-    the raw label spaces are not comparable.
-  * `<corpus>` and `<corpus>_gpt54mini` are built from the *same* human source
-    documents and share their ids. Evaluating one on the other would score the
-    model on human rows it trained on. Target rows whose group appears in the
-    source's training split are therefore excluded, and the count is reported.
+    feature_sets: [emb_luar, emb_bge]      one design matrix per entry
+    algorithms:   [logistic, simple_mlp]   the registry in epai/algs
+
+Every ``feature_sets`` entry is one matrix, whether it names one column or five,
+so all three questions the codebase used to ask with three separate scripts are
+the same config shape here -- hold an axis at one entry to ask about the other:
+
+  * one feature set, several algorithms -> which model transfers best;
+  * several feature sets, one algorithm -> which representation transfers best;
+  * one of each -> a single matrix, the plain control;
+  * both -> every pair, ranked together.
+
+An entry may be a column, a list of columns stacked into one matrix, or a mapping
+with an explicit ``id`` / ``label``, which is also how a run compares a feature
+set against a superset of itself::
+
+    feature_sets:
+      - emb_luar_crud                       # the embedding alone
+      - [emb_luar_crud, binoculars_score]   # ...and with the score beside it
+
+Each variant gets its own directory, its own matrix and figures, and a row in a
+comparison that ranks them all by how well they transfer. Naming follows
+whichever axis actually varies, so a pure feature sweep writes
+``<alg_id>/emb_luar/`` and a pure algorithm sweep ``<alg_id>/logistic/``; only a
+genuine 2-D run needs ``<features>__<alg>``.
+
+Algorithms are pluggable ``ClfAlgorithm`` subclasses under ``epai/algs``
+(logistic, svm, gradient_boosting, simple_mlp, binox_mlp), selected by ``name``
+and configured with per-entry ``params``. Each owns its own preprocessing, and
+each declares which ``params`` it reads: an entry naming anything else is a
+preflight error rather than a silently ignored key, so the hyper-parameters
+``run_sweep_cross_domain.py`` finds can be transcribed into a config and either
+take effect or fail loudly. The resolved set (the entry's params plus the
+algorithm's defaults) is printed before each matrix and stored in its
+``cross_domain.json``.
+
+An entry may set ``binoculars`` to hand that algorithm the Binoculars score as a
+second input beside the design matrix -- a *hybrid*, marked with a ◆ in the
+ranking and on the figures because it is not ranked on the same information as
+the rest. The column stays out of the feature set (so the plain algorithms are
+unaffected) but joins the missing-value filter (so every algorithm still trains
+and is scored on identical rows).
+
+BASELINES
+---------
+Optional zero-shot score baselines, each one more matrix marked with a ★ in the
+comparison. Two families, configured by ``binoculars_baseline`` and
+``llm_judge_baseline``, each contributing a ``<kind>_fitted`` variant whose
+cutoff is calibrated per source and one ``<kind>_vanilla_<threshold>`` per fixed
+cutoff, fit to nothing at all. Both read their score the same way round -- *low*
+means machine for Binoculars by construction and for the LLM judge because it
+reports P(human) -- and the judge's default vanilla cutoff is 0.5.
+
+PREFLIGHT
+---------
+The interesting failures here are slow ones: a run can be fifteen embedders x
+five algorithms x nine matrix cells x three seeds, and a column missing from the
+third corpus would otherwise surface twenty minutes in. So everything checkable
+without fitting a model is checked first, over *every* config, before *any*
+training: each config's shape and values, that every parquet exists and holds
+every column, that the feature dimensions agree across corpora, that enough rows
+survive the missing-value drop, and that every grouped split the run will
+actually take leaves both classes in the training half and leaves something to
+evaluate on. Errors from all configs are collected and reported together.
 
 A corpus is a ``CorpusSpec`` -- a parquet plus an optional ``domain`` -- so the
 six datasets of a full matrix are six slices of two combined files rather than
 six separate parquets. See ``epai/utils/corpus_utils.py``.
 
+``cfg/ai_detection/train/clf_cd/clf_cd_example.yaml`` is the annotated sample and
+the folder's only config, so the zero-argument run below is that experiment.
+Copy it to start a new one; each run also writes its config beside its results.
+
 Run:
     uv run python epai/ai_detection/train/run_clf_cross_domain.py
+    uv run python epai/ai_detection/train/run_clf_cross_domain.py --dry-run
     uv run python epai/ai_detection/train/run_clf_cross_domain.py \
-        --cfg cfg/ai_detection/train/clf_cd/gpt35t_luar_crud.yaml
-    uv run python epai/ai_detection/train/run_clf_cross_domain.py \
-        --cfg-dir cfg/ai_detection/train/clf_cd --no-plots
+        --cfg cfg/ai_detection/train/clf_cd/clf_cd_example.yaml --no-plots
 """
+
+from __future__ import annotations
 
 import argparse
 from datetime import datetime
 from pathlib import Path
-import shutil
 import json
+import shutil
 import sys
 
-import joblib
-import numpy as np
-import pandas as pd
-from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
-from sklearn.model_selection import GroupShuffleSplit
-from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 
+from epai.algs import build_algorithm
+from epai.utils.cd_core import (
+    BINARY_CLASSES,
+    Prepared,
+    aggregate_seeds,
+    baseline_specs,
+    check_baseline_datasets,
+    check_dataset,
+    check_splits,
+    describe_variant,
+    grouped_split,
+    load_prepared,
+    metrics_dict,
+    print_matrix,
+    print_ranking,
+    run_score_baseline,
+    summarise_baseline,
+    summarise_variant,
+)
 from epai.utils.config_utils import (
+    RESET,
+    YELLOW,
     add_config_args,
-    load_cd_config,
     rel,
     resolve_configs,
 )
-from epai.utils.corpus_utils import (
-    CorpusSpec,
-    check_corpus_files,
-    check_dataset_specs,
-    dataset_specs,
-    read_corpus,
+from epai.utils.corpus_utils import CorpusSpec, dataset_specs
+from epai.utils.preflight_utils import RULE, Report, load_yaml, print_report
+from epai.utils.train_utils import stack_features
+from epai.utils.variant_utils import (
+    Variant,
+    algorithm_specs,
+    aux_columns,
+    build_feature_sets,
+    build_variants,
+    check_config,
+    check_files,
+    comparison_noun,
+    fit_alg,
+    predict_alg,
+    resolved_params,
+    variant_columns,
 )
-from epai.utils.preflight_utils import (
-    RULE,
-    Report,
-    check_identity,
-    check_model_block,
-    load_yaml,
-    print_report,
+from epai.utils.visualization_utils import (
+    plot_clf_cd_comparison,
+    plot_clf_cd_result,
 )
-from epai.utils.train_utils import (
-    CLF_TARGET_COL,
-    build_clf_model,
-    drop_missing_rows,
-    stack_features,
-)
-from epai.utils.visualization_utils import plot_clf_cd_results
 
 BASE_DIR = Path(__file__).parent.parent.parent.parent
-DEFAULT_CFG_DIR = BASE_DIR / "cfg" / "ai_detection" / "train" / "clf_cd" / "ghostbuster"
+DEFAULT_CFG_DIR = BASE_DIR / "cfg" / "ai_detection" / "train" / "clf_cd"
 DEFAULT_RESULTS_DIR = BASE_DIR / "results" / "clf_cd"
 
-# Binarised target: human -> 0, any generator -> 1.
-BINARY_CLASSES = ["human", "machine"]
+#: Cleared by ``--no-plots``. The figures are drawn as each variant finishes, so
+#: that a long run interrupted half-way still leaves usable output -- which means
+#: suppressing them is a flag consulted in the loop, not a final step to skip.
+#: ``replot_cross_domain.py`` draws every one of them from the JSON afterwards.
+PLOTS_ENABLED = True
 
 
-def load_dataset(
-    spec: CorpusSpec, features: list[str], group_col: str, human_label: str
-) -> pd.DataFrame:
-    """Load one corpus, drop unusable rows, and binarise the target.
+# ---------------------------------------------------------------------------
+# Config: the two axes
+# ---------------------------------------------------------------------------
 
-    The domain filter and drop_classes are applied by ``read_corpus`` first, so
-    a row this run will not use cannot take its group down in the missing-value
-    drop below.
+
+
+def preflight_config(cfg: dict, report: Report) -> None:
+    """Everything that can be checked about one config before a model is fitted.
+
+    Runs to the end and records all problems: a run this long should not be
+    restarted once per typo.
     """
-    load = read_corpus(spec)
-    df = drop_missing_rows(
-        load.df, features + [CLF_TARGET_COL, group_col], group_col=group_col
+    print("\n[1/3] config")
+    n_errors = len(report.errors)
+    check_config(cfg, report)
+    if len(report.errors) > n_errors:
+        # The checks below index into the config; stop while it is still unsafe.
+        print("  invalid — skipping the data checks for this config")
+        return
+
+    fsets = build_feature_sets(cfg)
+    variants = build_variants(cfg)
+    baseline_variants = baseline_specs(cfg)
+    n_datasets = len(cfg["data"]["datasets"])
+    n_fits = (len(variants) + len(baseline_variants)) * cfg["model"]["n_runs"] * n_datasets
+    baseline_note = (
+        " + score baselines "
+        + ", ".join(f"{v['label']} ({v['column']})" for v in baseline_variants)
+        if baseline_variants
+        else ""
     )
+    axis = (
+        f"{len(fsets)} feature sets"
+        if len(fsets) > 1
+        else f"features={list(fsets[0].columns) if fsets else []}"
+    )
+    print(
+        f"  {n_datasets} datasets, {axis}, {len(algorithm_specs(cfg))} algorithms"
+        f"{baseline_note}, {cfg['model']['n_runs']} seeds  → "
+        f"{len(variants)} variant(s), {n_fits} fits"
+    )
+    hybrids = [v for v in variants if v.hybrid]
+    if hybrids:
+        # These see more than the feature set, so say so before anything runs.
+        print(
+            f"  {len(hybrids)} hybrid variant(s) also take an auxiliary column: "
+            + ", ".join(f"{v.id} ({v.aux_col})" for v in hybrids)
+        )
+        print(
+            f"  every variant is filtered on its features plus {aux_columns(cfg)} "
+            f"so they all train and score on the same rows"
+        )
 
-    # The corpora disagree on generator names, so only this binary view is
-    # comparable across them.
-    df["y"] = (df[CLF_TARGET_COL] != human_label).astype(int)
+    print("\n[2/3] parquet files")
+    n_errors = len(report.errors)
+    check_files(cfg, dataset_specs(cfg, BASE_DIR), report)
+    if len(report.errors) > n_errors:
+        # Without the columns there is nothing to load in stage 3.
+        print("  unusable — skipping the data checks for this config")
+        return
 
-    counts = df[CLF_TARGET_COL].value_counts().to_dict()
-    tqdm.write(f"  {spec.name:<17} {len(df):>5} rows  {counts}  ← {spec.source}")
-    return df
+    print("\n[3/3] data, dimensions and splits")
+    group_col: str = cfg["data"]["group_col"]
+    human_label: str = cfg["data"]["human_label"]
+    specs = dataset_specs(cfg, BASE_DIR)
 
+    print(
+        f"{'feature set':<22}{'dataset':<20}{'rows':>7}{'dropped':>9}"
+        f"{'dim':>7}{'groups':>8}  classes"
+    )
+    print("-" * RULE)
 
-def evaluate(model, scaler, X: np.ndarray, y: np.ndarray) -> dict:
-    y_pred = model.predict(scaler.transform(X))
-    return {
-        "accuracy": float(accuracy_score(y, y_pred)),
-        "macro_f1": float(f1_score(y, y_pred, average="macro", zero_division=0)),
-        "confusion": confusion_matrix(y, y_pred, labels=range(len(BINARY_CLASSES))).tolist(),
-        "n": int(len(y)),
-        "class_balance": {
-            BINARY_CLASSES[c]: int(n) for c, n in zip(*np.unique(y, return_counts=True))
-        },
-    }
+    # One pass per feature set: the algorithms sharing it see identical rows, so
+    # checking it once per algorithm would only repeat the reads.
+    for fs in fsets:
+        columns = variant_columns(fs, cfg)
+        preps: dict[str, Prepared] = {}
+        for spec in specs:
+            try:
+                prep = load_prepared(spec, columns, group_col, human_label)
+            except Exception as exc:
+                report.error(
+                    f"{fs.id} | {spec.name}: failed to load: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                continue
+
+            ok = check_dataset(prep, cfg, fs.id, report)
+            dropped = prep.n_class_dropped + prep.n_missing_dropped
+            # 'dim' is the shared design matrix only; auxiliary columns are handed
+            # to their algorithm separately and never widen it.
+            print(
+                f"{fs.id:<22}{prep.name:<20}{len(prep.df):>7}{dropped:>9}"
+                f"{(prep.dim_of(list(fs.columns)) if prep.dims_per_col else 0):>7}"
+                f"{(prep.n_groups if len(prep.df) else 0):>8}  "
+                f"{prep.class_counts if len(prep.df) else '-'}"
+            )
+            if ok:
+                # Keep only what the split check needs; the vectors are large and
+                # the training loop re-reads them one feature set at a time.
+                preps[prep.name] = Prepared(
+                    name=prep.name,
+                    df=prep.df[["y", "group"]].copy(),
+                    n_file=prep.n_file,
+                    n_class_dropped=prep.n_class_dropped,
+                    n_missing_dropped=prep.n_missing_dropped,
+                    missing_per_col=prep.missing_per_col,
+                    dims_per_col=prep.dims_per_col,
+                    n_filtered=prep.n_filtered,
+                )
+            del prep
+
+        if len(preps) != len(specs):
+            continue  # a dataset already failed; its splits are not meaningful
+
+        # Features must live in one shared space to be transferable: the same
+        # columns, in the same order, and the same width for every corpus.
+        dims = {name: p.dim_of(list(fs.columns)) for name, p in preps.items()}
+        if len(set(dims.values())) != 1:
+            report.error(
+                f"{fs.id}: datasets disagree on feature dimensionality: {dims} "
+                f"— a model trained on one corpus cannot be applied to another"
+            )
+            continue
+
+        check_splits(preps, cfg, fs.id, report)
+
+    # The baselines are filtered on their own score column instead of a feature
+    # set, so their row set is checked separately -- a partly filled column (the
+    # judge only scores the generators it was asked for) means they stand on
+    # fewer rows than the trained variants, and that has to be visible.
+    check_baseline_datasets(cfg, report)
 
 
 def preflight(cfg_paths: list[Path]) -> tuple[Report, list[tuple[Path, dict]]]:
-    """Check every config before the first fit: shape, files, columns, domains."""
+    """Check every config in the folder. Returns the report and the loaded configs."""
     report = Report()
     loaded: list[tuple[Path, dict]] = []
 
@@ -137,211 +320,339 @@ def preflight(cfg_paths: list[Path]) -> tuple[Report, list[tuple[Path, dict]]]:
 
     for cfg_path in cfg_paths:
         report.context = cfg_path.name
-        print(f"\n{cfg_path}")
+        print(f"\n{'-' * RULE}\n{cfg_path}\n{'-' * RULE}")
         cfg = load_yaml(cfg_path, report)
         if cfg is None:
             continue
 
-        n_errors = len(report.errors)
-        check_identity(cfg, report)
-        if "features" not in cfg:
-            report.error("missing top-level key 'features'")
-        elif not isinstance(cfg["features"], (list, tuple)) or not cfg["features"]:
-            report.error("'features' must be a non-empty list of column names")
-        check_dataset_specs(cfg, report)
-        check_model_block(cfg, report)
-        if len(report.errors) > n_errors:
-            print("  invalid — skipping the file checks for this config")
-            continue
-
-        specs = dataset_specs(cfg, BASE_DIR)
-        needed = list(cfg["features"]) + [
-            CLF_TARGET_COL, cfg["data"]["group_col"]
-        ]
-        check_corpus_files(specs, needed, report, rule=RULE)
+        preflight_config(cfg, report)
         loaded.append((cfg_path, cfg))
 
+    # Each alg_id names an output directory, so a repeat would have two configs
+    # writing into the same place.
     report.context = ""
+    alg_ids = [cfg.get("alg_id") for _, cfg in loaded if isinstance(cfg, dict)]
+    dupes = sorted({a for a in alg_ids if a is not None and alg_ids.count(a) > 1})
+    if dupes:
+        report.error(f"alg_id must be unique across the configs run, repeated: {dupes}")
+
     return report, loaded
 
 
-def run_cross_domain(
-    cfg_paths: list[Path], results_dir: Path, experiment_id: str
-) -> str:
-    EXP_DIR = results_dir / experiment_id
-    EXP_DIR.mkdir(parents=True, exist_ok=True)
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------
 
-    for cfg_path in tqdm(cfg_paths, desc="Configs"):
-        cfg = load_cd_config(cfg_path)
 
-        base_seed: int = cfg["seed"]
-        features: list[str] = cfg["features"]
-        group_col: str = cfg["data"]["group_col"]
-        human_label: str = cfg["data"]["human_label"]
-        specs: list[CorpusSpec] = dataset_specs(cfg, BASE_DIR)
-        ml_alg: str = cfg["model"]["ml_alg"]
-        n_runs: int = cfg["model"]["n_runs"]
-        test_size: float = cfg["model"].get("test_size", 0.30)
+def run_variant(
+    variant: Variant,
+    cfg: dict,
+    X_all: dict,
+    data: dict,
+    names: list[str],
+    labels: dict,
+    out_dir: Path,
+    save_models: bool = True,
+) -> dict:
+    """Full source x target matrix for one variant. Returns the saved payload.
 
-        ALG_DIR = EXP_DIR / cfg["alg_id"]
-        ALG_DIR.mkdir(parents=True, exist_ok=True)
-        shutil.copy(cfg_path, ALG_DIR / "config.yaml")
-        with open(ALG_DIR / "config.json", "w") as f:
-            json.dump(cfg, f, indent=2)
+    ``X_all`` / ``data`` are loaded once per feature set by ``run_config`` and
+    shared across every algorithm trained on it.
 
-        tqdm.write(f"\n{'='*72}")
-        tqdm.write(f"  ALG ID: {cfg['alg_id']}")
-        tqdm.write(f"  ML ALG: {ml_alg}  ({n_runs} seeds, base seed {base_seed})")
-        tqdm.write(f"  FEATURES: {features}")
-        tqdm.write(f"  SPLIT: grouped by {group_col!r}, test_size={test_size}")
-        tqdm.write(f"  {'-'*30}")
-        tqdm.write(f"{'='*72}")
+    ``save_models`` writes one pickled model per (seed, source). The
+    hyper-parameter sweep turns it off: it fits thousands of throwaway candidates
+    and only the winner is ever reloaded, so keeping them all would cost
+    gigabytes for nothing.
+    """
+    base_seed: int = cfg["seed"]
+    n_runs: int = cfg["model"]["n_runs"]
+    test_size: float = cfg["model"].get("test_size", 0.30)
 
-        data = {
-            spec.name: load_dataset(spec, features, group_col, human_label)
-            for spec in specs
-        }
-        names = [spec.name for spec in specs]
-        labels = {spec.name: spec.label for spec in specs}
+    feature_dim = int(next(iter(X_all.values())).shape[1])
 
-        # Features must live in one shared space to be transferable: the same
-        # columns, in the same order, for every corpus.
-        X_all = {name: stack_features(df, features)[0] for name, df in data.items()}
-        dims = {name: X.shape[1] for name, X in X_all.items()}
-        if len(set(dims.values())) != 1:
-            raise ValueError(f"Datasets disagree on feature dimensionality: {dims}")
+    # The auxiliary column, kept out of X so it can enter the network late. Per
+    # variant, since two entries may name different columns; one scalar column
+    # per corpus, so stacking it here rather than in run_config costs nothing.
+    Z_all = (
+        {n: stack_features(df, [variant.aux_col])[0] for n, df in data.items()}
+        if variant.aux_col
+        else {n: None for n in data}
+    )
 
-        # per_seed[i][source][target] -> metrics
-        per_seed: list[dict] = []
+    # per_seed[i][source][target] -> metrics
+    per_seed: list[dict] = []
 
-        for i in tqdm(range(n_runs), desc="Seeds", leave=False):
-            seed = base_seed + i
-            SEED_MODEL_DIR = ALG_DIR / str(i) / "model"
-            SEED_MODEL_DIR.mkdir(parents=True, exist_ok=True)
-            seed_res: dict[str, dict] = {}
+    for i in tqdm(range(n_runs), desc="Seeds", leave=False):
+        seed = base_seed + i
+        seed_model_dir = out_dir / str(i) / "model"
+        if save_models:
+            seed_model_dir.mkdir(parents=True, exist_ok=True)
+        seed_res: dict[str, dict] = {}
 
-            for source in names:
-                df_s = data[source]
-                X_s, y_s = X_all[source], df_s["y"].to_numpy()
-                groups_s = df_s[group_col].to_numpy()
-
-                # Grouped split: a document and its rewrites never straddle the cut.
-                splitter = GroupShuffleSplit(
-                    n_splits=1, test_size=test_size, random_state=seed
-                )
-                train_idx, test_idx = next(splitter.split(X_s, y_s, groups_s))
-                train_groups = set(groups_s[train_idx])
-
-                scaler = StandardScaler()
-                X_train = scaler.fit_transform(X_s[train_idx])
-                model = build_clf_model(ml_alg, seed)
-                model.fit(X_train, y_s[train_idx])
-
-                joblib.dump(model, SEED_MODEL_DIR / f"{source}_model.joblib")
-                joblib.dump(scaler, SEED_MODEL_DIR / f"{source}_scaler.joblib")
-
-                seed_res[source] = {}
-                for target in names:
-                    if target == source:
-                        # In-domain: the corpus's own held-out grouped test split.
-                        res = evaluate(model, scaler, X_s[test_idx], y_s[test_idx])
-                        res["excluded"] = 0
-                        res["train_n"] = int(len(train_idx))
-                    else:
-                        df_t = data[target]
-                        # `essay` and `essay_gpt54mini` share their human documents
-                        # (same source files, same ids). Any target row whose group
-                        # was trained on would be a free hit, so drop it.
-                        keep = ~df_t[group_col].isin(train_groups).to_numpy()
-                        n_excluded = int((~keep).sum())
-                        if not keep.any():
-                            raise ValueError(
-                                f"{source} -> {target}: every target group was seen "
-                                f"in training; nothing left to evaluate on."
-                            )
-                        res = evaluate(
-                            model,
-                            scaler,
-                            X_all[target][keep],
-                            df_t.loc[keep, "y"].to_numpy(),
-                        )
-                        res["excluded"] = n_excluded
-                        res["train_n"] = int(len(train_idx))
-                    seed_res[source][target] = res
-
-            per_seed.append(seed_res)
-
-        # Aggregate over seeds.
-        summary: dict[str, dict] = {}
         for source in names:
-            summary[source] = {}
-            for target in names:
-                runs = [s[source][target] for s in per_seed]
-                accs = [r["accuracy"] for r in runs]
-                f1s = [r["macro_f1"] for r in runs]
-                summary[source][target] = {
-                    "train_set": source,
-                    "test_set": target,
-                    "in_domain": source == target,
-                    "accuracy_mean": float(np.mean(accs)),
-                    "accuracy_std": float(np.std(accs)),
-                    "macro_f1_mean": float(np.mean(f1s)),
-                    "macro_f1_std": float(np.std(f1s)),
-                    "confusion_mean": np.mean(
-                        [r["confusion"] for r in runs], axis=0
-                    ).tolist(),
-                    "train_n": runs[0]["train_n"],
-                    "n": runs[0]["n"],
-                    "excluded": runs[0]["excluded"],
-                    "class_balance": runs[0]["class_balance"],
-                }
+            df_s = data[source]
+            X_s, y_s = X_all[source], df_s["y"].to_numpy()
+            Z_s = Z_all[source]
+            groups_s = df_s["group"].to_numpy()
 
-        with open(ALG_DIR / "cross_domain.json", "w") as f:
-            json.dump(
-                {
-                    "alg_id": cfg["alg_id"],
-                    "alg_label": cfg["alg_label"],
-                    "dataset_names": names,
-                    "dataset_labels": labels,
-                    "classes": BINARY_CLASSES,
-                    "config": cfg,
-                    "summary": summary,
-                    "per_seed": per_seed,
-                },
-                f,
-                indent=2,
+            train_idx, test_idx = grouped_split(y_s, groups_s, test_size, seed)
+            train_groups = set(groups_s[train_idx])
+
+            # A fresh algorithm per (seed, source); each owns its preprocessing.
+            alg = build_algorithm(variant.alg_name, seed, **variant.params)
+            # Groups for the training rows only. An algorithm that carves its own
+            # validation split out of them (the torch ones, under `val_frac`) needs
+            # these to keep a document and its rewrites on one side of that split,
+            # the same guarantee the outer split above gives. Ignored by the rest.
+            alg.set_fit_groups(groups_s[train_idx])
+            fit_alg(
+                alg,
+                X_s[train_idx],
+                y_s[train_idx],
+                Z_s[train_idx] if Z_s is not None else None,
             )
 
-        print_matrix(cfg["alg_label"], summary, names)
+            seed_res[source] = {}
+            for target in names:
+                if target == source:
+                    # In-domain: the corpus's own held-out grouped test split.
+                    res = metrics_dict(
+                        y_s[test_idx],
+                        predict_alg(
+                            alg,
+                            X_s[test_idx],
+                            Z_s[test_idx] if Z_s is not None else None,
+                        ),
+                    )
+                    res["excluded"] = 0
+                else:
+                    df_t = data[target]
+                    # `essay` and `essay_gpt54mini` share their human documents
+                    # (same source files, same ids). Any target row whose group
+                    # was trained on would be a free hit, so drop it.
+                    keep = ~df_t["group"].isin(train_groups).to_numpy()
+                    Z_t = Z_all[target]
+                    res = metrics_dict(
+                        df_t.loc[keep, "y"].to_numpy(),
+                        predict_alg(
+                            alg,
+                            X_all[target][keep],
+                            Z_t[keep] if Z_t is not None else None,
+                        ),
+                    )
+                    res["excluded"] = int((~keep).sum())
+                res["train_n"] = int(len(train_idx))
+                seed_res[source][target] = res
 
-    return experiment_id
+            # Persist last: the torch algorithms' save() moves the model to CPU,
+            # so saving before the predictions above would drop them off the GPU.
+            # Best-effort.
+            if save_models:
+                try:
+                    alg.save(seed_model_dir / f"{source}.joblib")
+                except Exception as exc:  # persistence must never abort a long run
+                    tqdm.write(
+                        f"{YELLOW}  ⚠️  could not save {variant.alg_name} for "
+                        f"{source} (seed {seed}): {type(exc).__name__}: {exc}{RESET}"
+                    )
+
+        per_seed.append(seed_res)
+
+    summary = aggregate_seeds(per_seed, names)
+
+    # The per-variant config copy the figures read: `features` and `model.ml_alg`
+    # are what the matrix subtitles are built from, and `alg_id` / `alg_label`
+    # name this variant rather than the whole config.
+    var_cfg = dict(cfg)
+    var_cfg["features"] = list(variant.features)
+    var_cfg["binoculars"] = variant.aux_col
+    var_cfg["model"] = {**cfg["model"], "ml_alg": variant.alg_name}
+    var_cfg["alg_id"] = f"{cfg['alg_id']}__{variant.id}"
+    var_cfg["alg_label"] = f"{cfg['alg_label']} — {variant.label}"
+
+    payload = {
+        "alg_id": var_cfg["alg_id"],
+        "alg_label": var_cfg["alg_label"],
+        "variant": variant.id,
+        "label": variant.label,
+        "algorithm": variant.alg_name,
+        "params": variant.params,
+        # What the config asked for is `params`; this is what the algorithm made
+        # of it, defaults filled in. Keeping both means a matrix can be traced
+        # back to the exact model without re-deriving any default.
+        "resolved_params": resolved_params(variant, base_seed),
+        "binoculars": variant.aux_col,
+        "feature_dim": feature_dim,
+        "dataset_names": names,
+        "dataset_labels": labels,
+        "classes": BINARY_CLASSES,
+        "config": var_cfg,
+        "summary": summary,
+        "per_seed": per_seed,
+    }
+    with open(out_dir / "cross_domain.json", "w") as f:
+        json.dump(payload, f, indent=2)
+    return payload
 
 
-def print_matrix(alg_label: str, summary: dict, names: list[str]) -> None:
-    """Print the source x target accuracy matrix; the diagonal is in-domain."""
-    w = max(len(n) for n in names) + 2
-    print(f"\n{'='*72}")
-    print(f"  {alg_label} — ACCURACY  (rows = TRAINED ON, cols = TESTED ON)")
-    print("  [diagonal] = in-domain held-out; off-diagonal = transfer")
-    print(f"{'='*72}\n")
+def comparison_subtitle(cfg: dict, n_corpora: int) -> str:
+    """One line describing what was held fixed, for the comparison figures."""
+    fsets = build_feature_sets(cfg)
+    algs = algorithm_specs(cfg)
 
-    print(" " * w + "".join(f"{n:>18}" for n in names))
-    for source in names:
-        row = f"{source:<{w}}"
-        for target in names:
-            s = summary[source][target]
-            cell = f"{s['accuracy_mean']*100:5.1f}%"
-            cell = f"[{cell}]" if s["in_domain"] else f" {cell} "
-            row += f"{cell:>18}"
-        print(row)
+    if len(fsets) > 1:
+        feats = f"{len(fsets)} feature sets"
+    else:
+        feats = "features: " + ", ".join(fsets[0].columns) if fsets else "features: -"
+        if len(feats) > 70:
+            feats = feats[:67] + "…"
+    # Name the extra columns: the ◆ rows did not run on the feature set alone,
+    # and the figure should say so without needing the JSON.
+    aux = aux_columns(cfg)
+    if aux:
+        feats += f" (◆ also + {', '.join(aux)})"
 
-    off = [summary[s][t]["accuracy_mean"] for s in names for t in names if s != t]
-    diag = [summary[s][s]["accuracy_mean"] for s in names]
-    print(f"\n  in-domain (diagonal) mean : {np.mean(diag)*100:5.1f}%")
-    print(f"  transfer  (off-diag) mean : {np.mean(off)*100:5.1f}%")
-    print(f"  transfer  (off-diag) min  : {np.min(off)*100:5.1f}%")
-    print("\n  Chance is 50% (both classes are balanced). A transfer mean near")
-    print("  chance means the in-domain score is corpus-specific, not 'AI-ness'.")
+    algo = algs[0]["label"] if len(algs) == 1 else f"{len(algs)} algorithms"
+    return (
+        f"{feats} · {algo} · {cfg['model']['n_runs']} seeds · "
+        f"grouped by {cfg['data']['group_col']!r} · "
+        f"{n_corpora} corpora · chance = 50%"
+    )
+
+
+def run_config(cfg_path: Path, cfg: dict, alg_dir: Path) -> None:
+    """Every variant of one config, plus its comparison figures."""
+    alg_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy(cfg_path, alg_dir / "config.yaml")
+    with open(alg_dir / "config.json", "w") as f:
+        json.dump(cfg, f, indent=2)
+
+    group_col: str = cfg["data"]["group_col"]
+    human_label: str = cfg["data"]["human_label"]
+    specs_ds: list[CorpusSpec] = dataset_specs(cfg, BASE_DIR)
+    names = [spec.name for spec in specs_ds]
+    labels = {spec.name: spec.label for spec in specs_ds}
+    fsets = build_feature_sets(cfg)
+    variants = build_variants(cfg)
+    aux = aux_columns(cfg)
+
+    tqdm.write("\n" + "=" * RULE)
+    tqdm.write(f"  ALG ID     : {cfg['alg_id']}")
+    tqdm.write(f"  VARIANTS   : {[v.id for v in variants]}")
+    if len(fsets) > 1:
+        tqdm.write(f"  FEATURES   : {len(fsets)} sets — {[fs.id for fs in fsets]}")
+    elif fsets:
+        tqdm.write(f"  FEATURES   : {list(fsets[0].columns)}")
+    tqdm.write(f"  ALGORITHMS : {[s['id'] for s in algorithm_specs(cfg)]}")
+    if aux:
+        tqdm.write(f"  AUXILIARY  : {aux}  (hybrid entries only)")
+    tqdm.write(
+        f"  SPLIT      : grouped by {group_col!r}, "
+        f"test_size={cfg['model'].get('test_size', 0.30)}, "
+        f"{cfg['model']['n_runs']} seeds (base {cfg['seed']})"
+    )
+    tqdm.write(f"  OUTPUT     : {alg_dir}")
+    tqdm.write("=" * RULE)
+
+    rows: list[dict] = []
+    for fs in tqdm(fsets, desc="Feature sets", unit="set", leave=False):
+        # Load and stack one feature set once; every algorithm on it reuses the
+        # result. The missing-value filter runs over the features and the
+        # auxiliary columns together, so a row a hybrid algorithm cannot use is
+        # absent for the plain ones too and the comparison stays like-for-like.
+        columns = variant_columns(fs, cfg)
+        tqdm.write(f"\n{'─' * 60}\n  feature set: {fs.id}")
+        data = {}
+        for spec in specs_ds:
+            prep = load_prepared(spec, columns, group_col, human_label)
+            tqdm.write(
+                f"  {spec.name:<20} {len(prep.df):>6} rows  {prep.class_counts}"
+            )
+            data[spec.name] = prep.df
+        X_all = {
+            name: stack_features(df, list(fs.columns))[0] for name, df in data.items()
+        }
+
+        for variant in tqdm(
+            [v for v in variants if v.fs_id == fs.id],
+            desc="Variants",
+            unit="var",
+            leave=False,
+        ):
+            hybrid_note = f" + {variant.aux_col}" if variant.aux_col else ""
+            tqdm.write(f"\n→ {variant.id}  ({variant.alg_name}{hybrid_note})")
+            # The resolved set, not the config's diff against the defaults: when
+            # the params came out of a sweep leaderboard this is the line that
+            # confirms the transcription took effect.
+            eff = resolved_params(variant, cfg["seed"])
+            tqdm.write(
+                "   params: " + ", ".join(f"{k}={v}" for k, v in sorted(eff.items()))
+            )
+            out_dir = alg_dir / variant.id
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            payload = run_variant(
+                variant, cfg, X_all, data, names, labels, out_dir
+            )
+            print_matrix(
+                payload["alg_label"], payload["summary"], payload["dataset_names"]
+            )
+
+            # Plot as we go: an interrupted run still leaves finished variants
+            # with their figures.
+            if PLOTS_ENABLED:
+                plot_clf_cd_result(out_dir)
+            row = summarise_variant(payload)
+            if variant.aux_col:
+                # Flags the row for the ranking and the figures: it saw the shared
+                # feature set *and* the score, so it is not on equal footing with
+                # the plain algorithms and must not read as though it were.
+                row["hybrid"] = True
+                row["aux_column"] = variant.aux_col
+            rows.append(row)
+
+        del data, X_all
+
+    # Optional zero-shot score baselines: per enabled family, the source-fit
+    # threshold plus a fixed one per configured cutoff. Binoculars reads low ⇒
+    # machine, the LLM judge high ⇒ machine; the variant carries its own
+    # direction, so both are run by the same loop. Run after the variants so they
+    # show up as extra rows in the comparison.
+    for bl in baseline_specs(cfg):
+        tqdm.write(f"\n→ {bl['label']}  ({describe_variant(bl)})")
+        bl_dir = alg_dir / bl["name"]
+        bl_dir.mkdir(parents=True, exist_ok=True)
+        payload = run_score_baseline(cfg, bl_dir, bl)
+        print_matrix(
+            payload["alg_label"], payload["summary"], payload["dataset_names"]
+        )
+        if PLOTS_ENABLED:
+            plot_clf_cd_result(bl_dir)
+        rows.append(summarise_baseline(payload))
+
+    noun = comparison_noun(cfg)
+    comparison = {
+        "alg_id": cfg["alg_id"],
+        "alg_label": cfg["alg_label"],
+        "noun": noun,
+        "subtitle": comparison_subtitle(cfg, len(names)),
+        "dataset_names": names,
+        "dataset_labels": labels,
+        "classes": BINARY_CLASSES,
+        "config": cfg,
+        "variants": rows,
+    }
+    with open(alg_dir / "variant_comparison.json", "w") as f:
+        json.dump(comparison, f, indent=2)
+
+    print_ranking(cfg["alg_label"], rows, noun=noun)
+    if PLOTS_ENABLED:
+        plot_clf_cd_comparison(alg_dir, comparison)
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 
 def parse_args() -> argparse.Namespace:
@@ -350,10 +661,10 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     add_config_args(p, DEFAULT_CFG_DIR, DEFAULT_RESULTS_DIR)
+    p.add_argument("--dry-run", action="store_true",
+                   help="Run the preflight and stop, without training anything.")
     p.add_argument("--no-plots", action="store_true",
                    help="Write the matrices and JSON but skip the figures.")
-    p.add_argument("--skip-preflight", action="store_true",
-                   help="Start training without checking the configs first.")
     return p.parse_args()
 
 
@@ -361,19 +672,33 @@ def main() -> None:
     args = parse_args()
     cfg_paths = resolve_configs(args)
 
-    if not args.skip_preflight:
-        report, _ = preflight(cfg_paths)
-        print_report(report, "every config, dataset and column")
-        if not report.ok:
-            sys.exit(1)
+    # Every config is checked before any of them trains: a folder-wide run
+    # should not get half-way through and then stop on the last file.
+    report, loaded = preflight(cfg_paths)
+    print_report(report, "every config, dataset, variant and split")
+    if not report.ok:
+        sys.exit(1)
+    if args.dry_run:
+        print("\nDry run — nothing was trained.")
+        return
+
+    if args.no_plots:
+        global PLOTS_ENABLED
+        PLOTS_ENABLED = False
 
     experiment_id = "clf_cd_" + datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_cross_domain(cfg_paths, args.results_dir, experiment_id)
-
     exp_dir = args.results_dir / experiment_id
+    exp_dir.mkdir(parents=True, exist_ok=True)
+
+    for cfg_path, cfg in tqdm(loaded, desc="Configs", unit="cfg"):
+        run_config(cfg_path, cfg, exp_dir / cfg["alg_id"])
+
     print(f"\nDone. Results saved to: {rel(exp_dir)}")
-    if not args.no_plots:
-        plot_clf_cd_results(exp_dir)
+    if args.no_plots:
+        print(
+            "Figures were skipped; draw them with "
+            "epai/ai_detection/train/replot_cross_domain.py"
+        )
 
 
 if __name__ == "__main__":

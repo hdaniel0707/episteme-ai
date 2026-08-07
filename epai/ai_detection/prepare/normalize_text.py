@@ -94,8 +94,8 @@ Usage:
         --suffix norm 
 
     # EVERYTHING ON, all six corpora -- copy-paste. Drop --dry-run to write.
-    # --suffix norm keeps the output names the ones
-    # cfg/ai_detection/train/clf_cd/norm/NORM_luar_crud.yaml already points at.
+    # --suffix norm keeps the output names predictable: point a copy of
+    # cfg/ai_detection/train/clf_cd/clf_cd_example.yaml at the *_norm parquets.
     uv run python epai/ai_detection/prepare/normalize_text.py \
         data/parquet/essay_binox0.parquet \
         data/parquet/reuter_binox0.parquet \
@@ -152,12 +152,14 @@ Then, for each of the six outputs:
     uv run python epai/ai_detection/embed/add_embeddings.py \
         data/parquet/wp_gpt54mini_binox0_norm.parquet --cpu-threads 16 --gpu 0
 
-Then re-run the matrix with CFG_DIR in run_clf_cross_domain.py pointed at
-cfg/ai_detection/train/clf_cd/norm/, which holds the RAW and NORM arms on the
-same seed / split / algorithm, and re-run the step-1 audit on the normalised
-parquets to confirm the artifacts are gone:
+Then re-run the matrix on both arms -- two copies of
+cfg/ai_detection/train/clf_cd/clf_cd_example.yaml differing ONLY in the parquet
+paths (raw vs *_norm) and in `alg_id`, so the seed, split and algorithms are held
+fixed and the difference is the normalisation -- and re-run the step-1 audit on
+the normalised parquets to confirm the artifacts are gone:
+    uv run python epai/ai_detection/train/run_clf_cross_domain.py --cfg RAW.yaml NORM.yaml
     uv run python epai/ai_detection/analyse/analyse_surface_artifacts.py \
-        --config cfg/ai_detection/train/clf_cd/norm/NORM_luar_crud.yaml --tag norm
+        --config NORM.yaml --tag norm
 """
 
 from __future__ import annotations

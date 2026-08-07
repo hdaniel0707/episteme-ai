@@ -43,10 +43,11 @@ wrong and the collapse is caused by something else.
 Nothing is written back to the corpora; the parquets are only read.
 
 Usage:
-    # all six corpora, using the same dataset list and drop_classes as training
+    # the same dataset list and drop_classes as training: any cross-domain
+    # config will do -- only its `data` block is read
     uv run python epai/ai_detection/analyse/analyse_surface_artifacts.py \
-        --config cfg/ai_detection/train/clf_cd/ghostbuster/ALL_logistic.yaml \
-        --compare-matrix results/clf_cd/clf_cd_20260721_121101/ALL_logistic/cross_domain.json
+        --config cfg/ai_detection/train/clf_cd/clf_cd_example.yaml \
+        --compare-matrix results/clf_cd/<experiment>/<alg_id>/<variant>/cross_domain.json
 
     # ad-hoc: a combined parquet becomes one corpus per domain it holds
     uv run python epai/ai_detection/analyse/analyse_surface_artifacts.py \
@@ -59,7 +60,7 @@ Usage:
 
     # after normalising, to confirm the artifacts are actually gone
     uv run python epai/ai_detection/analyse/analyse_surface_artifacts.py \
-        --config cfg/ai_detection/train/clf_cd/norm/NORM_luar_crud.yaml --tag norm
+        --config <a config pointing at the *_norm parquets>.yaml --tag norm
 """
 
 from __future__ import annotations

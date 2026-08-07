@@ -19,18 +19,33 @@ Config shape, in ``data``:
     datasets:
       - name: "essay"                                  # key used in the matrix
         label: "essay (gpt-3.5)"                       # optional, for figures
-        domain: "essay"                                # optional; omit = whole file
+        where: {domain: "essay"}                       # optional; omit = whole file
         drop_classes: []                               # optional generators to skip
 
-``parquet_path`` and ``drop_classes`` may be given once under ``data`` and left
-out of the entries, or repeated per entry, in which case the entry wins. The
-first form is the one to use when every corpus is a domain of one file -- the
+``parquet_path``, ``drop_classes`` and ``where`` may be given once under ``data``
+and left out of the entries, or repeated per entry, in which case the entry wins.
+The first form is the one to use when every corpus is a slice of one file -- the
 path repeated three times says nothing and drifts when the file is renamed; the
 second is for a matrix spanning several files.
 
-``domain`` is optional, so a config that predates the combined parquet keeps
-working unchanged: no domain means the whole file, which is exactly what a
-per-domain parquet holds.
+WHICH SLICE: ``where`` is a mapping of column to the value (or list of values) to
+keep, ANDed across columns. ``domain`` is only the most common column to cut on,
+not a special one, so a matrix can just as well run across generators, sources or
+years -- and the corpora of one run need not be cut on the same column at all::
+
+    - {name: essay_gpt,    where: {domain: essay, generated_by: [human, gpt]}}
+    - {name: essay_claude, where: {domain: essay, generated_by: [human, claude]}}
+
+``domain: essay`` is kept as shorthand for ``where: {domain: essay}``. Both are
+optional, so a config that predates the combined parquet keeps working unchanged:
+no conditions means the whole file, which is exactly what a per-domain parquet
+holds.
+
+Values are compared as strings (``year: 2024`` matches an int column), and
+:func:`check_corpus_files` verifies every value against the file before a row is
+loaded -- a typo is "essay is not one of essai/reuter/wp", not an empty corpus
+twenty minutes into a run. ``drop_classes`` is the complement of ``where``: the
+generators to remove rather than the values to keep.
 
 ORDER OF OPERATIONS, and why it matters: the domain filter and ``drop_classes``
 are applied HERE, before any caller drops rows for missing values. The
@@ -67,13 +82,43 @@ UID_COL = "uid"
 # ---------------------------------------------------------------------------
 
 
+#: One normalised ``where`` condition: a column, and the values kept in it.
+Condition = tuple[str, tuple[str, ...]]
+
+
+def normalise_where(raw, domain=None) -> tuple[Condition, ...]:
+    """A ``where`` mapping (plus the ``domain`` shorthand) as ordered conditions.
+
+    ``{domain: essay, generated_by: [human, gpt]}`` becomes
+    ``(("domain", ("essay",)), ("generated_by", ("human", "gpt")))``: a scalar is
+    a one-value condition, a list is a membership test, and several conditions
+    are ANDed. Config order is kept so messages read the way the file does.
+
+    Values are normalised to strings, and :func:`read_corpus` compares the column
+    as a string too -- the same thing the ``domain`` filter has always done, now
+    applied to every column. It means ``year: 2024`` matches an int column, and
+    it means the preflight's "available: [...]" list is the authority on what a
+    value has to look like.
+    """
+    conds: dict[str, tuple[str, ...]] = {}
+    if isinstance(raw, dict):
+        for col, value in raw.items():
+            values = value if isinstance(value, (list, tuple)) else [value]
+            conds[str(col)] = tuple(str(v) for v in values)
+    # The shorthand loses to an explicit condition on the same column; setting
+    # both is contradictory and check_dataset_specs reports it.
+    if domain is not None and DOMAIN_COL not in conds:
+        conds[DOMAIN_COL] = (str(domain),)
+    return tuple(conds.items())
+
+
 @dataclass(frozen=True)
 class CorpusSpec:
     """One entry of ``data.datasets``, resolved against the project root."""
 
     name: str
     path: Path
-    domain: str | None = None
+    where: tuple[Condition, ...] = ()
     label: str = ""
     drop_classes: tuple[str, ...] = ()
 
@@ -84,14 +129,15 @@ class CorpusSpec:
         base_dir: Path = BASE_DIR,
         default_path: str | None = None,
         default_drop_classes: list[str] | None = None,
+        default_where=None,
     ) -> CorpusSpec:
         """One dataset entry, with the ``data``-level defaults filled in.
 
-        ``parquet_path`` and ``drop_classes`` may be set once under ``data`` and
-        omitted per dataset -- the common case now that three corpora live in one
-        file, where repeating the same path per entry says nothing and drifts
-        when the file is renamed. An entry that names either one wins, so a
-        matrix mixing two combined files stays expressible.
+        ``parquet_path``, ``drop_classes`` and ``where`` may be set once under
+        ``data`` and omitted per dataset -- the common case now that three
+        corpora live in one file, where repeating the same path per entry says
+        nothing and drifts when the file is renamed. An entry that names any of
+        them wins, so a matrix mixing two combined files stays expressible.
         """
         raw = spec.get("parquet_path") or default_path
         if not raw:
@@ -100,23 +146,78 @@ class CorpusSpec:
                 f"'data.parquet_path' is not set either."
             )
         raw_path = Path(str(raw))
-        domain = spec.get("domain")
         drop = spec.get("drop_classes")
         if drop is None:
             drop = default_drop_classes or ()
+        raw_where = spec.get("where")
+        if raw_where is None and spec.get("domain") is None:
+            raw_where = default_where
         return cls(
             name=str(spec["name"]),
             path=raw_path if raw_path.is_absolute() else base_dir / raw_path,
-            domain=str(domain) if domain else None,
+            where=normalise_where(raw_where, spec.get("domain")),
             label=str(spec.get("label") or spec["name"]),
             drop_classes=tuple(drop),
         )
 
     @property
+    def filter_columns(self) -> list[str]:
+        """Columns ``where`` reads, so the pruned parquet read can include them."""
+        return [col for col, _ in self.where]
+
+    @property
+    def domain(self) -> str | None:
+        """The single ``domain`` value this corpus is narrowed to, if any.
+
+        A convenience for the code and messages that still think in domains --
+        ``domain`` is just one column ``where`` can filter on, but it is the one
+        ``combine_domains.py`` writes and the one most corpora are sliced by.
+        """
+        for col, values in self.where:
+            if col == DOMAIN_COL and len(values) == 1:
+                return values[0]
+        return None
+
+    @property
+    def where_str(self) -> str:
+        """The conditions as ``domain=essay, generated_by=human|gpt``."""
+        return ", ".join(f"{c}={'|'.join(v)}" for c, v in self.where)
+
+    @property
     def source(self) -> str:
         """How this corpus is identified in a message: file, and slice of it."""
-        where = f"{self.path.name}"
-        return f"{where} [{DOMAIN_COL}={self.domain}]" if self.domain else where
+        return f"{self.path.name} [{self.where_str}]" if self.where else self.path.name
+
+
+def single_corpus_spec(cfg: dict, base_dir: Path = BASE_DIR) -> CorpusSpec:
+    """The ONE corpus of an in-domain config, where ``data`` *is* the corpus.
+
+    A cross-domain config carries a ``datasets`` list because the point is the
+    matrix between them. An in-domain run has nothing to put in a matrix, so it
+    would be a list of one -- a shape that reads as though a second entry were
+    coming. Instead ``data`` holds the corpus directly: the same
+    ``parquet_path`` / ``where`` / ``drop_classes`` keys, one level up.
+
+    ``name`` and ``label`` default to the file stem, narrowed by the conditions,
+    since there is no sibling corpus to tell it apart from.
+    """
+    data = cfg["data"]
+    where = normalise_where(data.get("where"), data.get("domain"))
+    stem = Path(str(data.get("parquet_path", "corpus"))).stem
+    name = data.get("name") or (
+        "+".join([stem] + [v for _, values in where for v in values]) if where else stem
+    )
+    return CorpusSpec.from_dict(
+        {
+            "name": str(name),
+            "label": str(data.get("label") or name),
+            "parquet_path": data.get("parquet_path"),
+            "where": data.get("where"),
+            "domain": data.get("domain"),
+            "drop_classes": data.get("drop_classes"),
+        },
+        base_dir,
+    )
 
 
 def dataset_specs(cfg: dict, base_dir: Path = BASE_DIR) -> list[CorpusSpec]:
@@ -124,8 +225,9 @@ def dataset_specs(cfg: dict, base_dir: Path = BASE_DIR) -> list[CorpusSpec]:
     data = cfg["data"]
     default_path = data.get("parquet_path")
     default_drop = data.get("drop_classes")
+    default_where = data.get("where")
     return [
-        CorpusSpec.from_dict(spec, base_dir, default_path, default_drop)
+        CorpusSpec.from_dict(spec, base_dir, default_path, default_drop, default_where)
         for spec in data["datasets"]
     ]
 
@@ -142,7 +244,7 @@ class CorpusFrame:
     spec: CorpusSpec
     df: pd.DataFrame
     n_file: int  # rows in the parquet
-    n_domain_dropped: int  # rows belonging to another domain
+    n_filtered: int  # rows the `where` conditions excluded
     n_class_dropped: int  # rows removed by drop_classes
 
     @property
@@ -151,8 +253,8 @@ class CorpusFrame:
 
     def summary(self) -> str:
         parts = [f"{self.n_file} in file"]
-        if self.n_domain_dropped:
-            parts.append(f"{self.n_domain_dropped} other {DOMAIN_COL}s")
+        if self.n_filtered:
+            parts.append(f"{self.n_filtered} outside {self.spec.where_str}")
         if self.n_class_dropped:
             parts.append(f"{self.n_class_dropped} dropped generators")
         return f"{self.n} rows ({', '.join(parts)})"
@@ -161,18 +263,20 @@ class CorpusFrame:
 def read_corpus(
     spec: CorpusSpec, columns: list[str] | None = None, quiet: bool = False
 ) -> CorpusFrame:
-    """Read one corpus: the file, narrowed to its domain, minus its drop_classes.
+    """Read one corpus: the file, narrowed by ``where``, minus its drop_classes.
 
     ``columns`` prunes the read, which is not optional in practice -- the
     combined parquets carry fifteen embeddings and run to hundreds of MB, so a
-    full read per (embedding, dataset) pair would move gigabytes to use one
+    full read per (feature set, dataset) pair would move gigabytes to use one
     column. The columns needed to APPLY the filters are added automatically, so
     a caller only has to name what it wants to train on.
+
+    Every ``where`` condition is a membership test read as strings, so a config
+    filters on any column -- ``domain`` is only the most common one -- and
+    several conditions narrow the corpus in the order the config lists them.
     """
     if columns is not None:
-        needed = list(columns)
-        if spec.domain:
-            needed.append(DOMAIN_COL)
+        needed = list(columns) + spec.filter_columns
         if spec.drop_classes:
             needed.append(CLF_TARGET_COL)
         df = pd.read_parquet(spec.path, columns=list(dict.fromkeys(needed)))
@@ -181,22 +285,26 @@ def read_corpus(
 
     n_file = len(df)
 
-    n_domain_dropped = 0
-    if spec.domain:
-        if DOMAIN_COL not in df.columns:
-            raise KeyError(
-                f"{spec.name}: {spec.path.name} has no {DOMAIN_COL!r} column, but the "
-                f"config asks for {DOMAIN_COL}={spec.domain!r}. Build it with "
-                f"epai/ai_detection/prepare/combine_domains.py, or drop the "
-                f"'{DOMAIN_COL}' key to use the whole file."
+    n_filtered = 0
+    for col, values in spec.where:
+        if col not in df.columns:
+            hint = (
+                f" Build it with epai/ai_detection/prepare/combine_domains.py, or "
+                f"drop the condition to use the whole file."
+                if col == DOMAIN_COL
+                else ""
             )
-        keep = df[DOMAIN_COL].astype(str) == spec.domain
-        n_domain_dropped = int((~keep).sum())
+            raise KeyError(
+                f"{spec.name}: {spec.path.name} has no {col!r} column, but the "
+                f"config filters on {col}={'|'.join(values)}.{hint}"
+            )
+        keep = df[col].astype(str).isin(values)
+        n_filtered += int((~keep).sum())
         df = df.loc[keep].reset_index(drop=True)
         if df.empty:
             raise ValueError(
-                f"{spec.name}: no rows with {DOMAIN_COL}={spec.domain!r} in "
-                f"{spec.path.name}. Available: {sorted(available_domains(spec.path))}"
+                f"{spec.name}: no rows left with {col}={'|'.join(values)} in "
+                f"{spec.path.name}. Available: {sorted(column_values(spec.path, col))}"
             )
 
     n_class_dropped = 0
@@ -209,7 +317,7 @@ def read_corpus(
         spec=spec,
         df=df.reset_index(drop=True),
         n_file=n_file,
-        n_domain_dropped=n_domain_dropped,
+        n_filtered=n_filtered,
         n_class_dropped=n_class_dropped,
     )
 
@@ -228,27 +336,33 @@ def parquet_schema(path: Path) -> tuple[tuple[str, ...], int]:
     return tuple(pf.schema_arrow.names), int(pf.metadata.num_rows)
 
 
-@lru_cache(maxsize=64)
-def available_domains(path: Path) -> tuple[str, ...]:
-    """Domains present in a file, or () if it has no domain column.
+@lru_cache(maxsize=256)
+def column_counts(path: Path, column: str) -> dict[str, int]:
+    """How many rows hold each value of one column, or {} if it is not there.
 
     Reads that one column and nothing else, so it stays cheap enough to run in
-    preflight on a 400 MB file.
+    preflight on a 400 MB file -- and cached, since a config with six datasets
+    filtering on the same column would otherwise re-read it six times.
     """
     columns, _ = parquet_schema(path)
-    if DOMAIN_COL not in columns:
-        return ()
-    values = pd.read_parquet(path, columns=[DOMAIN_COL])[DOMAIN_COL]
-    return tuple(sorted(str(v) for v in values.dropna().unique()))
-
-
-@lru_cache(maxsize=64)
-def domain_row_counts(path: Path) -> dict[str, int]:
-    columns, _ = parquet_schema(path)
-    if DOMAIN_COL not in columns:
+    if column not in columns:
         return {}
-    values = pd.read_parquet(path, columns=[DOMAIN_COL])[DOMAIN_COL].astype(str)
+    values = pd.read_parquet(path, columns=[column])[column].astype(str)
     return {str(k): int(v) for k, v in values.value_counts().items()}
+
+
+def column_values(path: Path, column: str) -> tuple[str, ...]:
+    """The distinct values of one column, sorted. () if the column is absent."""
+    return tuple(sorted(column_counts(path, column)))
+
+
+def available_domains(path: Path) -> tuple[str, ...]:
+    """Domains present in a file, or () if it has no domain column."""
+    return column_values(path, DOMAIN_COL)
+
+
+def domain_row_counts(path: Path) -> dict[str, int]:
+    return column_counts(path, DOMAIN_COL)
 
 
 # ---------------------------------------------------------------------------
@@ -263,11 +377,13 @@ def check_corpus_files(
     emb_cols: tuple[str, ...] | list[str] = (),
     rule: int = 88,
 ) -> None:
-    """Every corpus exists, opens, holds its columns, and has its domain.
+    """Every corpus exists, opens, holds its columns, and has its ``where`` values.
 
-    The domain check is the one worth having: a typo in ``domain:`` selects zero
-    rows, and without this it would surface as an empty-dataset error somewhere
-    inside the first fit instead of as "essay is not one of essai/reuter/wp".
+    The ``where`` check is the one worth having: a typo in a filter value selects
+    zero rows, and without this it would surface as an empty-dataset error
+    somewhere inside the first fit instead of as "essay is not one of
+    essai/reuter/wp". Every condition is checked, not just the first, so one pass
+    reports every typo in the file.
     """
     print(f"{'dataset':<22}{'rows':>9}{'cols':>7}  source")
     print("-" * rule)
@@ -286,30 +402,39 @@ def check_corpus_files(
             print(f"{spec.name:<22}{'-':>9}{'-':>7}  {spec.path}  UNREADABLE")
             continue
 
-        n_shown = n_rows
-        domain_note = ""
-        if spec.domain:
-            if DOMAIN_COL not in columns:
-                report.error(
-                    f"{spec.name}: config asks for {DOMAIN_COL}={spec.domain!r} but "
-                    f"{spec.path.name} has no {DOMAIN_COL!r} column — build it with "
-                    f"prepare/combine_domains.py or drop the key"
+        n_shown, note, ok = n_rows, "", True
+        for col, values in spec.where:
+            if col not in columns:
+                hint = (
+                    " — build it with prepare/combine_domains.py or drop the key"
+                    if col == DOMAIN_COL
+                    else f" — columns are {sorted(columns)[:8]}…"
                 )
-                domain_note = f"  NO {DOMAIN_COL.upper()} COLUMN"
-            else:
-                counts = domain_row_counts(spec.path)
-                if spec.domain not in counts:
-                    report.error(
-                        f"{spec.name}: {DOMAIN_COL}={spec.domain!r} is not in "
-                        f"{spec.path.name}; available: {sorted(counts)}"
-                    )
-                    domain_note = "  UNKNOWN DOMAIN"
-                else:
-                    n_shown = counts[spec.domain]
-                    domain_note = f"  [{DOMAIN_COL}={spec.domain}]"
+                report.error(
+                    f"{spec.name}: config filters on {col}={'|'.join(values)} but "
+                    f"{spec.path.name} has no {col!r} column{hint}"
+                )
+                note, ok = f"  NO {col.upper()} COLUMN", False
+                continue
+            counts = column_counts(spec.path, col)
+            unknown = [v for v in values if v not in counts]
+            if unknown:
+                report.error(
+                    f"{spec.name}: {col}={unknown} not found in {spec.path.name}; "
+                    f"available: {sorted(counts)}"
+                )
+                note, ok = f"  UNKNOWN {col.upper()}", False
+            elif ok:
+                # Rows matching THIS condition. Exact for a single condition (the
+                # usual `domain: essay`); an upper bound once several narrow each
+                # other, which is why stage 3 prints the real post-filter count.
+                n_shown = min(n_shown, sum(counts[v] for v in values))
+
+        if ok and spec.where:
+            note = f"  [{spec.where_str}]" + ("  (≤)" if len(spec.where) > 1 else "")
 
         print(f"{spec.name:<22}{n_shown:>9}{len(columns):>7}  "
-              f"{spec.path}{domain_note}")
+              f"{spec.path}{note}")
 
         missing = [c for c in needed if c not in columns]
         if missing:
@@ -325,6 +450,79 @@ def check_corpus_files(
                     f"epai/ai_detection/embed/add_embeddings.py on this parquet, or "
                     f"drop them from 'embeddings' in the config"
                 )
+
+
+def check_where(raw, context: str, report) -> None:
+    """Validate one ``where`` block's shape. Values are checked against the file
+    later, by :func:`check_corpus_files`, which can list what is actually there.
+    """
+    if raw is None:
+        return
+    if not isinstance(raw, dict):
+        report.error(
+            f"{context} 'where' must be a mapping of column -> value or list of "
+            f"values, got {type(raw).__name__}"
+        )
+        return
+    if not raw:
+        report.error(f"{context} 'where' is empty — omit it to use the whole file")
+        return
+    for col, value in raw.items():
+        if not isinstance(col, str) or not col.strip():
+            report.error(f"{context} 'where' has a non-string column key {col!r}")
+            continue
+        values = value if isinstance(value, (list, tuple)) else [value]
+        if not values:
+            report.error(
+                f"{context} 'where.{col}' is an empty list, which keeps no rows"
+            )
+        if any(isinstance(v, (list, tuple, dict)) for v in values):
+            report.error(
+                f"{context} 'where.{col}' must hold scalars (a value, or a list of "
+                f"values to keep), got {value!r}"
+            )
+
+
+def check_single_corpus(cfg: dict, report) -> None:
+    """Validate ``data`` when it *is* the corpus -- the in-domain config shape.
+
+    The counterpart of :func:`check_dataset_specs`. A ``datasets`` list here is
+    almost certainly a cross-domain config pointed at the wrong runner, so it is
+    named as such rather than ignored.
+    """
+    data = cfg.get("data")
+    if not isinstance(data, dict):
+        report.error("'data' must be a mapping")
+        return
+
+    for key in ("human_label", "group_col", "parquet_path"):
+        if key not in data:
+            report.error(f"data is missing {key!r}")
+
+    if "datasets" in data:
+        report.error(
+            "data has a 'datasets' list, which is the cross-domain shape: an "
+            "in-domain run trains on ONE corpus, so 'data' names it directly "
+            "(parquet_path / where / drop_classes). Run the matrix with "
+            "epai/ai_detection/train/run_clf_cross_domain.py instead"
+        )
+
+    domain = data.get("domain")
+    if domain is not None and (not isinstance(domain, str) or not domain.strip()):
+        report.error(f"data '{DOMAIN_COL}' must be a non-empty string when given")
+    if domain is not None and isinstance(data.get("where"), dict) and (
+        DOMAIN_COL in data["where"]
+    ):
+        report.error(
+            f"data sets both '{DOMAIN_COL}: {domain}' and "
+            f"'where.{DOMAIN_COL}: {data['where'][DOMAIN_COL]}' — 'domain' is "
+            f"shorthand for the same condition, so keep only one"
+        )
+    check_where(data.get("where"), "data", report)
+
+    drop = data.get("drop_classes") or []
+    if not isinstance(drop, (list, tuple)):
+        report.error("data 'drop_classes' must be a list")
 
 
 def check_dataset_specs(cfg: dict, report, min_datasets: int = 2) -> None:
@@ -349,13 +547,14 @@ def check_dataset_specs(cfg: dict, report, min_datasets: int = 2) -> None:
         )
         return
 
-    # `parquet_path` and `drop_classes` may be set once under `data` and left
-    # out of the entries -- the usual shape when every corpus is a domain of one
-    # combined file.
+    # `parquet_path`, `drop_classes` and `where` may be set once under `data` and
+    # left out of the entries -- the usual shape when every corpus is a slice of
+    # one combined file.
     default_path = data.get("parquet_path")
     default_drop = data.get("drop_classes")
     if default_drop is not None and not isinstance(default_drop, (list, tuple)):
         report.error("data 'drop_classes' must be a list when given")
+    check_where(data.get("where"), "data", report)
 
     names: list[str] = []
     for i, spec in enumerate(specs):
@@ -373,6 +572,17 @@ def check_dataset_specs(cfg: dict, report, min_datasets: int = 2) -> None:
         if domain is not None and (not isinstance(domain, str) or not domain.strip()):
             report.error(
                 f"datasets[{i}] '{DOMAIN_COL}' must be a non-empty string when given"
+            )
+        check_where(spec.get("where"), f"datasets[{i}]", report)
+        if domain is not None and isinstance(spec.get("where"), dict) and (
+            DOMAIN_COL in spec["where"]
+        ):
+            # Both name the same column, and they would not agree. Silently
+            # preferring one is how a config comes to describe a run it did not do.
+            report.error(
+                f"datasets[{i}] sets both '{DOMAIN_COL}: {domain}' and "
+                f"'where.{DOMAIN_COL}: {spec['where'][DOMAIN_COL]}' — 'domain' is "
+                f"shorthand for the same condition, so keep only one"
             )
         drop = spec.get("drop_classes") or []
         if not isinstance(drop, (list, tuple)):
@@ -446,7 +656,7 @@ def specs_from_paths(
             # from which corpus?), so the stem stays in the name.
             name = f"{path.stem}:{domain}" if multi_file else domain
             specs.append(CorpusSpec(
-                name=name, path=path, domain=domain, label=name,
+                name=name, path=path, where=((DOMAIN_COL, (domain,)),), label=name,
                 drop_classes=tuple(drop_classes or ()),
             ))
     return specs

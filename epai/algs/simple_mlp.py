@@ -68,8 +68,8 @@ class SimpleMLPAlg(ClfAlgorithm):
     introduced, so existing configs are unaffected.
 
     ``PARAMS`` is ``hidden_dims`` plus every field of ``TrainHParams``, which is
-    exactly the space ``sweep_clf_cross_domain.py`` searches -- so a winning trial's
-    params paste straight into a ``clf_cd_algs`` config entry, and a name that does
+    exactly the space ``run_sweep_cross_domain.py`` searches -- so a winning trial's
+    params paste straight into a config's ``algorithms`` entry, and a name that does
     not belong there is a preflight error rather than a silently ignored key.
     """
 

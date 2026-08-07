@@ -37,8 +37,8 @@ class ClfAlgorithm(ABC):
     Because every subclass reads ``self.params`` with ``.get(name, default)``, a
     key nothing reads has no effect at all and no error either. That is a bad
     trade in this codebase: hyper-parameters are found by the sweep
-    (``sweep_clf_cross_domain.py``) and then transcribed by hand into a
-    ``clf_cd_algs`` config, and a mistranscribed name would quietly train the
+    (``run_sweep_cross_domain.py``) and then transcribed by hand into a
+    cross-domain config, and a mistranscribed name would quietly train the
     *default* model while the results directory still recorded the params that
     were asked for. So each subclass declares ``PARAMS`` -- the names it actually
     reads -- and an entry naming anything else is rejected at construction, which

@@ -1,13 +1,14 @@
 # Regularisation sweep for the MLP on luar_crud, scored on cross-domain transfer.
 #
-# Run by epai/ai_detection/train/sweep_clf_cross_domain.py. Unlike the configs in
-# clf_cd_algs/, this file is NOT a list of algorithms to compare -- it is one
-# algorithm plus a space of hyper-parameters to search over. Everything about the
-# data, the split and the features comes from `base`.
+# Run by epai/ai_detection/train/run_sweep_cross_domain.py -- the only config in
+# this folder, and the sample to copy. Unlike a clf_cd config, this file is NOT a
+# list of algorithms to compare: it is ONE algorithm plus a space of
+# hyper-parameters to search over. Everything about the data, the split and the
+# features comes from `base`.
 #
-#   python -m epai.ai_detection.train.sweep_clf_cross_domain --cfg cfg/ai_detection/train/sweep/luar_mlp_reg.yaml
-#   python -m epai.ai_detection.train.sweep_clf_cross_domain --cfg ... --report
-#   python -m epai.ai_detection.train.sweep_clf_cross_domain --cfg ... --final
+#   python -m epai.ai_detection.train.run_sweep_cross_domain              # this file
+#   python -m epai.ai_detection.train.run_sweep_cross_domain --cfg ... --report
+#   python -m epai.ai_detection.train.run_sweep_cross_domain --cfg ... --final
 #
 # The sweep is resumable: it appends every finished trial to
 # results/sweep_clf_cd/<sweep_id>/trials.jsonl and skips what is already there, so
@@ -19,7 +20,7 @@ sweep_id: "luar_mlp_reg"
 # split. Its `algorithms` list is ignored during the search (the sweep has its
 # own algorithm, below) but is re-used by --final as the untuned reference the
 # tuned model is ranked against.
-base: "cfg/ai_detection/train/clf_cd_algs/luar_crud_algs.yaml"
+base: "cfg/ai_detection/train/clf_cd/clf_cd_example.yaml"
 
 seed: 1234
 

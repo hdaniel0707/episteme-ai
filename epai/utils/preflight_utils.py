@@ -3,19 +3,21 @@ r"""One preflight: collect every problem with a run before anything is fitted.
 The cross-domain runners are slow -- fifteen embedders x nine matrix cells x
 three seeds -- so the failures worth catching are the ones that would otherwise
 surface twenty minutes in: a column missing from the third corpus, a typo in a
-``domain``, an ``ml_alg`` that does not exist, a split that leaves one class
-empty. All three runners used to carry their own copy of this scaffolding, which
-is how they drifted into accepting slightly different configs.
+``domain``, an algorithm name that does not exist, a split that leaves one class
+empty. Three runners used to carry their own copy of this scaffolding, which is
+how they drifted into accepting slightly different configs; they are now one
+runner, and what they shared lives here and in :mod:`epai.utils.cd_core`.
 
 The rule everywhere: run every check to the end, record what failed, print it
 once, and exit before training. A run this long should not be restarted once per
 typo.
 
 Two pieces live here -- :class:`Report`, which accumulates errors and warnings
-against the config file they belong to, and the config-shape checks every runner
-shares. What each runner still owns is what only it understands: the
-``embeddings`` list, the ``algorithms`` list, its baseline blocks. Dataset
-checks live next to the loader, in :mod:`epai.utils.corpus_utils`.
+against the config file they belong to, and the config-shape checks a runner
+shares with the sweep. What a runner still owns is what only it understands: the
+feature axis, the ``algorithms`` list, its baseline blocks. Dataset checks live
+next to the loader, in :mod:`epai.utils.corpus_utils`, and the cross-domain data
+and split checks in :mod:`epai.utils.cd_core`.
 """
 
 from __future__ import annotations
@@ -30,10 +32,6 @@ from epai.utils.config_utils import RESET, YELLOW
 RED = "\033[91m"
 GREEN = "\033[92m"
 RULE = 78
-
-# Classifiers train_utils.build_clf_model knows about. Checked up front so a
-# typo does not survive until the first fit.
-ML_ALGS = ("gradient_boosting", "logistic", "svm", "mlp")
 
 
 @dataclass
@@ -112,24 +110,18 @@ def check_identity(cfg: dict, report: Report) -> None:
         report.error(f"'seed' must be an int, got {type(cfg['seed']).__name__}")
 
 
-def check_model_block(cfg: dict, report: Report, check_alg: bool = True) -> None:
-    """``model.ml_alg`` / ``n_runs`` / ``test_size``, plus the run-size guards."""
+def check_model_block(cfg: dict, report: Report) -> None:
+    """``model.n_runs`` / ``test_size``, plus the run-size guards.
+
+    Which classifier runs is *not* checked here: it is a per-entry ``name`` in
+    the config's ``algorithms`` list, validated against the ``epai/algs``
+    registry (along with its hyper-parameters) by the runner, which is the only
+    place that knows what an entry may contain.
+    """
     model = cfg.get("model")
     if not isinstance(model, dict):
         report.error("'model' must be a mapping")
         return
-
-    if check_alg:
-        ml_alg = model.get("ml_alg")
-        if ml_alg not in ML_ALGS:
-            report.error(f"unknown ml_alg {ml_alg!r}. Choose from: {list(ML_ALGS)}")
-        else:
-            from epai.utils.train_utils import build_clf_model  # noqa: PLC0415
-
-            try:
-                build_clf_model(ml_alg, cfg.get("seed", 0))
-            except Exception as exc:  # a known name that still cannot be built
-                report.error(f"ml_alg {ml_alg!r} cannot be built: {exc}")
 
     n_runs = model.get("n_runs")
     if not isinstance(n_runs, int) or n_runs < 1:

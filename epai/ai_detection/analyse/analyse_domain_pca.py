@@ -35,6 +35,12 @@ Usage:
     # defaults: emb_luar_crud, every plot and table
     uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
         data/parquet/ghostbuster_gpt35t.parquet
+    
+    uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
+            data/parquet/ghostbuster_gpt54mini.parquet
+    
+    uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
+            data/parquet/ghostbuster_gpt54mini_10w.parquet
 
     # another embedding
     uv run python epai/ai_detection/analyse/analyse_domain_pca.py \

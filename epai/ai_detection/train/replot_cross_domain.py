@@ -1,26 +1,31 @@
 """Regenerate cross-domain figures from saved JSON, without retraining.
 
 Walks a results folder and redraws every figure it can from the data already on
-disk -- use it after tweaking anything in the plotting code. It works for both
-result types (``run_clf_cross_domain_embeddings.py`` and
-``run_clf_cross_domain_algs.py``) because it dispatches on the JSON filenames
-they write:
+disk -- use it after tweaking anything in the plotting code, or after a run made
+with ``--no-plots``. It dispatches on the JSON filenames
+``run_clf_cross_domain.py`` writes:
 
   * every ``cross_domain.json`` -> the per-matrix figures (accuracy / macro-F1 /
     summary), via ``plot_clf_cd_result`` on its directory. This covers each
-    embedding / algorithm directory and the ``binoculars`` baseline directory.
-  * every ``embedding_comparison.json`` -> the embedding comparison figures, via
-    ``plot_clf_cd_emb_comparison``.
-  * every ``algorithm_comparison.json`` -> the algorithm comparison figures, via
-    ``plot_clf_cd_alg_comparison``.
+    variant directory and each zero-shot baseline directory.
+  * every ``variant_comparison.json`` -> the comparison figures, via
+    ``plot_clf_cd_comparison``.
+
+The two legacy comparison filenames are still recognised, so result trees
+written before the three runners merged (``results/clf_cd_emb/``,
+``results/clf_cd_algs/``) redraw exactly as they did:
+
+  * ``embedding_comparison.json`` -> ``plot_clf_cd_emb_comparison``
+  * ``algorithm_comparison.json`` -> ``plot_clf_cd_alg_comparison``
 
 The input can be any folder from a single result directory up to the whole
 ``results/`` tree; matching files are found recursively, so the scope replotted
 is exactly the folder you point it at.
 
 Run:
-    uv run python epai/ai_detection/train/replot_cross_domain.py results/clf_cd_algs
-    uv run python epai/ai_detection/train/replot_cross_domain.py results/clf_cd_emb
+    uv run python epai/ai_detection/train/replot_cross_domain.py results/clf_cd
+    uv run python epai/ai_detection/train/replot_cross_domain.py \
+        results/clf_cd/clf_cd_20260807_101500
 """
 
 import argparse
@@ -34,13 +39,22 @@ matplotlib.use("Agg")  # headless: write files, never open a window
 
 from epai.utils.visualization_utils import (  # noqa: E402  (after backend set)
     plot_clf_cd_alg_comparison,
+    plot_clf_cd_comparison,
     plot_clf_cd_emb_comparison,
     plot_clf_cd_result,
 )
 
 CROSS_DOMAIN = "cross_domain.json"
-EMB_COMPARISON = "embedding_comparison.json"
-ALG_COMPARISON = "algorithm_comparison.json"
+
+#: Comparison files, and the function that draws each. A filename maps
+#: unambiguously to a payload shape, so dispatching on it needs no sniffing --
+#: which is also how the two pre-merge shapes keep working: they are simply two
+#: more rows, pointed at the legacy readers that understand their row key.
+COMPARISONS: tuple[tuple[str, str, object], ...] = (
+    ("variant_comparison.json", "cmp", plot_clf_cd_comparison),
+    ("embedding_comparison.json", "emb cmp", plot_clf_cd_emb_comparison),
+    ("algorithm_comparison.json", "alg cmp", plot_clf_cd_alg_comparison),
+)
 
 
 def _load(path: Path) -> dict:
@@ -55,15 +69,10 @@ def replot_folder(root: Path) -> dict[str, int]:
     files directly inside ``root`` as well as in any subdirectory, so pointing at
     a single result directory works just as well as pointing at the whole tree.
     """
-    counts = {
-        "matrices": 0,
-        "embedding_comparison": 0,
-        "algorithm_comparison": 0,
-        "errors": 0,
-    }
+    counts = {"matrices": 0, "comparisons": 0, "errors": 0}
 
-    # Per-matrix figures: one cross_domain.json per embedding / algorithm /
-    # baseline directory. plot_clf_cd_result reads the file from the directory.
+    # Per-matrix figures: one cross_domain.json per variant / baseline directory.
+    # plot_clf_cd_result reads the file from the directory.
     for path in sorted(root.rglob(CROSS_DOMAIN)):
         print(f"[matrix]  {path.parent}")
         try:
@@ -73,25 +82,15 @@ def replot_folder(root: Path) -> dict[str, int]:
             print(f"  [ERROR] {path}: {type(exc).__name__}: {exc}")
             counts["errors"] += 1
 
-    # Comparison figures: the two scripts write different filenames, so each maps
-    # unambiguously to its own plotting function.
-    for path in sorted(root.rglob(EMB_COMPARISON)):
-        print(f"[emb cmp] {path.parent}")
-        try:
-            plot_clf_cd_emb_comparison(path.parent, _load(path))
-            counts["embedding_comparison"] += 1
-        except Exception as exc:
-            print(f"  [ERROR] {path}: {type(exc).__name__}: {exc}")
-            counts["errors"] += 1
-
-    for path in sorted(root.rglob(ALG_COMPARISON)):
-        print(f"[alg cmp] {path.parent}")
-        try:
-            plot_clf_cd_alg_comparison(path.parent, _load(path))
-            counts["algorithm_comparison"] += 1
-        except Exception as exc:
-            print(f"  [ERROR] {path}: {type(exc).__name__}: {exc}")
-            counts["errors"] += 1
+    for filename, tag, draw in COMPARISONS:
+        for path in sorted(root.rglob(filename)):
+            print(f"[{tag}] {path.parent}")
+            try:
+                draw(path.parent, _load(path))
+                counts["comparisons"] += 1
+            except Exception as exc:
+                print(f"  [ERROR] {path}: {type(exc).__name__}: {exc}")
+                counts["errors"] += 1
 
     return counts
 
@@ -116,7 +115,7 @@ def main() -> None:
     print(f"Replotting from: {root}\n")
     counts = replot_folder(root)
 
-    total = counts["matrices"] + counts["embedding_comparison"] + counts["algorithm_comparison"]
+    total = counts["matrices"] + counts["comparisons"]
     if total == 0 and counts["errors"] == 0:
         print(
             f"\nNo cross-domain JSON found under {root}. Point this at a "
@@ -125,9 +124,8 @@ def main() -> None:
         return
 
     print(
-        f"\nDone. Replotted {counts['matrices']} matrix set(s), "
-        f"{counts['embedding_comparison']} embedding comparison(s), "
-        f"{counts['algorithm_comparison']} algorithm comparison(s)."
+        f"\nDone. Replotted {counts['matrices']} matrix set(s) and "
+        f"{counts['comparisons']} comparison(s)."
     )
     if counts["errors"]:
         print(f"{counts['errors']} file(s) failed — see the [ERROR] lines above.")

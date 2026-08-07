@@ -84,6 +84,12 @@ Usage:
         data/parquet/reuter_gpt54mini_binox0.parquet \
         data/parquet/wp_gpt54mini_binox0.parquet \
         -o data/parquet/ghostbuster_gpt54mini.parquet
+    
+    uv run python epai/ai_detection/prepare/combine_domains.py \
+        data/parquet/essay_gpt54mini_binox0_red_200w_binox0.parquet \
+        data/parquet/reuter_gpt54mini_binox0_red_200w_binox0.parquet \
+        data/parquet/wp_gpt54mini_binox0_red_200w_binox0.parquet \
+        -o data/parquet/ghostbuster_gpt54mini_200w.parquet
 
     # keep every generated_by label instead of the default drop list
     uv run python epai/ai_detection/prepare/combine_domains.py ... \

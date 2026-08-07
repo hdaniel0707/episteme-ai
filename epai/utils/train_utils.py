@@ -233,26 +233,11 @@ def split_train_val_test(
     )
 
 
-def build_clf_model(ml_alg: str, seed: int):
-    from sklearn.ensemble import GradientBoostingClassifier
-    from sklearn.linear_model import LogisticRegression
-    from sklearn.neural_network import MLPClassifier
-    from sklearn.svm import SVC
-
-    if ml_alg == "gradient_boosting":
-        return GradientBoostingClassifier(random_state=seed)
-    if ml_alg == "logistic":
-        return LogisticRegression(max_iter=1000, random_state=seed)
-    if ml_alg == "svm":
-        return SVC(random_state=seed)
-    if ml_alg == "mlp":
-        return MLPClassifier(
-            hidden_layer_sizes=(516, 64, 32),
-            activation="relu",
-            solver="adam",
-            max_iter=1000,
-            random_state=seed,
-        )
-    raise ValueError(
-        f"Unknown ml_alg: {ml_alg!r}. Choose from: gradient_boosting, logistic, svm, mlp"
-    )
+# The classifier factory that used to live here (`build_clf_model`, selected by a
+# config's `model.ml_alg`) is gone. Classifiers are now `ClfAlgorithm` subclasses
+# in `epai/algs`, built by `build_algorithm(name, seed, **params)`: they own their
+# own preprocessing and declare which hyper-parameters they read, so a config
+# either takes effect or fails in preflight instead of silently training a
+# default model. `logistic`, `svm` and `gradient_boosting` carry the same
+# defaults the factory did; the sklearn `mlp` it also offered was unused and was
+# dropped rather than ported (see `simple_mlp` for the torch replacement).
