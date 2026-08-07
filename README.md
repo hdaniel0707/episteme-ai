@@ -667,7 +667,7 @@ ai_detection config that globs `data/parquet/`.
 **Every stage writes one parquet holding every domain**, with `domain` as a
 column — the same shape as `ghostbuster_gpt54mini.parquet`. There are no
 per-domain files and no shard directory: `epai/utils/corpus_utils.py` defines a
-corpus as a *slice* of a file (`where: {domain: "Biology"}`), so a per-domain
+corpus as a *slice* of a file (`where: {domain: "biology"}`), so a per-domain
 file would only be a second copy of rows already present. Stage 1 rewrites its
 one output after each domain completes, which is what a crash in domain 9 needs
 — not a set of pieces to reassemble.
@@ -685,9 +685,14 @@ system prompt. The main config points at one with `prompt_config: "0807A"`.
 That id is stamped into every generated row:
 
 ```
+id           = "science:<domain>:<paperId>"       e.g.  science:computer_science:W2143535440
 generated_by = "<model_slug>:<prompt_config>"     e.g.  gpt54mini:0807A
-uid          = "<id>:<generated_by>"              e.g.  science:W2143535440:gpt54mini:0807A
+uid          = "<id>:<generated_by>"              e.g.  science:computer_science:W2143535440:gpt54mini:0807A
 ```
+
+Domain names are slugged (`Computer Science` → `computer_science`) where the
+queries config is loaded, so the `domain` column, the ids and any `where:`
+clause all spell a domain the same way, and no id ever carries a space.
 
 The label is **derived, never typed**, so it cannot disagree with what actually
 produced the row. Checkpoints are keyed on it too, so pointing `prompt_config`

@@ -22,9 +22,15 @@ trim is a surplus trim and never a shortfall.
 Output columns follow the AI-detection corpus convention (``id`` / ``text`` /
 ``generated_by``), so the result drops straight into Stage B of that pipeline:
 
-    id            -> "science:<paperId>"  — shared by the human row and every
-                     AI row generated from it, which is what the per-id
-                     human-vs-AI analyses key on
+    id            -> "science:<domain>:<paperId>"  — shared by the human row and
+                     every AI row generated from it, which is what the per-id
+                     human-vs-AI analyses key on. The domain is in there because
+                     an id is the one part of a row that survives every join and
+                     every report: a bare "science:<paperId>" says which corpus
+                     a row came from but not which of its domains, and anything
+                     reading the domain off the id prefix (combine_domains.py
+                     does, for inputs with no domain column) collapses all five
+                     into one. Slugged, so an id never carries a space.
     text          -> the cleaned abstract, alone (the title is a prompt input,
                      not part of the text being classified)
     generated_by  -> "human"
@@ -35,8 +41,13 @@ Output: data/science/<dataset_id>_human.parquet   (one file, every domain)
         results/science_data/filter/<dataset_id>/ (drop-reason report)
 
 One parquet, with ``domain`` as a column — not one file per domain. Downstream,
-``epai.utils.corpus_utils`` selects a domain with ``where: {domain: "Biology"}``,
+``epai.utils.corpus_utils`` selects a domain with ``where: {domain: "biology"}``,
 so a per-domain file would only be a second copy of rows that are already there.
+
+Domain names are slugged (``Computer Science`` -> ``computer_science``). The
+fetch stage already slugs them via :func:`load_queries`; it is re-applied here,
+where it is idempotent, so that a raw parquet fetched before that was true still
+produces a corpus with one spelling of each domain.
 
 Run (the config defaults to the example in cfg/science_data/):
     uv run python epai/science_data/filter/filter.py
@@ -57,6 +68,7 @@ from tqdm import tqdm
 from epai.science_data.config import (
     BASE_DIR,
     DEFAULT_CFG_PATH,
+    domain_slug,
     filter_config,
     human_path,
     load_pipeline_config,
@@ -76,6 +88,13 @@ RESET = "\033[0m"
 
 RESULTS_DIR = BASE_DIR / "results" / "science_data" / "filter"
 
+# ``id`` = NAMESPACE : domain : paperId. The namespace says which corpus a row
+# came from and keeps these ids from ever colliding with a ghostbuster one; the
+# domain says which slice of it. Same separator as combine_domains.py, which
+# splits ids on it.
+ID_NAMESPACE = "science"
+ID_SEP = ":"
+
 OUT_COLUMNS = [
     "id",
     "text",
@@ -94,6 +113,39 @@ OUT_COLUMNS = [
     "query",
     "also_matched_domains",
 ]
+
+
+def slug_domains(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalise ``domain`` (and the audit trail in ``also_matched_domains``).
+
+    A no-op for anything fetched since :func:`load_queries` started slugging its
+    keys — the slug of a slug is itself. It runs anyway because re-filtering an
+    older raw parquet from local data is a supported thing to do, and a corpus
+    where half the rows say ``Computer Science`` and half say
+    ``computer_science`` is two domains as far as any groupby is concerned.
+
+    Applied before the rules rather than after, so that the drop-reason report
+    and the corpus name their domains the same way.
+    """
+    out = df.copy()
+    out["domain"] = out["domain"].astype(str).map(domain_slug)
+    if "also_matched_domains" in out.columns:
+        out["also_matched_domains"] = (
+            out["also_matched_domains"]
+            .fillna("")
+            .astype(str)
+            .map(lambda s: ",".join(domain_slug(p) for p in s.split(",") if p))
+        )
+
+    renamed = {
+        before: after
+        for before, after in zip(df["domain"].astype(str), out["domain"])
+        if before != after
+    }
+    if renamed:
+        pairs = ", ".join(f"{b} -> {a}" for b, a in sorted(renamed.items()))
+        print(f"Domain names slugged: {pairs}")
+    return out
 
 
 def apply_rules(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
@@ -214,7 +266,7 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = load_pipeline_config(args.cfg)
-    raw = load_parquet(raw_path(cfg))
+    raw = slug_domains(load_parquet(raw_path(cfg)))
 
     scored = apply_rules(raw, cfg)
     write_report(scored, cfg)
@@ -222,7 +274,13 @@ def main() -> None:
     kept = scored[scored["drop_reason"] == ""].copy()
     print(f"\n{len(kept)} admissible of {len(scored)} raw records")
 
-    kept["id"] = "science:" + kept["paper_id"].astype(str)
+    kept["id"] = (
+        ID_NAMESPACE
+        + ID_SEP
+        + kept["domain"].astype(str)
+        + ID_SEP
+        + kept["paper_id"].astype(str)
+    )
     kept["text"] = kept["abstract"]
     kept["generated_by"] = "human"
 

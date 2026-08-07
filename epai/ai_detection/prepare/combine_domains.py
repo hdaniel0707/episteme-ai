@@ -11,8 +11,9 @@ is DROPPED, not carried along:
   uid           ADDED -- ``{id}:{generated_by}``, unique per row
   id            unchanged, still prefixed with the domain (``essay:1``,
                 ``reut:WilliamKazer:9``); NOT unique -- it is the pair key
-  domain        ADDED -- read back off the id prefix, aliased to a full name
-                (``reut`` -> ``reuter``); never guessed from the file name
+  domain        KEPT where the input already has the column, ADDED from the id
+                prefix where it does not, aliased to a full name (``reut`` ->
+                ``reuter``); never guessed from the file name
   text          unchanged
   generated_by  unchanged
   author        DROPPED -- folded into the id first (see below)
@@ -90,6 +91,11 @@ Usage:
         data/parquet/reuter_gpt54mini_binox0_red_200w_binox0.parquet \
         data/parquet/wp_gpt54mini_binox0_red_200w_binox0.parquet \
         -o data/parquet/ghostbuster_gpt54mini_200w.parquet
+    
+    uv run python epai/ai_detection/prepare/combine_domains.py \
+        data/parquet/ghostbuster_gpt54mini.parquet \
+        data/parquet/science_v1_gpt54mini_0807A.parquet \
+        -o data/parquet/aidetect_01.parquet
 
     # keep every generated_by label instead of the default drop list
     uv run python epai/ai_detection/prepare/combine_domains.py ... \
@@ -132,10 +138,11 @@ REQUIRED_COLS = (ID_COL, TEXT_COL, TARGET_COL)
 # (``llm_judge_score_<model>``) or a new embedding comes along for free.
 OPTIONAL_PREFIXES = ("emb_", "binoculars_score", "llm_judge_score")
 
-# Id prefix -> domain name. The prefix is what the prepare_*.py scripts wrote
-# into the ids; the value is what the ``domain`` column should read. Unknown
-# prefixes are kept verbatim (and reported), so a new corpus works without an
-# edit here -- add an entry only to rename it.
+# Domain rename map, applied to whichever source the domain came from. The keys
+# are id prefixes (what the prepare_*.py scripts wrote into the ids) for a file
+# with no ``domain`` column, and the column's own values for a file that has
+# one. Unmapped names are kept verbatim (and reported), so a new corpus works
+# without an edit here -- add an entry only to rename something.
 DOMAIN_ALIASES = {
     "reut": "reuter",
 }
@@ -170,23 +177,55 @@ NON_ALNUM_RE = re.compile(r"[^0-9a-z]+")
 # ---------------------------------------------------------------------------
 
 
+def clean_domain(value: object, aliases: dict[str, str]) -> str | None:
+    """One domain name, trimmed and aliased. ``None`` where there is none."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    name = str(value).strip()
+    if not name:
+        return None
+    return aliases.get(name, name)
+
+
 def domain_of(row_id: str, aliases: dict[str, str]) -> str | None:
     """Domain of one id, read off the segment before the first ``:``.
 
-    The id is the only place the domain is recorded per row; the file name is
-    not, and trusting it would silently mislabel a file that already holds more
-    than one domain (an earlier output of this script, for instance).
+    The fallback for a file with no ``domain`` column of its own. The id is then
+    the only place the domain is recorded per row; the file name is not, and
+    trusting it would silently mislabel a file that already holds more than one
+    domain (an earlier output of this script, for instance).
     """
     if not isinstance(row_id, str) or ID_SEP not in row_id:
         return None
-    prefix = row_id.split(ID_SEP, 1)[0].strip()
-    if not prefix:
-        return None
-    return aliases.get(prefix, prefix)
+    return clean_domain(row_id.split(ID_SEP, 1)[0], aliases)
 
 
 def domains_of(ids: pd.Series, aliases: dict[str, str]) -> pd.Series:
     return ids.map(lambda i: domain_of(i, aliases))
+
+
+def resolve_domains(
+    df: pd.DataFrame, aliases: dict[str, str]
+) -> tuple[pd.Series, str]:
+    """The domain per row, and a word for where it came from.
+
+    The input's own ``domain`` column wins wherever it has a value. An id prefix
+    is a coarser thing than a domain and is not always the same thing at all:
+    a science id is ``science:<domain>:<paperId>``, so its prefix is the corpus
+    and not the domain, and reading it would collapse Biology, Physics and the
+    rest into a single "science" domain -- a LODO split over one domain is not a
+    split. The prefix is used only where there is no column to read, which is
+    the ghostbuster case (``essay:1`` -> ``essay``).
+    """
+    from_id = domains_of(df[ID_COL].astype(str), aliases)
+    if DOMAIN_COL not in df.columns:
+        return from_id, "id prefix"
+
+    given = df[DOMAIN_COL].astype(object).map(lambda d: clean_domain(d, aliases))
+    holes = int(given.isna().sum())
+    if not holes:
+        return given, f"{DOMAIN_COL!r} column"
+    return given.fillna(from_id), f"{DOMAIN_COL!r} column, id prefix for {holes} row(s)"
 
 
 # ---------------------------------------------------------------------------
@@ -362,23 +401,38 @@ def prepare_frame(
         print(f"  {AUTHOR_COL!r}: {have_author} row(s) with an author; "
               f"{changed} id(s) rewritten, {have_author - changed} already carried it")
 
-    # --- domain from the id -------------------------------------------------
-    domains = domains_of(df[ID_COL].astype(str), aliases)
+    # --- domain: the file's own column, else the id prefix ------------------
+    had_domain_col = DOMAIN_COL in df.columns
+    domains, source = resolve_domains(df, aliases)
     unknown = int(domains.isna().sum())
     if unknown:
         sample = df.loc[domains.isna(), ID_COL].astype(str).head(5).tolist()
         raise SystemExit(
-            f"{path.name}: {unknown} id(s) have no '{ID_SEP}'-separated domain "
-            f"prefix, e.g. {sample}. The domain is read off the id, never off the "
-            "file name — fix the ids in the prepare_*.py step that wrote this "
-            "file."
+            f"{path.name}: {unknown} row(s) have no domain — no '{DOMAIN_COL}' "
+            f"column value and no '{ID_SEP}'-separated id prefix to fall back on, "
+            f"e.g. {sample}. The domain is read off the row, never off the file "
+            "name — fix the prepare_*.py step that wrote this file."
         )
     df[DOMAIN_COL] = domains
     counts = Counter(domains)
-    print(f"  {DOMAIN_COL}: " + ", ".join(f"{d}: {n}" for d, n in sorted(counts.items())))
+    print(f"  {DOMAIN_COL} (from {source}): "
+          + ", ".join(f"{d}: {n}" for d, n in sorted(counts.items())))
     if len(counts) > 1:
         print(f"  NOTE  {path.name} already holds {len(counts)} domains; "
               "all of them are carried through.")
+
+    # An id prefix that is not the domain is normal for a corpus whose ids are
+    # namespaced by corpus rather than by domain (science:biology:W... -> the
+    # prefix is "science"), but it is also what a stale prefix looks like, so
+    # say which one won.
+    coarse = sorted({
+        (p, d) for p, d in zip(domains_of(df[ID_COL].astype(str), aliases), domains)
+        if p is not None and p != d
+    })
+    if coarse and had_domain_col:
+        shown = ", ".join(f"{p} -> {d}" for p, d in coarse[:6])
+        print(f"  NOTE  {len(coarse)} id prefix/domain pair(s) differ; the column "
+              f"wins: {shown}{' ...' if len(coarse) > 6 else ''}")
 
     # --- narrow to the output schema ---------------------------------------
     keep = [c for c in df.columns if c == DOMAIN_COL or is_wanted(c, args.extra_cols)]
@@ -621,9 +675,9 @@ def parse_aliases(pairs: list[str]) -> dict[str, str]:
     aliases = dict(DOMAIN_ALIASES)
     for pair in pairs:
         if "=" not in pair:
-            raise SystemExit(f"--domain-alias expects prefix=name, got {pair!r}.")
-        prefix, name = pair.split("=", 1)
-        aliases[prefix.strip()] = name.strip()
+            raise SystemExit(f"--domain-alias expects from=name, got {pair!r}.")
+        source, name = pair.split("=", 1)
+        aliases[source.strip()] = name.strip()
     return aliases
 
 
@@ -642,9 +696,11 @@ def parse_args() -> argparse.Namespace:
                     help="Drop rows whose generated_by is one of these, where "
                     "they exist (default: " + " ".join(DEFAULT_DROP_LABELS) +
                     "). Pass the flag with no values to keep every label.")
-    ap.add_argument("--domain-alias", nargs="*", default=[], metavar="PREFIX=NAME",
-                    help="Map an id prefix to a domain name, e.g. reut=reuter. "
-                    "Unmapped prefixes are used as-is.")
+    ap.add_argument("--domain-alias", nargs="*", default=[], metavar="FROM=NAME",
+                    help="Rename a domain, e.g. reut=reuter or "
+                    "'Computer Science=comp_sci'. FROM is the id prefix for an "
+                    "input with no domain column, and the column's own value for "
+                    "one that has it. Unmapped names are used as-is.")
     ap.add_argument("--require-full-coverage", action="store_true",
                     help="Fail if any kept column is missing from some input, "
                     "instead of reporting it and filling with NaN.")

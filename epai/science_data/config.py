@@ -142,6 +142,11 @@ def load_queries(path: Path) -> dict[str, list[str]]:
     Domain order is preserved, and it matters: cross-domain duplicates are
     resolved first-domain-wins, so a stable order makes the assignment
     reproducible.
+
+    Keys are slugged here, once, so that the name a domain has in the config is
+    turned into the name it has in the corpus in exactly one place —
+    ``Computer Science`` in the YAML, ``computer_science`` in the ``domain``
+    column and in every id from here on.
     """
     with open(path) as f:
         data = yaml.safe_load(f)
@@ -149,11 +154,21 @@ def load_queries(path: Path) -> dict[str, list[str]]:
     queries_domains = data.get("queries_domains")
     if not queries_domains:
         raise ValueError(f"{path}: missing 'queries_domains'")
+
+    slugged: dict[str, list[str]] = {}
     for domain, queries in queries_domains.items():
         if not queries:
             raise ValueError(f"{path}: domain {domain!r} has no queries")
+        slug = domain_slug(domain)
+        if slug in slugged:
+            raise ValueError(
+                f"{path}: domain {domain!r} slugs to {slug!r}, which another "
+                "domain in this file already uses — two domains sharing a name "
+                "would merge into one in the corpus. Rename one of them."
+            )
+        slugged[slug] = queries
 
-    return queries_domains
+    return slugged
 
 
 # ---------------------------------------------------------------------------
@@ -171,7 +186,7 @@ def load_queries(path: Path) -> dict[str, list[str]]:
 # slice of a file, not a file — which is what `epai.utils.corpus_utils` has
 # expected since combine_domains.py folded essay/reuter/wp together, and what
 # the ghostbuster parquets already look like. Selecting one domain downstream
-# is `where: {domain: "Biology"}`, not a different path.
+# is `where: {domain: "biology"}`, not a different path.
 
 SCIENCE_DIR = BASE_DIR / "data" / "science"
 
@@ -245,6 +260,27 @@ def load_prompt_config(cfg: dict) -> dict:
         )
 
     return prompts
+
+
+def domain_slug(domain: str) -> str:
+    """Config domain name -> corpus domain name: ``Computer Science`` ->
+    ``computer_science``.
+
+    The domain is written into the ``id`` (``science:computer_science:W2143…``),
+    and an id is split on ``:`` and read by eye in every report the pipeline
+    prints, so a domain that carries a space or a colon would be a domain that
+    breaks one of those. Lowercase and underscore rather than dropped
+    punctuation (:func:`model_slug`'s rule) because a domain is a phrase and
+    ``computerscience`` is a worse thing to read than a model name is.
+
+    Idempotent: the slug of a slug is itself, which is what lets the filter
+    stage apply it to a raw parquet whether or not the fetch that wrote it
+    already had.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "_", str(domain).lower()).strip("_")
+    if not slug:
+        raise ValueError(f"domain {domain!r} has no alphanumeric characters")
+    return slug
 
 
 def model_slug(model: str) -> str:
