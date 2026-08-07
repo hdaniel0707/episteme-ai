@@ -2,8 +2,7 @@
 *.pyc
 .venv/
 info/
-
-todo.md
+old/
 
 /results/
 /data/
