@@ -15,15 +15,17 @@ measures whether that held:
     tail is what matters.
   - **Longest verbatim run** — a single long quoted span is a leak even when the
     averaged overlap looks fine.
-  - **Digit carry-over** — the spec was told to contain no numeric results, so
-    numbers appearing in both texts indicate the constraint was ignored.
+  - **Digit carry-over** — a coverage check, not a leak check, and the one
+    metric here you want to be *high*. The spec is required to carry the
+    paper's quantitative results, because a generator left to invent figures
+    produces a detectable artifact of its own. A low share means the specs are
+    vague and the AI abstracts are making their numbers up.
 
 The flagged-ids CSV lets you drop or regenerate the offending papers rather
 than discarding the whole run.
 
-Run:
-    python -m epai.science_data.analyse.analyse_prompts \
-        --cfg cfg/science_data/science_cfg_example.yaml [--overlap-threshold 0.10]
+Run (--cfg defaults to the example in cfg/science_data/):
+    uv run python epai/science_data/analyse/analyse_prompts.py [--overlap-threshold 0.10]
 """
 
 from __future__ import annotations
@@ -42,7 +44,7 @@ from epai.science_data.analyse._report import (
     longest_common_run,
     overlap_fraction,
 )
-from epai.science_data.config import load_pipeline_config, prompts_path
+from epai.science_data.config import BASE_DIR, DEFAULT_CFG_PATH, load_pipeline_config, prompts_path
 from epai.utils.parquet_utils import load_parquet
 
 _NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
@@ -50,7 +52,12 @@ _NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cfg", type=Path, required=True)
+    parser.add_argument(
+        "--cfg",
+        type=Path,
+        default=DEFAULT_CFG_PATH,
+        help=f"pipeline config YAML (default: {DEFAULT_CFG_PATH.relative_to(BASE_DIR)})",
+    )
     parser.add_argument(
         "--overlap-threshold",
         type=float,
@@ -128,9 +135,19 @@ def main() -> None:
     n_num = int((df["shared_numbers"] > 0).sum())
     rep.line("")
     rep.line(
-        f"{n_num} spec(s) ({100.0 * n_num / max(len(df), 1):.1f}%) reuse a number "
-        "from the source abstract, despite the instruction not to."
+        f"{n_num} spec(s) ({100.0 * n_num / max(len(df), 1):.1f}%) carry at least "
+        "one number over from the source abstract — which is what the spec "
+        "prompt asks for, so this should be HIGH."
     )
+    if len(df) and n_num / len(df) < 0.5:
+        rep.line("")
+        rep.line(
+            "WARNING: fewer than half the specs carry a number. The generator is "
+            "then inventing figures, which is a detectable artifact of its own "
+            "and makes the human and AI rows of a pair differ in content as well "
+            "as style. Check that the spec prompt still requires the quantitative "
+            "results, and that the source abstracts actually contain any."
+        )
 
     # ------------------------------------------------------------ flagged --
     rep.header("Flagged specs")
@@ -155,7 +172,8 @@ def main() -> None:
         rep.line(
             "WARNING: leakage is above 5%. The generated abstracts will inherit "
             "human phrasing, which weakens the human-vs-AI contrast. Either "
-            "tighten SPEC_SYSTEM_PROMPT in make_prompts.py and regenerate, or "
+            "tighten spec_system_prompt in the prompt config, give it a new id, "
+            "and regenerate, or "
             "drop the flagged ids before training."
         )
 

@@ -5,7 +5,7 @@ That is the Ghostbuster protocol, and it is what separates this corpus from the
 rephrasing setup in ``epai/utils/genai_utils.py``, where the model rewrites the
 human text and the AI class inherits its content and structure.
 
-Work is keyed by ``(id, model, prompt_name)`` and checkpointed per call, so:
+Work is keyed by ``(id, generated_by)`` and checkpointed per call, so:
 
   - a crash costs only the calls in flight;
   - adding a generator to the config later issues only that generator's calls,
@@ -18,18 +18,26 @@ re-evaluates correctly when the generator set changes, instead of baking in
 whichever set happened to run first.
 
 The exported frame carries one human row and one row per generator for each
-id, matching the ``id`` / ``text`` / ``generated_by`` schema of the essay, wp
-and reuter corpora. ``generated_by`` uses each generator's configured ``label``
-(default ``gpt_plain``), which puts it in the "gpt" family that
-``analyse_text_lengths.py`` and ``cfg/colors.yaml`` key on by prefix.
+id, matching the ``uid`` / ``id`` / ``text`` / ``generated_by`` schema of the
+essay, wp and reuter corpora.
 
-Output: data/parquet/<dataset_id>_all_<variant>.parquet
-        data/parquet/<dataset_id>_<domain>_<variant>.parquet
-        data/science/shards/<dataset_id>_generate.jsonl  (resumable checkpoint)
+``generated_by`` is DERIVED, never configured: ``<model_slug>:<prompt_config>``,
+e.g. ``gpt54mini:0807A``. A label that can be typed by hand is the one field in
+the corpus that can disagree with what actually produced the row. It still
+begins with the model family, so ``cfg/colors.yaml`` resolves it by
+longest-prefix exactly as before.
 
-Run:
-    python -m epai.science_data.generate.generate_ai \
-        --cfg cfg/science_data/science_cfg_example.yaml
+``uid`` (``<id>:<generated_by>``) is written here, as soon as a row knows its
+label. ``id`` stays the PAIR key that splits group on.
+
+Output: data/science/<dataset_id>_<variant>.parquet — one file, every domain
+        and both classes, in ghostbuster column order. The last stage, and the
+        only artifact meant to leave data/science/: move it to data/parquet/ by
+        hand once the run looks good.
+        data/science/<dataset_id>_generate.jsonl  (resumable checkpoint)
+
+Run (--cfg defaults to the example in cfg/science_data/):
+    uv run python epai/science_data/generate/generate_ai.py
 """
 
 from __future__ import annotations
@@ -43,19 +51,21 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 from epai.science_data.config import (
+    BASE_DIR,
+    DEFAULT_CFG_PATH,
     final_path,
+    generated_by_label,
     load_pipeline_config,
+    load_prompt_config,
+    prompt_config_path,
     prompts_path,
     shard_path,
 )
 from epai.science_data.llm import Shard, openai_text_call, run_resumable
-from epai.utils.parquet_utils import load_parquet, save_parquet
+from epai.science_data.rules import OPTIONAL_NUMERIC_COLUMNS
+from epai.utils.parquet_utils import coerce_dtypes, load_parquet, save_parquet
 
 load_dotenv()
-
-GENERATION_SYSTEM_PROMPT = """You are a researcher writing the abstract of your own paper.
-
-Write in the register and structure of a real published abstract in the stated field. Output the abstract text only: no title, no "Abstract:" heading, no section labels such as "Background:" or "Methods:", no markdown formatting, no bullet points."""
 
 # The human abstracts had these stripped by rules.clean_abstract, so leaving
 # them in the generated text would create a formatting asymmetry between the
@@ -64,17 +74,33 @@ _LEADING_LABEL_RE = re.compile(r"^\s*(abstract|summary)\b[\s:.\-—]*", re.IGNOR
 _MARKDOWN_RE = re.compile(r"[*_#`]+")
 _WS_RE = re.compile(r"\s+")
 
+# `uid` is unique per row, `id` is the PAIR key shared by a paper's human row
+# and every generated row derived from it. Both are needed and they do
+# different jobs: splits group on `id`, so that a paper never lands on both
+# sides of a split, while `uid` is what identifies a single row. Same
+# convention and same separator as combine_domains.py.
+ID_SEP = ":"
+
+# Ghostbuster convention: uid, id, domain, text, generated_by first, then
+# metadata, then any emb_* a later stage adds. Same front block as
+# `combine_domains.order_columns`, so a science corpus and a ghostbuster one can
+# be eyeballed with the same `df.iloc[:, :5]`.
 OUT_COLUMNS = [
+    "uid",
     "id",
+    "domain",
     "text",
     "generated_by",
+    "doi",
     "title",
+    "author_ids",
+    "author_count",
     "year",
     "venue",
     "citation_count",
-    "influential_citation_count",
+    "fwci",
+    "language",
     "fields_of_study",
-    "domain",
     "query",
     "also_matched_domains",
 ]
@@ -87,23 +113,34 @@ def clean_generated(text: str) -> str:
     return _WS_RE.sub(" ", text).strip()
 
 
-def _key(paper_id: str, model: str, prompt_name: str) -> str:
-    return f"{paper_id}|{model}|{prompt_name}"
+def _key(paper_id: str, label: str) -> str:
+    """Checkpoint key for one call.
+
+    Keyed on the *label* (``gpt54mini:0807A``) rather than the model alone, so
+    the prompt config is part of the identity of a cached call. Editing the
+    prompts and pointing `prompt_config` at a new id therefore re-issues every
+    call, instead of silently reusing text generated under the old prompts —
+    which is the failure this whole labelling scheme exists to prevent.
+    """
+    return f"{paper_id}|{label}"
 
 
-def generate(df: pd.DataFrame, cfg: dict, retry_failed: bool) -> Shard:
+def generate(df: pd.DataFrame, cfg: dict, prompts: dict, retry_failed: bool) -> Shard:
     client = OpenAI()
     shard = Shard(shard_path(cfg, "generate"))
 
     tasks = []
     for gen in cfg["generate"]["generators"]:
-        model, prompt_name = gen["model"], gen["prompt_name"]
+        label = generated_by_label(gen["model"], cfg)
         for row in df.to_dict("records"):
             tasks.append(
                 (
-                    _key(row["id"], model, prompt_name),
+                    _key(row["id"], label),
                     openai_text_call(
-                        client, model, GENERATION_SYSTEM_PROMPT, row["prompt"]
+                        client,
+                        gen["model"],
+                        prompts["generation_system_prompt"],
+                        row["prompt"],
                     ),
                 )
             )
@@ -122,15 +159,14 @@ def generate(df: pd.DataFrame, cfg: dict, retry_failed: bool) -> Shard:
 def export(df: pd.DataFrame, shard: Shard, cfg: dict) -> pd.DataFrame:
     """Assemble human + generated rows, enforcing generator completeness."""
     generators = cfg["generate"]["generators"]
+    labels = [generated_by_label(g["model"], cfg) for g in generators]
     ok = shard.ok_records()
 
     if cfg["generate"].get("require_all_generators", True):
         complete = {
             row_id
             for row_id in df["id"]
-            if all(
-                _key(row_id, g["model"], g["prompt_name"]) in ok for g in generators
-            )
+            if all(_key(row_id, label) in ok for label in labels)
         }
         dropped = len(df) - len(complete)
         if dropped:
@@ -142,31 +178,54 @@ def export(df: pd.DataFrame, shard: Shard, cfg: dict) -> pd.DataFrame:
 
     human = df.copy()
     human["generated_by"] = "human"
-    frames = [human[OUT_COLUMNS]]
+    # reindex, not strict selection: `doi`, `author_ids` and `author_count` are
+    # metadata no stage reads, and a corpus built before they existed carries
+    # none of them — see the same guard in make_prompts.py.
+    frames = [human.reindex(columns=OUT_COLUMNS)]
 
     print("\nExported rows per class:")
-    print(f"  {'human':<20} {len(human):>6} rows")
+    print(f"  {'human':<24} {len(human):>6} rows")
 
-    for gen in generators:
-        model, prompt_name, label = gen["model"], gen["prompt_name"], gen["label"]
+    for label in labels:
         rows = df.copy()
-        texts = [
-            ok.get(_key(row_id, model, prompt_name), {}).get("abstract")
-            for row_id in rows["id"]
-        ]
-        rows["text"] = texts
+        rows["text"] = [ok.get(_key(i, label), {}).get("abstract") for i in rows["id"]]
         rows["generated_by"] = label
         # Only incomplete ids survive to here when require_all_generators is off.
         rows = rows[rows["text"].notna()]
-        frames.append(rows[OUT_COLUMNS])
-        print(f"  {label:<20} {len(rows):>6} rows")
+        frames.append(rows.reindex(columns=OUT_COLUMNS))
+        print(f"  {label:<24} {len(rows):>6} rows")
 
-    return pd.concat(frames, ignore_index=True)
+    # Pin the optional columns after the concat: the AI frames inherit whatever
+    # the human frame had, and an all-null column here would otherwise reach
+    # parquet as Arrow type `null` and refuse to be read beside a corpus that
+    # has values.
+    out = coerce_dtypes(pd.concat(frames, ignore_index=True), OPTIONAL_NUMERIC_COLUMNS)
+
+    # uid last, once every row knows its generated_by. Assigned here rather
+    # than in the clean stage so the row key exists as soon as the row does.
+    out["uid"] = out["id"].astype(str) + ID_SEP + out["generated_by"].astype(str)
+
+    duplicated = out["uid"].duplicated()
+    if duplicated.any():
+        # Two rows with one uid means a paper appeared twice under the same
+        # label — a duplicate that survived the filter stage, not a pair.
+        raise SystemExit(
+            f"{int(duplicated.sum())} duplicate uid(s), e.g. "
+            f"{out.loc[duplicated, 'uid'].head(3).tolist()}. Each (paper, "
+            "generator) must be one row; check the filter stage's dedupe."
+        )
+
+    return out.reindex(columns=OUT_COLUMNS)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cfg", type=Path, required=True, help="pipeline config YAML")
+    parser.add_argument(
+        "--cfg",
+        type=Path,
+        default=DEFAULT_CFG_PATH,
+        help=f"pipeline config YAML (default: {DEFAULT_CFG_PATH.relative_to(BASE_DIR)})",
+    )
     parser.add_argument(
         "--retry-failed",
         action="store_true",
@@ -175,25 +234,31 @@ def main() -> None:
     parser.add_argument(
         "--variant",
         default=None,
-        help="filename suffix, e.g. 'gpt54mini'. Defaults to the single "
-        "generator's label, or 'multi' when several are configured.",
+        help="filename suffix. Defaults to the single generator's label with "
+        "the ':' replaced (gpt54mini_0807A), or 'multi' when several are "
+        "configured.",
     )
     args = parser.parse_args()
 
     cfg = load_pipeline_config(args.cfg)
+    prompts = load_prompt_config(cfg)
     generators = cfg["generate"]["generators"]
+    # ':' is legal in a POSIX filename but confuses shell completion, scp-style
+    # host:path parsing and Windows entirely, so the label's separator becomes
+    # '_' in the filename only. The label itself keeps the colon.
     variant = args.variant or (
-        generators[0]["label"] if len(generators) == 1 else "multi"
+        generated_by_label(generators[0]["model"], cfg).replace(":", "_")
+        if len(generators) == 1
+        else "multi"
     )
+    print(f"Prompt config: {prompt_config_path(cfg).relative_to(BASE_DIR)}")
 
     df = load_parquet(prompts_path(cfg))
-    shard = generate(df, cfg, args.retry_failed)
+    shard = generate(df, cfg, prompts, args.retry_failed)
 
     final = export(df, shard, cfg)
 
     save_parquet(final, final_path(cfg, variant))
-    for domain, group in final.groupby("domain", sort=False):
-        save_parquet(group.reset_index(drop=True), final_path(cfg, variant, domain))
 
     print(f"\nTotal {len(final)} rows, {final['id'].nunique()} papers")
     print(final.groupby(["domain", "generated_by"]).size().to_string())

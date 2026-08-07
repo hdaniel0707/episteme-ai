@@ -17,9 +17,8 @@ learned an artifact, not authorship.
     in one class only and are learnable without any authorship signal.
   - **Degenerate output.** Refusals, truncation and near-empty generations.
 
-Run:
-    python -m epai.science_data.analyse.analyse_generation \
-        --cfg cfg/science_data/science_cfg_example.yaml --variant gpt_plain
+Run (--cfg defaults to the example in cfg/science_data/):
+    uv run python epai/science_data/analyse/analyse_generation.py --variant gpt54mini_0807A
 """
 
 from __future__ import annotations
@@ -35,7 +34,13 @@ from sklearn.metrics import roc_auc_score
 from tqdm import tqdm
 
 from epai.science_data.analyse._report import Report, describe, overlap_fraction
-from epai.science_data.config import final_path, load_pipeline_config
+from epai.science_data.config import (
+    BASE_DIR,
+    DEFAULT_CFG_PATH,
+    final_path,
+    generated_by_label,
+    load_pipeline_config,
+)
 from epai.utils.color_utils import group_color
 from epai.utils.parquet_utils import load_parquet
 
@@ -65,25 +70,30 @@ REFUSAL_RE = re.compile(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cfg", type=Path, required=True)
+    parser.add_argument(
+        "--cfg",
+        type=Path,
+        default=DEFAULT_CFG_PATH,
+        help=f"pipeline config YAML (default: {DEFAULT_CFG_PATH.relative_to(BASE_DIR)})",
+    )
     parser.add_argument(
         "--variant",
         default=None,
         help="filename suffix used at generation time (default: the single "
-        "generator's label, else 'multi')",
+        "generator's label with ':' replaced, else 'multi')",
     )
     args = parser.parse_args()
 
     cfg = load_pipeline_config(args.cfg)
     generators = cfg["generate"]["generators"]
+    ai_labels = [generated_by_label(g["model"], cfg) for g in generators]
     variant = args.variant or (
-        generators[0]["label"] if len(generators) == 1 else "multi"
+        ai_labels[0].replace(":", "_") if len(ai_labels) == 1 else "multi"
     )
 
     df = load_parquet(final_path(cfg, variant))
     rep = Report("generation", cfg["dataset_id"])
     df["words"] = df["text"].fillna("").str.split().str.len()
-    ai_labels = [g["label"] for g in generators]
 
     # ---------------------------------------------------------- composition --
     rep.header("Composition")

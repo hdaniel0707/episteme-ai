@@ -6,7 +6,7 @@ A research platform for studying AI-generated text in scientific literature. The
 |---|---|---|
 | **Citation Impact** | `epai/citation_impact/` | Fetch academic papers from Semantic Scholar and enrich them with LLM-generated synthetic variants and NAIP impact scores. Data pipeline only — its training stage has been removed. |
 | **AI Detection** | `epai/ai_detection/` | Prepare AI-vs-human text corpora (Ghostbuster / Denario), compute embeddings and detector scores, and train classifiers that distinguish human from machine-generated text. The active pipeline. |
-| **Science Data** | `epai/science_data/` | Build a *new* AI-vs-human corpus from Semantic Scholar abstracts under the Ghostbuster protocol: fetch → filter → prompt → generate. The generator sees only the prompt, never the human text. |
+| **Science Data** | `epai/science_data/` | Build a *new* AI-vs-human corpus from OpenAlex abstracts under the Ghostbuster protocol: fetch → filter → prompt → generate. The generator sees only the prompt, never the human text. |
 
 All three draw on the shared library under `epai/utils/` and `epai/algs/`.
 
@@ -64,12 +64,11 @@ episteme-ai/
 │   │
 │   ├── science_data/              # Pipeline 3 — build a new corpus, Ghostbuster protocol
 │   │   ├── fetch/oa_fetch.py      #   Stage 1: OpenAlex → raw parquet
-│   │   ├── fetch/s2_fetch.py      #   Stage 1: Semantic Scholar → raw parquet
-│   │   │                          #   (interchangeable; same output schema)
-│   │   ├── filter/                #   Stage 2: admission rules → N per domain
+│   │   ├── filter/filter.py       #   Stage 2: admission rules → N per domain
 │   │   ├── prompt/make_prompts.py #   Stage 3: one generation prompt per paper
 │   │   ├── generate/generate_ai.py#   Stage 4: prompt → AI abstract
-│   │   └── analyse/               #   per-stage reports
+│   │   ├── analyse/               #   per-stage reports
+│   │   └── run_pipeline.py        #   Runs every stage above, in order
 │   │
 │   ├── algs/                      # Shared: pluggable classifier algorithms
 │   └── utils/                     # Shared: all utility modules
@@ -82,13 +81,14 @@ episteme-ai/
 │   │       train/clf_id/,         #   clf_cd_example.yaml, clf_id_example.yaml,
 │   │       train/sweep/           #   sweep_example.yaml
 │   └── science_data/              # Corpus-building config + query lists
+│       └── prompts/               #   Every prompt sent, one file per prompt_config id
 │
 ├── store/                         # Versioned datasets tracked with Git LFS
 │   └── data/parquet/, sql/
 ├── data/                          # Local working data (gitignored)
 │   ├── sql/                       # SQLite databases (citation impact pipeline)
 │   ├── parquet/                   # Parquet datasets (citation impact + AI detection)
-│   ├── science/                   # Science-data corpus + per-domain shards
+│   ├── science/                   # Science-data pipeline: ALL stages read/write here
 │   ├── ghostbuster-data*/         # Raw Ghostbuster text corpora
 │   └── papers/                    # Downloaded Denario PDFs
 └── results/                       # All experiment outputs (gitignored)
@@ -171,6 +171,8 @@ cp .env_sample .env
 | Variable | Required by | Purpose |
 |---|---|---|
 | `SEMANTIC_SCHOLAR_API_KEY` | `citation_impact/fetch/fetch.py` | Increases the Semantic Scholar API rate limit |
+| `OPENALEX_API_KEY` | `science_data/fetch/oa_fetch.py` | **Optional.** OpenAlex Premium key — raises the rate limit. The free tier returns the same works and fields |
+| `OPENALEX_MAILTO` | `science_data/fetch/oa_fetch.py` | **Optional, not a secret.** Contact address selecting OpenAlex's faster "polite pool"; redundant once a key is set |
 | `OPENAI_API_KEY` | `citation_impact/prepare/prepare_data.py`, `utils/embedding_utils.py` | GPT-4o-mini rephrasing and OpenAI embeddings |
 | `ANTHROPIC_API_KEY` | `citation_impact/prepare/prepare_data.py` | Claude Haiku abstract rephrasing |
 | `GOOGLE_API_KEY` | `citation_impact/prepare/prepare_data.py` | Gemini abstract rephrasing |
@@ -640,46 +642,167 @@ never the human abstract, so the AI class does not inherit the human text's
 content and structure the way a rephrasing setup does.
 
 ```
-[oa_fetch.py]        ← Stage 1: OpenAlex        → data/science/<id>_raw.parquet
-   or                          (stops on the POST-filter count, per domain)
-[s2_fetch.py]        ← Stage 1: Semantic Scholar → same schema, same guarantees
-   ↓
-[filter_abstracts.py]← Stage 2: admission rules → exactly N per domain
-   ↓
+[oa_fetch.py]        ← Stage 1: OpenAlex → <id>_raw.parquet
+   ↓                          (stops on the POST-filter count, per domain)
+[filter.py]          ← Stage 2: admission rules → <id>_human.parquet
+   ↓                          (exactly N records per domain)
 [make_prompts.py]    ← Stage 3: one generation prompt per paper
-   ↓
+   ↓                          <id>_prompts.parquet
 [generate_ai.py]     ← Stage 4: prompt → AI abstract, checkpointed per call
-   ↓  data/science/<id>.parquet
+   ↓                          <id>_<variant>.parquet   ← promote this
 [analyse_{fetch,filter,prompts,generation}.py]   ← per-stage reports
 ```
 
-All five stages read one config (`cfg/science_data/science_cfg_example.yaml`),
-with the domain/query lists in a separate file so they can be swapped
-independently:
+**Everything lives in `data/science/`.** No stage writes to `data/parquet/`.
+Stage 4's output is the only artifact meant to leave, and you move it by hand
+once the run is good:
 
 ```bash
-# Stage 1 — OpenAlex (no API key; set OPENALEX_MAILTO for the polite pool)
-uv run python -m epai.science_data.fetch.oa_fetch \
-    --cfg cfg/science_data/science_cfg_example.yaml \
-    --queries cfg/science_data/queries_example.yaml
-# ...or Semantic Scholar (needs SEMANTIC_SCHOLAR_API_KEY; heavily throttled)
-uv run python -m epai.science_data.fetch.s2_fetch \
-    --cfg cfg/science_data/science_cfg_example.yaml \
-    --queries cfg/science_data/queries_example.yaml
-uv run python -m epai.science_data.filter.filter_abstracts --cfg cfg/science_data/science_cfg_example.yaml
-uv run python -m epai.science_data.prompt.make_prompts    --cfg cfg/science_data/science_cfg_example.yaml
-uv run python -m epai.science_data.generate.generate_ai   --cfg cfg/science_data/science_cfg_example.yaml
-uv run python -m epai.science_data.analyse.analyse_fetch  --cfg cfg/science_data/science_cfg_example.yaml
+mv data/science/science_v1_gpt54mini_0807A.parquet data/parquet/
 ```
 
-### Stage 1: which source?
+That keeps a half-finished or abandoned run from ever being picked up by an
+ai_detection config that globs `data/parquet/`.
 
-`oa_fetch.py` (OpenAlex) and `s2_fetch.py` (Semantic Scholar) are
-interchangeable — same round-robin, same post-filter stop condition, same raw
-schema — so stages 2-4 never learn which one ran. Prefer OpenAlex: no API key,
-and its rate limit is a published limit that backing off actually clears,
-whereas Semantic Scholar sheds load and refuses a large fraction of well-formed
-requests regardless of cadence.
+**Every stage writes one parquet holding every domain**, with `domain` as a
+column — the same shape as `ghostbuster_gpt54mini.parquet`. There are no
+per-domain files and no shard directory: `epai/utils/corpus_utils.py` defines a
+corpus as a *slice* of a file (`where: {domain: "Biology"}`), so a per-domain
+file would only be a second copy of rows already present. Stage 1 rewrites its
+one output after each domain completes, which is what a crash in domain 9 needs
+— not a set of pieces to reassemble.
+
+The two `.jsonl` files in `data/science/` are not corpus shards: they record
+which paid LLM calls have already been made, and deleting one means paying for
+those calls again.
+
+### Prompts are config, and the corpus says which ones it used
+
+Every prompt the pipeline sends lives in `cfg/science_data/prompts/<id>.yaml` —
+the spec system prompt, the generation prompt template, and the generation
+system prompt. The main config points at one with `prompt_config: "0807A"`.
+
+That id is stamped into every generated row:
+
+```
+generated_by = "<model_slug>:<prompt_config>"     e.g.  gpt54mini:0807A
+uid          = "<id>:<generated_by>"              e.g.  science:W2143535440:gpt54mini:0807A
+```
+
+The label is **derived, never typed**, so it cannot disagree with what actually
+produced the row. Checkpoints are keyed on it too, so pointing `prompt_config`
+at a new id re-issues every generation call rather than silently reusing text
+written under the old prompts. It still begins with `gpt`, so `cfg/colors.yaml`
+resolves it to the GPT family by longest-prefix as before.
+
+> **Never edit a prompt file that has already produced a corpus.** Copy it to a
+> new id (`0808A`, …) and point `prompt_config` at the copy. Editing in place
+> makes every existing row's label a lie, and nothing can detect that
+> afterwards. `load_prompt_config` enforces that a file's `id` matches its
+> filename, which catches the copy-but-forgot-to-rename half of this.
+
+Stage 4 writes the corpus in the column order `combine_domains.py` produces —
+`uid, id, domain, text, generated_by`, then metadata — so a science corpus and
+a ghostbuster one can be eyeballed with the same `df.iloc[:, :5]`. It also
+raises on a duplicate `uid`, and `require_all_generators` (on by default) drops
+any paper some generator failed on, so every `id` is a complete pair.
+
+Two fetch-bookkeeping columns ride along: `query` (which search found the
+paper) and `also_matched_domains` (which other domains' queries also matched
+it). `combine_domains.py` drops both when it runs, so they cost nothing
+downstream.
+
+Stage 2 is `filter.py`, not `filter_abstracts.py`: only 5 of its 14 admission
+rules look at the abstract text — the other 9 reject on the id, title, year,
+citation count, FWCI, language label, or a cross-domain duplicate. It filters
+whole records, and also trims each domain to target and reshapes into the
+corpus schema.
+
+All stages read one config (`cfg/science_data/science_cfg_example.yaml`),
+with the domain/query lists in a separate file so they can be swapped
+independently. Every stage defaults `--cfg` to that example.
+
+**One command runs the whole thing**, each analysis report interleaved after
+the stage it describes:
+
+```bash
+uv run python epai/science_data/run_pipeline.py --yes
+```
+
+`--yes` answers the fetch stage's overwrite prompt; without it the run stops to
+ask. The runner ends with a per-stage timing summary and the `mv` that promotes
+the result.
+
+| Flag | |
+|---|---|
+| `--from STAGE` | resume after a failure, e.g. `--from prompts` |
+| `--only STAGE …` | run just these (always in pipeline order) |
+| `--skip-analyse` | drop the four report stages |
+| `--dry-run` | print the commands without running them |
+| `--retry-failed` | forwarded to the two LLM stages |
+
+Stage keys: `fetch`, `analyse-fetch`, `filter`, `analyse-filter`, `prompts`,
+`analyse-prompts`, `generate`, `analyse-generation`.
+
+A failing **analysis** stage is reported and skipped past — a matplotlib
+problem should not discard a completed fetch. A failing **core** stage stops
+the run and prints the `--from` command to resume with, since every stage
+consumes the previous one's output.
+
+Nothing is skipped on the grounds that its output already exists. The stages
+that cost money checkpoint per call and skip completed work from the inside;
+the rest are cheap to redo. Guessing that a parquet on disk is current is how a
+corpus ends up half-built from two different configs.
+
+The stages are also runnable one at a time, which is what the runner does under
+the hood:
+
+```bash
+uv run python epai/science_data/fetch/oa_fetch.py
+uv run python epai/science_data/filter/filter.py
+uv run python epai/science_data/prompt/make_prompts.py
+uv run python epai/science_data/generate/generate_ai.py
+```
+
+Pass `--cfg` (and `--queries`, which stage 1 defaults to
+`queries_example_debug.yaml`) to run anything else:
+
+```bash
+uv run python epai/science_data/fetch/oa_fetch.py \
+    --cfg cfg/science_data/science_cfg_example.yaml \
+    --queries cfg/science_data/queries_example.yaml
+```
+
+### Stage 1: fetching from OpenAlex
+
+The admission rules read `paper_id`, `title`, `abstract`, `year`,
+`citation_count`, **`fwci`** and **`language`** — a record missing FWCI or not
+labelled English is rejected, not merely unannotated. Alongside those:
+
+| Column | From | Notes |
+|---|---|---|
+| `fwci` | `fwci` | **Required.** Field-Weighted Citation Impact: citations against the expectation for work of the same field, type and age, so 1.0 is exactly average and — unlike `citation_count` — it is comparable across domains and years. Null means OpenAlex could not place the work in a field, so there is nothing to normalise against. A genuine `0.0` is kept |
+| `language` | `language` | **Required** to equal `filter.require_language` (`"en"`). Stored as well as enforced, so a `wrong_language` drop is distinguishable from a `not_english` one — the latter is the stopword heuristic disagreeing with OpenAlex's label |
+| `author_ids` | `authorships[].author.id` | A genuine parquet **list** column of short ids (`A5011953697`), in authorship order. Ids not names: a name is not an identity — authors publish under varying forms and different people share names — while an id is stable across a person's papers and resolves at `/authors/<id>` |
+| `author_count` | `len(authorships)` | Counted *before* unresolved authorships are dropped, so this is the honest author count. About 5% of authorships have a name but no author entity, so `len(author_ids)` can be smaller; comparing the two is the only way to spot it |
+| `doi` | `doi` | Bare, no `https://doi.org/` prefix. Empty for the ~8% of works carrying none — not required, since a missing DOI says nothing about whether the abstract is usable |
+| `venue` | `primary_location.source.display_name` | |
+| `fields_of_study` | `topics[].field.display_name` | The *field* level of OpenAlex's domain → field → subfield → topic hierarchy, i.e. broad subject areas |
+
+The exact request field list is `rules.OA_SELECT`, deliberately next to the
+function that reads it. `authorships` is the one expensive field in it — it
+carries institutions, countries and affiliation strings per author, none of
+which are stored — but OpenAlex selects whole top-level fields, so there is no
+ids-only projection.
+
+`require_fwci` and `require_language` are mirrored into server-side filters, so
+non-matching works are never fetched; the row-local rules still re-test every
+record, because correctness here never depends on the API honouring a filter.
+OpenAlex has no "is not null" filter, so FWCI is narrowed with the range
+`fwci:>-1` — deliberately not `>0`, which would drop the very common zero-FWCI
+works and bias the corpus toward cited work. Once the other filters are applied
+(`has_abstract`, `type:article`, pre-2021) requiring FWCI costs only ~0.2% of
+the candidate pool, so it is not a plausible cause of a domain shortfall.
 
 Neither OpenAlex identifier is required. `OPENALEX_API_KEY` is a Premium key
 that raises the rate limit; the free tier returns the same works with the same
@@ -690,30 +813,20 @@ for a keyless run, redundant once a key is set, since the key already
 identifies the caller. Both are sent when present; `--no-api-key` /
 `--no-mailto` ignore them for one run without editing `.env`.
 
-Three differences survive into the parquet:
+One quirk of the source to know about: OpenAlex serves abstracts as an inverted
+index, not as prose, so `abstract_raw` is a reconstruction with normalised
+whitespace rather than the verbatim publisher string. The `abstract` column is
+unaffected — cleaning collapses whitespace anyway.
 
-- `influential_citation_count` is null for OpenAlex rows — no equivalent metric.
-- `fwci` (Field-Weighted Citation Impact, 1.0 = field average) is null for
-  Semantic Scholar rows. It is *not* a stand-in for the influential-citation
-  count: FWCI normalises citation volume by field, type and age, while S2's
-  metric estimates whether a citation mattered to the citing paper. Both
-  columns exist so neither run has to fake the other's.
-- OpenAlex serves abstracts as an inverted index, so `abstract_raw` is a
-  reconstruction with normalised whitespace rather than the verbatim publisher
-  string. `abstract` is identical either way, since cleaning collapses
-  whitespace anyway.
+The raw corpus is keyed only by `dataset_id`, so a re-run replaces the previous
+one; give a new run its own `dataset_id` to keep both. `oa_fetch.py` prompts
+before overwriting an existing raw parquet.
 
-Both sources write to the path `dataset_id` names, so give the two runs
-different `dataset_id` values to keep both corpora on disk; `oa_fetch.py` will
-prompt before overwriting an existing raw parquet.
-
-`s2_hw_fetch.py` and `oa_hw_fetch.py` are standalone one-paper dumps of each
-API, useful for checking what a field actually contains before wiring it into
-`rules.py`:
+`oa_hw_fetch.py` is a standalone one-paper dump of the API, useful for checking
+what a field actually contains before wiring it into `rules.py`:
 
 ```bash
-uv run python -m epai.science_data.fetch.oa_hw_fetch 10.1038/s41562-025-02244-z
-uv run python -m epai.science_data.fetch.s2_hw_fetch
+uv run python epai/science_data/fetch/oa_hw_fetch.py 10.1038/s41562-025-02244-z
 ```
 
 Once exported, the corpus joins the AI-detection pipeline at Stage B (embed) —

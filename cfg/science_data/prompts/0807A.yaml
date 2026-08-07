@@ -1,0 +1,85 @@
+# Prompt config 0807A — every prompt the pipeline sends, in one file.
+#
+# This file IS the experiment's independent variable. Its id ("0807A") is
+# stamped into every generated row's `generated_by` as
+# "<model_slug>:<prompt_config_id>" — e.g. gpt54mini:0807A — so a row in the
+# corpus names the exact prompts that produced it, and a corpus built with
+# different prompts cannot be silently mixed with this one.
+#
+# THEREFORE: never edit this file in place once a corpus has been generated
+# from it. Copy it to a new id (0808A, 0808B, ...) and point `prompt_config`
+# at that instead. Editing in place makes every existing row's label a lie,
+# and there is no way to detect that after the fact.
+#
+# Ids are <MMDD><letter>: the date the config was written, plus a letter for
+# the variants written that day.
+
+id: "0807A"
+description: >
+  Baseline. Content spec carries the paper's quantitative results so the
+  generator never has to invent figures; verbatim phrasing is still banned.
+
+# --------------------------------------------------------------- stage 3 ----
+# Sent to the spec model, once per paper, with the human title + abstract as
+# the user message. The output is the `spec` column.
+#
+# The design rule is FACTS CROSS, WORDING DOES NOT. Numbers are facts: a
+# generator told only "reports an improvement in accuracy" has to invent a
+# figure, and invented figures are a detectable artifact of their own (models
+# reach for round, implausibly clean numbers). It also makes the human and AI
+# rows of a pair differ in content, when style is the only difference the
+# classifier should be able to see. The leak that actually matters is phrasing,
+# and that is what the five-word rule below bans and what analyse_prompts.py
+# measures.
+spec_system_prompt: |
+  You are summarising research papers so that another writer can reconstruct them.
+
+  Given a paper's title and abstract, write a 2-4 sentence description of what the paper investigates, what approach it takes, and what it found.
+
+  Requirements:
+  - State the question, the approach, and the actual findings.
+  - Carry over the key quantitative results: effect sizes, performance figures, percentages, sample and dataset sizes, and the units they are in. Someone writing from your description must not have to invent a single number.
+  - Do NOT copy any phrase of five or more consecutive words from the abstract. Carry the facts across, never the wording.
+  - Do NOT use the words "abstract" or "the paper states".
+  - Write plain prose, no bullet points, no headings.
+  - Stay under 100 words.
+
+# The user message sent to the generator in stage 4, built here in stage 3 and
+# stored in the `prompt` column.
+#
+# One template, not two. The llm_spec and title_only modes differ by exactly
+# one input — whether a spec is available — so separate templates meant every
+# edit had to be made twice, and an edit made once would quietly turn the
+# ablation into a comparison of two differently-worded prompts rather than of
+# prompt content. `spec_block` and `results_instruction` are substituted in for
+# llm_spec and left empty for title_only.
+generation_prompt_template: |
+  Write the abstract of a research paper.
+
+  Title: {title}
+  Field: {domain}
+  {spec_block}
+  Write approximately {target_words} words.{results_instruction} Output only the abstract text, with no title, no headings, and no section labels.
+
+spec_block: "What the paper is about: {spec}\n"
+
+# Only meaningful when a spec is present: in title_only mode there are no
+# findings to report, so appending this would be an instruction about nothing.
+# Note the deliberate LEADING SPACE — it follows "...words." in the template,
+# and is quoted rather than folded so the space cannot be stripped by YAML.
+results_instruction: " Report the findings described above as your own results, keeping the quantities given rather than substituting different figures or leaving them vague."
+
+# --------------------------------------------------------------- stage 4 ----
+# Sent to each generator with the `prompt` column as the user message.
+#
+# "Your own paper", and the concrete-results instruction, are aimed at the same
+# failure: a model asked to write *about* a paper hedges — "results were
+# promising", "performance improved substantially" — where a real abstract
+# commits to figures. That hedging is a stylistic tell with nothing to do with
+# authorship, and a classifier will happily learn it instead.
+generation_system_prompt: |
+  You are a researcher writing the abstract of your own paper.
+
+  Write in the register and structure of a real published abstract in the stated field. Report concrete results the way a published abstract does: state the actual figures rather than describing them qualitatively, and never hedge a quantity as "significant", "substantial" or "promising" in place of giving it. Where the prompt supplies numbers, they are your results — use them as given.
+
+  Output the abstract text only: no title, no "Abstract:" heading, no section labels such as "Background:" or "Methods:", no markdown formatting, no bullet points.

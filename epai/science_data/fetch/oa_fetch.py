@@ -1,14 +1,12 @@
 """Stage 1 — fetch scientific abstracts from OpenAlex.
 
-Same stage, same guarantees, same output as :mod:`s2_fetch`; only the upstream
-API differs. It stops on the *post-filter* count: each incoming record is run
-through the same row-local admission rules the filter stage uses
-(``epai.science_data.rules``), and a domain finishes the moment it has kept
-``target_per_domain × overfetch`` admissible records. The target is set after
-filtering, as intended — no overshoot, and no second scrape to make up a
-shortfall.
+Stops on the *post-filter* count: each incoming record is run through the same
+row-local admission rules the filter stage uses (``epai.science_data.rules``),
+and a domain finishes the moment it has kept ``target_per_domain × overfetch``
+admissible records. The target is set after filtering, as intended — no
+overshoot, and no second scrape to make up a shortfall.
 
-The two mechanisms that hold that guarantee up are unchanged:
+Two mechanisms hold that guarantee up:
 
   - **Round-robin over a domain's queries.** Records are pulled one at a time
     from each query in turn rather than giving each query a fixed quota. If one
@@ -21,36 +19,42 @@ The two mechanisms that hold that guarantee up are unchanged:
 Every record the API returned is written out, including the rejected ones, each
 carrying ``kept`` and ``drop_reason``.
 
-**Why OpenAlex.** Its rate limit is an actual limit rather than load shedding —
-Semantic Scholar refuses a large fraction of well-formed requests no matter how
-slowly you ask — and a key is optional rather than load-bearing: an
-``OPENALEX_API_KEY`` (Premium) raises the limit and is used automatically when
-set, but the free tier serves the same works with the same fields, so a lapsed
-or missing key degrades the run instead of ending it. ``OPENALEX_MAILTO``, a
-plain contact address, selects the faster "polite pool" and is not a secret.
+**Per record**: the fields the rules read — ``paper_id``, ``title``,
+``abstract``, ``year``, ``citation_count``, ``fwci`` and ``language`` — plus
+``doi``, ``author_ids``, ``author_count``, ``venue`` and ``fields_of_study``
+as metadata. ``author_ids`` is a genuine list column of OpenAlex author ids,
+not names: a name is not an identity, whereas ``A5011953697`` is stable across
+a person's papers and resolves at ``/authors/A5011953697``.
 
-Practical differences to expect in the output:
+``fwci`` and ``language`` are *admission rules*, not just columns: a work
+OpenAlex cannot place in a field has no FWCI to normalise against and is
+dropped, as is one whose language label is not English. Both are still stored,
+so the drop report can distinguish a ``wrong_language`` rejection from a
+``not_english`` one (the latter is the stopword heuristic disagreeing with
+OpenAlex's own label).
 
-  - ``influential_citation_count`` is always null (OpenAlex has no equivalent),
-    and ``fwci`` is the reverse — populated here, null for S2 rows.
-  - Abstracts are reconstructed from an inverted index, so the original
-    inter-word whitespace is lost. Irrelevant after cleaning, but it means
-    ``abstract_raw`` here is a reconstruction, not a verbatim publisher string.
-  - Server-side ``has_abstract`` / ``language`` / ``type`` filters mean the
-    fetch yield runs far higher than S2's, so a domain reaches quota in fewer
-    requests.
+**Why OpenAlex.** Its rate limit is an actual limit rather than load shedding,
+and a key is optional rather than load-bearing: an ``OPENALEX_API_KEY``
+(Premium) raises the limit and is used automatically when set, but the free
+tier serves the same works with the same fields, so a lapsed or missing key
+degrades the run instead of ending it. ``OPENALEX_MAILTO``, a plain contact
+address, selects the faster "polite pool" and is not a secret.
 
-Output: data/science/<dataset_id>_raw.parquet
-        data/science/shards/<dataset_id>_raw_<domain>.parquet  (per-domain, crash-safe)
+One quirk of the source worth knowing: abstracts are not served as prose but as
+an inverted index, so ``abstract_raw`` is a reconstruction and the original
+inter-word whitespace is lost. Irrelevant after cleaning, which collapses
+whitespace anyway, but it means ``abstract_raw`` is not a verbatim publisher
+string.
 
-Both write to the path ``dataset_id`` names, exactly as the S2 fetcher does, so
-stage 2 needs no argument to tell them apart. Give the two runs different
-``dataset_id`` values in the config if you want both corpora on disk at once.
+Output: data/science/<dataset_id>_raw.parquet — one file, every domain, with
+``domain`` as a column. It is rewritten after each domain completes, so a crash
+in domain 9 does not cost domains 1-8 and there are no per-domain pieces to
+reassemble afterwards.
 
 Run (both configs default to the examples in cfg/science_data/):
-    python -m epai.science_data.fetch.oa_fetch
+    uv run python epai/science_data/fetch/oa_fetch.py
 
-    python -m epai.science_data.fetch.oa_fetch \
+    uv run python epai/science_data/fetch/oa_fetch.py \
         --cfg cfg/science_data/science_cfg_example.yaml \
         --queries cfg/science_data/queries_example.yaml
 """
@@ -76,17 +80,17 @@ from epai.science_data.config import (
     load_pipeline_config,
     load_queries,
     raw_path,
-    _slug,
 )
 from epai.science_data.rules import (
     OA_SELECT,
+    OPTIONAL_NUMERIC_COLUMNS,
     SeenIndex,
     check_record,
     normalise_record_oa,
     normalise_title,
 )
 from epai.utils.env_utils import doublecheck_env, summarize_value
-from epai.utils.parquet_utils import save_parquet
+from epai.utils.parquet_utils import coerce_dtypes, save_parquet
 from epai.utils.oa_utils import (
     OARateLimitError,
     OARequestError,
@@ -105,15 +109,18 @@ RESET = "\033[0m"
 
 RAW_COLUMNS = [
     "paper_id",
+    "doi",
     "title",
     "abstract",
     "abstract_raw",
     "cleaning_fixes",
+    "author_ids",
+    "author_count",
     "year",
     "venue",
     "citation_count",
-    "influential_citation_count",
     "fwci",
+    "language",
     "fields_of_study",
     "domain",
     "query",
@@ -154,6 +161,29 @@ def _round_robin(iterators: dict[str, object], rate_limited: set[str]):
                 del live[query]
 
 
+def save_raw(records: list[dict], out: Path, quiet: bool = False) -> pd.DataFrame:
+    """Write every record fetched so far to the one raw parquet.
+
+    Called after each domain as a checkpoint and once more at the end, so the
+    file on disk is always a complete, readable corpus of everything fetched up
+    to that point — never a set of pieces that have to be found and stitched
+    back together.
+
+    ``columns=RAW_COLUMNS`` pins the column order and, more importantly, keeps
+    it stable when the first domain happens to contain no records at all.
+    """
+    df = coerce_dtypes(
+        pd.DataFrame.from_records(records, columns=RAW_COLUMNS),
+        OPTIONAL_NUMERIC_COLUMNS,
+    )
+    if quiet:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(out, index=False)
+    else:
+        save_parquet(df, out)
+    return df
+
+
 def _confirm(question: str, assume_yes: bool) -> bool:
     """Ask the user a yes/no question; default is no.
 
@@ -186,7 +216,7 @@ def resolve_session(assume_yes: bool, no_mailto: bool = False, no_api_key: bool 
     Both are sent when present, because sending both costs nothing. A key that
     the API rejects is worse than no key at all — it makes every request fail —
     so when the probe reports ``auth_failed`` the offer is to continue *without*
-    it, exactly as the S2 fetcher does.
+    it.
 
     ``no_mailto`` / ``no_api_key`` ignore whatever is in the environment. They
     need no edit to ``.env`` (a secrets file worth leaving alone) and nothing
@@ -244,9 +274,9 @@ def resolve_session(assume_yes: bool, no_mailto: bool = False, no_api_key: bool 
             "  OPENALEX_API_KEY is set but invalid, expired, or the Premium "
             "subscription has lapsed. Every request will fail while it is "
             "being sent.\n"
-            "  Unlike Semantic Scholar, OpenAlex serves the same works and the "
-            "same fields without a key — dropping it costs rate limit and data "
-            "freshness, nothing else."
+            "  OpenAlex serves the same works and the same fields without a "
+            "key — dropping it costs rate limit and data freshness, nothing "
+            "else."
         )
         if not _confirm("Continue WITHOUT the key?", assume_yes):
             print("Aborted — fix the key and re-run.")
@@ -300,16 +330,25 @@ def fetch_domain(
 
     # Server-side filters save bandwidth only; check_record re-tests every one
     # of these, so correctness never depends on the API honouring them. They
-    # are worth more here than on S2, which cannot filter on abstract presence
-    # at all — most of the S2 fetch yield is lost to abstract-less records.
+    # are what keeps the fetch yield high: `has_abstract` alone removes the
+    # bulk of what would otherwise be fetched and immediately dropped.
     filters = {
         "from_publication_date": f"{rules_cfg.year_min}-01-01",
         "to_publication_date": f"{rules_cfg.year_max}-12-31",
         "has_abstract": "true",
-        "language": "en",
         "type": "article",
         "is_retracted": "false",
     }
+    if rules_cfg.require_language:
+        filters["language"] = rules_cfg.require_language
+    if rules_cfg.require_fwci:
+        # OpenAlex has no "is not null" filter — `fwci:!null` is a 500 and
+        # there is no `has_fwci` field — but FWCI is never negative, so a
+        # ">-1" range excludes exactly the nulls. Deliberately not ">0":
+        # a zero FWCI is the common case (most works have one), and dropping
+        # those would bias the corpus toward cited work in exactly the way
+        # `require_citation_count` is careful not to.
+        filters["fwci"] = ">-1"
 
     kept = 0
     seen_total = 0
@@ -417,19 +456,16 @@ def main() -> None:
     cfg = load_pipeline_config(args.cfg)
     queries_domains = load_queries(args.queries)
 
-    # Both fetchers write to the path `dataset_id` names, so an OpenAlex run
-    # will silently replace an S2 corpus built under the same id. Ask first:
-    # the two are not interchangeable (different abstract provenance, and no
-    # influential-citation counts here), and re-fetching the other one is an
-    # hour you do not get back.
+    # The raw corpus is keyed only by `dataset_id`, so a re-run silently
+    # replaces the previous one. Ask first: a full fetch is an hour you do not
+    # get back, and a corpus built under different queries or thresholds is not
+    # recoverable from the new one.
     out = raw_path(cfg)
     if out.exists():
         print(
             f"\n{YELLOW}{out.relative_to(BASE_DIR)} already exists and will be "
             f"overwritten.{RESET}\n"
-            "  If that file came from s2_fetch.py, the two corpora are not "
-            "interchangeable — give this run its own dataset_id in the config "
-            "to keep both."
+            "  Give this run its own dataset_id in the config to keep both."
         )
         if not _confirm("Overwrite it?", args.yes):
             print("Aborted.")
@@ -439,8 +475,6 @@ def main() -> None:
 
     target = cfg["fetch"]["target_per_domain"]
     quota = math.ceil(target * cfg["fetch"].get("overfetch", 1.2))
-    shard_dir = BASE_DIR / "data" / "science" / "shards"
-    shard_dir.mkdir(parents=True, exist_ok=True)
 
     records: list[dict] = []
     seen = SeenIndex()
@@ -454,7 +488,6 @@ def main() -> None:
     try:
         for domain, queries in domain_bar:
             domain_bar.set_description(f"domain: {domain}")
-            start = len(records)
 
             try:
                 kept, seen_total, rate_limited = fetch_domain(
@@ -474,10 +507,12 @@ def main() -> None:
             if kept < quota:
                 shortfalls.append((domain, kept))
 
-            # Per-domain shard: a crash in domain 9 must not cost domains 1-8.
-            shard = pd.DataFrame.from_records(records[start:])
-            if not shard.empty:
-                shard.to_parquet(shard_dir / f"{cfg['dataset_id']}_raw_{_slug(domain)}.parquet", index=False)
+            # Checkpoint into the one output file rather than a per-domain
+            # shard: a crash in domain 9 must not cost domains 1-8, but that
+            # does not require a second set of files to reassemble afterwards.
+            # Rewriting the whole parquet each time is affordable because it
+            # happens once per domain, not once per record.
+            save_raw(records, out, quiet=True)
 
             time.sleep(cfg["fetch"].get("query_delay", 1.5))
     except KeyboardInterrupt:
@@ -487,8 +522,7 @@ def main() -> None:
         interrupted = True
         print(f"\n{YELLOW}Interrupted — saving the {len(records)} record(s) fetched so far.{RESET}")
 
-    df = pd.DataFrame.from_records(records, columns=RAW_COLUMNS)
-    save_parquet(df, out)
+    df = save_raw(records, out)
 
     if interrupted:
         print(f"Partial raw corpus → {out}")

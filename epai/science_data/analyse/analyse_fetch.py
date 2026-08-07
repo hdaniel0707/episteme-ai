@@ -1,4 +1,4 @@
-"""Stage 5a — what the Semantic Scholar fetch actually returned.
+"""Stage 5a — what the OpenAlex fetch actually returned.
 
 Reads the raw parquet, which holds every record the API returned including the
 rejected ones. The questions it answers: how efficient was each query, which
@@ -9,9 +9,8 @@ first-domain-wins, so a high overlap share means the domains are less separable
 than a LODO/LOGO setup assumes, and the early domains in config order are
 quietly absorbing papers the later ones would also have claimed.
 
-Run:
-    python -m epai.science_data.analyse.analyse_fetch \
-        --cfg cfg/science_data/science_cfg_example.yaml
+Run (--cfg defaults to the example in cfg/science_data/):
+    uv run python epai/science_data/analyse/analyse_fetch.py
 """
 
 from __future__ import annotations
@@ -23,14 +22,19 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 from epai.science_data.analyse._report import Report, describe
-from epai.science_data.config import load_pipeline_config, raw_path
+from epai.science_data.config import BASE_DIR, DEFAULT_CFG_PATH, load_pipeline_config, raw_path
 from epai.science_data.rules import DROP_REASONS
 from epai.utils.parquet_utils import load_parquet
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cfg", type=Path, required=True)
+    parser.add_argument(
+        "--cfg",
+        type=Path,
+        default=DEFAULT_CFG_PATH,
+        help=f"pipeline config YAML (default: {DEFAULT_CFG_PATH.relative_to(BASE_DIR)})",
+    )
     args = parser.parse_args()
 
     cfg = load_pipeline_config(args.cfg)

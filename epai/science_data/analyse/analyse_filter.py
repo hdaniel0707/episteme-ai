@@ -11,9 +11,8 @@ abstracts are systematically longer is fine — but a domain whose abstracts are
 *bimodal* usually means two different abstract conventions got merged, and that
 will show up later as apparent within-domain heterogeneity.
 
-Run:
-    python -m epai.science_data.analyse.analyse_filter \
-        --cfg cfg/science_data/science_cfg_example.yaml
+Run (--cfg defaults to the example in cfg/science_data/):
+    uv run python epai/science_data/analyse/analyse_filter.py
 """
 
 from __future__ import annotations
@@ -26,7 +25,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 from epai.science_data.analyse._report import Report, describe
-from epai.science_data.config import human_path, load_pipeline_config
+from epai.science_data.config import BASE_DIR, DEFAULT_CFG_PATH, human_path, load_pipeline_config
 from epai.utils.parquet_utils import load_parquet
 
 # Patterns that rules.clean_abstract is supposed to have removed. Anything
@@ -47,7 +46,12 @@ RESIDUAL_PATTERNS = {
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cfg", type=Path, required=True)
+    parser.add_argument(
+        "--cfg",
+        type=Path,
+        default=DEFAULT_CFG_PATH,
+        help=f"pipeline config YAML (default: {DEFAULT_CFG_PATH.relative_to(BASE_DIR)})",
+    )
     args = parser.parse_args()
 
     cfg = load_pipeline_config(args.cfg)

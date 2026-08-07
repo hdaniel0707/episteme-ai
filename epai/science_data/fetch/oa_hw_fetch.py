@@ -1,9 +1,9 @@
 """
 Hello-world script for the OpenAlex API — lookup by DOI.
 
-The counterpart to s2_hw_fetch.py: same shape, same DOI, same sectioned dump,
-so the two can be run back to back on one paper and diffed by eye. Standalone
-on purpose (raw `requests`, no project imports) so it can be copied out and run
+Dumps everything OpenAlex holds about one paper, sectioned, so you can see what
+is available before deciding what oa_fetch.py should store. Standalone on
+purpose (raw `requests`, no project imports) so it can be copied out and run
 anywhere.
 
 Credentials, both optional and independent:
@@ -14,22 +14,19 @@ Credentials, both optional and independent:
                       returns the same work with the same fields, so every
                       section below prints identically without it.
 
-What OpenAlex gives that S2 does not:
-    the full topic hierarchy (domain → field → subfield → topic) with scores,
-    SDG mappings, keywords, per-year citation counts, FWCI, institution
-    affiliations with ROR ids, grants, and open-access routing.
-
-What S2 gives that OpenAlex does not:
-    citation *intents* (background/methodology/result), the isInfluential flag,
-    TLDRs, and SPECTER embeddings. The corresponding sections here are
-    replaced, not faked — see "NOT AVAILABLE FROM OPENALEX" at the end.
+Well beyond what stage 1 keeps: the full topic hierarchy (domain → field →
+subfield → topic) with scores, SDG mappings, keywords, per-year citation
+counts, FWCI, institution affiliations with ROR ids, grants, open-access
+routing, and the citing/referenced/related networks. What oa_fetch.py actually
+stores is the short list in `rules.OA_SELECT`; everything else printed here is
+one `select=` edit away.
 
 Usage:
-    python -m epai.science_data.fetch.oa_hw_fetch
-    python -m epai.science_data.fetch.oa_hw_fetch <doi>
+    uv run python epai/science_data/fetch/oa_hw_fetch.py
+    uv run python epai/science_data/fetch/oa_hw_fetch.py <doi>
 
 Example:
-    python -m epai.science_data.fetch.oa_hw_fetch 10.1038/s41562-025-02244-z
+    uv run python epai/science_data/fetch/oa_hw_fetch.py 10.1038/s41562-025-02244-z
 """
 
 import os
@@ -118,10 +115,9 @@ OR_FILTER_MAX = 50
 def get(url, params=None, retries=5):
     """GET with backoff on 429/5xx.
 
-    OpenAlex's limits (10/s, 100k/day) are real limits rather than S2-style
-    load shedding, so backing off actually clears a 429 here — which is why
-    this waits longer per attempt but needs far fewer attempts than the S2
-    hello-world.
+    OpenAlex's limits (10/s, 100k/day) are real limits rather than load
+    shedding, so a 429 means we genuinely went too fast and backing off
+    actually clears it. Hence long waits and a small retry budget.
     """
     params = {**common_params, **(params or {})}
     for attempt in range(retries):
@@ -344,8 +340,8 @@ def print_work(doi):
     if not authorships:
         print("  None")
 
-    # Institution roll-up: OpenAlex resolves affiliations to ROR ids and
-    # countries, which S2 does not do at all.
+    # Institution roll-up: OpenAlex resolves raw affiliation strings to ROR
+    # ids and country codes, so this is a real roll-up, not string matching.
     countries = defaultdict(int)
     for a in authorships:
         for i in a.get("institutions") or []:
@@ -418,10 +414,10 @@ def print_work(doi):
     print(f"  Citations / year      : {total_citations / age:>8.1f}")
 
     # FWCI: citations relative to what similar-age, same-field work receives.
-    # 1.0 is exactly average. Recorded in the raw parquet by oa_fetch.py as its
-    # own `fwci` column — not as a substitute for influential_citation_count,
-    # which measures whether a citation mattered rather than how many arrived.
-    # Null for very recent works and for works OpenAlex cannot place in a field.
+    # 1.0 is exactly average, which is what makes it comparable across domains
+    # and years where the raw count is not. Stored by oa_fetch.py as its own
+    # `fwci` column. Null for very recent works and for works OpenAlex cannot
+    # place in a field.
     fwci = w.get("fwci")
     if fwci is not None:
         print(f"  FWCI                  : {fwci:>8.2f}   (1.00 = field average)")
@@ -488,8 +484,8 @@ def print_work(doi):
         print("  None found")
 
     # ── Citation network shape ────────────────────────────────────────────────
-    # The S2 script slices this by citation intent. OpenAlex has no intents, so
-    # the equivalent summary is by year and venue instead.
+    # Summarised by year and venue. OpenAlex records no citation *intent*
+    # (background/methodology/result), so a citation is a citation here.
     if citing:
         section("CITATION NETWORK")
         by_year = defaultdict(int)
@@ -515,17 +511,18 @@ def print_work(doi):
     else:
         print("  None")
 
-    # ── Coverage gaps vs S2 ───────────────────────────────────────────────────
-    section("NOT AVAILABLE FROM OPENALEX  (present in s2_hw_fetch.py)")
-    print("  Citation intents      : no equivalent (S2: background/methodology/result)")
-    print("  isInfluential flag    : no equivalent; FWCI above is volume, not influence")
-    print("  TLDR summaries        : no equivalent")
-    print("  SPECTER embeddings    : no equivalent — embed the abstract yourself")
-    print("\n  Consequence for the pipeline: the raw schema is shared by both")
-    print("  fetchers, and exactly two columns differ by source —")
-    print("    influential_citation_count : null on OpenAlex rows")
-    print("    fwci                       : null on Semantic Scholar rows")
-    print("  Every other column is populated the same way by both.")
+    # ── Known coverage gaps ───────────────────────────────────────────────────
+    # Worth stating explicitly: each of these is a thing you might reasonably
+    # expect a scholarly API to expose, and looking for it in the JSON above
+    # turns up nothing rather than an empty field.
+    section("NOT AVAILABLE FROM OPENALEX")
+    print("  Citation intents      : none (no background/methodology/result split)")
+    print("  Influential-citation  : none; FWCI above normalises volume, and says")
+    print("                          nothing about whether a citation mattered")
+    print("  TLDR summaries        : none")
+    print("  Text embeddings       : none — embed the abstract yourself")
+    print("  Verbatim abstracts    : reconstructed from an inverted index, so")
+    print("                          inter-word whitespace is lost (see ABSTRACT)")
 
     sep("═")
     print()

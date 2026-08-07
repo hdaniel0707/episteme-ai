@@ -6,14 +6,31 @@
 # "exactly N per domain after filtering" guarantee is void. One file, one set
 # of thresholds, no drift.
 #
-# Run order (stage 1 has two interchangeable implementations — pick one):
-#   python -m epai.science_data.fetch.oa_fetch            --cfg cfg/science_data/science_cfg_example.yaml
-#   python -m epai.science_data.fetch.s2_fetch            --cfg cfg/science_data/science_cfg_example.yaml
-#   python -m epai.science_data.filter.filter_abstracts   --cfg cfg/science_data/science_cfg_example.yaml
-#   python -m epai.science_data.prompt.make_prompts       --cfg cfg/science_data/science_cfg_example.yaml
-#   python -m epai.science_data.generate.generate_ai      --cfg cfg/science_data/science_cfg_example.yaml
+# Run the whole pipeline with one command:
+#   uv run python epai/science_data/run_pipeline.py --yes
+#
+# ...or a stage at a time. --cfg defaults to this file, so it can be left off
+# entirely unless you are running a different config:
+#   uv run python epai/science_data/fetch/oa_fetch.py
+#   uv run python epai/science_data/filter/filter.py
+#   uv run python epai/science_data/prompt/make_prompts.py
+#   uv run python epai/science_data/generate/generate_ai.py
+#
+# Every stage reads and writes inside data/science/. The generate stage's
+# output is the only artifact meant to leave it — move that to data/parquet/
+# by hand once the run is good.
 
 dataset_id: "science_v1"
+
+# Which file in cfg/science_data/prompts/ holds the prompts (without .yaml).
+# It carries every prompt the pipeline sends, and its id is stamped into each
+# generated row as `generated_by` = "<model_slug>:<prompt_config>", e.g.
+# gpt54mini:0807A. So a row names the exact prompts behind it.
+#
+# NEVER edit a prompt file that has already produced a corpus — copy it to a
+# new id and point this at the copy. Editing in place makes every existing
+# row's label a lie, undetectably.
+prompt_config: "0807A"
 
 # ---------------------------------------------------------------- fetch ----
 fetch:
@@ -26,20 +43,15 @@ fetch:
   # against a filter rule you add later, at negligible cost.
   overfetch: 1.2
 
-  # "relevance" (page-based, relevance-ranked) or "bulk" (uncapped paging).
-  # Both fetchers read this, but the ceiling it lifts differs:
-  #   s2_fetch — relevance caps at 1000 hits/query; bulk switches to
-  #              paper/search/bulk, which is term-matched and unordered, so the
-  #              sample changes character as well as size.
-  #   oa_fetch — relevance caps at 10,000 hits/query; bulk switches to cursor
-  #              paging with the *same* query and ordering, so it only lifts
-  #              the cap.
-  # With 5 queries per domain and a target of 1000, relevance has ample
-  # headroom either way; switch to bulk only if a domain reports a shortfall.
+  # "relevance" (page-based, relevance-ranked) or "bulk" (cursor paging).
+  # Relevance caps at 10,000 hits per query; bulk lifts that cap and nothing
+  # else — same query, same ordering — but keeps a server-side position, so it
+  # costs OpenAlex more. With 5 queries per domain and a target of 1000,
+  # relevance has ample headroom; switch to bulk only on a reported shortfall.
   search_mode: "relevance"
 
   # Seconds to sleep between queries, on top of the per-page delay in the API
-  # client (s2_utils / oa_utils).
+  # client (epai/utils/oa_utils.py).
   query_delay: 1.5
 
 # --------------------------------------------------------------- filter ----
@@ -51,7 +63,23 @@ filter:
   min_words: 80
   max_words: 400
   min_title_words: 3
-  require_citation_count: true   # drops null citationCount, keeps genuine zeros
+  require_citation_count: true   # drops null cited_by_count, keeps genuine zeros
+
+  # Field-Weighted Citation Impact must be present. Null means OpenAlex could
+  # not place the work in a field, so there is no expectation to normalise
+  # against. Like the citation count, a genuine 0.0 is kept — most works have
+  # exactly that, and dropping them would bias the corpus toward cited work.
+  require_fwci: true
+
+  # OpenAlex's own language label must equal this. "" disables the check.
+  # Costs roughly nothing at fetch time: oa_fetch mirrors both this and
+  # require_fwci into server-side filters, so non-matching works are never
+  # fetched in the first place. The rule still re-tests every record, because
+  # correctness here never depends on the API honouring a filter.
+  require_language: "en"
+
+  # Independent English check over the abstract prose itself, so a record
+  # mislabelled "en" upstream is still caught.
   min_english_stopwords: 4
   max_non_latin_ratio: 0.10
 
@@ -76,17 +104,20 @@ prompt:
 generate:
   max_workers: 8
 
-  # Add entries here to bring in more generators later. Shards are keyed by
-  # (id, model, prompt_name), so a new generator only issues the calls it is
-  # missing — the existing rows are never regenerated.
+  # Add entries here to bring in more generators later. Checkpoints are keyed
+  # by (id, label), so a new generator only issues the calls it is missing —
+  # the existing rows are never regenerated.
+  #
+  # The `generated_by` label is DERIVED, never typed: "<model_slug>:<prompt_config>",
+  # so gpt-5.4-mini under prompt config 0807A becomes "gpt54mini:0807A". The
+  # whole point is that a label cannot disagree with what actually produced the
+  # row, which a hand-written one can. It still starts with "gpt", so
+  # cfg/colors.yaml resolves it to the GPT family by prefix as before.
+  #
+  # Only `model` is configurable. Two generators must have distinct model slugs
+  # or they would share a label — the config check enforces that.
   generators:
     - model: "gpt-5.4-mini"
-      prompt_name: "plain"
-      # `generated_by` value written to the parquet. "gpt_plain" matches the
-      # Ghostbuster corpora, so this dataset drops straight into the existing
-      # cross-domain configs and into the "gpt" family prefix that
-      # analyse_text_lengths.py and cfg/colors.yaml key on.
-      label: "gpt_plain"
 
   # Drop any paper for which some generator failed, so every id carries a
   # complete set of rows. Applied at export, not during generation.

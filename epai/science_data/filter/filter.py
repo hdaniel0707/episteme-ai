@@ -1,10 +1,19 @@
-"""Stage 2 — filter the raw corpus down to exactly N human abstracts per domain.
+"""Stage 2 — reduce the raw corpus to exactly N human records per domain.
 
-This stage re-runs the *same* admission rules the fetcher used, over the raw
-parquet, and then trims each domain's surplus back to ``target_per_domain``.
-Re-running rather than trusting the ``kept`` flag written at fetch time is the
-point: it means you can tighten a threshold in the config and rebuild the
-corpus from local data, with no API calls at all.
+Three jobs, in order: re-run the admission rules over every raw record, trim
+each domain's surplus back to ``target_per_domain``, and reshape what survives
+into the AI-detection corpus schema.
+
+Despite the name of the rules it applies, this is a *record* filter, not an
+abstract filter. Only 5 of the 14 drop reasons look at the abstract text
+(missing, truncated, too short, too long, not English); the other 9 reject on
+the id, the title, the year, the citation count, the FWCI, the language label,
+or a duplicate already claimed by an earlier domain. A record is admitted as a
+whole or not at all.
+
+Re-running the rules rather than trusting the ``kept`` flag written at fetch
+time is the point: it means you can tighten a threshold in the config and
+rebuild the corpus from local data, with no API calls at all.
 
 Because the fetcher already stopped on the post-filter count, every domain
 arrives here with at least its target (fetch fails loudly otherwise), so the
@@ -19,14 +28,20 @@ Output columns follow the AI-detection corpus convention (``id`` / ``text`` /
     text          -> the cleaned abstract, alone (the title is a prompt input,
                      not part of the text being classified)
     generated_by  -> "human"
-    title, year, venue, citation_count, domain, query  — carried along
+    doi, title, author_ids, author_count, year, venue, citation_count, fwci,
+    language, fields_of_study, domain, query  — carried along
 
-Output: data/parquet/<dataset_id>_all.parquet     (every domain)
-        data/parquet/<dataset_id>_<domain>.parquet (one per domain)
-        results/science_data/filter/<dataset_id>/  (drop-reason report)
+Output: data/science/<dataset_id>_human.parquet   (one file, every domain)
+        results/science_data/filter/<dataset_id>/ (drop-reason report)
 
-Run:
-    python -m epai.science_data.filter.filter_abstracts \
+One parquet, with ``domain`` as a column — not one file per domain. Downstream,
+``epai.utils.corpus_utils`` selects a domain with ``where: {domain: "Biology"}``,
+so a per-domain file would only be a second copy of rows that are already there.
+
+Run (the config defaults to the example in cfg/science_data/):
+    uv run python epai/science_data/filter/filter.py
+
+    uv run python epai/science_data/filter/filter.py \
         --cfg cfg/science_data/science_cfg_example.yaml
 """
 
@@ -41,6 +56,7 @@ from tqdm import tqdm
 
 from epai.science_data.config import (
     BASE_DIR,
+    DEFAULT_CFG_PATH,
     filter_config,
     human_path,
     load_pipeline_config,
@@ -48,11 +64,12 @@ from epai.science_data.config import (
 )
 from epai.science_data.rules import (
     DROP_REASONS,
+    OPTIONAL_NUMERIC_COLUMNS,
     SeenIndex,
     check_record,
     normalise_title,
 )
-from epai.utils.parquet_utils import load_parquet, save_parquet
+from epai.utils.parquet_utils import coerce_dtypes, load_parquet, save_parquet
 
 RED = "\033[91m"
 RESET = "\033[0m"
@@ -63,12 +80,15 @@ OUT_COLUMNS = [
     "id",
     "text",
     "generated_by",
+    "doi",
     "title",
+    "author_ids",
+    "author_count",
     "year",
     "venue",
     "citation_count",
-    "influential_citation_count",
     "fwci",
+    "language",
     "fields_of_study",
     "domain",
     "query",
@@ -142,9 +162,9 @@ def trim_to_target(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
 def write_report(raw: pd.DataFrame, cfg: dict) -> None:
     """Save the drop-reason breakdown — overall, and per domain.
 
-    The most useful artifact of the whole stage: it tells you what S2 actually
-    returned and which rule is doing the work, which is exactly what you need
-    to know before trusting the corpus.
+    The most useful artifact of the whole stage: it tells you what OpenAlex
+    actually returned and which rule is doing the work, which is exactly what
+    you need to know before trusting the corpus.
     """
     out_dir = RESULTS_DIR / cfg["dataset_id"]
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -185,7 +205,12 @@ def write_report(raw: pd.DataFrame, cfg: dict) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cfg", type=Path, required=True, help="pipeline config YAML")
+    parser.add_argument(
+        "--cfg",
+        type=Path,
+        default=DEFAULT_CFG_PATH,
+        help=f"pipeline config YAML (default: {DEFAULT_CFG_PATH.relative_to(BASE_DIR)})",
+    )
     args = parser.parse_args()
 
     cfg = load_pipeline_config(args.cfg)
@@ -201,18 +226,19 @@ def main() -> None:
     kept["text"] = kept["abstract"]
     kept["generated_by"] = "human"
 
-    # reindex rather than plain selection: `fwci` (OpenAlex) and
-    # `influential_citation_count` (Semantic Scholar) each exist for one source
-    # only, and a raw parquet fetched before either column was introduced has
-    # neither. Filling those with null is right; failing the whole stage over a
-    # metadata column that no rule reads is not. A column the rules *do* read
-    # cannot go missing unnoticed — check_record above would have dropped every
-    # row for it first.
-    final = trim_to_target(kept, cfg).reindex(columns=OUT_COLUMNS)
+    # reindex rather than plain selection: a raw parquet fetched before a
+    # metadata column was introduced does not carry it (`doi`, `author_ids`
+    # and `author_count` were all added after the first corpora were built).
+    # Filling those with null is right; failing the whole stage over a metadata
+    # column that no rule reads is not. A column the rules *do* read cannot go
+    # missing unnoticed — check_record above would have dropped every row for
+    # it first, and `fwci`/`language` are now among them.
+    final = coerce_dtypes(
+        trim_to_target(kept, cfg).reindex(columns=OUT_COLUMNS),
+        OPTIONAL_NUMERIC_COLUMNS,
+    )
 
     save_parquet(final, human_path(cfg))
-    for domain, group in final.groupby("domain", sort=False):
-        save_parquet(group.reset_index(drop=True), human_path(cfg, domain))
 
     print("\nPer-domain counts:")
     print(final["domain"].value_counts().to_string())

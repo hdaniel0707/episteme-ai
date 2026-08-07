@@ -13,9 +13,9 @@
 #     narrow query that runs dry costs nothing — the others absorb its share.
 #     Prefer more queries per domain over broader ones.
 #
-# With relevance search each query is capped at 1000 hits, so a domain's
-# ceiling is roughly (queries × 1000 × filter yield). Five queries at the ~50%
-# yield typical of S2 abstracts leaves ample headroom for 1000 kept per domain.
+# With relevance search each query is capped at 10,000 hits, so a domain's
+# ceiling is roughly (queries × 10,000 × filter yield). Five queries leaves
+# ample headroom for 1000 kept per domain.
 
 queries_domains:
   Physics:

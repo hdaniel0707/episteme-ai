@@ -55,12 +55,27 @@ class FilterConfig:
     # Titles that are a bare word or two are usually parse errors upstream.
     min_title_words: int = 3
 
-    # A record with no citationCount field at all is dropped; a genuine zero is
-    # kept. Dropping zeros would bias the corpus toward well-cited work, which
-    # correlates with venue prestige and writing polish.
+    # A record with no citation count field at all is dropped; a genuine zero
+    # is kept. Dropping zeros would bias the corpus toward well-cited work,
+    # which correlates with venue prestige and writing polish.
     require_citation_count: bool = True
 
-    # English heuristic (no language-detection dependency in this project).
+    # Same rule, same reasoning, for Field-Weighted Citation Impact: null means
+    # OpenAlex could not place the work in a field, so there is no expectation
+    # to normalise against. A genuine 0.0 is kept — most works have exactly
+    # that, and dropping them would reintroduce the very bias the citation-count
+    # rule avoids.
+    require_fwci: bool = True
+
+    # The language OpenAlex assigned to the work. Enforced as a rule rather
+    # than trusted from the server-side filter, on the same principle as every
+    # other threshold here. Empty string disables the check.
+    require_language: str = "en"
+
+    # English heuristic over the abstract text itself (no language-detection
+    # dependency in this project). Not redundant with `require_language`: that
+    # one tests OpenAlex's metadata label, this one tests the prose, and a
+    # mislabelled record fails only the second.
     min_english_stopwords: int = 4
     max_non_latin_ratio: float = 0.10
 
@@ -170,7 +185,7 @@ def as_text(value) -> str:
 
 
 def clean_abstract(raw: str | None) -> tuple[str, list[str]]:
-    """Normalise an S2 abstract; return ``(cleaned_text, applied_fixes)``.
+    """Normalise an abstract; return ``(cleaned_text, applied_fixes)``.
 
     ``applied_fixes`` names each transformation that actually changed the text,
     so the filter analysis can report how dirty the raw corpus was.
@@ -297,6 +312,8 @@ DROP_REASONS = (
     "missing_year",
     "year_out_of_range",
     "missing_citation_count",
+    "missing_fwci",
+    "wrong_language",
     "truncated_abstract",
     "abstract_too_short",
     "abstract_too_long",
@@ -308,9 +325,9 @@ DROP_REASONS = (
 def check_record(record: dict, cfg: FilterConfig) -> str | None:
     """Return a drop reason for *record*, or ``None`` if it is admissible.
 
-    Expects a cleaned record as produced by :func:`normalise_record` (i.e. the
-    abstract already run through :func:`clean_abstract`). Duplicates are *not*
-    checked here — that needs the caller's :class:`SeenIndex`.
+    Expects a cleaned record as produced by :func:`normalise_record_oa` (i.e.
+    the abstract already run through :func:`clean_abstract`). Duplicates are
+    *not* checked here — that needs the caller's :class:`SeenIndex`.
     """
     if not as_text(record.get("paper_id")):
         return "missing_paper_id"
@@ -334,8 +351,14 @@ def check_record(record: dict, cfg: FilterConfig) -> str | None:
     if cfg.require_citation_count and is_missing(record.get("citation_count")):
         return "missing_citation_count"
 
-    # S2 truncates some abstracts mid-sentence; an ellipsis terminator is the
-    # reliable marker. Missing terminal punctuation alone is too noisy to use.
+    if cfg.require_fwci and is_missing(record.get("fwci")):
+        return "missing_fwci"
+
+    if cfg.require_language and as_text(record.get("language")) != cfg.require_language:
+        return "wrong_language"
+
+    # Some sources truncate abstracts mid-sentence; an ellipsis terminator is
+    # the reliable marker. Missing terminal punctuation alone is too noisy.
     if abstract.endswith("…") or abstract.endswith("..."):
         return "truncated_abstract"
 
@@ -351,49 +374,30 @@ def check_record(record: dict, cfg: FilterConfig) -> str | None:
     return None
 
 
-def normalise_record(paper: dict, domain: str, query: str) -> dict:
-    """Flatten one S2 API paper into the raw-corpus row shape."""
-    cleaned, fixes = clean_abstract(paper.get("abstract"))
-    title = (paper.get("title") or "").strip()
-    return {
-        "paper_id": paper.get("paperId") or "",
-        "title": title,
-        "abstract": cleaned,
-        "abstract_raw": paper.get("abstract") or "",
-        "cleaning_fixes": ",".join(fixes),
-        "year": paper.get("year"),
-        "venue": paper.get("venue") or "",
-        "citation_count": paper.get("citationCount"),
-        "influential_citation_count": paper.get("influentialCitationCount"),
-        # Field-Weighted Citation Impact is an OpenAlex metric with no S2
-        # equivalent. The column exists on both sources so that the raw schema
-        # does not fork — see `normalise_record_oa` for the mirror-image case.
-        "fwci": None,
-        "fields_of_study": ",".join(paper.get("fieldsOfStudy") or []),
-        "domain": domain,
-        "query": query,
-        "also_matched_domains": "",
-    }
-
-
-# Fields requested from the S2 API. Kept next to `normalise_record` so the two
-# stay in step.
-PAPER_FIELDS = (
-    "paperId,title,abstract,year,venue,"
-    "citationCount,influentialCitationCount,fieldsOfStudy"
-)
+# Numeric columns that can arrive null, with the dtype every stage must write
+# them as. `fwci` is the only one, and it is null-bearing despite
+# `require_fwci`: the *raw* parquet holds every record the API returned,
+# rejected ones included, and a record rejected for `missing_fwci` is precisely
+# one whose `fwci` is null.
+#
+# An all-null column serialises to Arrow type `null`, which then cannot be read
+# alongside a file where the same column has values —
+# `ArrowNotImplementedError: Unsupported cast from double to null`. Pinning the
+# dtype at write time keeps every shard schema-compatible. See
+# `epai.utils.parquet_utils.coerce_dtypes`.
+OPTIONAL_NUMERIC_COLUMNS = {
+    "fwci": "float64",
+}
 
 
 # --------------------------------------------------------------------------
 # OpenAlex
 # --------------------------------------------------------------------------
 #
-# OpenAlex produces the *same row shape* as Semantic Scholar, so everything
-# downstream of the fetch stage — check_record, the filter stage, the analysis
-# — is source-agnostic and untouched. Only the flattening differs, and it lives
-# here rather than in `oa_utils` for the same reason `normalise_record` does:
-# the API field list and the code reading it have to stay in step, so they sit
-# next to each other.
+# The flattening lives here rather than in `oa_utils` because the API field
+# list (`OA_SELECT`) and the code reading it have to stay in step, so they sit
+# next to each other. `oa_utils` stays a transport layer that knows nothing
+# about the row shape.
 
 
 def invert_abstract(inverted_index: dict | None) -> str:
@@ -406,8 +410,8 @@ def invert_abstract(inverted_index: dict | None) -> str:
     tokens are rejoined with single spaces. That is harmless here because
     `clean_abstract` collapses whitespace anyway.
 
-    Two things it does *not* recover, both worth knowing before comparing an
-    OpenAlex corpus against an S2 one:
+    Two things it does *not* recover, both worth knowing before treating
+    ``abstract_raw`` as the publisher's text:
 
       - Punctuation attached to words survives (it is part of the token), but
         anything the indexer dropped is gone for good.
@@ -428,36 +432,103 @@ def invert_abstract(inverted_index: dict | None) -> str:
 
 
 def _oa_id(value: str | None) -> str:
-    """Strip the URL prefix from an OpenAlex ID: a full URL down to ``W12345``.
+    """Strip the URL prefix from an OpenAlex id: a full URL down to ``W12345``.
 
     The short form is what the dedupe index and every report want to show, and
-    it round-trips back to the API unchanged (``/works/W12345`` resolves).
+    it round-trips back to the API unchanged (``/works/W12345`` resolves, as
+    does ``/authors/A5011953697``).
     """
     text = as_text(value)
     return text.rsplit("/", 1)[-1] if text else ""
 
 
+def _doi(value: str | None) -> str:
+    """Strip the resolver prefix from an OpenAlex DOI.
+
+    OpenAlex returns ``https://doi.org/10.1038/nature12373``; the bare
+    ``10.1038/nature12373`` is the DOI itself, which is what a reader pastes
+    into a resolver and what every other DOI-bearing table in this project
+    stores. Empty for the ~8% of works that carry no DOI.
+    """
+    text = as_text(value).strip()
+    for prefix in ("https://doi.org/", "http://doi.org/", "doi:"):
+        if text.lower().startswith(prefix):
+            return text[len(prefix):]
+    return text
+
+
+def author_ids_oa(work: dict) -> list[str]:
+    """OpenAlex author ids for one work, in authorship order.
+
+    Ids rather than names because a name is not an identity: authors publish
+    under varying forms ("W. G. Zumft" / "Walter G. Zumft"), and different
+    people share names. ``A5011953697`` is stable across a person's papers and
+    resolves at ``/authors/A5011953697``, so it is the only form worth grouping
+    or joining on.
+
+    Returned as a list, and stored in parquet as a genuine list column rather
+    than a delimiter-joined string — there is no separator that cannot appear
+    inside a value to worry about, and no re-splitting for a consumer to get
+    wrong.
+
+    **The list can be shorter than the author count.** Roughly 5% of
+    authorships are ones OpenAlex could not resolve to an author entity; they
+    carry a name but no id, and are skipped here because there is no id to
+    record. That is why :func:`normalise_record_oa` also stores
+    ``author_count``, taken from the authorship list before any of this
+    filtering: comparing the two is the only way to tell a genuinely
+    single-author paper from a ten-author one whose authors went unresolved.
+
+    ``authorships`` is the single most expensive field in ``OA_SELECT`` — it
+    carries institutions, countries and affiliation strings per author, none of
+    which this pipeline stores. It is requested anyway because there is no
+    ids-only projection: OpenAlex selects whole top-level fields.
+    """
+    ids = []
+    for authorship in work.get("authorships") or []:
+        author_id = _oa_id((authorship.get("author") or {}).get("id"))
+        if author_id:
+            ids.append(author_id)
+    return ids
+
+
 def normalise_record_oa(work: dict, domain: str, query: str) -> dict:
     """Flatten one OpenAlex work into the raw-corpus row shape.
 
-    Field-by-field against :func:`normalise_record`, the mismatches are:
+    The fields that need explaining rather than just reading:
 
-      - ``influential_citation_count`` is always ``None``. OpenAlex has no
-        equivalent of S2's influential-citation heuristic.
-      - ``fwci`` is the mirror image: populated here, ``None`` for S2 rows.
-        Field-Weighted Citation Impact is citations received against the
-        expectation for work of the same field, type and age, so 1.0 is exactly
-        average. It is *not* a stand-in for the influential-citation count —
-        that one estimates whether a citation mattered to the citing paper,
-        while FWCI only normalises volume — which is why both columns exist
-        instead of one being folded into the other. It is null for very recent
-        works and for those OpenAlex cannot place in a field.
-      - ``fields_of_study`` comes from the *field* level of the OpenAlex topic
-        hierarchy (domain → field → subfield → topic), which is the level whose
-        labels line up with S2's ``fieldsOfStudy`` ("Biology", "Computer
-        Science"). The finer levels are dropped.
+      - ``fwci`` — Field-Weighted Citation Impact: citations received against
+        the expectation for work of the same field, type and age, so 1.0 is
+        exactly average. Unlike ``citation_count`` it is comparable across
+        domains and across publication years, which is what makes it worth
+        carrying next to the raw count rather than instead of it. Null when
+        OpenAlex cannot place the work in a field, and ``check_record`` drops
+        those under ``require_fwci``.
+      - ``language`` — OpenAlex's own language label, required to equal
+        ``require_language`` (``"en"``). Kept as a column and not merely
+        filtered on, so the ``not_english`` rejections can be told apart from
+        the ``wrong_language`` ones in the drop report.
+      - ``author_ids`` — see :func:`author_ids_oa`; a list of OpenAlex author
+        ids in authorship order, which can be shorter than ``author_count``.
+      - ``author_count`` — authorships on the work, counted before unresolved
+        ones are dropped from ``author_ids``. The honest author count.
+      - ``doi`` — bare, no resolver prefix (see :func:`_doi`). Empty for the
+        works that carry none; not required, since a missing DOI says nothing
+        about whether the abstract is usable.
+      - ``fields_of_study`` — the *field* level of the OpenAlex topic hierarchy
+        (domain → field → subfield → topic), which is the level whose labels
+        are broad subject areas ("Biology", "Computer Science"). The finer
+        levels are dropped.
+
+    Of these only ``fwci`` and ``language`` are read by a rule. The rest are
+    corpus metadata, kept so a downstream analysis can slice on them without a
+    refetch.
     """
-    cleaned, fixes = clean_abstract(invert_abstract(work.get("abstract_inverted_index")))
+    # Reconstructed once and reused: the inverted index of a 300-word abstract
+    # is a few hundred dict entries, and both the cleaned and the raw column
+    # need the same reconstruction.
+    raw_abstract = invert_abstract(work.get("abstract_inverted_index"))
+    cleaned, fixes = clean_abstract(raw_abstract)
     title = as_text(work.get("display_name") or work.get("title")).strip()
 
     source = (work.get("primary_location") or {}).get("source") or {}
@@ -472,15 +543,18 @@ def normalise_record_oa(work: dict, domain: str, query: str) -> dict:
 
     return {
         "paper_id": _oa_id(work.get("id")),
+        "doi": _doi(work.get("doi")),
         "title": title,
         "abstract": cleaned,
-        "abstract_raw": invert_abstract(work.get("abstract_inverted_index")),
+        "abstract_raw": raw_abstract,
         "cleaning_fixes": ",".join(fixes),
+        "author_ids": author_ids_oa(work),
+        "author_count": len(work.get("authorships") or []),
         "year": work.get("publication_year"),
         "venue": as_text(source.get("display_name")),
         "citation_count": work.get("cited_by_count"),
-        "influential_citation_count": None,
         "fwci": work.get("fwci"),
+        "language": as_text(work.get("language")),
         "fields_of_study": ",".join(fields),
         "domain": domain,
         "query": query,
@@ -489,11 +563,16 @@ def normalise_record_oa(work: dict, domain: str, query: str) -> dict:
 
 
 # Fields requested from the OpenAlex API (`select=`). Kept next to
-# `normalise_record_oa` so the two stay in step. Trimming this list is worth
-# it: a bare /works response carries authorships, locations and counts_by_year
-# for every hit, which is roughly an order of magnitude more bytes than the
-# nine fields this pipeline reads.
+# `normalise_record_oa` so the two stay in step: every entry here is read by
+# that function, and every field it reads is listed here.
+#
+# Trimming this list is worth it — a bare /works response carries all
+# locations, counts_by_year, related works and referenced works for every hit,
+# an order of magnitude more bytes than the fields below. `authorships` is the
+# one expensive field kept anyway, because it is the only way to get author
+# names (OpenAlex selects whole top-level fields, so there is no names-only
+# projection); it roughly doubles the per-record payload of a page.
 OA_SELECT = (
     "id,doi,display_name,publication_year,abstract_inverted_index,"
-    "cited_by_count,fwci,primary_location,topics,type,language"
+    "authorships,cited_by_count,fwci,language,primary_location,topics"
 )
