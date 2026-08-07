@@ -68,6 +68,7 @@ OUT_COLUMNS = [
     "venue",
     "citation_count",
     "influential_citation_count",
+    "fwci",
     "fields_of_study",
     "domain",
     "query",
@@ -200,7 +201,14 @@ def main() -> None:
     kept["text"] = kept["abstract"]
     kept["generated_by"] = "human"
 
-    final = trim_to_target(kept, cfg)[OUT_COLUMNS]
+    # reindex rather than plain selection: `fwci` (OpenAlex) and
+    # `influential_citation_count` (Semantic Scholar) each exist for one source
+    # only, and a raw parquet fetched before either column was introduced has
+    # neither. Filling those with null is right; failing the whole stage over a
+    # metadata column that no rule reads is not. A column the rules *do* read
+    # cannot go missing unnoticed — check_record above would have dropped every
+    # row for it first.
+    final = trim_to_target(kept, cfg).reindex(columns=OUT_COLUMNS)
 
     save_parquet(final, human_path(cfg))
     for domain, group in final.groupby("domain", sort=False):

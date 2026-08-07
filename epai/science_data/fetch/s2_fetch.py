@@ -31,12 +31,12 @@ Output: data/science/<dataset_id>_raw.parquet
         data/science/shards/<dataset_id>_raw_<domain>.parquet  (per-domain, crash-safe)
 
 Run (both configs default to the examples in cfg/science_data/):
-    python -m epai.science_data.fetch.fetch_s2
+    python -m epai.science_data.fetch.s2_fetch
 
     # unauthenticated smoke test, e.g. while waiting on an API key
-    python -m epai.science_data.fetch.fetch_s2 --no-api-key
+    python -m epai.science_data.fetch.s2_fetch --no-api-key
 
-    python -m epai.science_data.fetch.fetch_s2 \
+    python -m epai.science_data.fetch.s2_fetch \
         --cfg cfg/science_data/science_cfg_example.yaml \
         --queries cfg/science_data/queries_example.yaml
 """
@@ -99,6 +99,7 @@ RAW_COLUMNS = [
     "venue",
     "citation_count",
     "influential_citation_count",
+    "fwci",
     "fields_of_study",
     "domain",
     "query",
@@ -211,8 +212,12 @@ def resolve_session(assume_yes: bool, no_api_key: bool = False):
 
     print(
         f"\n{YELLOW}Could not verify credentials: {message}.{RESET}\n"
-        "  This may be a transient rate limit rather than a bad key; the "
-        "fetcher retries 429s and 5xx errors on its own."
+        "  This is NOT an invalid key — a rejected key returns 401/403 and is "
+        "reported separately. Semantic Scholar throttles valid keys too, and\n"
+        "  heavily at times, so this is most likely a transient rate limit. The "
+        "fetcher retries 429s and 5xx errors with backoff as it goes, and\n"
+        "  continuing is usually the right call; expect a slow run, and see "
+        "--allow-shortfall if domains come up under quota."
     )
     if not _confirm("Continue anyway?", assume_yes):
         print("Aborted.")
@@ -243,14 +248,30 @@ def fetch_domain(
     # correctness never depends on the API honouring this.
     extra_params = {"year": f"{rules_cfg.year_min}-{rules_cfg.year_max}"}
 
-    iterators = {
-        q: search(q, session, PAPER_FIELDS, extra_params) for q in queries
-    }
-
     kept = 0
     seen_total = 0
     rate_limited: set[str] = set()
-    bar = tqdm(total=quota, desc=f"{domain}", unit="kept", leave=False)
+    # position=1 keeps this under the domain bar; without an explicit position
+    # the two can end up rendering onto the same terminal line.
+    bar = tqdm(
+        total=quota,
+        desc=domain,
+        unit="kept",
+        leave=False,
+        position=1,
+        dynamic_ncols=True,
+    )
+
+    # Throttled stretches can run tens of seconds without a single record
+    # arriving. Surfacing the retry count in the bar's postfix is what
+    # distinguishes "waiting out a 429" from "hung", which otherwise look
+    # identical from the outside.
+    def on_status(msg: str) -> None:
+        bar.set_postfix_str(msg, refresh=True)
+
+    iterators = {
+        q: search(q, session, PAPER_FIELDS, extra_params, on_status) for q in queries
+    }
 
     for query, paper in _round_robin(iterators, rate_limited):
         seen_total += 1
@@ -341,7 +362,9 @@ def main() -> None:
     throttled: set[str] = set()
     interrupted = False
 
-    domain_bar = tqdm(queries_domains.items(), desc="domains")
+    domain_bar = tqdm(
+        queries_domains.items(), desc="domains", position=0, dynamic_ncols=True
+    )
     try:
         for domain, queries in domain_bar:
             domain_bar.set_description(f"domain: {domain}")

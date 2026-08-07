@@ -18,16 +18,16 @@
 # yield typical of S2 abstracts leaves ample headroom for 1000 kept per domain.
 
 queries_domains:
-  Physics:
-    - "quantum mechanics particle physics"
-    - "condensed matter solid state physics"
-    - "thermodynamics statistical mechanics"
-    - "electromagnetism optics photonics"
-    - "nuclear physics plasma"
+  Biology:
+    - "molecular biology cell signalling"
+    - "genetics genomics gene expression"
+    - "developmental biology stem cells"
+    - "microbiology virology infectious disease"
+    - "biochemistry protein structure function"
 
-  Chemistry:
-    - "organic synthesis reaction mechanisms"
-    - "physical chemistry thermodynamics kinetics"
-    - "inorganic coordination chemistry"
-    - "analytical chemistry spectroscopy"
-    - "computational chemistry molecular simulation"
+  Computer Science:
+    - "machine learning deep learning"
+    - "natural language processing large language models"
+    - "computer vision image recognition"
+    - "algorithms complexity distributed systems"
+    - "computer security cryptography"

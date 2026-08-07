@@ -6,8 +6,9 @@
 # "exactly N per domain after filtering" guarantee is void. One file, one set
 # of thresholds, no drift.
 #
-# Run order:
-#   python -m epai.science_data.fetch.fetch_s2            --cfg cfg/science_data/science_cfg_example.yaml
+# Run order (stage 1 has two interchangeable implementations — pick one):
+#   python -m epai.science_data.fetch.oa_fetch            --cfg cfg/science_data/science_cfg_example.yaml
+#   python -m epai.science_data.fetch.s2_fetch            --cfg cfg/science_data/science_cfg_example.yaml
 #   python -m epai.science_data.filter.filter_abstracts   --cfg cfg/science_data/science_cfg_example.yaml
 #   python -m epai.science_data.prompt.make_prompts       --cfg cfg/science_data/science_cfg_example.yaml
 #   python -m epai.science_data.generate.generate_ai      --cfg cfg/science_data/science_cfg_example.yaml
@@ -25,13 +26,20 @@ fetch:
   # against a filter rule you add later, at negligible cost.
   overfetch: 1.2
 
-  # "relevance" (paper/search, proven, capped at 1000 hits per query) or
-  # "bulk" (paper/search/bulk, uncapped but term-matched and unordered).
-  # With 5 queries per domain and a target of 1000, relevance search has ample
-  # headroom; switch to bulk only if a domain reports a shortfall.
+  # "relevance" (page-based, relevance-ranked) or "bulk" (uncapped paging).
+  # Both fetchers read this, but the ceiling it lifts differs:
+  #   s2_fetch — relevance caps at 1000 hits/query; bulk switches to
+  #              paper/search/bulk, which is term-matched and unordered, so the
+  #              sample changes character as well as size.
+  #   oa_fetch — relevance caps at 10,000 hits/query; bulk switches to cursor
+  #              paging with the *same* query and ordering, so it only lifts
+  #              the cap.
+  # With 5 queries per domain and a target of 1000, relevance has ample
+  # headroom either way; switch to bulk only if a domain reports a shortfall.
   search_mode: "relevance"
 
-  # Seconds to sleep between queries, on top of the per-page delay in s2_utils.
+  # Seconds to sleep between queries, on top of the per-page delay in the API
+  # client (s2_utils / oa_utils).
   query_delay: 1.5
 
 # --------------------------------------------------------------- filter ----

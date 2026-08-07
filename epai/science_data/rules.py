@@ -365,6 +365,10 @@ def normalise_record(paper: dict, domain: str, query: str) -> dict:
         "venue": paper.get("venue") or "",
         "citation_count": paper.get("citationCount"),
         "influential_citation_count": paper.get("influentialCitationCount"),
+        # Field-Weighted Citation Impact is an OpenAlex metric with no S2
+        # equivalent. The column exists on both sources so that the raw schema
+        # does not fork — see `normalise_record_oa` for the mirror-image case.
+        "fwci": None,
         "fields_of_study": ",".join(paper.get("fieldsOfStudy") or []),
         "domain": domain,
         "query": query,
@@ -377,4 +381,119 @@ def normalise_record(paper: dict, domain: str, query: str) -> dict:
 PAPER_FIELDS = (
     "paperId,title,abstract,year,venue,"
     "citationCount,influentialCitationCount,fieldsOfStudy"
+)
+
+
+# --------------------------------------------------------------------------
+# OpenAlex
+# --------------------------------------------------------------------------
+#
+# OpenAlex produces the *same row shape* as Semantic Scholar, so everything
+# downstream of the fetch stage — check_record, the filter stage, the analysis
+# — is source-agnostic and untouched. Only the flattening differs, and it lives
+# here rather than in `oa_utils` for the same reason `normalise_record` does:
+# the API field list and the code reading it have to stay in step, so they sit
+# next to each other.
+
+
+def invert_abstract(inverted_index: dict | None) -> str:
+    """Rebuild plain text from an OpenAlex ``abstract_inverted_index``.
+
+    OpenAlex does not ship abstracts as prose. It ships ``{word: [positions]}``,
+    an inverted index, which reportedly sidesteps the redistribution terms on
+    the abstracts it aggregates. Reconstruction is exact for word order but not
+    for whitespace: the original spacing between tokens is not recorded, so
+    tokens are rejoined with single spaces. That is harmless here because
+    `clean_abstract` collapses whitespace anyway.
+
+    Two things it does *not* recover, both worth knowing before comparing an
+    OpenAlex corpus against an S2 one:
+
+      - Punctuation attached to words survives (it is part of the token), but
+        anything the indexer dropped is gone for good.
+      - Gaps in the position sequence are left as-is; the words are emitted in
+        position order regardless, so a missing index shortens the text rather
+        than shifting it.
+    """
+    if not inverted_index:
+        return ""
+
+    positions: list[tuple[int, str]] = []
+    for word, where in inverted_index.items():
+        for pos in where or []:
+            positions.append((pos, word))
+
+    positions.sort(key=lambda p: p[0])
+    return " ".join(word for _, word in positions)
+
+
+def _oa_id(value: str | None) -> str:
+    """Strip the URL prefix from an OpenAlex ID: a full URL down to ``W12345``.
+
+    The short form is what the dedupe index and every report want to show, and
+    it round-trips back to the API unchanged (``/works/W12345`` resolves).
+    """
+    text = as_text(value)
+    return text.rsplit("/", 1)[-1] if text else ""
+
+
+def normalise_record_oa(work: dict, domain: str, query: str) -> dict:
+    """Flatten one OpenAlex work into the raw-corpus row shape.
+
+    Field-by-field against :func:`normalise_record`, the mismatches are:
+
+      - ``influential_citation_count`` is always ``None``. OpenAlex has no
+        equivalent of S2's influential-citation heuristic.
+      - ``fwci`` is the mirror image: populated here, ``None`` for S2 rows.
+        Field-Weighted Citation Impact is citations received against the
+        expectation for work of the same field, type and age, so 1.0 is exactly
+        average. It is *not* a stand-in for the influential-citation count —
+        that one estimates whether a citation mattered to the citing paper,
+        while FWCI only normalises volume — which is why both columns exist
+        instead of one being folded into the other. It is null for very recent
+        works and for those OpenAlex cannot place in a field.
+      - ``fields_of_study`` comes from the *field* level of the OpenAlex topic
+        hierarchy (domain → field → subfield → topic), which is the level whose
+        labels line up with S2's ``fieldsOfStudy`` ("Biology", "Computer
+        Science"). The finer levels are dropped.
+    """
+    cleaned, fixes = clean_abstract(invert_abstract(work.get("abstract_inverted_index")))
+    title = as_text(work.get("display_name") or work.get("title")).strip()
+
+    source = (work.get("primary_location") or {}).get("source") or {}
+
+    # dict.fromkeys, not a set: topics arrive in descending score order and
+    # keeping that order makes the column stable across runs.
+    fields = dict.fromkeys(
+        as_text((t.get("field") or {}).get("display_name"))
+        for t in (work.get("topics") or [])
+    )
+    fields.pop("", None)
+
+    return {
+        "paper_id": _oa_id(work.get("id")),
+        "title": title,
+        "abstract": cleaned,
+        "abstract_raw": invert_abstract(work.get("abstract_inverted_index")),
+        "cleaning_fixes": ",".join(fixes),
+        "year": work.get("publication_year"),
+        "venue": as_text(source.get("display_name")),
+        "citation_count": work.get("cited_by_count"),
+        "influential_citation_count": None,
+        "fwci": work.get("fwci"),
+        "fields_of_study": ",".join(fields),
+        "domain": domain,
+        "query": query,
+        "also_matched_domains": "",
+    }
+
+
+# Fields requested from the OpenAlex API (`select=`). Kept next to
+# `normalise_record_oa` so the two stay in step. Trimming this list is worth
+# it: a bare /works response carries authorships, locations and counts_by_year
+# for every hit, which is roughly an order of magnitude more bytes than the
+# nine fields this pipeline reads.
+OA_SELECT = (
+    "id,doi,display_name,publication_year,abstract_inverted_index,"
+    "cited_by_count,fwci,primary_location,topics,type,language"
 )

@@ -63,7 +63,9 @@ episteme-ai/
 │   │                              #   run_sweep_cross_domain.py + replot_sweep.py
 │   │
 │   ├── science_data/              # Pipeline 3 — build a new corpus, Ghostbuster protocol
-│   │   ├── fetch/fetch_s2.py      #   Stage 1: Semantic Scholar → raw parquet
+│   │   ├── fetch/oa_fetch.py      #   Stage 1: OpenAlex → raw parquet
+│   │   ├── fetch/s2_fetch.py      #   Stage 1: Semantic Scholar → raw parquet
+│   │   │                          #   (interchangeable; same output schema)
 │   │   ├── filter/                #   Stage 2: admission rules → N per domain
 │   │   ├── prompt/make_prompts.py #   Stage 3: one generation prompt per paper
 │   │   ├── generate/generate_ai.py#   Stage 4: prompt → AI abstract
@@ -638,8 +640,10 @@ never the human abstract, so the AI class does not inherit the human text's
 content and structure the way a rephrasing setup does.
 
 ```
-[fetch_s2.py]        ← Stage 1: Semantic Scholar → data/science/<id>_raw.parquet
-   ↓                            (stops on the POST-filter count, per domain)
+[oa_fetch.py]        ← Stage 1: OpenAlex        → data/science/<id>_raw.parquet
+   or                          (stops on the POST-filter count, per domain)
+[s2_fetch.py]        ← Stage 1: Semantic Scholar → same schema, same guarantees
+   ↓
 [filter_abstracts.py]← Stage 2: admission rules → exactly N per domain
    ↓
 [make_prompts.py]    ← Stage 3: one generation prompt per paper
@@ -654,13 +658,62 @@ with the domain/query lists in a separate file so they can be swapped
 independently:
 
 ```bash
-uv run python -m epai.science_data.fetch.fetch_s2 \
+# Stage 1 — OpenAlex (no API key; set OPENALEX_MAILTO for the polite pool)
+uv run python -m epai.science_data.fetch.oa_fetch \
+    --cfg cfg/science_data/science_cfg_example.yaml \
+    --queries cfg/science_data/queries_example.yaml
+# ...or Semantic Scholar (needs SEMANTIC_SCHOLAR_API_KEY; heavily throttled)
+uv run python -m epai.science_data.fetch.s2_fetch \
     --cfg cfg/science_data/science_cfg_example.yaml \
     --queries cfg/science_data/queries_example.yaml
 uv run python -m epai.science_data.filter.filter_abstracts --cfg cfg/science_data/science_cfg_example.yaml
 uv run python -m epai.science_data.prompt.make_prompts    --cfg cfg/science_data/science_cfg_example.yaml
 uv run python -m epai.science_data.generate.generate_ai   --cfg cfg/science_data/science_cfg_example.yaml
 uv run python -m epai.science_data.analyse.analyse_fetch  --cfg cfg/science_data/science_cfg_example.yaml
+```
+
+### Stage 1: which source?
+
+`oa_fetch.py` (OpenAlex) and `s2_fetch.py` (Semantic Scholar) are
+interchangeable — same round-robin, same post-filter stop condition, same raw
+schema — so stages 2-4 never learn which one ran. Prefer OpenAlex: no API key,
+and its rate limit is a published limit that backing off actually clears,
+whereas Semantic Scholar sheds load and refuses a large fraction of well-formed
+requests regardless of cadence.
+
+Neither OpenAlex identifier is required. `OPENALEX_API_KEY` is a Premium key
+that raises the rate limit; the free tier returns the same works with the same
+fields, so a missing or rejected key degrades the run rather than ending it and
+`oa_fetch.py` offers to continue without it. `OPENALEX_MAILTO` is a plain
+contact address that selects OpenAlex's faster "polite pool" — worth setting
+for a keyless run, redundant once a key is set, since the key already
+identifies the caller. Both are sent when present; `--no-api-key` /
+`--no-mailto` ignore them for one run without editing `.env`.
+
+Three differences survive into the parquet:
+
+- `influential_citation_count` is null for OpenAlex rows — no equivalent metric.
+- `fwci` (Field-Weighted Citation Impact, 1.0 = field average) is null for
+  Semantic Scholar rows. It is *not* a stand-in for the influential-citation
+  count: FWCI normalises citation volume by field, type and age, while S2's
+  metric estimates whether a citation mattered to the citing paper. Both
+  columns exist so neither run has to fake the other's.
+- OpenAlex serves abstracts as an inverted index, so `abstract_raw` is a
+  reconstruction with normalised whitespace rather than the verbatim publisher
+  string. `abstract` is identical either way, since cleaning collapses
+  whitespace anyway.
+
+Both sources write to the path `dataset_id` names, so give the two runs
+different `dataset_id` values to keep both corpora on disk; `oa_fetch.py` will
+prompt before overwriting an existing raw parquet.
+
+`s2_hw_fetch.py` and `oa_hw_fetch.py` are standalone one-paper dumps of each
+API, useful for checking what a field actually contains before wiring it into
+`rules.py`:
+
+```bash
+uv run python -m epai.science_data.fetch.oa_hw_fetch 10.1038/s41562-025-02244-z
+uv run python -m epai.science_data.fetch.s2_hw_fetch
 ```
 
 Once exported, the corpus joins the AI-detection pipeline at Stage B (embed) —
@@ -683,6 +736,7 @@ The `epai/utils/` and `epai/algs/` modules are shared and should not be modified
 | `epai/utils/env_utils.py` | `.env` variable and installed-package checks |
 | `epai/utils/genai_utils.py` | Multi-LLM abstract rephrasing (OpenAI, Anthropic, Gemini) |
 | `epai/utils/parquet_utils.py` | Parquet save/load helpers |
+| `epai/utils/oa_utils.py` | OpenAlex API client (no key; `OPENALEX_MAILTO` for the polite pool) |
 | `epai/utils/s2_utils.py` | Semantic Scholar API client |
 | `epai/utils/sqlite_utils.py` | SQLite schema, save, and load helpers |
 | `epai/utils/train_utils.py` | Missing-value rules (`drop_missing_rows`), feature stacking, split helpers |
