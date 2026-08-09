@@ -1,0 +1,92 @@
+# Three maximally-separated science domains — the Ghostbuster analogue.
+#
+# Ghostbuster's three domains (student essays / Reuters news / creative
+# writing) are not three *topics*, they are three *genres*: the register,
+# structure and purpose of the prose differ, not just the vocabulary. A
+# detector that transfers across them has learned something about authorship
+# rather than about subject matter. Picking three science domains by topic
+# alone (physics / chemistry / biology) would not reproduce that — they are one
+# genre, the empirical research abstract, wearing three vocabularies.
+#
+# So these three are chosen for genre distance, one per mode of scientific
+# writing:
+#
+#   Computer Science  engineering report. An artifact is proposed, named and
+#                     measured against baselines on named benchmarks. "We
+#                     propose ... outperforms ... by 3.2 points."
+#   Mathematics       deductive proof. No data, no methods section, no
+#                     results in the empirical sense; a statement of what is
+#                     assumed and what follows. "Let X be ... We prove that ..."
+#   Sociology         interpretive argument. Essayistic, theory-laden, often
+#                     first person and hedged about generalisation, arguing a
+#                     reading of evidence rather than reporting a measurement.
+#                     "This article argues that ..."
+#
+# Why not the obvious empirical third (Medicine, Biology, Physics):
+#   - Medicine carries a *format* artifact, not just a style one. Clinical
+#     abstracts are frequently structured — "BACKGROUND: ... METHODS: ..." —
+#     and cfg/science_data/prompts/0807A.yaml explicitly forbids the generator
+#     from emitting section labels. The human class would then contain a
+#     literal token the AI class can never contain, which a classifier learns
+#     instantly. In-domain accuracy goes up, and it means nothing. Use Medicine
+#     only with a filter rule that rejects or strips structured abstracts.
+#   - Biology / Physics / Chemistry are the same genre as each other and share
+#     it with CS's empirical half, so they measure topic transfer, not genre
+#     transfer. They are also already covered by queries_example.yaml, so a
+#     five-domain run gives them anyway.
+#
+# Two mechanics of this file, unchanged from queries_example.yaml:
+#
+#   - Domain ORDER is significant. A paper matching queries in two domains is
+#     assigned first-domain-wins, so reordering reassigns the overlap.
+#     analyse_fetch.py reports how many that is.
+#   - Queries within a domain are drawn round-robin, not by fixed quota, so a
+#     narrow query that runs dry costs nothing — the others absorb its share.
+#
+# CS is first deliberately. The only real overlap here is CS x Mathematics
+# (complexity, combinatorial algorithms, optimisation), and an algorithmic
+# paper belongs in CS; the Mathematics queries below are pure-side on purpose
+# so that little of it arises in the first place. Sociology overlaps neither,
+# provided its queries stay clear of computational social science ("social
+# media", "algorithmic bias") and of population health.
+#
+# Yield note: both new domains have shorter abstracts than the empirical
+# sciences, and filter.min_words is 80. Pure mathematics especially — a large
+# share of math abstracts are under 80 words, so expect a much lower keep rate
+# there than physics or medicine gave, and expect the surviving math sample to
+# be biased toward the wordier end of the field. That is a uniform rule applied
+# uniformly, so it is acceptable, but check analyse_filter.py's per-domain
+# rejection breakdown before trusting a run. These two domains get six queries
+# each rather than five to raise the ceiling; if fetch still reports a
+# shortfall, switch fetch.search_mode to "bulk" before broadening the queries.
+
+queries_domains:
+  Computer Science:
+    - "machine learning deep learning"
+    - "natural language processing large language models"
+    - "computer vision image recognition"
+    - "algorithms complexity distributed systems"
+    - "computer security cryptography"
+
+  # Pure side only. "numerical analysis optimization" and "probability theory
+  # stochastic processes" — both in cfg/citation_impact/fetch/hd/fetch_cfg.yaml
+  # — are left out on purpose: they sit on the CS boundary and would hand the
+  # first-domain-wins rule a pile of papers to arbitrate, blurring exactly the
+  # separation this file exists to create.
+  Mathematics:
+    - "algebraic geometry commutative algebra"
+    - "number theory modular forms"
+    - "topology manifolds homotopy"
+    - "differential geometry curvature"
+    - "functional analysis operator theory"
+    - "group theory representation theory"
+
+  # Qualitative and theoretical sociology. Deliberately avoids computational
+  # social science (overlaps CS) and population health (would be Medicine).
+  Sociology:
+    - "social inequality stratification class"
+    - "race ethnicity identity discrimination"
+    - "family kinship gender roles"
+    - "urban sociology neighbourhood community"
+    - "social movements collective action"
+    - "cultural sociology symbolic boundaries"

@@ -20,12 +20,17 @@
 # output is the only artifact meant to leave it — move that to data/parquet/
 # by hand once the run is good.
 
-dataset_id: "science_v1"
+# Every path in data/science/ is derived from this id, so a run under an id
+# that already exists overwrites that corpus in place. science_v1 was the
+# five-domain corpus from queries_example.yaml (physics/chemistry/biology/CS/
+# medicine); science_v2 is the three-domain genre-separated one from
+# queries_3domain.yaml. Change the domain list, change the id.
+dataset_id: "science_v2"
 
 # Which file in cfg/science_data/prompts/ holds the prompts (without .yaml).
 # It carries every prompt the pipeline sends, and its id is stamped into each
 # generated row as `generated_by` = "<model_slug>:<prompt_config>", e.g.
-# gpt54mini:0807A. So a row names the exact prompts behind it.
+# gpt56luna:0807A. So a row names the exact prompts behind it.
 #
 # NEVER edit a prompt file that has already produced a corpus — copy it to a
 # new id and point this at the copy. Editing in place makes every existing
@@ -97,7 +102,18 @@ prompt:
   # "title_only"— deterministic, zero leakage, but produces a vaguer prompt
   #               than the other three corpora use. Kept for ablation.
   mode: "llm_spec"
-  model: "gpt-5.4-mini"
+
+  # The spec model is NOT recorded in `generated_by` — only the generator is —
+  # so nothing in a row says which model wrote the spec behind its prompt.
+  # `dataset_id` is what separates a corpus built with one spec model from a
+  # corpus built with another. Change this and change the id, or the two runs
+  # become indistinguishable after the fact.
+  #
+  # Related trap: the spec shard is keyed by paper id alone, not by model, so
+  # re-running an EXISTING dataset_id after changing this model reuses every
+  # spec the old model wrote and silently issues no new calls. A change here
+  # only takes effect on a fresh id (or after deleting the spec shard).
+  model: "gpt-5.6-luna"
   max_workers: 8
 
 # ------------------------------------------------------------- generate ----
@@ -109,7 +125,7 @@ generate:
   # the existing rows are never regenerated.
   #
   # The `generated_by` label is DERIVED, never typed: "<model_slug>:<prompt_config>",
-  # so gpt-5.4-mini under prompt config 0807A becomes "gpt54mini:0807A". The
+  # so gpt-5.6-luna under prompt config 0807A becomes "gpt56luna:0807A". The
   # whole point is that a label cannot disagree with what actually produced the
   # row, which a hand-written one can. It still starts with "gpt", so
   # cfg/colors.yaml resolves it to the GPT family by prefix as before.
@@ -117,7 +133,7 @@ generate:
   # Only `model` is configurable. Two generators must have distinct model slugs
   # or they would share a label — the config check enforces that.
   generators:
-    - model: "gpt-5.4-mini"
+    - model: "gpt-5.6-luna"
 
   # Drop any paper for which some generator failed, so every id carries a
   # complete set of rows. Applied at export, not during generation.

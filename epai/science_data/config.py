@@ -26,7 +26,7 @@ BASE_DIR = Path(__file__).parent.parent.parent
 # Defaults for the stage CLIs, so the pipeline runs with no arguments. Both are
 # absolute, so a stage behaves the same whatever directory it is invoked from.
 DEFAULT_CFG_PATH = BASE_DIR / "cfg" / "science_data" / "science_cfg_example.yaml"
-DEFAULT_QUERIES_PATH = BASE_DIR / "cfg" / "science_data" / "queries_example_debug.yaml"
+DEFAULT_QUERIES_PATH = BASE_DIR / "cfg" / "science_data" / "queries_3domain.yaml"
 
 PROMPTS_DIR = BASE_DIR / "cfg" / "science_data" / "prompts"
 
