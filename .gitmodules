@@ -1,0 +1,3 @@
+[submodule "external/Binoculars"]
+	path = external/Binoculars
+	url = git@github.com:hdaniel0707/Binoculars.git
