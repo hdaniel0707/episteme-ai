@@ -17,8 +17,8 @@ All three draw on the shared library under `epai/utils/` and `epai/algs/`.
 - [Repository Layout](#repository-layout)
 - [Setup](#setup)
   - [Clean clone](#clean-clone)
+  - [CUDA wheels — compute server only](#cuda-wheels--compute-server-only)
   - [Environments](#environments)
-  - [Compute server — CUDA wheels](#compute-server--cuda-wheels)
   - [Updating the Binoculars submodule](#updating-the-binoculars-submodule)
 - [Git LFS — Store Folder](#git-lfs--store-folder)
 - [Environment Variables](#environment-variables)
@@ -123,6 +123,35 @@ The submodule is a private repo, so the machine needs SSH access to it as well a
 Datasets under `store/` are Git LFS pointers after a fresh clone — see
 [Git LFS — Store Folder](#git-lfs--store-folder) to pull the real files.
 
+### CUDA wheels — compute server only
+
+**Only for the compute server. Otherwise, skip this section entirely**
+
+On the compute server, do this **before** the `uv sync` commands in the next section — the index
+has to be in place when an environment is first resolved, or uv installs CPU torch and you have to
+tear the venv down and sync again.
+
+Append the block below to **both** pyproject files. Each environment installs its own torch, so
+each one needs its own index — doing only the first is the usual mistake:
+
+1. `pyproject.toml` — this repo
+2. `external/Binoculars/pyproject.toml` — the submodule
+
+```toml
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
+```
+
+Both files are tracked by git, so keep this edit local to the server — don't commit it to either
+repo, or every laptop clone will start pulling CUDA wheels too.
+
 ### Environments
 
 There are **two** uv environments, deliberately kept apart: this repo pins `transformers>=4.57`,
@@ -143,25 +172,11 @@ uv run                              python -c "import sys, transformers; print(s
 uv run --project external/Binoculars python -c "import sys, transformers; print(sys.prefix, transformers.__version__)"
 ```
 
+On the server, add `torch.cuda.is_available()` to that check — it must be `True` in **both**
+environments; `False` means the CUDA index above was missing when that venv was resolved.
+
 Never add `binoculars` to this project's `dependencies` / `[tool.uv.sources]`, and never declare a
 `[tool.uv.workspace]` here. Either one fuses the two environments back together.
-
-### Compute server — CUDA wheels
-
-Add this at the end of `pyproject.toml` (both of them — this repo's and
-`external/Binoculars/pyproject.toml`, since each installs its own torch):
-
-```toml
-[[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
-explicit = true
-
-[tool.uv.sources]
-torch = { index = "pytorch-cu128" }
-torchvision = { index = "pytorch-cu128" }
-torchaudio = { index = "pytorch-cu128" }
-```
 
 ### Updating the Binoculars submodule
 
