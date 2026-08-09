@@ -223,6 +223,14 @@ def main() -> None:
         action="store_true",
         help="print the commands without running anything",
     )
+    parser.add_argument(
+        "--no-hint",
+        action="store_true",
+        help="suppress the closing 'promote the result' advice. For callers "
+        "that promote the file themselves, where printing an 'mv' command "
+        "someone might then run by hand would move the corpus out of "
+        "data/science/ rather than copy it.",
+    )
     args = parser.parse_args()
 
     # Load the config here as well as in every stage: it validates the whole
@@ -324,7 +332,7 @@ def main() -> None:
         print(f"\n{YELLOW}Dry run — nothing was executed.{RESET}")
         return
 
-    if any(s.key == "generate" for s, code, _ in results if code == 0):
+    if not args.no_hint and any(s.key == "generate" for s, code, _ in results if code == 0):
         out = final_path(cfg, variant)
         print(
             f"\n{GREEN}Done.{RESET} Promote the result when you are happy with it:\n"
