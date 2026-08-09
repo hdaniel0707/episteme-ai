@@ -16,6 +16,10 @@ All three draw on the shared library under `epai/utils/` and `epai/algs/`.
 
 - [Repository Layout](#repository-layout)
 - [Setup](#setup)
+  - [Clean clone](#clean-clone)
+  - [Environments](#environments)
+  - [Compute server — CUDA wheels](#compute-server--cuda-wheels)
+  - [Updating the Binoculars submodule](#updating-the-binoculars-submodule)
 - [Git LFS — Store Folder](#git-lfs--store-folder)
 - [Environment Variables](#environment-variables)
 - [File Naming Convention](#file-naming-convention)
@@ -73,6 +77,9 @@ episteme-ai/
 │   ├── algs/                      # Shared: pluggable classifier algorithms
 │   └── utils/                     # Shared: all utility modules
 │
+├── external/
+│   └── Binoculars/                # Git submodule: the Binoculars fork, own uv env
+│
 ├── cfg/
 │   ├── citation_impact/
 │   │   └── fetch/                 # Semantic Scholar query configs
@@ -98,17 +105,51 @@ episteme-ai/
 
 ## Setup
 
-This project uses [uv](https://github.com/astral-sh/uv) for dependency management.
+This project uses [uv](https://github.com/astral-sh/uv) for dependency management and needs Python 3.12 or newer.
+
+### Clean clone
+
+The Binoculars fork lives here as a git submodule, so clone with `--recurse-submodules`:
 
 ```bash
-# Install all dependencies
-uv sync
+git clone --recurse-submodules git@github.com:hdaniel0707/episteme-ai.git
+cd episteme-ai
 
-# Install the epai package in editable mode
-uv pip install -e .
+# If you cloned without the flag, or the submodule is empty:
+git submodule update --init
 ```
 
-For the compute server, add this at the end of your `pyproject.toml`:
+The submodule is a private repo, so the machine needs SSH access to it as well as to this one.
+Datasets under `store/` are Git LFS pointers after a fresh clone — see
+[Git LFS — Store Folder](#git-lfs--store-folder) to pull the real files.
+
+### Environments
+
+There are **two** uv environments, deliberately kept apart: this repo pins `transformers>=4.57`,
+the Binoculars fork pins `transformers>=5.12`, and they cannot share a venv.
+
+```bash
+# 1. This repo -> .venv  (also installs epai editable, via [tool.uv] package = true)
+uv sync
+
+# 2. The Binoculars fork -> external/Binoculars/.venv
+uv sync --project external/Binoculars
+```
+
+Confirm they really are separate — the two prefixes must differ:
+
+```bash
+uv run                              python -c "import sys, transformers; print(sys.prefix, transformers.__version__)"
+uv run --project external/Binoculars python -c "import sys, transformers; print(sys.prefix, transformers.__version__)"
+```
+
+Never add `binoculars` to this project's `dependencies` / `[tool.uv.sources]`, and never declare a
+`[tool.uv.workspace]` here. Either one fuses the two environments back together.
+
+### Compute server — CUDA wheels
+
+Add this at the end of `pyproject.toml` (both of them — this repo's and
+`external/Binoculars/pyproject.toml`, since each installs its own torch):
 
 ```toml
 [[tool.uv.index]]
@@ -122,7 +163,23 @@ torchvision = { index = "pytorch-cu128" }
 torchaudio = { index = "pytorch-cu128" }
 ```
 
-You need Python 3.12 or newer.
+### Updating the Binoculars submodule
+
+The submodule points at a specific commit of the fork and never moves on its own — that is what
+ties a set of scores to the code that produced them. To pick up fork changes:
+
+```bash
+git -C external/Binoculars pull origin main
+git add external/Binoculars
+git commit -m "Bump Binoculars to $(git -C external/Binoculars rev-parse --short HEAD)"
+```
+
+Both halves matter: the pull moves the working copy, the commit records the new SHA so a fresh
+clone gets the same code. Re-run `uv sync --project external/Binoculars` only when the pull changed
+that project's `pyproject.toml` or `uv.lock`; plain code changes need nothing, the install is editable.
+
+When editing the fork, commit and push **inside** `external/Binoculars` first, then commit the
+moved pointer here — otherwise the pin references a commit nobody else can fetch.
 
 ---
 
@@ -176,7 +233,7 @@ cp .env_sample .env
 | `OPENAI_API_KEY` | `citation_impact/prepare/prepare_data.py`, `utils/embedding_utils.py` | GPT-4o-mini rephrasing and OpenAI embeddings |
 | `ANTHROPIC_API_KEY` | `citation_impact/prepare/prepare_data.py` | Claude Haiku abstract rephrasing |
 | `GOOGLE_API_KEY` | `citation_impact/prepare/prepare_data.py` | Gemini abstract rephrasing |
-| `HF_TOKEN` | `citation_impact/score/add_naip_scores.py` | HuggingFace token for the NAIP Gradio API (optional but avoids rate limits) |
+| `HF_TOKEN` | `citation_impact/score/add_naip_scores.py`, `external/Binoculars/score_parquets.py` | HuggingFace token — for the NAIP Gradio API (optional, avoids rate limits) and for pulling the Binoculars observer/performer models |
 
 The Semantic Scholar key is optional but strongly recommended — without it you will be heavily rate-limited. The LLM keys are only needed if you enable the `ADD_GEN_AI` flag in `prepare_data.py`.
 
@@ -393,6 +450,24 @@ uv run python epai/ai_detection/fetch/fetch_denario.py
 ---
 
 ### Stage B — Embed and Score
+
+**Binoculars scores** come from the fork in `external/Binoculars`, which runs in its own
+environment. Run it from the repo root: the script writes `<name>_binox0.parquet` next to its
+input, so scored files land straight in `data/parquet/` — nothing to copy.
+
+```bash
+uv run --project external/Binoculars python external/Binoculars/score_parquets.py \
+    data/parquet/reuter.parquet --cpu-threads 16 --gpu 0
+```
+
+Pass several files or a whole directory to score them in one run, and `--only-missing` to fill the
+gaps in an already-scored file. Two details worth knowing:
+
+- Use the **script path**, not `python -m binoculars...`. The fork is a virtual uv project (no
+  `[build-system]`), so `binoculars` is importable via the script's own directory rather than being
+  installed into the env.
+- The script calls `load_dotenv()`, which walks up from the repo root and picks up **this** repo's
+  `.env` — so `HF_TOKEN` is read from there. The submodule needs no `.env` of its own.
 
 **Script:** `epai/ai_detection/embed/add_embeddings.py`
 **Output:** overwrites / extends the input Parquet with new `emb_*` columns
