@@ -21,6 +21,15 @@ The exported frame carries one human row and one row per generator for each
 id, matching the ``uid`` / ``id`` / ``text`` / ``generated_by`` schema of the
 essay, wp and reuter corpora.
 
+``prompt`` is carried through from stage 3 onto the generated rows only, and is
+null on the human row — a human abstract was not written to a prompt, and
+filling the column there with the prompt derived FROM it would invite exactly
+the reading the Ghostbuster protocol exists to prevent. On a generated row it is
+the verbatim user message that produced the text, so the corpus can be read
+without going back to ``<dataset_id>_prompts.parquet``. The system prompt is not
+stored per row: it is one string for the whole run, and ``generated_by`` already
+names the prompt config it came from.
+
 ``generated_by`` is DERIVED, never configured: ``<model_slug>:<prompt_config>``,
 e.g. ``gpt54mini:0807A``. A label that can be typed by hand is the one field in
 the corpus that can disagree with what actually produced the row. It still
@@ -85,6 +94,10 @@ ID_SEP = ":"
 # metadata, then any emb_* a later stage adds. Same front block as
 # `combine_domains.order_columns`, so a science corpus and a ghostbuster one can
 # be eyeballed with the same `df.iloc[:, :5]`.
+#
+# `prompt` goes last rather than beside `text`: it is long enough to make any
+# `df.head()` unreadable, and putting it after the metadata keeps the front
+# block identical to the other corpora.
 OUT_COLUMNS = [
     "uid",
     "id",
@@ -103,6 +116,7 @@ OUT_COLUMNS = [
     "fields_of_study",
     "query",
     "also_matched_domains",
+    "prompt",
 ]
 
 
@@ -178,6 +192,11 @@ def export(df: pd.DataFrame, shard: Shard, cfg: dict) -> pd.DataFrame:
 
     human = df.copy()
     human["generated_by"] = "human"
+    # The prompt travels with the row it produced, and it produced no human
+    # row. `df` carries the column because stage 3 wrote it beside the human
+    # abstract it was derived from; leaving that value here would say the
+    # abstract was written to the prompt, when the truth is the reverse.
+    human["prompt"] = None
     # reindex, not strict selection: `doi`, `author_ids` and `author_count` are
     # metadata no stage reads, and a corpus built before they existed carries
     # none of them — see the same guard in make_prompts.py.
@@ -200,6 +219,11 @@ def export(df: pd.DataFrame, shard: Shard, cfg: dict) -> pd.DataFrame:
     # parquet as Arrow type `null` and refuse to be read beside a corpus that
     # has values.
     out = coerce_dtypes(pd.concat(frames, ignore_index=True), OPTIONAL_NUMERIC_COLUMNS)
+    # Same reasoning for `prompt`, which coerce_dtypes cannot help with because
+    # it is text: null on every human row, and null on ALL rows if a run
+    # exported nothing but human rows. Naming the dtype makes it Arrow `string`
+    # either way, instead of `null` in the degenerate case.
+    out["prompt"] = out["prompt"].astype("string")
 
     # uid last, once every row knows its generated_by. Assigned here rather
     # than in the clean stage so the row key exists as soon as the row does.

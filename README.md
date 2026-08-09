@@ -74,6 +74,10 @@ episteme-ai/
 │   │   ├── analyse/               #   per-stage reports
 │   │   └── run_pipeline.py        #   Runs every stage above, in order
 │   │
+│   ├── scripts/                   # Standalone parquet tools, pipeline-agnostic
+│   │   ├── export_records_txt.py  #   Parquet → one readable .txt per record
+│   │   └── rename_column_values.py#   Relabel values inside one column
+│   │
 │   ├── algs/                      # Shared: pluggable classifier algorithms
 │   └── utils/                     # Shared: all utility modules
 │
@@ -96,6 +100,7 @@ episteme-ai/
 │   ├── sql/                       # SQLite databases (citation impact pipeline)
 │   ├── parquet/                   # Parquet datasets (citation impact + AI detection)
 │   ├── science/                   # Science-data pipeline: ALL stages read/write here
+│   ├── inspect/                   # export_records_txt.py output, one dir per corpus
 │   ├── ghostbuster-data*/         # Raw Ghostbuster text corpora
 │   └── papers/                    # Downloaded Denario PDFs
 └── results/                       # All experiment outputs (gitignored)
@@ -807,6 +812,18 @@ paper) and `also_matched_domains` (which other domains' queries also matched
 it). `combine_domains.py` drops both when it runs, so they cost nothing
 downstream.
 
+The **`prompt`** column carries the verbatim user message that produced the
+row, so the corpus can be read without going back to `<id>_prompts.parquet`.
+It is **null on every human row** — a human abstract was not written to a
+prompt, and filling the column there with the prompt derived *from* it would
+invite exactly the reading the protocol exists to prevent. It sits last, after
+the metadata, because a 200-word cell beside `text` makes any `df.head()`
+unreadable. The system prompt is not stored per row: it is one string for the
+whole run, and `generated_by` already names the prompt config it came from.
+A corpus built before this column existed can be rebuilt by re-running stage 4
+— the generation checkpoint is keyed on `(id, generated_by)`, so it re-exports
+from cached calls and costs nothing.
+
 Stage 2 is `filter.py`, not `filter_abstracts.py`: only 5 of its 14 admission
 rules look at the abstract text — the other 9 reject on the id, title, year,
 citation count, FWCI, language label, or a cross-domain duplicate. It filters
@@ -923,6 +940,29 @@ what a field actually contains before wiring it into `rules.py`:
 ```bash
 uv run python epai/science_data/fetch/oa_hw_fetch.py 10.1038/s41562-025-02244-z
 ```
+
+### Reading a corpus by eye
+
+A pair is unreadable in a dataframe: two 200-word strings and a longer prompt,
+one per cell, and `df.head()` shows none of it. `export_records_txt.py` writes
+one `.txt` per `id` — the original text, the prompt, then each AI text,
+separated by labelled rules and wrapped to 80 columns:
+
+```bash
+# every record → data/inspect/<parquet stem>/0001_biology_science_biology_W2143….txt
+uv run python epai/scripts/export_records_txt.py data/parquet/science_v1_gpt54mini_0807A.parquet
+
+# 25 random biology papers, somewhere else
+uv run python epai/scripts/export_records_txt.py corpus.parquet \
+    --where domain=biology --sample 25 --seed 0 -o /tmp/look
+```
+
+`--limit` cuts from the head of the file, `--ids` takes named papers, `--wrap 0`
+leaves the text single-line. The column names are all flags
+(`--text-column`, `--prompt-column`, `--label-column`, `--human-label`), so it
+reads a ghostbuster parquet or anything older just as well; a file with no
+`prompt` column simply exports without it, and one with no `id` column becomes
+one file per row. A `_index.tsv` beside the files maps filename → id → domain.
 
 Once exported, the corpus joins the AI-detection pipeline at Stage B (embed) —
 and `prepare/combine_domains.py` can fold it in beside the Ghostbuster domains.
