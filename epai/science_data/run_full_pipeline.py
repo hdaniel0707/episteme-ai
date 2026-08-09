@@ -35,7 +35,7 @@ Resuming, since step 1 is the expensive one:
     --science-from prompts   resume *inside* the science pipeline
 
 Run:
-    uv run python epai/science_data/run_full_pipeline.py --yes --gpu 0
+    uv run python epai/science_data/run_full_pipeline.py --yes --cpu-threads 16 --gpu 5
     uv run python epai/science_data/run_full_pipeline.py --from promote --gpu 0
     uv run python epai/science_data/run_full_pipeline.py --dry-run
 """
