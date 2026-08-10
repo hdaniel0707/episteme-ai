@@ -1,3 +1,6 @@
 [submodule "external/Binoculars"]
 	path = external/Binoculars
 	url = git@github.com:hdaniel0707/Binoculars.git
+[submodule "external/ghostbuster"]
+	path = external/ghostbuster
+	url = git@github.com:hdaniel0707/ghostbuster.git
