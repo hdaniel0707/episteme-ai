@@ -4,19 +4,30 @@ r"""Build a Ghostbuster corpus with a newer generator and score it, end to end.
 
 Seven stages, in order:
 
-  1. **generate**  — ``external/ghostbuster/generate.py``, once per domain, in
-     the fork's own environment. Writes ``external/ghostbuster/data/<domain>/<type>/``.
+  1. **generate**  — ``external/ghostbuster/generate.py``, once per (domain,
+     type), in the fork's own environment. Writes
+     ``external/ghostbuster/data/<domain>/<model_slug>_<prompt_id>/``.
   2. **fix-empty** — ``fix_empty_generations.py``, once per (domain, type),
      refilling files that came back blank. Skipped when
      ``generate.fix_empty`` is false.
-  3. **collect**   — audit the generated text tree, then *copy* it to
-     ``data/ghostbuster-data-<variant>/``. A copy, not a move: the fork's tree
-     is what makes a re-run of stage 1 free, since every loop there skips an
-     output file that already exists.
+  3. **collect**   — audit the generated text tree, then *copy* this run's part
+     of it to ``data/ghostbuster-data-<variant>/``. A copy, not a move: the
+     fork's tree is what makes a re-run of stage 1 free, since every loop there
+     skips an output file that already exists. Only the seeded inputs and this
+     run's own generator directories are copied — the fork's tree accumulates
+     every variant ever generated, and a corpus holds one.
   4. **prepare**   — ``prepare_{essay,wp,reuter}.py`` over the collected tree,
-     one parquet per domain in ``data/parquet/``.
+     one parquet per domain in ``data/parquet/``. Told which generator
+     directories to read (``--generators human <this run's>``): a collected tree
+     is copied into, never emptied, so a directory left by an earlier run into
+     the same variant would otherwise add a second set of machine rows under its
+     own old label.
   5. **combine**   — ``combine_domains.py`` unions them into
-     ``data/parquet/<dataset_id>_<variant>.parquet`` with a ``domain`` column.
+     ``data/parquet/<dataset_id>_<variant>.parquet`` with a ``domain`` column,
+     then deletes the per-domain files: every row of them is in the combined
+     corpus, nothing downstream reads them, and a leftover
+     ``essay_<variant>.parquet`` is a corpus-shaped file waiting to be trained
+     on by mistake. ``combine.remove_domain_parquets: false`` keeps them.
   6. **score**     — ``external/Binoculars/score_parquets.py`` over that file,
      writing ``..._binox0.parquet``.
   7. **embed**     — ``embed/add_embeddings.py`` over the scored file, filling
@@ -32,6 +43,18 @@ fork, because ``generate.py`` does ``import utils`` and reads and writes
 ``data/<domain>/...`` relative to the working directory; neither is
 configurable there.
 
+**A generator is named after its model and its prompts, everywhere.** The fork's
+own name for a generator (``gpt_plain``) says which prompt was used and nothing
+about which model used it, so every model would generate into one directory —
+and since the fork skips output files that already exist, the second model to
+run there writes nothing and its "corpus" is the first model's text under a new
+filename. This pipeline passes ``--out_name <model_slug>_<prompt_id>`` instead
+(``gpt56luna_0701A``), and ``prepare_*.py`` turn that back into the corpus label
+``gpt56luna:0701A`` — the same ``<model>:<prompts>`` convention the science
+pipeline uses. The model half is derived from ``generate.gpt_model``; the prompt
+half is ``generate.prompt_ids``, which has to be stated because the prompts
+themselves live in the fork.
+
 **The seeded inputs are never written by this pipeline.** ``human/``,
 ``prompts/`` and reuter's ``gpt/<author>/headlines/`` are placed under
 ``external/ghostbuster/data/`` by hand (see the README), once, and reused by
@@ -46,6 +69,31 @@ code to show it. The audit counts documents and blank files per (domain, type)
 and stops the run on a shortfall (``--allow-shortfall`` to accept one) or on a
 blank *generated* file (``--allow-empty``). Blank *human* files are reported and
 never fatal: they are seeded input, and the upstream essay corpus ships six.
+
+**``--clean`` starts a run from a clean slate.** These directories are written
+to by more than one run: the fork's tree is shared by every model variant, and
+the collected tree is copied *into*, never emptied. So a previous run's
+generator directory can sit beside this one's, and until the prepare stage was
+told which generators to read, that is exactly how a corpus ended up holding its
+machine rows twice — once under ``gpt_plain`` and once under
+``gpt56luna:0701A``. ``--clean`` removes those leftovers before the first step,
+at all three levels:
+
+  1. ``external/ghostbuster/data/<domain>/`` — generator directories that are
+     neither seeded inputs nor this run's;
+  2. ``data/ghostbuster-data-<variant>/`` — the same, plus whole domains this
+     config no longer builds and any stray ``logprobs*`` cache;
+  3. ``data/parquet/<domain>_<variant>.parquet`` — but only when ``prepare`` is
+     among the selected steps, so it never deletes what a later step needs.
+
+The rule at every level is one rule: *inside the places this config writes,
+remove what this config would not produce*. The seeded inputs and this run's own
+directories are what a leftover is defined against, so they cannot be selected —
+which is what makes the flag safe to pass on every run — and nothing outside
+these directories is even looked at. It prints the full list with document
+counts and asks before deleting (``--yes`` answers it, ``--dry-run`` shows the
+list and deletes nothing). Read the list: the fork-tree entries are usually
+another model's generated text, which cost API calls and is kept nowhere else.
 
 Resuming, since stage 1 is the expensive one:
 
@@ -66,7 +114,7 @@ LLM call under ``--debug``, and only ten rows get scored and embedded, so the
 whole thing is minutes rather than a day:
 
     uv run python epai/ghostbuster/run_full_pipeline.py --yes --debug \
-        --gen-limit 10 --score-limit 10 --embed-limit 10 --gpu 0
+        --gen-limit 10 --score-limit 10 --embed-limit 10 --gpu 0 --until combine --clean
 
 Drop ``--debug`` to spend real API calls on ten items per domain, which is the
 run to do before committing to a full one. Read its output knowing three things:
@@ -80,6 +128,8 @@ run to do before committing to a full one. Read its output knowing three things:
 
 Run:
     uv run python epai/ghostbuster/run_full_pipeline.py --yes --cpu-threads 16 --gpu 5
+    uv run python epai/ghostbuster/run_full_pipeline.py --clean --dry-run
+    uv run python epai/ghostbuster/run_full_pipeline.py --clean --yes --gpu 0
     uv run python epai/ghostbuster/run_full_pipeline.py --gen-limit 3 --debug --dry-run
     uv run python epai/ghostbuster/run_full_pipeline.py --until combine --yes
     uv run python epai/ghostbuster/run_full_pipeline.py --from score --gpu 0
@@ -109,6 +159,7 @@ from epai.ghostbuster.config import (
     GPT_TYPES,
     PARQUET_DIR,
     PREPARE_SCRIPTS,
+    SEED_SUBDIRS,
     collected_dir,
     combined_path,
     count_txt,
@@ -116,9 +167,12 @@ from epai.ghostbuster.config import (
     domain_source_dir,
     domains,
     expected_documents,
-    generate_flags,
+    generate_flag,
+    generated_by_label,
     load_pipeline_config,
     missing_seeds,
+    output_dir_name,
+    output_dir_names,
     scored_path,
     types,
     variant,
@@ -233,14 +287,16 @@ def fork_cmd(project: Path, script: str, extra: list[str]) -> list[str]:
     return ["uv", "run", "--project", str(project), "python", script, *extra]
 
 
-def model_args(cfg: dict) -> list[str]:
+def model_args(cfg: dict, gen_type: str | None = None) -> list[str]:
     """``--gpt_model`` / ``--claude_model``, only for the models actually used.
 
     Passing a model that no selected type will call would put a generator in the
-    printed command line that produced none of the text.
+    printed command line that produced none of the text. ``gen_type`` narrows it
+    further, to the one model that invocation will call — the fork's stages run
+    one type at a time, so that is all any of them needs.
     """
     gen = cfg["generate"]
-    selected = types(cfg)
+    selected = [gen_type] if gen_type else types(cfg)
     out: list[str] = []
     if any(t in GPT_TYPES for t in selected):
         out += ["--gpt_model", gen["gpt_model"]]
@@ -347,11 +403,13 @@ def preflight(cfg: dict, args: argparse.Namespace, steps: list[str]) -> None:
 
 
 def step_generate(cfg: dict, args: argparse.Namespace) -> int:
-    """One subprocess per domain, in the fork's environment and directory.
+    """One subprocess per (domain, type), in the fork's environment and directory.
 
-    Per domain rather than one call with every flag, so a failure names the
-    domain it happened in and a re-run can be pointed at that domain alone. The
-    fork's own skip-if-exists logic makes the repeat free.
+    Per (domain, type) rather than one call with every flag, for two reasons: a
+    failure names the pair it happened in and a re-run can be pointed at that
+    pair alone, and the fork's ``--out_name`` names one directory, so one
+    invocation can only describe one type. The fork's own skip-if-exists logic
+    makes the repeat free.
     """
     gen = cfg["generate"]
     limit = args.gen_limit if args.gen_limit is not None else gen.get("limit")
@@ -362,26 +420,35 @@ def step_generate(cfg: dict, args: argparse.Namespace) -> int:
               f"writes are placeholders, not a corpus.{RESET}\n")
 
     for domain in domains(cfg):
-        extra = [
-            *generate_flags(cfg, domain),
-            *model_args(cfg),
-            "--seed", str(gen.get("seed", 0)),
-        ]
-        if limit is not None:
-            extra += ["--limit", str(limit)]
-        if args.debug:
-            extra.append("--debug")
+        for gen_type in types(cfg):
+            out_name = output_dir_name(cfg, gen_type)
+            extra = [
+                generate_flag(domain, gen_type),
+                # What makes this run's documents its own. Without it the fork
+                # writes to data/<domain>/<type>/, which is the same directory
+                # every model would use, and the second model to run there
+                # skips every file and generates nothing.
+                "--out_name", out_name,
+                *model_args(cfg, gen_type),
+                "--seed", str(gen.get("seed", 0)),
+            ]
+            if limit is not None:
+                extra += ["--limit", str(limit)]
+            if args.debug:
+                extra.append("--debug")
 
-        print(f"{BOLD}  {domain}{RESET}")
-        code = run_cmd(
-            fork_cmd(GHOSTBUSTER_PROJECT, GENERATE_SCRIPT, extra),
-            args.dry_run,
-            cwd=GHOSTBUSTER_PROJECT,
-            env=submodule_env(),
-        )
-        if code != 0:
-            print(f"{RED}generate failed for domain {domain!r} (exit {code}).{RESET}")
-            return code
+            print(f"{BOLD}  {domain}/{gen_type}{RESET} {DIM}→ data/{domain}/"
+                  f"{out_name}/{RESET}")
+            code = run_cmd(
+                fork_cmd(GHOSTBUSTER_PROJECT, GENERATE_SCRIPT, extra),
+                args.dry_run,
+                cwd=GHOSTBUSTER_PROJECT,
+                env=submodule_env(),
+            )
+            if code != 0:
+                print(f"{RED}generate failed for {domain}/{gen_type} "
+                      f"(exit {code}).{RESET}")
+                return code
     return 0
 
 
@@ -400,7 +467,14 @@ def step_fix_empty(cfg: dict, args: argparse.Namespace) -> int:
 
     for domain in domains(cfg):
         for gen_type in types(cfg):
-            extra = [f"--{domain}_{gen_type}", *model_args(cfg)]
+            extra = [
+                generate_flag(domain, gen_type),
+                # Same directory the generate stage wrote to; the flag above
+                # still picks the prompt, so a refilled file gets the prompt its
+                # neighbours got.
+                "--out_name", output_dir_name(cfg, gen_type),
+                *model_args(cfg, gen_type),
+            ]
             if args.debug:
                 extra.append("--debug")
 
@@ -431,7 +505,7 @@ def audit(cfg: dict, args: argparse.Namespace) -> int:
     """
     gen_limit = args.gen_limit if args.gen_limit is not None else cfg["generate"].get("limit")
 
-    print(f"  {'domain/type':<22} {'files':>7} {'expected':>9} {'missing':>8} {'blank':>7}")
+    print(f"  {'domain/directory':<28} {'files':>7} {'expected':>9} {'missing':>8} {'blank':>7}")
     shortfall: list[str] = []
     blanks: list[str] = []
     # Reported but never fatal, unlike the generated blanks. A blank human
@@ -446,21 +520,25 @@ def audit(cfg: dict, args: argparse.Namespace) -> int:
         expected = expected_documents(cfg, domain, gen_limit)
         # Printed for context, not as the baseline: the human tree can hold more
         # files than there are prompts to generate from.
-        print(f"  {domain + '/human':<22} {human:>7} {'—':>9} {'—':>8} {human_blank:>7}")
+        print(f"  {domain + '/human':<28} {human:>7} {'—':>9} {'—':>8} {human_blank:>7}")
         if human_blank:
             seed_blanks.append(f"{domain}/human ({human_blank})")
 
+        # Counted under this run's own directories, not under the type names:
+        # another model's rows may be sitting in data/<domain>/<its dir>/, and
+        # counting those would report a run as complete that never happened.
         for gen_type in types(cfg):
-            files, blank = count_txt(GB_DATA_DIR / domain / gen_type)
+            out_name = output_dir_name(cfg, gen_type)
+            files, blank = count_txt(GB_DATA_DIR / domain / out_name)
             missing = max(expected - files, 0)
             colour = RED if (missing or blank) else ""
             reset = RESET if colour else ""
-            print(f"  {colour}{domain + '/' + gen_type:<22} {files:>7} {expected:>9} "
+            print(f"  {colour}{domain + '/' + out_name:<28} {files:>7} {expected:>9} "
                   f"{missing:>8} {blank:>7}{reset}")
             if missing:
-                shortfall.append(f"{domain}/{gen_type} (-{missing})")
+                shortfall.append(f"{domain}/{out_name} (-{missing})")
             if blank:
-                blanks.append(f"{domain}/{gen_type} ({blank})")
+                blanks.append(f"{domain}/{out_name} ({blank})")
 
     ok = True
     if blanks and not args.allow_empty:
@@ -520,15 +598,142 @@ def audit(cfg: dict, args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def collect_subdirs(cfg: dict, domain: str) -> list[str]:
+    """What collect copies out of ``data/<domain>/``, and nothing else.
+
+    The seeded inputs plus this run's own generator directories. Selective
+    rather than "copy the domain", because the fork's tree is shared by every
+    model variant: once a second variant has been generated there,
+    ``data/essay/`` holds ``gpt56luna_0701A`` *and* ``gpt57x_0701A``, and
+    copying the lot would put both models in one corpus under one filename.
+    """
+    return [*SEED_SUBDIRS[domain], *output_dir_names(cfg)]
+
+
+def clean_plan(cfg: dict, var: str, steps: list[str]) -> list[tuple[str, Path, str]]:
+    """``(level, path, detail)`` for everything ``--clean`` would remove.
+
+    One rule at every level: **inside the places this config writes, remove what
+    this config would not produce.** That is what a leftover is — the seeded
+    inputs and this run's own directories are what it is defined against, so
+    neither can ever be selected, and nothing outside these two trees is looked
+    at at all. Another variant's collected tree and another variant's parquets
+    belong to another corpus and are not this run's business.
+
+    The three levels, in the order a run touches them:
+
+      1. ``external/ghostbuster/data/<domain>/`` — generator directories that
+         are neither seeded nor this run's. **This is generated text that cost
+         API calls**, usually another model's, and it is the one level worth
+         reading the list before confirming.
+      2. ``data/ghostbuster-data-<variant>/`` — the same, plus whole domains
+         this config no longer builds, plus the fork's ``logprobs*`` caches if
+         an older collect ever copied them (this one does not).
+      3. ``data/parquet/<domain>_<variant>.parquet`` — only when the run will
+         rebuild them, i.e. when ``prepare`` is among the selected steps.
+         Otherwise they are somebody's input, not a leftover.
+    """
+    plan: list[tuple[str, Path, str]] = []
+
+    def documents(path: Path) -> str:
+        files, _ = count_txt(path)
+        return f"{files} document(s)"
+
+    for domain in domains(cfg):
+        root = GB_DATA_DIR / domain
+        expected = set(collect_subdirs(cfg, domain))
+        if root.is_dir():
+            for path in sorted(root.iterdir()):
+                if path.is_dir() and path.name not in expected:
+                    plan.append(("fork tree", path, documents(path)))
+
+    dest_root = collected_dir(cfg, var)
+    if dest_root.is_dir():
+        configured = set(domains(cfg))
+        for path in sorted(dest_root.iterdir()):
+            if path.is_dir() and path.name not in configured:
+                plan.append(("collected", path,
+                             f"domain not in this config, {documents(path)}"))
+        for domain in domains(cfg):
+            root = dest_root / domain
+            expected = set(collect_subdirs(cfg, domain))
+            if not root.is_dir():
+                continue
+            for path in sorted(root.iterdir()):
+                if not path.is_dir():
+                    continue
+                if path.name not in expected:
+                    plan.append(("collected", path, documents(path)))
+                    continue
+                # Kept directory, but the fork's token log-probability caches
+                # inside it are not part of any corpus and are never copied by
+                # this pipeline — so any that are here are from an older one.
+                for cache in sorted(p for p in path.rglob("logprobs*") if p.is_dir()):
+                    plan.append(("collected", cache, "logprob cache, unused here"))
+
+    if "prepare" in steps:
+        for domain in domains(cfg):
+            path = domain_parquet(cfg, var, domain)
+            if path.is_file():
+                plan.append(("parquet", path,
+                             f"{path.stat().st_size / 1e6:.1f} MB, rebuilt by prepare"))
+
+    return plan
+
+
+def step_clean(cfg: dict, args: argparse.Namespace, var: str, steps: list[str]) -> int:
+    """Remove what :func:`clean_plan` found, after showing it. 0 unless aborted."""
+    banner("clean", "leftovers from previous runs")
+    plan = clean_plan(cfg, var, steps)
+
+    if not plan:
+        print(f"{GREEN}Nothing to remove.{RESET}\n")
+        return 0
+
+    for level, path, detail in plan:
+        print(f"  {level:<10} {rel(path):<52} {DIM}{detail}{RESET}")
+
+    if any(level == "fork tree" for level, _, _ in plan):
+        print(f"\n{YELLOW}  The 'fork tree' entries are generated text — another "
+              f"run paid for them, and nothing else keeps a copy.{RESET}")
+
+    if args.dry_run:
+        print()
+        for _, path, _ in plan:
+            print(f"{DIM}$ rm -rf {rel(path)}{RESET}")
+        print()
+        return 0
+
+    if not confirm(f"\n{YELLOW}Remove these {len(plan)} path(s)?{RESET}", args.yes):
+        print("Aborted.")
+        return 1
+
+    roots = (GB_DATA_DIR.resolve(), collected_dir(cfg, var).resolve(), PARQUET_DIR.resolve())
+    for _, path, _ in plan:
+        # Nothing is deleted from outside the three directories this pipeline
+        # writes to, whatever a config says.
+        if not any(r in path.resolve().parents for r in roots):
+            print(f"{RED}Refusing to remove {rel(path)}: outside this "
+                  f"pipeline's directories.{RESET}")
+            return 1
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+    print(f"{GREEN}Removed{RESET} {len(plan)} path(s).\n")
+    return 0
+
+
 def step_collect(cfg: dict, args: argparse.Namespace, var: str) -> int:
-    """Audit the fork's text tree, then copy it into this repo."""
+    """Audit the fork's text tree, then copy this run's part of it into the repo."""
     dest_root = collected_dir(cfg, var)
     banner("collect", f"{rel(GB_DATA_DIR)} → {rel(dest_root)}")
 
     if args.dry_run:
         for domain in domains(cfg):
-            print(f"{DIM}$ cp -a {rel(GB_DATA_DIR / domain)} "
-                  f"{rel(dest_root / domain)}{RESET}")
+            for sub in collect_subdirs(cfg, domain):
+                print(f"{DIM}$ cp -a {rel(GB_DATA_DIR / domain / sub)} "
+                      f"{rel(dest_root / domain / sub)}{RESET}")
         return 0
 
     code = audit(cfg, args)
@@ -537,13 +742,7 @@ def step_collect(cfg: dict, args: argparse.Namespace, var: str) -> int:
 
     print()
     for domain in domains(cfg):
-        src = GB_DATA_DIR / domain
         dest = dest_root / domain
-        if not src.is_dir():
-            print(f"{RED}Not found: {rel(src)}{RESET}\n"
-                  f"  The generate stage writes it. Run that first, or drop "
-                  f"{domain!r} from generate.domains.")
-            return 1
         if dest.exists() and not confirm(
             f"{YELLOW}{rel(dest)} already exists and will be updated in place. "
             f"Continue?{RESET}",
@@ -552,14 +751,40 @@ def step_collect(cfg: dict, args: argparse.Namespace, var: str) -> int:
             print("Aborted.")
             return 1
 
-        dest.mkdir(parents=True, exist_ok=True)
-        # dirs_exist_ok so a second collect refreshes the tree rather than
-        # failing; the fork's tree is authoritative, and files removed there are
-        # left behind here deliberately — nothing should silently delete a
-        # document from a corpus directory.
-        shutil.copytree(src, dest, dirs_exist_ok=True, ignore=COPY_IGNORE)
+        for sub in collect_subdirs(cfg, domain):
+            src = GB_DATA_DIR / domain / sub
+            if not src.is_dir():
+                print(f"{RED}Not found: {rel(src)}{RESET}\n"
+                      f"  The generate stage writes it. Run that first, or drop "
+                      f"{domain!r} from generate.domains.")
+                return 1
+
+            (dest / sub).mkdir(parents=True, exist_ok=True)
+            # dirs_exist_ok so a second collect refreshes the tree rather than
+            # failing; the fork's tree is authoritative, and files removed there
+            # are left behind here deliberately — nothing should silently delete
+            # a document from a corpus directory.
+            shutil.copytree(src, dest / sub, dirs_exist_ok=True, ignore=COPY_IGNORE)
+
         files, _ = count_txt(dest)
-        print(f"{GREEN}Copied{RESET} {files} document(s) to {rel(dest)}")
+        print(f"{GREEN}Copied{RESET} {files} document(s) to {rel(dest)}"
+              f" ({', '.join(collect_subdirs(cfg, domain))})")
+
+        # Nothing here deletes, so a directory from an earlier run into the same
+        # variant stays behind. It costs only disk — the prepare stage reads the
+        # directories this config names and no others — but it is worth saying
+        # out loud, because it is text that looks like part of this corpus and
+        # is not in it.
+        expected = set(collect_subdirs(cfg, domain))
+        leftover = sorted(
+            p.name for p in dest.iterdir() if p.is_dir() and p.name not in expected
+        )
+        if leftover:
+            print(f"{YELLOW}  NOTE: {rel(dest)} also holds {', '.join(leftover)}, "
+                  f"from an earlier run.{RESET}\n"
+                  f"    Not included in the corpus — the prepare stage reads "
+                  f"human/ and {', '.join(output_dir_names(cfg))} only. Remove "
+                  f"with:  rm -rf {' '.join(rel(dest / n) for n in leftover)}")
 
     return 0
 
@@ -582,6 +807,12 @@ def step_prepare(cfg: dict, args: argparse.Namespace, var: str) -> int:
             str(BASE_DIR / PREPARE_SCRIPTS[domain]),
             "--source-dir", rel(source),
             "-o", rel(domain_parquet(cfg, var, domain)),
+            # Named, not discovered. A collected tree is added to rather than
+            # replaced — collect copies into it without deleting — so a
+            # generator directory from an earlier run survives there and would
+            # otherwise contribute a second set of machine rows under its own
+            # old label. This makes the config decide what the corpus holds.
+            "--generators", "human", *output_dir_names(cfg),
         ]
         if not cfg["prepare"].get("embeddings", False):
             cmd.append("--no-embedding")
@@ -594,8 +825,40 @@ def step_prepare(cfg: dict, args: argparse.Namespace, var: str) -> int:
     return 0
 
 
+def remove_domain_parquets(inputs: list[Path], out: Path, dry_run: bool) -> None:
+    """Delete the per-domain parquets the combined corpus was built from.
+
+    They are an intermediate, not an artefact: every row of every one of them is
+    in ``out``, with a ``domain`` column saying where it came from, and nothing
+    downstream — score, embed, train, analyse — reads them again. Keeping them
+    doubles the corpus on disk and leaves three files that look like corpora,
+    which is how a run ends up trained on ``essay_gpt56luna.parquet`` from two
+    generations ago.
+
+    Rebuilding one costs a prepare run over the collected text tree: local,
+    minutes, no API calls. That is what makes this safe to do automatically —
+    and why it happens only after combine has exited 0 and written ``out``.
+    """
+    if dry_run:
+        for path in inputs:
+            print(f"{DIM}$ rm {rel(path)}{RESET}")
+        return
+
+    removed = []
+    for path in inputs:
+        # Guard against deleting the thing that was just written, however the
+        # names are configured.
+        if path.resolve() == out.resolve() or not path.is_file():
+            continue
+        path.unlink()
+        removed.append(path)
+    if removed:
+        print(f"{DIM}Removed {len(removed)} per-domain parquet(s): "
+              f"{', '.join(rel(p) for p in removed)}{RESET}")
+
+
 def step_combine(cfg: dict, args: argparse.Namespace, var: str) -> int:
-    """Union the per-domain parquets into one corpus."""
+    """Union the per-domain parquets into one corpus, then drop them."""
     comb = cfg["combine"]
     out = combined_path(cfg, var)
     inputs = [domain_parquet(cfg, var, d) for d in domains(cfg)]
@@ -610,8 +873,9 @@ def step_combine(cfg: dict, args: argparse.Namespace, var: str) -> int:
         "--drop-incomplete", comb.get("drop_incomplete", "emb"),
         "--max-drop-frac", str(comb.get("max_drop_frac", 0.05)),
         # Always passed, with no values when the list is empty: the script's own
-        # default drops the prompt-variant labels, which a corpus of gpt_plain
-        # rows does not have, and it reports every label that matched nothing.
+        # default drops the prompt-variant labels, which this corpus does not
+        # have, and it reports every label that matched nothing. The labels
+        # here are the corpus ones (gpt56luna:0701A), not the fork's types.
         "--drop-generated-by", *comb.get("drop_generated_by", []),
     ]
 
@@ -629,7 +893,20 @@ def step_combine(cfg: dict, args: argparse.Namespace, var: str) -> int:
                 return 1
             cmd.append("--overwrite")
 
-    return run_cmd(cmd, args.dry_run)
+    code = run_cmd(cmd, args.dry_run)
+    if code != 0:
+        return code
+
+    if comb.get("remove_domain_parquets", True):
+        # Only ever after a successful combine, and only once the file it wrote
+        # is on disk: the inputs are the one copy of this text in parquet form
+        # until that is true.
+        if args.dry_run or out.is_file():
+            remove_domain_parquets(inputs, out, args.dry_run)
+        else:
+            print(f"{YELLOW}combine reported success but {rel(out)} is not "
+                  f"there; keeping the per-domain parquets.{RESET}")
+    return 0
 
 
 def step_score(cfg: dict, args: argparse.Namespace, var: str) -> int:
@@ -813,6 +1090,15 @@ def main() -> None:
                         "be combined with --from or --until.")
     g.add_argument("--dry-run", action="store_true",
                    help="print the commands without running anything")
+    g.add_argument("--clean", action="store_true",
+                   help="before the first step, remove what previous runs left "
+                        "in the places this config writes: foreign generator "
+                        "directories in the fork's tree and in the collected "
+                        "tree, domains this config no longer builds, stray "
+                        "logprob caches, and (when prepare runs) the per-domain "
+                        "parquets. Never touches the seeded inputs or this "
+                        "run's own directories. Lists everything and asks first; "
+                        "--dry-run shows the list and deletes nothing.")
 
     g = parser.add_argument_group("generation")
     g.add_argument("--yes", action="store_true",
@@ -867,9 +1153,16 @@ def main() -> None:
     print(f"  variant      {var}")
     print(f"  domains      {', '.join(domains(cfg))}")
     print(f"  types        {', '.join(types(cfg))}")
-    print(f"  generated    {rel(GB_DATA_DIR)}/<domain>/<type>/")
+    # The label is what a row will actually be called, so it is worth reading
+    # before a run rather than discovering in the parquet afterwards.
+    print(f"  generated_by {', '.join(generated_by_label(cfg, t) for t in types(cfg))}")
+    print(f"  generated    {rel(GB_DATA_DIR)}/<domain>/"
+          f"{{{','.join(output_dir_names(cfg))}}}/")
     print(f"  collected    {rel(collected_dir(cfg, var))}/")
-    print(f"  per-domain   {', '.join(rel(domain_parquet(cfg, var, d)) for d in domains(cfg))}")
+    removing = cfg["combine"].get("remove_domain_parquets", True)
+    print(f"  per-domain   "
+          f"{', '.join(rel(domain_parquet(cfg, var, d)) for d in domains(cfg))}"
+          f"{DIM + '  (removed after combine)' + RESET if removing else ''}")
     print(f"  combined     {rel(combined)}")
     print(f"  scored       {rel(scored_path(cfg, var))}")
     print(f"  steps        {' → '.join(steps)}")
@@ -888,6 +1181,11 @@ def main() -> None:
         "score": lambda: step_score(cfg, args, var),
         "embed": lambda: step_embed(cfg, args, var),
     }
+
+    # Before the first step, not as one of them: it is about the state a run
+    # starts from, so it has to happen whichever step that run begins at.
+    if args.clean and step_clean(cfg, args, var, steps) != 0:
+        sys.exit(1)
 
     results: list[Result] = []
     failed = None

@@ -16,7 +16,12 @@ Output schema (data/parquet/reuter.parquet):
     id            -> "reut:<author>:<n>"  (per-source-story id)
     author        -> author directory name
     text          -> raw article text
-    generated_by  -> generator directory name (human / gpt / claude / ...)
+    generated_by  -> generator directory name, with a name of the form
+                     <model_slug>_<prompt_id> rewritten to the corpus label
+                     <model_slug>:<prompt_id> (gpt56luna_0701A ->
+                     gpt56luna:0701A); every other name is kept verbatim
+                     (human / gpt / claude / gpt_prompt1 / ...). See
+                     epai/utils/label_utils.py.
     emb_specter2  -> SPECTER2 embedding of the article text (Null unless ADD_EMB_SPECTER2)
 
 The id is the (author, file-number) of the source story, so the human original
@@ -35,6 +40,7 @@ from pathlib import Path
 import pandas as pd
 
 from epai.utils.embedding_utils import add_embedding
+from epai.utils.label_utils import generator_dirs, label_from_dir_name
 from epai.utils.parquet_utils import save_parquet
 
 BASE_DIR = Path(__file__).parent.parent.parent.parent
@@ -51,15 +57,15 @@ IGNORE_SUBDIRS = {"logprobs", "headlines"}
 REFERENCE_COLUMNS = ["id", "author", "text", "generated_by", "emb_specter2"]
 
 
-def load_reuter(root: Path) -> pd.DataFrame:
+def load_reuter(root: Path, generators: list[str] | None = None) -> pd.DataFrame:
     """Collect every article .txt under data/reuter into a tidy DataFrame.
 
     Files are gathered in a deterministic order (generator, author, numeric
     filename) so the running "reut:<i>" ids are stable across runs.
     """
     records = []
-    for generator_dir in sorted(p for p in root.iterdir() if p.is_dir()):
-        generated_by = generator_dir.name
+    for generator_dir in generator_dirs(root, generators):
+        generated_by = label_from_dir_name(generator_dir.name)
         for author_dir in sorted(p for p in generator_dir.iterdir() if p.is_dir()):
             if author_dir.name in IGNORE_SUBDIRS:
                 continue
@@ -107,6 +113,12 @@ def parse_args() -> argparse.Namespace:
                    help="Output parquet path.")
     p.add_argument("--limit", type=int, default=None, metavar="N",
                    help="Only keep the first N rows (a quick smoke test).")
+    p.add_argument("--generators", nargs="+", default=None, metavar="DIR",
+                   help="Only read these generator directories, by name "
+                        "(e.g. --generators human gpt56luna_0701A). Default: "
+                        "every directory found, which also picks up generators "
+                        "left behind by an earlier run — name them when the "
+                        "corpus has to hold exactly one run's output.")
     p.add_argument("--no-embedding", action="store_true",
                    help="Leave emb_specter2 empty instead of computing it "
                         "(the slow step; add_embeddings.py can fill it later).")
@@ -115,7 +127,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    df = load_reuter(args.source_dir)
+    df = load_reuter(args.source_dir, args.generators)
     if args.limit:
         df = df.head(args.limit)
     print(f"Loaded {len(df)} articles from {args.source_dir}")

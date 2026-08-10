@@ -46,8 +46,8 @@ data:
   parquet_path: "data/parquet/ghostbuster_gpt54mini_10w.parquet"
 
   # Labels are binarised to human vs machine: `human_label` -> 0, every other
-  # class -> 1. Corpora disagree on generator names (`gpt` here, `gpt_plain`
-  # there), so only this binary view is comparable across runs.
+  # class -> 1. Corpora disagree on generator names (`gpt` here,
+  # `gpt56luna:0701A` there), so only this binary view is comparable across runs.
   human_label: "human"
 
   # Column whose rows must stay in the SAME split. In the Ghostbuster corpora the

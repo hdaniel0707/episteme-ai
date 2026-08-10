@@ -9,6 +9,14 @@ Those two are the defaults, so the common case is just:
 
     uv run python epai/scripts/rename_column_values.py data/parquet/essay.parquet
 
+FOR OLDER CORPORA ONLY. The ghostbuster pipeline now names each generator's
+output directory ``<model_slug>_<prompt_id>`` and ``prepare_*.py`` turn that
+into the label as the parquet is written (see ``epai/utils/label_utils.py``), so
+a corpus built by ``epai/ghostbuster/run_full_pipeline.py`` arrives labelled and
+needs nothing from this script. Mind the defaults if you point it at one anyway:
+``--new`` names gpt54mini, and this script will happily write that into a corpus
+some other model generated.
+
 Nothing is written until you type ``yes`` at the prompt: the script first
 prints the current value distribution, the exact rows it would touch, and the
 resulting distribution. ``--dry-run`` skips the prompt and never writes;

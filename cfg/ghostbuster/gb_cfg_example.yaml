@@ -48,6 +48,27 @@ generate:
   #            gpt_plain, claude
   types: ["gpt_plain"]
 
+  # The prompt-config id for each type in `types`, and the only hand-written
+  # half of a row's identity. Every generated row is labelled
+  # <model_slug>:<prompt_id> — gpt56luna:0701A — the same convention
+  # cfg/science_data/ uses, and the fork writes that run into
+  # data/<domain>/gpt56luna_0701A/ (a colon is not a directory name).
+  #
+  # WHY THIS IS TYPED AND THE MODEL IS NOT: the prompts live in the fork, in
+  # external/ghostbuster/utils/prompt_utils.py, and `types` names an INDEX into
+  # them (gpt_plain is prompts[6]). Nothing here can read them, so nothing here
+  # can derive their version. Ids are <MMDD><letter>: the date the prompts were
+  # written, plus a letter for that day's variants.
+  #
+  # 0701A is the fork's plain prompt as it stands, unchanged since the
+  # gpt54mini corpus — which is why that corpus is labelled gpt54mini:0701A. The
+  # shared id is the point: same prompts, different model, so the two corpora
+  # are comparable. CHANGE THE PROMPTS IN THE FORK AND YOU MUST CHANGE THE ID,
+  # or two different prompts end up wearing one name with no way to tell them
+  # apart afterwards.
+  prompt_ids:
+    gpt_plain: "0701A"
+
   # Which Ghostbuster domains to build. Order is fixed by the pipeline, not by
   # this list. Dropping one drops it from the combined corpus too.
   domains: ["essay", "wp", "reuter"]
@@ -91,7 +112,8 @@ combine:
   # Rows whose generated_by is one of these are dropped. Empty list = keep
   # every label, which is what you want for a corpus that only holds the types
   # listed above — the script's own default drops the prompt-variant labels and
-  # would report each one as "matched nothing".
+  # would report each one as "matched nothing". Note the labels here are the
+  # corpus ones (gpt56luna:0701A), not the fork's type names.
   drop_generated_by: []
 
   # "none" is required while prepare.embeddings is false: the emb_specter2
@@ -100,6 +122,18 @@ combine:
 
   # Guard on drop_incomplete; inert while it is "none".
   max_drop_frac: 0.05
+
+  # Delete data/parquet/<domain>_<variant>.parquet once they are in the combined
+  # file. They are an intermediate: every row is in the combined corpus with a
+  # `domain` column saying which file it came from, nothing downstream reads
+  # them, and keeping them stores the corpus twice while leaving three files
+  # that look like corpora of their own — which is how a training run ends up
+  # pointed at a stale one. Rebuilding them is a prepare run over the collected
+  # text tree: local, minutes, no API calls.
+  #
+  # Only ever after combine exits 0 AND its output is on disk. Set false to keep
+  # them, e.g. while iterating on one domain's prepare script.
+  remove_domain_parquets: true
 
 # ---------------------------------------------------------------- score ----
 # Runs external/Binoculars/score_parquets.py once over the combined corpus, in

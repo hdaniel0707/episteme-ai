@@ -18,8 +18,8 @@ split, the missing-value rule, the group exclusion or the metric definitions.
 Three invariants this module exists to hold:
 
   * **Binarised target.** The corpora do not agree on generator names (``gpt``
-    in the Ghostbuster sets, ``gpt_plain`` in the gpt54mini ones), so only the
-    human-vs-machine view is comparable across them.
+    in the original Ghostbuster sets, ``<model>:<prompt_id>`` in the ones this
+    repo generates), so only the human-vs-machine view is comparable across them.
   * **Grouped split.** A document and its rewrites share one ``group_col`` value
     and never straddle the train/test cut.
   * **Group exclusion under transfer.** ``essay`` and ``essay_gpt54mini`` are

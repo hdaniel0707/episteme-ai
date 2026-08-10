@@ -16,6 +16,17 @@ The variant is derived from the generator model, not configured:
 ``gpt-5.6-luna`` -> ``gpt56luna``, giving ``data/parquet/essay_gpt56luna.parquet``
 and ``data/parquet/ghostbuster_gpt56luna.parquet``, which is the naming the
 existing ``*_gpt54mini`` files already use.
+
+So is the name of each generator's output directory, and for a second reason.
+The fork writes ``data/<domain>/<name>/``, skipping any file that already
+exists, and its own name for a generator says only which *prompt* was used
+(``gpt_plain``) — nothing about the model. Two models generated under that name
+land in one directory, and the second run silently skips all thousand files and
+"produces" the first model's corpus under a new filename. Naming the directory
+``<model_slug>_<prompt_id>`` (:func:`output_dir_name`) makes that impossible:
+a different model has nothing to skip. ``prepare_*.py`` then turn the directory
+name back into the corpus label ``<model_slug>:<prompt_id>`` — see
+:mod:`epai.utils.label_utils`, which owns both spellings.
 """
 
 from __future__ import annotations
@@ -29,6 +40,7 @@ import yaml
 # would put the same generator under two names in data/parquet/.
 from epai.science_data.config import model_slug
 from epai.utils.embed_select import validate_embedders
+from epai.utils.label_utils import PROMPT_ID_HINT, check_prompt_id, generator_dir_name
 
 BASE_DIR = Path(__file__).parent.parent.parent
 
@@ -185,6 +197,48 @@ def load_pipeline_config(path: Path) -> dict:
             f"{path}: generate.claude_model is required — generate.types includes 'claude'"
         )
 
+    # The other half of every generated row's label, and the half this repo
+    # cannot derive: the prompts live in the fork, in utils/prompt_utils.py, and
+    # `types` names an index into them rather than a version of them. So the id
+    # is stated once here and stamped into both the directory and the label.
+    prompt_ids = gen.get("prompt_ids")
+    if not isinstance(prompt_ids, dict):
+        raise ValueError(
+            f"{path}: generate.prompt_ids must be a mapping of generator type to "
+            f"prompt config id, e.g. {{gpt_plain: \"0701A\"}} — {PROMPT_ID_HINT}"
+        )
+    unknown = [t for t in prompt_ids if t not in ALL_TYPES]
+    if unknown:
+        raise ValueError(
+            f"{path}: generate.prompt_ids has entries for unknown types "
+            f"{unknown}. Choose from {list(ALL_TYPES)}"
+        )
+    for gen_type in types:
+        if gen_type not in prompt_ids:
+            raise ValueError(
+                f"{path}: generate.prompt_ids is missing {gen_type!r}, which "
+                f"generate.types selects. Every generated row is labelled "
+                f"<model_slug>:<prompt_id>, so a type with no id cannot be named."
+            )
+        check_prompt_id(
+            prompt_ids[gen_type], f"{path}: generate.prompt_ids[{gen_type!r}]"
+        )
+
+    # Two selected types resolving to one directory would generate into the same
+    # files, and the fork's skip-if-exists would quietly give the second type's
+    # rows to the first. Only reachable by giving two gpt types the same id,
+    # which is also a claim that two different prompts are the same prompt.
+    dirs: dict[str, str] = {}
+    for gen_type in types:
+        name = output_dir_name(cfg, gen_type)
+        if name in dirs:
+            raise ValueError(
+                f"{path}: generate.types {dirs[name]!r} and {gen_type!r} both "
+                f"resolve to the directory {name!r}. They are different prompts, "
+                "so give them different generate.prompt_ids."
+            )
+        dirs[name] = gen_type
+
     limit = gen.get("limit")
     if limit is not None and (not isinstance(limit, int) or limit < 1):
         raise ValueError(f"{path}: generate.limit must be null or an integer >= 1")
@@ -206,6 +260,8 @@ def load_pipeline_config(path: Path) -> dict:
     frac = comb.get("max_drop_frac", 0.05)
     if not isinstance(frac, (int, float)) or not 0 <= frac <= 1:
         raise ValueError(f"{path}: combine.max_drop_frac must be between 0 and 1")
+    if not isinstance(comb.get("remove_domain_parquets", True), bool):
+        raise ValueError(f"{path}: combine.remove_domain_parquets must be true or false")
     labels = comb.get("drop_generated_by", [])
     if labels is None or not isinstance(labels, list):
         raise ValueError(
@@ -297,6 +353,46 @@ def variant(cfg: dict) -> str:
     return model_slug(gen["gpt_model"])
 
 
+def type_model(cfg: dict, gen_type: str) -> str:
+    """The model that produces one type's rows."""
+    gen = cfg["generate"]
+    return gen["claude_model"] if gen_type == "claude" else gen["gpt_model"]
+
+
+def prompt_id(cfg: dict, gen_type: str) -> str:
+    """The prompt config id stamped into one type's directory and label."""
+    return cfg["generate"]["prompt_ids"][gen_type]
+
+
+def output_dir_name(cfg: dict, gen_type: str) -> str:
+    """Where the fork writes one type's documents: ``gpt56luna_0701A``.
+
+    Passed to ``generate.py --out_name``; the fork itself knows nothing about
+    models or prompt ids and only takes the string. Per *type* rather than per
+    run, because a type is a different prompt and belongs in its own directory
+    even when the model is the same.
+    """
+    return generator_dir_name(
+        model_slug(type_model(cfg, gen_type)), prompt_id(cfg, gen_type)
+    )
+
+
+def output_dir_names(cfg: dict) -> list[str]:
+    """Every generator directory this run writes, in the fork's type order."""
+    return [output_dir_name(cfg, t) for t in types(cfg)]
+
+
+def generated_by_label(cfg: dict, gen_type: str) -> str:
+    """The ``generated_by`` value one type's rows end up with: ``gpt56luna:0701A``.
+
+    Not used to *write* the corpus — ``prepare_*.py`` derive it from the
+    directory name they find on disk, which is the only source that cannot
+    disagree with what was generated. This is here so the runner can print what
+    a run is about to produce, before it produces it.
+    """
+    return f"{model_slug(type_model(cfg, gen_type))}:{prompt_id(cfg, gen_type)}"
+
+
 def collected_dir(cfg: dict, var: str) -> Path:
     """Where the collect stage copies the fork's text tree.
 
@@ -334,9 +430,14 @@ def scored_path(cfg: dict, var: str) -> Path:
     return combined.with_name(f"{combined.stem}{SCORED_SUFFIX}{combined.suffix}")
 
 
-def generate_flags(cfg: dict, domain: str) -> list[str]:
-    """The ``--<domain>_<type>`` flags for one domain, e.g. ``--essay_gpt_plain``."""
-    return [f"--{domain}_{t}" for t in types(cfg)]
+def generate_flag(domain: str, gen_type: str) -> str:
+    """The fork's flag for one (domain, type): ``--essay_gpt_plain``.
+
+    One flag per invocation, never a list: the fork's ``--out_name`` names a
+    single directory, so a call that selected two types would have to put both
+    in it.
+    """
+    return f"--{domain}_{gen_type}"
 
 
 # ---------------------------------------------------------------------------

@@ -47,7 +47,8 @@ seed: 42
 data:
   # Labels are binarised to human vs machine: `human_label` -> 0, every other
   # class -> 1. The corpora do not agree on generator names (`gpt` here,
-  # `gpt_plain` there), so only this binary view is comparable across them.
+  # `gpt56luna:0701A` there), so only this binary view is comparable across
+  # them.
   human_label: "human"
 
   # Column whose rows must stay in the SAME split. In the Ghostbuster corpora the

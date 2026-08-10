@@ -1093,14 +1093,14 @@ command rather than a week of glue:
 
 ```
 [generate.py]         ← Stage 1: prompts + human word counts → machine text
-   ↓                           external/ghostbuster/data/<domain>/<type>/*.txt
+   ↓                           external/ghostbuster/data/<domain>/<model>_<prompt>/*.txt
 [fix_empty_...py]     ← Stage 2: refill the files that came back blank
    ↓
 [collect]             ← Stage 3: audit the tree, copy it into this repo
    ↓                           data/ghostbuster-data-<variant>/
-[prepare_{essay,wp,reuter}.py]  ← Stage 4: one parquet per domain
+[prepare_{essay,wp,reuter}.py]  ← Stage 4: one parquet per domain, named generators only
    ↓                           data/parquet/<domain>_<variant>.parquet
-[combine_domains.py]  ← Stage 5: union, with a `domain` column
+[combine_domains.py]  ← Stage 5: union with a `domain` column, then drop the inputs
    ↓                           data/parquet/ghostbuster_<variant>.parquet
 [score_parquets.py]   ← Stage 6: Binoculars over the whole corpus
    ↓                           data/parquet/ghostbuster_<variant>_binox0.parquet
@@ -1141,6 +1141,44 @@ Available names (from `EMB_TYPES` in `epai/utils/embedding_utils.py`):
 `data/parquet/ghostbuster_gpt56luna.parquet`. Same convention as the existing
 `ghostbuster_gpt54mini.parquet`.
 
+### What a generated row is called
+
+Every machine row is labelled `<model_slug>:<prompt_id>` — `gpt56luna:0701A` —
+the same `generated_by` convention pipeline 3 uses, so one reader of that column
+learns one thing. The model half comes from `generate.gpt_model`; the prompt half
+is `generate.prompt_ids`, which has to be stated because the prompts live inside
+the fork (`utils/prompt_utils.py`) and `generate.types` names an *index* into
+them rather than a version of them.
+
+On disk the same generator is a directory: `data/<domain>/gpt56luna_0701A/`, an
+underscore standing in for the colon. That is not cosmetic. The fork's own name
+for a generator (`gpt_plain`) says which prompt was used and nothing about which
+model used it, so every model generates into one directory — and since the fork
+skips output files that already exist, **the second model to run there writes
+nothing at all and its corpus is the first model's text under a new filename.**
+Model-scoped directories make that impossible: a different model has nothing to
+skip. The runner passes the name to `generate.py --out_name`, and
+`prepare_*.py` map it back to the label (`epai/utils/label_utils.py`).
+
+**A collected tree is added to, never emptied.** Collect copies into
+`data/ghostbuster-data-<variant>/` without deleting, so a generator directory
+from an earlier run into the same variant stays behind — and if the prepare
+stage simply read every directory it found, that old text would come back as a
+second set of machine rows under its old label, doubling the AI class. So
+prepare is *told* what to read (`--generators human gpt56luna_0701A`), the
+config decides what the corpus holds, and collect prints a NOTE naming any
+leftover directory and the `rm -rf` for it.
+
+Directory names that are not of that shape — `human`, `gpt`, `gpt_prompt1`,
+`gpt_writing`, and the rest of the original release — pass through unchanged, so
+the older trees in `data/ghostbuster-data/` and `data/ghostbuster-data-gpt54/`
+still prepare exactly as they did.
+
+Changing the prompts in the fork means changing `prompt_ids`. `0701A` is the
+plain prompt as it stands, unchanged since the gpt54mini corpus — which is why
+that corpus is labelled `gpt54mini:0701A`, and the shared id is what makes the
+two comparable: same prompts, different model.
+
 ### Seed the shared inputs first
 
 **This is a manual step, once per machine, and the pipeline will refuse to run
@@ -1163,6 +1201,13 @@ cp -a data/ghostbuster-data-gpt54/reuter external/ghostbuster/data/reuter
 # drop the previous model's generations, keep human/, prompts/ and reuter's gpt/<author>/headlines/
 rm -rf external/ghostbuster/data/*/gpt_plain
 ```
+
+That `rm` is housekeeping, not a correctness requirement: generations now live
+in per-model directories (`gpt56luna_0701A/`), the collect stage copies only the
+ones this run produced, and older ones cost nothing but disk. The exception is a
+tree seeded from a corpus built *before* that naming — its generations sit in
+`gpt_plain/`, which no model-scoped run would ever write to or read from, so
+they are pure dead weight.
 
 What has to be present, per domain:
 
@@ -1209,6 +1254,31 @@ Resuming, since stage 1 is the expensive one:
 Re-running `generate` is cheap and safe: every loop in the fork skips an output
 file that already exists, so an interrupted run resumes by being repeated.
 
+**Starting from a clean slate.** These directories are written to by more than
+one run — the fork's tree is shared by every variant, and the collected tree is
+copied *into*, never emptied — so `--clean` removes what previous runs left, at
+all three levels, before the first step:
+
+```bash
+uv run python epai/ghostbuster/run_full_pipeline.py --clean --dry-run   # just the list
+uv run python epai/ghostbuster/run_full_pipeline.py --clean --yes --gpu 0
+```
+
+| Level | Removed |
+|---|---|
+| `external/ghostbuster/data/<domain>/` | generator directories that are neither seeded nor this run's |
+| `data/ghostbuster-data-<variant>/` | the same, plus domains this config no longer builds and stray `logprobs*` caches |
+| `data/parquet/<domain>_<variant>.parquet` | only when `prepare` is among the selected steps |
+
+One rule at every level: *inside the places this config writes, remove what this
+config would not produce*. The seeded inputs and this run's own directories are
+what a leftover is defined against, so they can never be selected — which is
+what makes the flag safe to pass on every run — and nothing outside those
+directories is looked at, so another variant's corpus is never at risk. It
+prints the list with document counts and asks first (`--yes` answers,
+`--dry-run` deletes nothing). Read the list: the fork-tree entries are usually
+another model's generated text, which cost API calls and is kept nowhere else.
+
 **Stopping before the GPU work.** Stages 6–7 are the GPU-hours, and they often
 belong on a different machine than the generation. `--until` stops the run after
 a named stage, and `--from` picks it up:
@@ -1244,10 +1314,14 @@ rows. So the collect stage audits the text tree before copying it, per
 (domain, type):
 
 ```
-  domain/type              files  expected  missing   blank
-  essay/human               1000         —        —       6
-  essay/gpt_plain           1000      1000        0       0
+  domain/directory               files  expected  missing   blank
+  essay/human                     1000         —        —       6
+  essay/gpt56luna_0701A           1000      1000        0       0
 ```
+
+The counts are taken under **this run's** directories, not under the fork's type
+names, so another model's generations sitting in the same tree can neither be
+mistaken for this run's output nor be copied into its corpus.
 
 `expected` is the fork's own loop bound (1000 for essay/wp, 20 × authors for
 reuter), capped by what is actually seeded — deliberately not the human file
@@ -1274,6 +1348,17 @@ Two coupled settings the config validates rather than silently reconciling:
   with a hole in an `emb_*` column, i.e. all of them.
 - `score.observer` and `score.performer` are one detector; set both or neither.
 
+**The per-domain parquets do not survive the combine stage.** Every row of
+`essay_<variant>.parquet`, `wp_…` and `reuter_…` is in
+`ghostbuster_<variant>.parquet` with a `domain` column saying which file it came
+from, and nothing downstream reads them again — so they are deleted once combine
+has exited 0 and written its output. Keeping them would store the corpus twice
+and leave three corpus-shaped files that a training config can be pointed at by
+mistake, long after they have gone stale. Rebuilding one is a prepare run over
+the collected text tree (`--only prepare`): local, minutes, no API calls. Set
+`combine.remove_domain_parquets: false` to keep them while iterating on a
+prepare script.
+
 The scored corpus is a new file, not an in-place update (`score_parquets.py`
 overwrites by default; the runner always passes `-o`), so
 `ghostbuster_<variant>.parquet` survives as the thing to re-score when the
@@ -1297,6 +1382,7 @@ The `epai/utils/` and `epai/algs/` modules are shared and should not be modified
 | `epai/utils/embedding_utils.py` | SPECTER2 / SciBERT / OpenAI embedding computation |
 | `epai/utils/env_utils.py` | `.env` variable and installed-package checks |
 | `epai/utils/genai_utils.py` | Multi-LLM abstract rephrasing (OpenAI, Anthropic, Gemini) |
+| `epai/utils/label_utils.py` | The `generated_by` convention: `<model>:<prompt_id>` in a corpus, `<model>_<prompt_id>` as a directory, and the map between them |
 | `epai/utils/parquet_utils.py` | Parquet save/load helpers |
 | `epai/utils/oa_utils.py` | OpenAlex API client (no key; `OPENALEX_MAILTO` for the polite pool) |
 | `epai/utils/s2_utils.py` | Semantic Scholar API client |
@@ -1339,6 +1425,8 @@ dataset_id: "ghostbuster"
 generate:
   gpt_model: "gpt-5.6-luna"     # -> variant gpt56luna -> ghostbuster_gpt56luna.parquet
   types: ["gpt_plain"]          # NOT human/prompts — those are seeded by hand
+  prompt_ids:                   # one per type; -> generated_by "gpt56luna:0701A"
+    gpt_plain: "0701A"          #   and directory data/<domain>/gpt56luna_0701A/
   domains: ["essay", "wp", "reuter"]
   limit: null                   # null = the full 1000 per domain
   fix_empty: true
@@ -1347,6 +1435,7 @@ prepare:
 combine:
   drop_generated_by: []         # keep every label
   drop_incomplete: "none"       # required while embeddings is false
+  remove_domain_parquets: true  # delete <domain>_<variant>.parquet once unioned
 score:
   text_column: "text"
   batch_size: 1
