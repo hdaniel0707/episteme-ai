@@ -1,8 +1,9 @@
 """Add several embedding columns to a Parquet in one pass.
 
-Reads a Parquet, works out which of the embedders in ``EMBEDDERS`` are already
-present in it, reports the findings, asks whether the ones that already have
-values should be recomputed, and then fills in whatever is left.
+Reads a Parquet, works out which of the selected embedders are already present in
+it, reports the findings, asks whether the ones that already have values should be
+recomputed, and then fills in whatever is left. The selection is ``--embedders``
+when given, otherwise the ``EMBEDDERS`` list at the top of this file.
 
 "Already present" is decided per row, not per column: a column that exists but is
 half Null counts as *partial*, and the missing rows are filled even when the user
@@ -41,6 +42,10 @@ cosine(old, new) in three buckets -- identical / drifted / changed -- since
 re-running a model on the same text rarely reproduces bit-identical floats.
 
 Run:
+    # a subset, named on the command line (this is what the pipeline runners pass)
+    uv run python epai/ai_detection/embed/add_embeddings.py data/parquet/ghostbuster_gpt56luna_binox0.parquet \
+        --embedders specter2 mpnet luar --cpu-threads 16 --gpu 0
+
     uv run python epai/ai_detection/embed/add_embeddings.py data/parquet/essay_gpt54mini_binox0.parquet --cpu-threads 16 --gpu 0
     uv run python epai/ai_detection/embed/add_embeddings.py data/parquet/reuter_gpt54mini_binox0.parquet --cpu-threads 16 --gpu 0
     uv run python epai/ai_detection/embed/add_embeddings.py data/parquet/wp_gpt54mini_binox0.parquet --cpu-threads 16 --gpu 0
@@ -65,8 +70,10 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).parent.parent.parent.parent
 
-# The embedders to put into the Parquet. Each one becomes an ``emb_{name}``
-# column. Trim this list to run a subset; every name must be in EMB_TYPES.
+# The embedders to put into the Parquet when ``--embedders`` is not given. Each
+# one becomes an ``emb_{name}`` column, and every name must be in EMB_TYPES.
+# ``--embedders`` selects a subset per run, which is what the pipeline runners
+# pass; editing this list changes the default for a bare invocation.
 EMBEDDERS = [
     # content-heavy
     "specter2",
@@ -146,6 +153,15 @@ def parse_args() -> argparse.Namespace:
         "--text-col",
         default=DEFAULT_TEXT_COL,
         help=f"Column holding the text to embed (default: {DEFAULT_TEXT_COL!r}).",
+    )
+    ap.add_argument(
+        "--embedders",
+        nargs="+",
+        default=None,
+        metavar="NAME",
+        help="Which embedders to run, in place of the EMBEDDERS list at the top "
+        f"of this file (default: {' '.join(EMBEDDERS)}). Names are validated "
+        "before anything is loaded.",
     )
     ap.add_argument(
         "--batch-size",
@@ -398,14 +414,21 @@ def check_parquet(df: pd.DataFrame, text_col: str, path: Path) -> np.ndarray:
     return embeddable
 
 
-def check_embedders(embedders: list[str]) -> None:
+def check_embedders(embedders: list[str], source: str = "EMBEDDERS") -> None:
     """Abort on any embedder name add_embedding would not accept."""
+    if not embedders:
+        raise ValueError(f"No embedders selected ({source} is empty).")
     unknown = [e for e in embedders if e not in EMB_TYPES]
     if unknown:
         raise ValueError(
-            f"Unknown embedder(s) in EMBEDDERS: {unknown}. "
+            f"Unknown embedder(s) in {source}: {unknown}. "
             f"Choose from: {', '.join(EMB_TYPES)}"
         )
+    duplicates = sorted({e for e in embedders if embedders.count(e) > 1})
+    if duplicates:
+        # Not harmless: the second pass would recompute the column the first one
+        # just wrote, and the summary would report it twice.
+        raise ValueError(f"Duplicate embedder(s) in {source}: {duplicates}")
 
 
 def inspect(
@@ -613,7 +636,12 @@ def main() -> None:
     # args is parsed at import time, before torch, so --gpu/--cpu-threads apply.
     out_path = args.out or args.parquet
 
-    check_embedders(EMBEDDERS)
+    embedders = args.embedders if args.embedders is not None else EMBEDDERS
+    check_embedders(
+        embedders, "--embedders" if args.embedders is not None else "EMBEDDERS"
+    )
+    if args.embedders is not None:
+        print(f"Embedders (--embedders): {' '.join(embedders)}")
 
     df = load_parquet(args.parquet)
     embeddable = check_parquet(df, args.text_col, args.parquet)
@@ -621,7 +649,7 @@ def main() -> None:
     embeddable = apply_limit(embeddable, args.limit)
 
     # Counts below describe the limited window, so the plan matches the work.
-    statuses = inspect(df, EMBEDDERS, embeddable)
+    statuses = inspect(df, embedders, embeddable)
     print_findings(args.parquet, df, args.text_col, embeddable, statuses)
     if args.limit is not None:
         print(

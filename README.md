@@ -7,8 +7,9 @@ A research platform for studying AI-generated text in scientific literature. The
 | **Citation Impact** | `epai/citation_impact/` | Fetch academic papers from Semantic Scholar and enrich them with LLM-generated synthetic variants and NAIP impact scores. Data pipeline only — its training stage has been removed. |
 | **AI Detection** | `epai/ai_detection/` | Prepare AI-vs-human text corpora (Ghostbuster / Denario), compute embeddings and detector scores, and train classifiers that distinguish human from machine-generated text. The active pipeline. |
 | **Science Data** | `epai/science_data/` | Build a *new* AI-vs-human corpus from OpenAlex abstracts under the Ghostbuster protocol: fetch → filter → prompt → generate. The generator sees only the prompt, never the human text. |
+| **Ghostbuster** | `epai/ghostbuster/` | Rebuild the *original* Ghostbuster corpora (essay / wp / reuter) with a newer generator, then parquet them and score them. Drives the ghostbuster fork as a submodule; the human text and prompts are held fixed so two model variants are comparable. |
 
-All three draw on the shared library under `epai/utils/` and `epai/algs/`.
+All four draw on the shared library under `epai/utils/` and `epai/algs/`.
 
 ---
 
@@ -19,7 +20,7 @@ All three draw on the shared library under `epai/utils/` and `epai/algs/`.
   - [Clean clone](#clean-clone)
   - [CUDA wheels — compute server only](#cuda-wheels--compute-server-only)
   - [Environments](#environments)
-  - [Updating the Binoculars submodule](#updating-the-binoculars-submodule)
+  - [Updating a submodule](#updating-a-submodule)
 - [Git LFS — Store Folder](#git-lfs--store-folder)
 - [Environment Variables](#environment-variables)
 - [File Naming Convention](#file-naming-convention)
@@ -37,6 +38,10 @@ All three draw on the shared library under `epai/utils/` and `epai/algs/`.
   - [Stage D — Analyse](#stage-d--analyse)
   - [Stage E — Training (Cross-domain classification)](#stage-e--training-cross-domain-classification)
 - [Pipeline 3 — Science Data](#pipeline-3--science-data)
+- [Pipeline 4 — Ghostbuster with a newer generator](#pipeline-4--ghostbuster-with-a-newer-generator)
+  - [Seed the shared inputs first](#seed-the-shared-inputs-first)
+  - [Running it](#running-it)
+  - [The collect stage is the gate](#the-collect-stage-is-the-gate)
 - [Shared Library](#shared-library)
 - [Configuration Reference](#configuration-reference)
 
@@ -72,7 +77,13 @@ episteme-ai/
 │   │   ├── prompt/make_prompts.py #   Stage 3: one generation prompt per paper
 │   │   ├── generate/generate_ai.py#   Stage 4: prompt → AI abstract
 │   │   ├── analyse/               #   per-stage reports
-│   │   └── run_pipeline.py        #   Runs every stage above, in order
+│   │   ├── run_pipeline.py        #   Runs every stage above, in order
+│   │   └── run_full_pipeline.py   #   ...then promote → score → embed
+│   │
+│   ├── ghostbuster/               # Pipeline 4 — Ghostbuster corpora, newer generator
+│   │   ├── config.py              #   The one config: validation, derived paths
+│   │   └── run_full_pipeline.py   #   generate → fix-empty → collect → prepare
+│   │                              #   → combine → score, in order
 │   │
 │   ├── scripts/                   # Standalone parquet tools, pipeline-agnostic
 │   │   ├── export_records_txt.py  #   Parquet → one readable .txt per record
@@ -82,7 +93,9 @@ episteme-ai/
 │   └── utils/                     # Shared: all utility modules
 │
 ├── external/
-│   └── Binoculars/                # Git submodule: the Binoculars fork, own uv env
+│   ├── Binoculars/                # Git submodule: the Binoculars fork, own uv env
+│   └── ghostbuster/               # Git submodule: the ghostbuster fork, own uv env
+│       └── data/                  #   gitignored; seeded by hand, written by generate.py
 │
 ├── cfg/
 │   ├── citation_impact/
@@ -91,8 +104,9 @@ episteme-ai/
 │   │   └── train/clf_cd/,         # One annotated sample config each:
 │   │       train/clf_id/,         #   clf_cd_example.yaml, clf_id_example.yaml,
 │   │       train/sweep/           #   sweep_example.yaml
-│   └── science_data/              # Corpus-building config + query lists
-│       └── prompts/               #   Every prompt sent, one file per prompt_config id
+│   ├── science_data/              # Corpus-building config + query lists
+│   │   └── prompts/               #   Every prompt sent, one file per prompt_config id
+│   └── ghostbuster/               # One config for the whole ghostbuster pipeline
 │
 ├── store/                         # Versioned datasets tracked with Git LFS
 │   └── data/parquet/, sql/
@@ -101,7 +115,7 @@ episteme-ai/
 │   ├── parquet/                   # Parquet datasets (citation impact + AI detection)
 │   ├── science/                   # Science-data pipeline: ALL stages read/write here
 │   ├── inspect/                   # export_records_txt.py output, one dir per corpus
-│   ├── ghostbuster-data*/         # Raw Ghostbuster text corpora
+│   ├── ghostbuster-data*/         # Raw Ghostbuster text corpora, one dir per variant
 │   └── papers/                    # Downloaded Denario PDFs
 └── results/                       # All experiment outputs (gitignored)
 ```
@@ -114,17 +128,18 @@ This project uses [uv](https://github.com/astral-sh/uv) for dependency managemen
 
 ### Clean clone
 
-The Binoculars fork lives here as a git submodule, so clone with `--recurse-submodules`:
+Two forks live here as git submodules — Binoculars (scoring) and ghostbuster (generation) — so
+clone with `--recurse-submodules`:
 
 ```bash
 git clone --recurse-submodules git@github.com:hdaniel0707/episteme-ai.git
 cd episteme-ai
 
-# If you cloned without the flag, or the submodule is empty:
+# If you cloned without the flag, or a submodule is empty:
 git submodule update --init
 ```
 
-The submodule is a private repo, so the machine needs SSH access to it as well as to this one.
+The submodules are cloned over SSH, so the machine needs SSH access to them as well as to this one.
 Datasets under `store/` are Git LFS pointers after a fresh clone — see
 [Git LFS — Store Folder](#git-lfs--store-folder) to pull the real files.
 
@@ -141,6 +156,10 @@ each one needs its own index — doing only the first is the usual mistake:
 
 1. `pyproject.toml` — this repo
 2. `external/Binoculars/pyproject.toml` — the submodule
+
+**Not** `external/ghostbuster/pyproject.toml`. That fork depends on torch but only its `--logprob*`
+and `--gen_perturb*` stages touch it, and pipeline 4 runs neither: generation is API calls. CPU
+torch there is correct and keeps the venv small.
 
 ```toml
 [[tool.uv.index]]
@@ -159,8 +178,8 @@ repo, or every laptop clone will start pulling CUDA wheels too.
 
 ### Environments
 
-There are **two** uv environments, deliberately kept apart: this repo pins `transformers>=4.57`,
-the Binoculars fork pins `transformers>=5.12`, and they cannot share a venv.
+There are **three** uv environments, deliberately kept apart: this repo pins `transformers>=4.57`,
+and both forks pin `transformers>=5.12`. They cannot share a venv.
 
 ```bash
 # 1. This repo -> .venv  (also installs epai editable, via [tool.uv] package = true)
@@ -168,37 +187,64 @@ uv sync
 
 # 2. The Binoculars fork -> external/Binoculars/.venv
 uv sync --project external/Binoculars
+
+# 3. The ghostbuster fork -> external/ghostbuster/.venv
+uv sync --project external/ghostbuster
 ```
 
-Confirm they really are separate — the two prefixes must differ:
+If step 3 fails while building the `ghostbuster` package itself — its `pyproject.toml` says
+`version = "0.1.0"` while its `setup.py` says `1.0`, which some setuptools versions reject — add
+`--no-install-project`. Nothing is lost: `generate.py` is always run with `cwd` inside the fork, so
+`import utils` resolves from there whether or not the project was installed.
+
+Confirm they really are separate — the three prefixes must differ:
 
 ```bash
-uv run                              python -c "import sys, transformers; print(sys.prefix, transformers.__version__)"
-uv run --project external/Binoculars python -c "import sys, transformers; print(sys.prefix, transformers.__version__)"
+uv run                                python -c "import sys, transformers; print(sys.prefix, transformers.__version__)"
+uv run --project external/Binoculars  python -c "import sys, transformers; print(sys.prefix, transformers.__version__)"
+uv run --project external/ghostbuster python -c "import sys, transformers; print(sys.prefix, transformers.__version__)"
 ```
 
-On the server, add `torch.cuda.is_available()` to that check — it must be `True` in **both**
-environments; `False` means the CUDA index above was missing when that venv was resolved.
+On the server, add `torch.cuda.is_available()` to that check for this repo and Binoculars — it must
+be `True` in both; `False` means the CUDA index above was missing when that venv was resolved. The
+ghostbuster env is expected to report `False`, and that is fine (see the CUDA section).
 
-Never add `binoculars` to this project's `dependencies` / `[tool.uv.sources]`, and never declare a
-`[tool.uv.workspace]` here. Either one fuses the two environments back together.
+Never add `binoculars` or `ghostbuster` to this project's `dependencies` / `[tool.uv.sources]`, and
+never declare a `[tool.uv.workspace]` here. Any of those fuses the environments back together.
 
-### Updating the Binoculars submodule
+The ghostbuster fork also needs its own `.env`, because it calls `load_dotenv()` against its own
+directory — this repo's `.env` is not visible to it:
 
-The submodule points at a specific commit of the fork and never moves on its own — that is what
-ties a set of scores to the code that produced them. To pick up fork changes:
+```bash
+cp external/ghostbuster/.env_sample external/ghostbuster/.env   # then set OPENAI_API_KEY
+uv run --project external/ghostbuster python -c \
+  "import nltk; nltk.download('wordnet'); nltk.download('omw-1.4'); nltk.download('brown')"
+```
+
+The nltk downloads are one-off: `generate.py` fetches the first two at import time on every run
+otherwise.
+
+### Updating a submodule
+
+A submodule points at a specific commit of its fork and never moves on its own — that is what ties a
+set of scores, or a corpus, to the code that produced it. To pick up fork changes (note the branch:
+`main` for Binoculars, `master` for ghostbuster):
 
 ```bash
 git -C external/Binoculars pull origin main
 git add external/Binoculars
 git commit -m "Bump Binoculars to $(git -C external/Binoculars rev-parse --short HEAD)"
+
+git -C external/ghostbuster pull origin master
+git add external/ghostbuster
+git commit -m "Bump ghostbuster to $(git -C external/ghostbuster rev-parse --short HEAD)"
 ```
 
 Both halves matter: the pull moves the working copy, the commit records the new SHA so a fresh
-clone gets the same code. Re-run `uv sync --project external/Binoculars` only when the pull changed
+clone gets the same code. Re-run `uv sync --project external/<fork>` only when the pull changed
 that project's `pyproject.toml` or `uv.lock`; plain code changes need nothing, the install is editable.
 
-When editing the fork, commit and push **inside** `external/Binoculars` first, then commit the
+When editing a fork, commit and push **inside** `external/<fork>` first, then commit the
 moved pointer here — otherwise the pin references a commit nobody else can fetch.
 
 ---
@@ -250,12 +296,15 @@ cp .env_sample .env
 | `SEMANTIC_SCHOLAR_API_KEY` | `citation_impact/fetch/fetch.py` | Increases the Semantic Scholar API rate limit |
 | `OPENALEX_API_KEY` | `science_data/fetch/oa_fetch.py` | **Optional.** OpenAlex Premium key — raises the rate limit. The free tier returns the same works and fields |
 | `OPENALEX_MAILTO` | `science_data/fetch/oa_fetch.py` | **Optional, not a secret.** Contact address selecting OpenAlex's faster "polite pool"; redundant once a key is set |
-| `OPENAI_API_KEY` | `citation_impact/prepare/prepare_data.py`, `utils/embedding_utils.py` | GPT-4o-mini rephrasing and OpenAI embeddings |
-| `ANTHROPIC_API_KEY` | `citation_impact/prepare/prepare_data.py` | Claude Haiku abstract rephrasing |
+| `OPENAI_API_KEY` | `citation_impact/prepare/prepare_data.py`, `utils/embedding_utils.py`, `external/ghostbuster/generate.py` | GPT-4o-mini rephrasing, OpenAI embeddings, and the ghostbuster generator |
+| `ANTHROPIC_API_KEY` | `citation_impact/prepare/prepare_data.py`, `external/ghostbuster/generate.py` | Claude Haiku abstract rephrasing; the ghostbuster generator's `claude` type |
 | `GOOGLE_API_KEY` | `citation_impact/prepare/prepare_data.py` | Gemini abstract rephrasing |
 | `HF_TOKEN` | `citation_impact/score/add_naip_scores.py`, `external/Binoculars/score_parquets.py` | HuggingFace token — for the NAIP Gradio API (optional, avoids rate limits) and for pulling the Binoculars observer/performer models |
 
 The Semantic Scholar key is optional but strongly recommended — without it you will be heavily rate-limited. The LLM keys are only needed if you enable the `ADD_GEN_AI` flag in `prepare_data.py`.
+
+Pipeline 4 is the exception to "copy `.env_sample` and fill it in once": the ghostbuster fork reads
+its *own* directory, so its key goes in `external/ghostbuster/.env`. See [Environments](#environments).
 
 ---
 
@@ -277,10 +326,15 @@ Per-corpus files, `<corpus>[_<variant>][_binox<N>][_norm|_red_<len>].parquet`:
 - `_norm` — text normalised by `prepare/normalize_text.py`
 - `_red_<len>[w]` — text truncated by `prepare/truncate_text.py`
 
-Combined files, `ghostbuster_<generator>.parquet`, written by
+Combined files, `ghostbuster_<generator>[_binox<N>].parquet`, written by
 `prepare/combine_domains.py`: several corpora in one file, one per `domain`.
 This is what the training and analysis scripts read now — a *corpus* is a
 `(file, domain)` pair rather than a file.
+
+The `_binox0` can sit on either side of the union, and where it sits says which
+order a corpus was built in: `ghostbuster_gpt54mini.parquet` was scored per
+domain and then combined, while pipeline 4 combines first and scores once, giving
+`ghostbuster_<generator>_binox0.parquet`. Same columns either way.
 
 ---
 
@@ -472,12 +526,18 @@ uv run python epai/ai_detection/fetch/fetch_denario.py
 ### Stage B — Embed and Score
 
 **Binoculars scores** come from the fork in `external/Binoculars`, which runs in its own
-environment. Run it from the repo root: the script writes `<name>_binox0.parquet` next to its
-input, so scored files land straight in `data/parquet/` — nothing to copy.
+environment. Run it from the repo root. It writes each input **in place** unless `-o` is given, so
+pass `-o` when you want the unscored file kept — which is what pipelines 3 and 4 do, and where the
+`_binox0` suffix comes from:
 
 ```bash
+# in place: reuter.parquet gains a binoculars_score column
 uv run --project external/Binoculars python external/Binoculars/score_parquets.py \
     data/parquet/reuter.parquet --cpu-threads 16 --gpu 0
+
+# or keep the input and write a scored copy (-o takes a single input file)
+uv run --project external/Binoculars python external/Binoculars/score_parquets.py \
+    data/parquet/reuter.parquet -o data/parquet/reuter_binox0.parquet --cpu-threads 16 --gpu 0
 ```
 
 Pass several files or a whole directory to score them in one run, and `--only-missing` to fill the
@@ -493,10 +553,17 @@ gaps in an already-scored file. Two details worth knowing:
 **Output:** overwrites / extends the input Parquet with new `emb_*` columns
 
 ```bash
+# the EMBEDDERS list at the top of the script (all 13, including the billed OpenAI ones)
 uv run python epai/ai_detection/embed/add_embeddings.py data/parquet/reuter_binox0.parquet --cpu-threads 16 --gpu 0
+
+# or name the ones you want — this is what pipelines 3 and 4 pass from their configs
+uv run python epai/ai_detection/embed/add_embeddings.py data/parquet/reuter_binox0.parquet \
+    --embedders specter2 mpnet luar --cpu-threads 16 --gpu 0
 ```
 
-Adds multiple embedding columns in one pass. Supported embedders (subset, see `EMBEDDERS` list in the script):
+Adds multiple embedding columns in one pass. `--embedders` selects a subset per run
+(names validated before any model loads); without it the script's own `EMBEDDERS`
+list applies. Supported embedders:
 
 | Key | Model |
 |---|---|
@@ -748,9 +815,9 @@ content and structure the way a rephrasing setup does.
 [analyse_{fetch,filter,prompts,generation}.py]   ← per-stage reports
 ```
 
-**Everything lives in `data/science/`.** No stage writes to `data/parquet/`.
-Stage 4's output is the only artifact meant to leave, and you move it by hand
-once the run is good:
+**Everything lives in `data/science/`.** None of the four stages writes to
+`data/parquet/`. Stage 4's output is the only artifact meant to leave, and
+`run_pipeline.py` does not move it for you:
 
 ```bash
 mv data/science/science_v1_gpt54mini_0807A.parquet data/parquet/
@@ -758,6 +825,54 @@ mv data/science/science_v1_gpt54mini_0807A.parquet data/parquet/
 
 That keeps a half-finished or abandoned run from ever being picked up by an
 ai_detection config that globs `data/parquet/`.
+
+**Or run the whole thing, scoring and embedding included.**
+`run_full_pipeline.py` wraps the four stages above and adds three more:
+`promote` (a *copy* into `data/parquet/`, so `data/science/` stays the record of
+what the run produced), `score` (Binoculars, in the fork's environment, writing
+`<name>_binox0.parquet`), and `embed` (every `emb_*` column, in place). The
+corpus that comes out is ready for `train/` and `analyse/` with nothing left to
+run by hand:
+
+```bash
+# corpus → data/parquet/, scored, embedded
+uv run python epai/science_data/run_full_pipeline.py --yes --cpu-threads 16 --gpu 0
+
+# stop before the GPU steps, finish them later or elsewhere
+uv run python epai/science_data/run_full_pipeline.py --until promote --yes
+uv run python epai/science_data/run_full_pipeline.py --from score --gpu 0
+
+# resume inside the science half, then carry on through score and embed
+uv run python epai/science_data/run_full_pipeline.py --science-from prompts --yes
+
+# ten-row debug run of the two GPU steps, over a corpus that already exists
+uv run python epai/science_data/run_full_pipeline.py --only score embed \
+    --limit 10 --embed-limit 10 --yes --gpu 0
+```
+
+The corpus half has no `--limit` of its own: how many papers get fetched and
+generated is `fetch.target_per_domain` in the config, because the fetch stage's
+stop condition and the filter stage's admission test have to agree on it.
+
+`--from`, `--until` and `--only` work over `science → promote → score → embed`;
+`--science-from` reaches into `run_pipeline.py`'s own stage list.
+
+The embed step is configured by an **optional** `embed:` block in the science
+config — optional so that a config written before this step existed still works:
+
+```yaml
+embed:
+  embedders: ["specter2", "mpnet", "luar"]   # null / absent = all 13, incl. billed OpenAI
+  batch_size: null
+  limit: null
+  recompute: false
+```
+
+The names are checked in the preflight, before the fetch. `--embedders`,
+`--embed-batch-size`, `--embed-limit` and `--embed-recompute` override the block
+per run, and `--gpu` / `--cpu-threads` / `--text-column` apply to both GPU steps.
+See [pipeline 4](#pipeline-4--ghostbuster-with-a-newer-generator) for the table of
+embedder names.
 
 **Every stage writes one parquet holding every domain**, with `domain` as a
 column — the same shape as `ghostbuster_gpt54mini.parquet`. There are no
@@ -969,6 +1084,205 @@ and `prepare/combine_domains.py` can fold it in beside the Ghostbuster domains.
 
 ---
 
+## Pipeline 4 — Ghostbuster with a newer generator
+
+The original Ghostbuster corpora were written by GPT-3.5-turbo. This pipeline
+rebuilds them with a current model and carries the result all the way to a
+scored parquet, so "does the detector still work on a newer generator?" is one
+command rather than a week of glue:
+
+```
+[generate.py]         ← Stage 1: prompts + human word counts → machine text
+   ↓                           external/ghostbuster/data/<domain>/<type>/*.txt
+[fix_empty_...py]     ← Stage 2: refill the files that came back blank
+   ↓
+[collect]             ← Stage 3: audit the tree, copy it into this repo
+   ↓                           data/ghostbuster-data-<variant>/
+[prepare_{essay,wp,reuter}.py]  ← Stage 4: one parquet per domain
+   ↓                           data/parquet/<domain>_<variant>.parquet
+[combine_domains.py]  ← Stage 5: union, with a `domain` column
+   ↓                           data/parquet/ghostbuster_<variant>.parquet
+[score_parquets.py]   ← Stage 6: Binoculars over the whole corpus
+   ↓                           data/parquet/ghostbuster_<variant>_binox0.parquet
+[add_embeddings.py]   ← Stage 7: every emb_* column, in place
+                              ↳ ready for train/ and analyse/
+```
+
+Stages 1–2 run in the **ghostbuster fork's** environment with `cwd` inside the
+submodule (`generate.py` does `import utils` and hardcodes `data/<domain>/...`
+relative to the working directory — neither is configurable there). Stage 6 runs
+in the **Binoculars fork's** environment. Stages 3–5 and 7 run in this one. The
+runner strips `VIRTUAL_ENV` and `UV_PROJECT_ENVIRONMENT` before calling either
+fork, so an outer `uv run` cannot point them at this repo's venv.
+
+Which embedders stage 7 runs comes from `embed.embedders` in the config, and the
+names are checked in the preflight — before generation, not at the last stage.
+Leaving it `null` runs `add_embeddings.py`'s own `EMBEDDERS` list, which is all
+thirteen models **including `openai_small` and `openai_large`, billed per row**;
+naming the ones you want is how that stays deliberate:
+
+```yaml
+embed:
+  embedders: ["specter2", "mpnet", "luar"]
+```
+
+Available names (from `EMB_TYPES` in `epai/utils/embedding_utils.py`):
+
+| Group | Names |
+|---|---|
+| content | `specter2`, `scincl`, `scibert` |
+| general semantic | `mpnet`, `minilm`, `e5`, `bge`, `qwen3` |
+| raw LM | `roberta` |
+| style / authorship | `styledistance`, `style_wegmann`, `luar`, `luar_crud` |
+| API (billed) | `openai_small`, `openai_large` |
+
+`<variant>` is the generator model's slug, derived not configured:
+`gpt_model: "gpt-5.6-luna"` gives `gpt56luna`, hence
+`data/parquet/ghostbuster_gpt56luna.parquet`. Same convention as the existing
+`ghostbuster_gpt54mini.parquet`.
+
+### Seed the shared inputs first
+
+**This is a manual step, once per machine, and the pipeline will refuse to run
+without it.** Three things are *inputs*, not outputs: the human documents, the
+essay/wp prompts, and reuter's headlines. They must be identical across model
+variants — otherwise a difference in detector scores could be a difference in
+the human class or in the prompts, and the comparison means nothing. So the
+pipeline never writes them, and a config that lists `human` or `prompts` under
+`generate.types` is rejected.
+
+Copy them from an existing corpus directory into the submodule:
+
+```bash
+mkdir -p external/ghostbuster/data
+
+cp -a data/ghostbuster-data-gpt54/essay  external/ghostbuster/data/essay
+cp -a data/ghostbuster-data-gpt54/wp     external/ghostbuster/data/wp
+cp -a data/ghostbuster-data-gpt54/reuter external/ghostbuster/data/reuter
+
+# drop the previous model's generations, keep human/, prompts/ and reuter's gpt/<author>/headlines/
+rm -rf external/ghostbuster/data/*/gpt_plain
+```
+
+What has to be present, per domain:
+
+| Domain | Required | Why |
+|---|---|---|
+| `essay`, `wp` | `human/<n>.txt`, `prompts/<n>.txt` | the prompt is the input; the human word count sets the target length |
+| `reuter` | `human/<author>/<n>.txt`, `gpt/<author>/headlines/<n>.txt` | reuter's "prompt" is a generated headline, and it lives under `gpt/` whatever variant is being written |
+
+`external/ghostbuster/data/` is gitignored in the fork, so none of this dirties
+the submodule pointer. Building from scratch instead (`--*_human`, `--*_prompts`)
+needs raw sources that are not in this repo — `data/wp/raw/train.wp_source`, the
+Reuters C50 dump, the `qwedsacf/ivypanda-essays` dataset — and costs 3000 API
+calls, so it is not what this pipeline does.
+
+### Running it
+
+One config drives every stage: `cfg/ghostbuster/gb_cfg_example.yaml`. Set
+`generate.gpt_model` and run:
+
+```bash
+# the whole thing, unattended
+uv run python epai/ghostbuster/run_full_pipeline.py --yes --cpu-threads 16 --gpu 0
+
+# see every command, run nothing
+uv run python epai/ghostbuster/run_full_pipeline.py --dry-run
+
+# plumbing test: 3 items per domain, every LLM call mocked, no keys needed
+uv run python epai/ghostbuster/run_full_pipeline.py --gen-limit 3 --debug --yes
+
+# ten-item debug run of all seven stages: mocked generations, ten rows scored and embedded
+uv run python epai/ghostbuster/run_full_pipeline.py --yes --debug \
+    --gen-limit 10 --score-limit 10 --embed-limit 10 --gpu 0
+```
+
+Resuming, since stage 1 is the expensive one:
+
+```bash
+--from collect            # the text is generated; audit, copy, prepare, combine, score, embed
+--only generate           # fill the gaps: the fork skips files that already exist
+--only prepare combine    # rebuild the parquets from a collected tree
+--from score              # the corpus is combined; score it and embed it
+```
+
+Re-running `generate` is cheap and safe: every loop in the fork skips an output
+file that already exists, so an interrupted run resumes by being repeated.
+
+**Stopping before the GPU work.** Stages 6–7 are the GPU-hours, and they often
+belong on a different machine than the generation. `--until` stops the run after
+a named stage, and `--from` picks it up:
+
+```bash
+# on a laptop: build the corpus, stop before score and embed
+uv run python epai/ghostbuster/run_full_pipeline.py --until combine --yes
+
+# later, on the compute server: finish it
+uv run python epai/ghostbuster/run_full_pipeline.py --from score --gpu 0 --cpu-threads 16
+```
+
+Both bounds are inclusive, so they compose into any window (`--from prepare
+--until combine`). `--only` names stages explicitly and cannot be mixed with
+either. A run that stops short prints what is left and the command that resumes
+it. The same two flags work on pipeline 3 (`--until promote`, then `--from score`).
+
+**Reading a limited run.** `--gen-limit N` (or `generate.limit`) is for testing
+the plumbing, and two things about it will surprise you otherwise:
+
+- the fork's `--limit` caps essay/wp by document count but reuter by position in
+  the flattened (author, index) list, so `--gen-limit 10` gives ten articles by
+  *one* author, not a sample of ten authors;
+- the human side is **not** limited. The whole seeded human tree is collected, so
+  the corpus holds ~1000 human rows against N generated ones per domain. The
+  collect stage prints a warning saying so.
+
+### The collect stage is the gate
+
+`generate.py` catches a failed API call, records it, and carries on — exiting 0
+with the output file simply absent. Nothing in the exit code says a corpus lost
+rows. So the collect stage audits the text tree before copying it, per
+(domain, type):
+
+```
+  domain/type              files  expected  missing   blank
+  essay/human               1000         —        —       6
+  essay/gpt_plain           1000      1000        0       0
+```
+
+`expected` is the fork's own loop bound (1000 for essay/wp, 20 × authors for
+reuter), capped by what is actually seeded — deliberately not the human file
+count, which counts differently (`essay/human` has an extra `logprobs/` tree, and
+its documents are 1000 against 1000 prompts).
+
+A shortfall or a blank **generated** file stops the run with the command that
+fixes it: blanks are refilled by stage 2 (`--only fix-empty`), gaps by re-running
+stage 1. `--allow-shortfall` and `--allow-empty` override each, and are the honest
+way to say "I know this corpus is unpaired".
+
+Blank **human** files are reported and never fatal — the upstream Ghostbuster
+essay release ships six empty documents, which is where the "six rows per corpus
+with neither embeddings nor scores" in `combine_domains.py` comes from. Nothing in
+this pipeline can refill them; they become rows with empty text, a Null score and
+a Null embedding, to be dropped at training time or by combine's
+`--drop-incomplete` once the embeddings are in.
+
+Two coupled settings the config validates rather than silently reconciling:
+
+- `prepare.embeddings: false` (the default) leaves `emb_specter2` Null for
+  stage 7 to fill over the whole corpus in one pass, which means
+  `combine.drop_incomplete` **must** be `"none"` — every other mode drops rows
+  with a hole in an `emb_*` column, i.e. all of them.
+- `score.observer` and `score.performer` are one detector; set both or neither.
+
+The scored corpus is a new file, not an in-place update (`score_parquets.py`
+overwrites by default; the runner always passes `-o`), so
+`ghostbuster_<variant>.parquet` survives as the thing to re-score when the
+detector changes. Stage 7 then writes the `emb_*` columns **into** the scored
+file, because an embedding is derived from the text alone and a second file would
+be the same corpus twice.
+
+---
+
 ## Shared Library
 
 The `epai/utils/` and `epai/algs/` modules are shared and should not be modified for pipeline-specific purposes.
@@ -1012,7 +1326,39 @@ queries_domains:
 ### Science-data config (`cfg/science_data/science_cfg_example.yaml`)
 
 One annotated YAML drives all five stages of pipeline 3, with the domain and
-query lists in `queries_example.yaml` so they can be swapped independently.
+query lists in `queries_example.yaml` so they can be swapped independently. Its
+`embed:` block is optional and read only by `run_full_pipeline.py`'s embed step.
+
+### Ghostbuster config (`cfg/ghostbuster/gb_cfg_example.yaml`)
+
+One annotated YAML drives all six stages of pipeline 4. The generator model is
+the only value most runs change — every filename downstream is derived from it:
+
+```yaml
+dataset_id: "ghostbuster"
+generate:
+  gpt_model: "gpt-5.6-luna"     # -> variant gpt56luna -> ghostbuster_gpt56luna.parquet
+  types: ["gpt_plain"]          # NOT human/prompts — those are seeded by hand
+  domains: ["essay", "wp", "reuter"]
+  limit: null                   # null = the full 1000 per domain
+  fix_empty: true
+prepare:
+  embeddings: false             # add_embeddings.py fills emb_specter2 later
+combine:
+  drop_generated_by: []         # keep every label
+  drop_incomplete: "none"       # required while embeddings is false
+score:
+  text_column: "text"
+  batch_size: 1
+embed:
+  embedders: ["specter2", "mpnet", "luar"]   # null = all 13, incl. billed OpenAI
+  text_col: "text"              # note: this script spells the flag --text-col
+  batch_size: null              # null = the script's per-model values
+  recompute: false              # false fills only the holes
+```
+
+`embed.gpu` / `embed.cpu_threads` / `embed.limit` exist too; `--gpu` and
+`--cpu-threads` on the command line override both the score and embed stages.
 
 ### Classification configs (`clf_cd/`, `clf_id/`, `sweep/` — one sample each)
 

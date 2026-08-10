@@ -1,0 +1,171 @@
+# Ghostbuster corpus with a newer generator — one config for the whole pipeline.
+#
+# Same arrangement as cfg/science_data/: every stage reads this single file, so
+# the model that produced the text, the parquet names derived from it, and the
+# scoring knobs cannot drift apart between stages.
+#
+# Run the whole pipeline with one command:
+#   uv run python epai/ghostbuster/run_full_pipeline.py --yes --gpu 0
+#
+# ...or a stage at a time, in pipeline order:
+#   uv run python epai/ghostbuster/run_full_pipeline.py --only generate
+#   uv run python epai/ghostbuster/run_full_pipeline.py --from collect
+#
+# ...or stop before the GPU stages and finish them later, elsewhere:
+#   uv run python epai/ghostbuster/run_full_pipeline.py --until combine --yes
+#   uv run python epai/ghostbuster/run_full_pipeline.py --from score --gpu 0
+#
+# BEFORE THE FIRST RUN the shared inputs must be seeded by hand into
+# external/ghostbuster/data/ — see "Ghostbuster (new-generator corpus)" in the
+# README. The pipeline never writes them: human text and prompts are what makes
+# two model variants comparable, so regenerating them is a mistake worth being
+# unable to make by accident.
+
+# Names the combined corpus: data/parquet/<dataset_id>_<variant>.parquet, where
+# <variant> is derived from the model below. Keep it "ghostbuster" unless this
+# is a different corpus rather than a different generator — the existing files
+# are ghostbuster_gpt35t.parquet and ghostbuster_gpt54mini.parquet.
+dataset_id: "ghostbuster"
+
+# ------------------------------------------------------------- generate ----
+# Runs external/ghostbuster/generate.py, once per domain, in the fork's own uv
+# environment. Every loop there skips an output file that already exists, so
+# re-running this stage costs nothing for work already done and is the way to
+# finish an interrupted run.
+generate:
+  # The OpenAI model for the gpt_* types. <variant> is its slug — gpt-5.6-luna
+  # becomes gpt56luna — so this value alone decides every filename below.
+  gpt_model: "gpt-5.6-luna"
+
+  # Only used when "claude" appears in `types`; ignored otherwise.
+  claude_model: "claude-sonnet-5"
+
+  # Which of the fork's generators to run. gpt_plain is the one built for
+  # detector datasets (no markdown, no formatting tells). "human" and "prompts"
+  # are NOT valid here — they are the seeded inputs, not outputs.
+  #
+  # Available: gpt, gpt_prompt1, gpt_prompt2, gpt_writing, gpt_semantic,
+  #            gpt_plain, claude
+  types: ["gpt_plain"]
+
+  # Which Ghostbuster domains to build. Order is fixed by the pipeline, not by
+  # this list. Dropping one drops it from the combined corpus too.
+  domains: ["essay", "wp", "reuter"]
+
+  # Cap the number of items per domain, for a smoke test. null = the full 1000.
+  # --gen-limit on the command line overrides this, which is the better way to
+  # do a one-off test run: the config keeps saying what the real corpus is.
+  #
+  # Two things to know before reading a limited run's output:
+  #   - the fork's --limit does not mean the same thing everywhere. For essay/wp
+  #     it is a document count; for reuter it caps the flattened (author, index)
+  #     list, so limit: 10 gives ten articles by ONE author, not ten authors.
+  #   - the human side is NOT limited. The whole seeded human tree is collected,
+  #     so limit: 10 yields ~1000 human rows against 10 generated ones per
+  #     domain. Fine for testing the pipeline, useless as a small corpus.
+  limit: null
+
+  # Passed through as generate.py --seed. It only affects the perturbation
+  # stages, which this pipeline does not run; kept so the command is complete.
+  seed: 0
+
+  # Re-run fix_empty_generations.py after generating, to refill files that came
+  # back blank. Costs one API call per empty file and nothing when there are
+  # none.
+  fix_empty: true
+
+# -------------------------------------------------------------- prepare ----
+# Runs epai/ai_detection/prepare/prepare_{essay,wp,reuter}.py over the collected
+# text tree, one parquet per domain: data/parquet/<domain>_<variant>.parquet
+prepare:
+  # Compute emb_specter2 while preparing. false leaves the column Null for the
+  # embed stage to fill at the end, over the whole corpus in one pass, which is
+  # both faster and the only order in which every emb_* column comes from the
+  # same text. If you set this true, also set combine.drop_incomplete to "emb".
+  embeddings: false
+
+# -------------------------------------------------------------- combine ----
+# Runs epai/ai_detection/prepare/combine_domains.py: the per-domain parquets
+# become one file with a `domain` column.
+combine:
+  # Rows whose generated_by is one of these are dropped. Empty list = keep
+  # every label, which is what you want for a corpus that only holds the types
+  # listed above — the script's own default drops the prompt-variant labels and
+  # would report each one as "matched nothing".
+  drop_generated_by: []
+
+  # "none" is required while prepare.embeddings is false: the emb_specter2
+  # column exists but is entirely Null, so any other mode drops every row.
+  drop_incomplete: "none"
+
+  # Guard on drop_incomplete; inert while it is "none".
+  max_drop_frac: 0.05
+
+# ---------------------------------------------------------------- score ----
+# Runs external/Binoculars/score_parquets.py once over the combined corpus, in
+# the fork's own uv environment, writing <combined>_binox0.parquet.
+score:
+  text_column: "text"
+  batch_size: 1
+
+  # CUDA_VISIBLE_DEVICES for the scorer, e.g. "0" or "0,1". null leaves the
+  # choice to torch. --gpu on the command line overrides this.
+  gpu: null
+
+  # Cap the CPU thread pools, so a scoring run does not fight other jobs on a
+  # shared box. null = torch's default.
+  cpu_threads: null
+
+  # null uses the fork's own defaults (falcon-7b / falcon-7b-instruct). Set
+  # both or neither — a mismatched pair is a different detector, and its scores
+  # are not comparable with anything already in data/parquet/.
+  observer: null
+  performer: null
+
+  # Score only the first N rows, for timing a run before committing to it.
+  # null = the whole corpus. The output is still a complete copy; rows past the
+  # limit simply keep a Null score.
+  limit: null
+
+# ---------------------------------------------------------------- embed ----
+# Runs epai/ai_detection/embed/add_embeddings.py over the scored corpus, filling
+# every emb_* column IN PLACE — an embedding is derived from the text alone, so a
+# second file would be the same corpus twice.
+embed:
+  # Which embedders to run; each one becomes an emb_<name> column. Names are
+  # checked in the preflight, so a typo fails before the generation starts
+  # rather than at the last stage.
+  #
+  # null runs add_embeddings.py's own EMBEDDERS list — all thirteen, including
+  # openai_small and openai_large, which are BILLED PER ROW. Naming them here is
+  # the way to keep that deliberate.
+  #
+  # Available:
+  #   content    specter2  scincl  scibert
+  #   semantic   mpnet  minilm  e5  bge  qwen3
+  #   raw LM     roberta
+  #   style      styledistance  style_wegmann  luar  luar_crud
+  #   api        openai_small  openai_large        ← billed
+  embedders: ["specter2", "mpnet", "luar"]
+
+  # Column to embed. Kept separate from score.text_column because the two
+  # scripts spell the flag differently (--text-column vs --text-col); set both
+  # if you ever score and embed something other than `text`.
+  text_col: "text"
+
+  # null keeps the script's per-model batch sizes (128, with smaller values for
+  # qwen3/LUAR and larger for the OpenAI endpoints). A number here overrides all
+  # of them — lower it if a model runs out of memory on a shared GPU.
+  batch_size: null
+
+  # Both null by default; --gpu / --cpu-threads on the command line override
+  # them, and apply to the score stage too.
+  gpu: null
+  cpu_threads: null
+
+  # Embed only the first N rows, for debugging a model. null = the whole corpus.
+  limit: null
+
+  # Recompute embedders that already have values. false fills only the holes,
+  # which is what a re-run after a crash wants.
+  recompute: false

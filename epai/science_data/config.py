@@ -20,6 +20,7 @@ from pathlib import Path
 import yaml
 
 from epai.science_data.rules import FilterConfig
+from epai.utils.embed_select import validate_embedders
 
 BASE_DIR = Path(__file__).parent.parent.parent
 
@@ -126,7 +127,28 @@ def load_pipeline_config(path: Path) -> dict:
     if "human" in slugs:
         raise ValueError(f"{path}: 'human' is reserved for the original abstracts")
 
+    # Optional, and only read by run_full_pipeline.py's embed step — the four
+    # corpus stages never touch it. Absent means "whatever add_embeddings.py
+    # defaults to", which is how every config written before the embed step
+    # existed continues to work.
+    embed = cfg.get("embed")
+    if embed is not None:
+        if not isinstance(embed, dict):
+            raise ValueError(f"{path}: embed must be a mapping")
+        validate_embedders(embed.get("embedders"), f"{path}: embed.embedders")
+        for key in ("batch_size", "limit"):
+            value = embed.get(key)
+            if value is not None and (not isinstance(value, int) or value < 1):
+                raise ValueError(f"{path}: embed.{key} must be null or an integer >= 1")
+        if not isinstance(embed.get("recompute", False), bool):
+            raise ValueError(f"{path}: embed.recompute must be true or false")
+
     return cfg
+
+
+def embed_config(cfg: dict) -> dict:
+    """The optional ``embed`` block, or an empty mapping when it is absent."""
+    return cfg.get("embed") or {}
 
 
 def filter_config(cfg: dict) -> FilterConfig:

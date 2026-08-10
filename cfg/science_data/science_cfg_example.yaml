@@ -138,3 +138,39 @@ generate:
   # Drop any paper for which some generator failed, so every id carries a
   # complete set of rows. Applied at export, not during generation.
   require_all_generators: true
+
+# ---------------------------------------------------------------- embed ----
+# OPTIONAL, and read only by run_full_pipeline.py's embed step — the four corpus
+# stages above ignore it, so a config without this block still works everywhere.
+# That step runs epai/ai_detection/embed/add_embeddings.py over the scored
+# corpus, filling every emb_* column in place.
+#
+# Command-line flags win over everything here: --embedders, --embed-batch-size,
+# --embed-limit, --embed-recompute, and --gpu / --cpu-threads / --text-column
+# (the last three are shared with the score step).
+embed:
+  # Which embedders to run; each one becomes an emb_<name> column. Names are
+  # checked in the preflight, so a typo fails before the fetch rather than after
+  # the corpus has been built and scored.
+  #
+  # null (or no `embedders` key) runs add_embeddings.py's own EMBEDDERS list —
+  # all thirteen, including openai_small and openai_large, which are BILLED PER
+  # ROW. Naming them here is the way to keep that deliberate.
+  #
+  # Available:
+  #   content    specter2  scincl  scibert
+  #   semantic   mpnet  minilm  e5  bge  qwen3
+  #   raw LM     roberta
+  #   style      styledistance  style_wegmann  luar  luar_crud
+  #   api        openai_small  openai_large        ← billed
+  embedders: ["specter2", "mpnet", "luar"]
+
+  # null keeps the script's per-model batch sizes (128, with smaller values for
+  # qwen3/LUAR and larger for the OpenAI endpoints).
+  batch_size: null
+
+  # Embed only the first N rows, for debugging a model. null = the whole corpus.
+  limit: null
+
+  # Recompute embedders that already have values. false fills only the holes.
+  recompute: false
