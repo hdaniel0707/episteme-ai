@@ -46,6 +46,12 @@ PROMPT_ID_RE = re.compile(r"^[0-9]{4}[A-Z]$")
 # name from somewhere else and must survive unchanged.
 GENERATOR_DIR_RE = re.compile(r"^([a-z0-9]+)_([0-9]{4}[A-Z])$")
 
+# The same generator as a corpus label: the ':' spelling of GENERATOR_DIR_RE,
+# and the only shape `generated_by` should hold beside 'human'. Readers that
+# take a generator from a user (the analyse scripts) check against this, so a
+# mistyped label fails where it was typed rather than selecting no rows.
+GENERATOR_LABEL_RE = re.compile(r"^([a-z0-9]+):([0-9]{4}[A-Z])$")
+
 PROMPT_ID_HINT = (
     "a prompt config id is <MMDD><letter> — four digits and one capital "
     "letter, e.g. \"0701A\" — the same convention as cfg/science_data/prompts/"
@@ -64,6 +70,25 @@ def check_prompt_id(prompt_id: object, where: str) -> str:
     if not isinstance(prompt_id, str) or not PROMPT_ID_RE.match(prompt_id):
         raise ValueError(f"{where}: {prompt_id!r} is not a prompt id. {PROMPT_ID_HINT}")
     return prompt_id
+
+
+def check_generator_label(label: object, where: str) -> str:
+    """Validate one corpus label, returning it; raises ``ValueError`` otherwise.
+
+    The counterpart of :func:`check_prompt_id` for the whole label. Used where a
+    generator arrives from outside the pipeline — a command line naming the
+    generator to analyse — so that ``gpt``, ``gpt_plain`` or ``gpt:000A`` are
+    rejected as the wrong shape, with the shape spelled out, instead of quietly
+    matching no rows in the parquet.
+    """
+    if not isinstance(label, str) or not GENERATOR_LABEL_RE.match(label):
+        raise ValueError(
+            f"{where}: {label!r} is not a generator label. A generator is "
+            f"<model_slug>{LABEL_SEP}<prompt_id> — lowercase letters and digits, "
+            f"{LABEL_SEP!r}, then the prompt id, e.g. \"gpt56luna:0807A\"; "
+            f"{PROMPT_ID_HINT}"
+        )
+    return label
 
 
 def generator_dir_name(model_token: str, prompt_id: str) -> str:
@@ -102,6 +127,21 @@ def label_from_dir_name(name: str) -> str:
     if not match:
         return name
     return f"{match.group(1)}{LABEL_SEP}{match.group(2)}"
+
+
+def dir_name_from_label(label: str) -> str:
+    """``"gpt56luna:0701A"`` -> ``"gpt56luna_0701A"``; anything else unchanged.
+
+    :func:`label_from_dir_name` the other way round, for code that HAS a label
+    and needs a path out of it — a results directory named after the generator
+    it describes, so two runs over two generators cannot land in the same one.
+    The pass-through half is the same promise: a name that is not a label of
+    this convention is not this module's to rewrite.
+    """
+    match = GENERATOR_LABEL_RE.match(label)
+    if not match:
+        return label
+    return f"{match.group(1)}{DIR_SEP}{match.group(2)}"
 
 
 def generator_dirs(
