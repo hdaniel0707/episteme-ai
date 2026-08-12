@@ -26,7 +26,10 @@ null on the human row — a human abstract was not written to a prompt, and
 filling the column there with the prompt derived FROM it would invite exactly
 the reading the Ghostbuster protocol exists to prevent. On a generated row it is
 the verbatim user message that produced the text, so the corpus can be read
-without going back to ``<dataset_id>_prompts.parquet``. The system prompt is not
+without going back to ``<dataset_id>_prompts_<prompt_config>.parquet``. The
+value is read from that file rather than from the shard, so the two must
+describe the same arm; they do, because both paths carry ``prompt_config``. The
+system prompt is not
 stored per row: it is one string for the whole run, and ``generated_by`` already
 names the prompt config it came from.
 

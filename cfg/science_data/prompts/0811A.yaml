@@ -1,0 +1,145 @@
+# Prompt config 0811A — every prompt the pipeline sends, in one file.
+#
+# This file IS the experiment's independent variable. Its id ("0811A") is
+# stamped into every generated row's `generated_by` as
+# "<model_slug>:<prompt_config_id>" — e.g. gpt56luna:0811A — so a row in the
+# corpus names the exact prompts that produced it, and a corpus built with
+# different prompts cannot be silently mixed with this one.
+#
+# THEREFORE: never edit this file in place once a corpus has been generated
+# from it. Copy it to a new id (0812A, 0812B, ...) and point `prompt_config`
+# at that instead. Editing in place makes every existing row's label a lie,
+# and there is no way to detect that after the fact.
+#
+# Ids are <MMDD><letter>: the date the config was written, plus a letter for
+# the variants written that day.
+#
+# ===========================================================================
+# 0811A IS THE TITLE-ONLY ARM.
+# ===========================================================================
+#   0807A (mode: llm_spec)    — baseline: generator sees a content spec
+#   0811A (mode: title_only)  — this file: generator sees the title, field and
+#                               a target length, nothing from the abstract
+#
+# The mode is a key in this file (see `mode:` below), so it travels with the id
+# that names it. It used to live in the pipeline config, where it was the one
+# input to a generated row that the row's label did not name: running this file
+# under llm_spec produced rows labelled gpt56luna:0811A whose prompts carried a
+# spec, indistinguishable afterwards from ones that did not. That is now
+# impossible rather than merely documented — the pipeline config may not carry a
+# `prompt.mode` that disagrees with this key, and a run that tries stops.
+
+id: "0811A"
+description: >
+  Title-only ablation of 0807A. The generator is given the paper's title,
+  field and target length — no content spec, so nothing derived from the human
+  abstract reaches it and leakage is structurally zero. Every prompt string
+  below is byte-identical to 0807A: the ONLY difference between the two arms
+  is that `spec_block` and `results_instruction` are substituted in for
+  llm_spec and left empty here. Anything else edited here stops being an
+  ablation and becomes a comparison of two differently-worded prompts.
+
+# The independent variable, and now the whole of it: `diff 0807A.yaml
+# 0811A.yaml` shows this key, the id, the description and comments — and not one
+# prompt string. See the explanation of `mode` in 0807A.yaml.
+mode: "title_only"
+
+# --------------------------------------------------------------- stage 3 ----
+# NEVER SENT UNDER THIS ID. In title_only mode make_prompts.py skips the spec
+# stage entirely — no calls, no cost, `spec` is "" for every paper — so this
+# key is inert here. It is kept because config.py requires every prompt key
+# (a missing one is a hard error, never a silent default), and kept BYTE-
+# IDENTICAL to 0807A so that `diff 0807A.yaml 0811A.yaml` shows the arms differ
+# in `mode` and comments alone. Do not "clean it up": an empty or reworded value
+# here would make that diff stop being the proof it currently is.
+#
+# The original rationale, for reading the diff against:
+#
+# Sent to the spec model, once per paper, with the human title + abstract as
+# the user message. The output is the `spec` column.
+#
+# The design rule is FACTS CROSS, WORDING DOES NOT. Numbers are facts: a
+# generator told only "reports an improvement in accuracy" has to invent a
+# figure, and invented figures are a detectable artifact of their own (models
+# reach for round, implausibly clean numbers). It also makes the human and AI
+# rows of a pair differ in content, when style is the only difference the
+# classifier should be able to see. The leak that actually matters is phrasing,
+# and that is what the five-word rule below bans and what analyse_prompts.py
+# measures.
+spec_system_prompt: |
+  You are summarising research papers so that another writer can reconstruct them.
+
+  Given a paper's title and abstract, write a 2-4 sentence description of what the paper investigates, what approach it takes, and what it found.
+
+  Requirements:
+  - State the question, the approach, and the actual findings.
+  - Carry over the key quantitative results: effect sizes, performance figures, percentages, sample and dataset sizes, and the units they are in. Someone writing from your description must not have to invent a single number.
+  - Do NOT copy any phrase of five or more consecutive words from the abstract. Carry the facts across, never the wording.
+  - Do NOT use the words "abstract" or "the paper states".
+  - Write plain prose, no bullet points, no headings.
+  - Stay under 100 words.
+
+# The user message sent to the generator in stage 4, built here in stage 3 and
+# stored in the `prompt` column.
+#
+# One template, not two. The llm_spec and title_only modes differ by exactly
+# one input — whether a spec is available — so separate templates meant every
+# edit had to be made twice, and an edit made once would quietly turn the
+# ablation into a comparison of two differently-worded prompts rather than of
+# prompt content. `spec_block` and `results_instruction` are substituted in for
+# llm_spec and left empty for title_only.
+#
+# Under this id both are empty, so the rendered prompt is the title, the field
+# and the target length. Note what that leaves in: `{domain}` and
+# `{target_words}` are NOT the abstract, but `target_words` is derived from it
+# (the source abstract's own word count). That is deliberate and stays —
+# without it generated abstracts converge on a characteristic length and a
+# length-only classifier scores well for reasons unrelated to authorship. So
+# "title only" means "no CONTENT from the abstract", not "no information".
+generation_prompt_template: |
+  Write the abstract of a research paper.
+
+  Title: {title}
+  Field: {domain}
+  {spec_block}
+  Write approximately {target_words} words.{results_instruction} Output only the abstract text, with no title, no headings, and no section labels.
+
+# Inert under this id: make_prompts.py substitutes "" for it in title_only.
+# Kept byte-identical to 0807A for the same reason as spec_system_prompt.
+spec_block: "What the paper is about: {spec}\n"
+
+# Also inert here — and this is the key that explains why. Only meaningful when
+# a spec is present: in title_only mode there are no findings to report, so
+# appending this would be an instruction about nothing.
+# Note the deliberate LEADING SPACE — it follows "...words." in the template,
+# and is quoted rather than folded so the space cannot be stripped by YAML.
+results_instruction: " Report the findings described above as your own results, keeping the quantities given rather than substituting different figures or leaving them vague."
+
+# --------------------------------------------------------------- stage 4 ----
+# Sent to each generator with the `prompt` column as the user message.
+#
+# "Your own paper", and the concrete-results instruction, are aimed at the same
+# failure: a model asked to write *about* a paper hedges — "results were
+# promising", "performance improved substantially" — where a real abstract
+# commits to figures. That hedging is a stylistic tell with nothing to do with
+# authorship, and a classifier will happily learn it instead.
+#
+# READ THIS BEFORE INTERPRETING THE RESULTS OF THIS ARM. Unchanged from 0807A,
+# and under title_only that has a consequence worth naming: the last sentence
+# ("Where the prompt supplies numbers, they are your results") applies to
+# nothing, and the demand for concrete figures now falls on a generator that
+# has none — so it INVENTS them, and invented figures are a known artifact
+# (models reach for round, implausibly clean numbers). A classifier trained on
+# this arm may be learning that rather than style.
+#
+# That confound is inherent to withholding the spec; it is not a reason to
+# soften this prompt. Softening it would confound "no spec" with "different
+# instructions" and the two arms would no longer differ in one variable. If
+# the invented numbers turn out to dominate, the answer is a THIRD id that
+# changes this prompt deliberately — not an edit here.
+generation_system_prompt: |
+  You are a researcher writing the abstract of your own paper.
+
+  Write in the register and structure of a real published abstract in the stated field. Report concrete results the way a published abstract does: state the actual figures rather than describing them qualitatively, and never hedge a quantity as "significant", "substantial" or "promising" in place of giving it. Where the prompt supplies numbers, they are your results — use them as given.
+
+  Output the abstract text only: no title, no "Abstract:" heading, no section labels such as "Background:" or "Methods:", no markdown formatting, no bullet points.

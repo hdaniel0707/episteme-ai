@@ -44,7 +44,13 @@ from epai.science_data.analyse._report import (
     longest_common_run,
     overlap_fraction,
 )
-from epai.science_data.config import BASE_DIR, DEFAULT_CFG_PATH, load_pipeline_config, prompts_path
+from epai.science_data.config import (
+    BASE_DIR,
+    DEFAULT_CFG_PATH,
+    load_pipeline_config,
+    load_prompt_config,
+    prompts_path,
+)
 from epai.utils.parquet_utils import load_parquet
 
 _NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
@@ -76,7 +82,10 @@ def main() -> None:
     df = load_parquet(prompts_path(cfg))
     rep = Report("prompts", cfg["dataset_id"])
 
-    mode = cfg["prompt"].get("mode", "llm_spec")
+    # From the prompt config, so this report names the same mode stage 3 built
+    # the file with — the pipeline config cannot disagree about it.
+    mode = load_prompt_config(cfg)["mode"]
+    rep.line(f"prompt config: {cfg['prompt_config']}")
     rep.line(f"prompt mode: {mode}")
     rep.line(f"{len(df)} prompts across {df['domain'].nunique()} domains")
 

@@ -18,6 +18,7 @@ record of what happened, and lets a re-run pick up only the failures (see
 from __future__ import annotations
 
 import json
+import random
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -96,6 +97,12 @@ def call_with_retry(
     provider SDKs raise a wide range for rate limits and transient server
     errors, and distinguishing them reliably is not worth the coupling. A
     deterministic failure simply burns its retries once and is then recorded.
+
+    The wait is randomised over ``[backoff * 2**attempt / 2, backoff *
+    2**attempt]``. Without the jitter, ``max_workers`` calls that hit one rate
+    limit together sleep for exactly the same interval and then retry in
+    lockstep, re-creating the burst that caused the limit — the more workers,
+    the worse it gets, which is the opposite of what raising them is for.
     """
     last_error = ""
     for attempt in range(max_retries):
@@ -108,7 +115,8 @@ def call_with_retry(
             last_error = f"{type(e).__name__}: {e}"
 
         if attempt < max_retries - 1:
-            time.sleep(backoff * (2**attempt))
+            delay = backoff * (2**attempt)
+            time.sleep(random.uniform(delay / 2, delay))
 
     return False, last_error
 
@@ -126,11 +134,40 @@ def run_resumable(
     Tasks whose key is already complete are skipped without being submitted.
     ``payload_of(key, text)`` builds the extra fields stored alongside the
     result; it defaults to ``{"text": text}``.
+
+    Each thunk must be self-contained — closed over its own inputs, reading no
+    shared mutable state — because that is what makes the concurrency safe: the
+    workers share only the HTTP client (thread-safe) and the API is stateless,
+    so one call cannot see another's content. Results are matched by future
+    identity, never by completion order, so a reply cannot land under the wrong
+    key.
     """
     payload_of = payload_of or (lambda _key, text: {"text": text})
     skip = shard.done_keys(include_failed=retry_failed)
 
     pending = [(k, thunk) for k, thunk in tasks if k not in skip]
+
+    # Two tasks under one key would both run, both write to the shard, and the
+    # slower one would win — so the corpus would silently hold whichever reply
+    # finished last, and a re-run could pick the other. That is a bug in the
+    # caller's key scheme (a duplicate id in the frame, say), and it is worth
+    # failing loudly on rather than paying for twice.
+    seen: set[str] = set()
+    repeated: set[str] = set()
+    for key, _ in pending:
+        if key in seen:
+            repeated.add(key)
+        seen.add(key)
+    if repeated:
+        duplicates = sorted(repeated)
+        shown = ", ".join(duplicates[:5])
+        more = f" (+{len(duplicates) - 5} more)" if len(duplicates) > 5 else ""
+        raise ValueError(
+            f"{len(duplicates)} duplicate task key(s): {shown}{more}. "
+            f"Each key identifies one checkpointed call, so duplicates would "
+            f"race to overwrite each other in {shard.path.name}."
+        )
+
     if not pending:
         print(f"  Nothing to do — all {len(skip)} results already in {shard.path.name}")
         return shard
@@ -138,8 +175,23 @@ def run_resumable(
     print(f"  {len(pending)} call(s) to make ({len(skip)} already done)")
 
     n_ok = n_fail = 0
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(call_with_retry, thunk): key for key, thunk in pending}
+    # Not a `with` block: its __exit__ is shutdown(wait=True), which on Ctrl-C
+    # waits for every one of the (possibly thousands of) queued tasks to run
+    # before the interrupt propagates — the run looks hung at exactly the moment
+    # someone is trying to stop it. Cancelling the unstarted futures instead
+    # loses nothing: each finished result is already durable in the shard, and
+    # a re-run skips it.
+    #
+    # `except BaseException` and not `except KeyboardInterrupt`, because Ctrl-C
+    # is not the only way out of the loop below — `shard.append` writes to disk
+    # and can raise. Any escape that left the pool un-shut-down would hand the
+    # queue to ThreadPoolExecutor's atexit hook, which drains it in full: the
+    # same apparent hang, on the path where something has already gone wrong.
+    # Every exit shuts the pool down, and only the clean one waits.
+    pool = ThreadPoolExecutor(max_workers=max_workers)
+    futures = {pool.submit(call_with_retry, thunk): key for key, thunk in pending}
+    abandoned = False
+    try:
         for fut in tqdm(as_completed(futures), total=len(futures), desc=desc, unit="call"):
             key = futures[fut]
             try:
@@ -153,6 +205,21 @@ def run_resumable(
             else:
                 shard.append(key, False, {"error": text})
                 n_fail += 1
+    except BaseException as e:
+        abandoned = True
+        why = (
+            "Interrupted"
+            if isinstance(e, KeyboardInterrupt)
+            else f"Stopped by {type(e).__name__}"
+        )
+        print(f"\n{YELLOW}  {why} after {n_ok + n_fail} of {len(pending)} "
+              f"call(s). Everything finished is in {shard.path.name}; re-run to "
+              f"continue from there.{RESET}")
+        raise
+    finally:
+        # In-flight calls (at most `max_workers`) are not interruptible and are
+        # left to finish; it is the unstarted queue that would cost minutes.
+        pool.shutdown(wait=not abandoned, cancel_futures=abandoned)
 
     print(f"  {n_ok} succeeded, {n_fail} failed")
     if n_fail:

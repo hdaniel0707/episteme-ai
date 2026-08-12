@@ -40,8 +40,14 @@ prompt. Without it, generated abstracts converge on a characteristic length and
 a length-only classifier scores well for reasons that have nothing to do with
 authorship.
 
-Output: data/science/<dataset_id>_prompts.parquet
+Output: data/science/<dataset_id>_prompts_<prompt_config>.parquet
         data/science/<dataset_id>_spec.jsonl  (resumable checkpoint)
+
+The output carries the prompt config id, so two arms of an ablation sharing a
+``dataset_id`` do not overwrite each other's prompts — see ``prompts_path``. The
+spec shard deliberately does not: a spec is a function of the paper and the spec
+model, not of the generation prompts, so both arms share the one it already paid
+for.
 
 Run (--cfg defaults to the example in cfg/science_data/):
     uv run python epai/science_data/prompt/make_prompts.py
@@ -165,8 +171,11 @@ def main() -> None:
 
     cfg = load_pipeline_config(args.cfg)
     prompts = load_prompt_config(cfg)
-    mode = cfg["prompt"].get("mode", "llm_spec")
-    print(f"Prompt config: {prompt_config_path(cfg).relative_to(BASE_DIR)}")
+    # From the prompt config, not the pipeline config: the mode decides what the
+    # prompt says, so it is part of what the prompt id names. See
+    # REQUIRED_PROMPT_KEYS.
+    mode = prompts["mode"]
+    print(f"Prompt config: {prompt_config_path(cfg).relative_to(BASE_DIR)} ({mode})")
 
     df = load_parquet(human_path(cfg))
     # Length target comes from the paper this prompt was derived from, so the

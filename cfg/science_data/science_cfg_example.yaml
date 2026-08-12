@@ -20,12 +20,61 @@
 # output is the only artifact meant to leave it — move that to data/parquet/
 # by hand once the run is good.
 
-# Every path in data/science/ is derived from this id, so a run under an id
-# that already exists overwrites that corpus in place. science_v1 was the
-# five-domain corpus from queries_example.yaml (physics/chemistry/biology/CS/
-# medicine); science_v2 is the three-domain genre-separated one from
-# queries_3domain.yaml. Change the domain list, change the id.
-dataset_id: "science_v2"
+# =========================================================================
+# THE RULE: `dataset_id` names the PAPER SET. `prompt_config` names the ARM.
+# =========================================================================
+# Every path in data/science/ derives from these two, and each answers a
+# different question, so neither is a substitute for the other:
+#
+#   Different papers?  -> new dataset_id.   Same papers, different prompts?
+#   -> same dataset_id, new prompt_config.
+#
+# Follow it and the destructive cases below cannot arise, because a run that
+# changes the paper set writes to different files by construction. That is
+# worth more than any confirm-prompt: a prompt you always say yes to trains
+# you to say yes.
+#
+# WHAT COUNTS AS A DIFFERENT PAPER SET: a changed domain list, changed fetch
+# or filter thresholds, a changed `target_per_domain` — and a re-fetch under
+# ANY settings, because OpenAlex's relevance ranking drifts between runs. That
+# last one is the trap: re-running fetch changes the paper set even when you
+# changed nothing at all.
+#
+# WHAT DOES NOT: a different prompt config, a different mode, a different
+# generator model. Those are arms over one paper set, and the artifacts that
+# hold them (<id>_prompts_<prompt_config>.parquet, the generate shard key
+# <paper_id>|<model>:<prompt_config>, the output <id>_<model>_<prompt_config>
+# .parquet) all carry the arm in their name already.
+#
+# ---------------------------------------------------------------------------
+# science_v1 is the three-domain corpus from queries_3domain.yaml — 1000 each
+# of computer_science, mathematics and sociology, already fetched, filtered and
+# generated under prompt config 0807A. (It was five-domain once, from
+# queries_example.yaml; it was rebuilt in place and this comment used to say so.
+# The corpus on disk is the three-domain one.)
+#
+# KEPT DELIBERATELY for the 0811A run, and the rule above is why: the title-only
+# arm compares against 0807A on the SAME 3000 papers, so it is the same paper
+# set and takes the same id. A new id here would re-fetch, hand back a different
+# 3000, and destroy the one thing the ablation is measuring.
+#
+# So this id is pinned to 3000 paid generations in <id>_generate.jsonl, keyed by
+# paper id. Anything that rewrites <id>_human.parquet strands them: the ids stop
+# matching, orphaned receipts go unused, newly-admitted papers get billed again,
+# and the only symptom is a "N paper(s) dropped" line at export that reads like
+# a handful of failed API calls. Two stages rewrite it —
+#
+#   fetch   — asks before overwriting <id>_raw.parquet, BUT `--yes` answers that
+#             prompt for you, and run_pipeline.py / run_full_pipeline.py pass
+#             `--yes` straight down. `run_full_pipeline.py --yes` under this id
+#             is the genuinely dangerous command.
+#   filter  — rewrites <id>_human.parquet with no prompt at all. Harmless on an
+#             unchanged raw file with unchanged thresholds (it is deterministic,
+#             seed included); a different paper set the moment either changes.
+#
+# — and neither can reach this corpus if you start at the prompt stage
+# (--science-from prompts), which is how every further 0811A run should begin.
+dataset_id: "science_v1"
 
 # Which file in cfg/science_data/prompts/ holds the prompts (without .yaml).
 # It carries every prompt the pipeline sends, and its id is stamped into each
@@ -35,13 +84,52 @@ dataset_id: "science_v2"
 # NEVER edit a prompt file that has already produced a corpus — copy it to a
 # new id and point this at the copy. Editing in place makes every existing
 # row's label a lie, undetectably.
-prompt_config: "0807A"
+#
+# 0811A is the title-only ablation of 0807A: same five prompt strings, but its
+# `mode: title_only` drops the spec block, so the generator sees the title and
+# nothing derived from the abstract. The mode is a key inside the prompt file
+# itself, so choosing the id here chooses the mode with it — there is no second
+# setting to keep in step. See the header of prompts/0811A.yaml.
+#
+# Switching this id is what keeps the 0807A run intact, and it now covers all
+# three artifacts: the output (<dataset_id>_gpt56luna_0811A.parquet), the
+# generate checkpoint key (<paper_id>|gpt56luna:0811A) and the stage-3
+# intermediate (<dataset_id>_prompts_0811A.parquet) each carry it. Nothing of
+# 0807A's is overwritten and no 0807A text is reused.
+prompt_config: "0811A"
 
 # ---------------------------------------------------------------- fetch ----
 fetch:
   # Kept per domain. The fetcher stops a domain as soon as it has this many
   # admissible records, so raising it costs API calls but never a re-scrape.
-  target_per_domain: 10
+  #
+  # 1000 is what built the science_v1 corpus on disk (3 domains x 1000 = the
+  # 3000 rows in <id>_generate.jsonl). It sat at 10 here — a debug value left
+  # behind — so this line simply lied about the corpus it describes.
+  #
+  # Be clear about what fixing it does and does not buy. It is NOT what makes an
+  # accidental full run under this dataset_id safe: such a run re-scrapes
+  # OpenAlex, and OpenAlex's relevance ranking drifts, so <id>_human.parquet
+  # comes back holding DIFFERENT papers. The generate shard is keyed by paper
+  # id, so the 3000 paid generations would then be stranded against a corpus
+  # they no longer match. 1000 vs 10 changes that accident from catastrophic to
+  # merely expensive; it does not prevent it.
+  #
+  # What actually prevents it, in order of reliability:
+  #   1. starting the run at the prompt stage (--science-from prompts), which
+  #      never opens the fetch or filter stage at all;
+  #   2. the fetch stage's own guard — it sees <id>_raw.parquet already there
+  #      and refuses to overwrite without an interactive yes (or --yes, which
+  #      run_full_pipeline.py's --yes passes straight through: do not use it on
+  #      an id whose corpus you want to keep);
+  #   3. giving a genuinely new corpus a new dataset_id, which is the only thing
+  #      that makes the question moot.
+  #
+  # Note that the filter stage has NO such guard: it rewrites <id>_human.parquet
+  # in place. Re-filtering an unchanged <id>_raw.parquet is deterministic and so
+  # harmless, but re-filtering it under changed thresholds silently replaces the
+  # human corpus the existing generations were paired with.
+  target_per_domain: 1000
 
   # Fetch this multiple of `target_per_domain` before stopping. 1.0 is exact
   # and correct; the default 1.2 buys ~200 spare rows per domain as insurance
@@ -96,12 +184,24 @@ filter:
 
 # --------------------------------------------------------------- prompt ----
 prompt:
-  # "llm_spec"  — a model writes a constrained content spec from title +
-  #               abstract, so the generated abstract is about the same *work*.
-  #               Matches how the essay/wp Ghostbuster prompts were built.
-  # "title_only"— deterministic, zero leakage, but produces a vaguer prompt
-  #               than the other three corpora use. Kept for ablation.
-  mode: "llm_spec"
+  # `mode` USED TO LIVE HERE and now lives in the prompt config, beside the
+  # prompts it selects between — cfg/science_data/prompts/<prompt_config>.yaml
+  # carries `mode: llm_spec` or `mode: title_only`. The mode decides what the
+  # prompt says, and the prompt id is the corpus's only record of what the
+  # prompt said (`generated_by` is <model_slug>:<prompt_config>), so keeping it
+  # here made it the one input to a generated row that the row's label did not
+  # name: 0811A run under llm_spec produced rows labelled gpt56luna:0811A whose
+  # prompts carried a spec, and nothing afterwards could tell them apart.
+  #
+  # You may still write `mode:` here, but only if it AGREES with the prompt
+  # config; a mismatch is a hard error at load, before anything is spent. The
+  # honest thing is to leave it out and read the mode off `prompt_config`.
+  #
+  # For the record, since this config selects 0811A (title_only): stage 3 skips
+  # the spec stage entirely, so this arm issues ZERO spec calls (the `model`
+  # below goes unused) and only the 3000 generation calls cost anything. The
+  # existing <id>_spec.jsonl is left untouched, so switching back to 0807A later
+  # costs nothing either.
 
   # The spec model is NOT recorded in `generated_by` — only the generator is —
   # so nothing in a row says which model wrote the spec behind its prompt.

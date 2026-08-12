@@ -47,8 +47,18 @@ PROMPT_MODES = {"llm_spec", "title_only"}
 # id stamped into `generated_by` accounts for all of them. A missing key is a
 # hard error rather than a fallback to something hardcoded — a silent default
 # would be a prompt the id does not describe.
+#
+# `mode` is in here, rather than in the pipeline config where it used to live,
+# for exactly that reason. It decides whether the generator is shown a content
+# spec, which is a difference in what the prompt SAYS — and the prompt config's
+# id is the corpus's only record of what the prompt said. Split across two
+# files, the mode was the one input to a generated row that its label did not
+# name: `0811A` under `llm_spec` produced rows labelled gpt56luna:0811A whose
+# prompts carried a spec, indistinguishable afterwards from ones that did not.
+# Here, the id accounts for it like it accounts for every prompt string.
 REQUIRED_PROMPT_KEYS = {
     "id",
+    "mode",
     "spec_system_prompt",
     "generation_prompt_template",
     "spec_block",
@@ -94,9 +104,6 @@ def load_pipeline_config(path: Path) -> dict:
         {k: v for k, v in filt.items() if k not in {"trim_mode", "seed"}}
     )
 
-    if cfg["prompt"].get("mode", "llm_spec") not in PROMPT_MODES:
-        raise ValueError(f"{path}: prompt.mode must be one of {sorted(PROMPT_MODES)}")
-
     if not str(cfg.get("prompt_config") or "").strip():
         raise ValueError(
             f"{path}: prompt_config must name a file in cfg/science_data/prompts/ "
@@ -104,7 +111,23 @@ def load_pipeline_config(path: Path) -> dict:
         )
     # Load it here rather than lazily in stage 3: a bad prompt id should fail
     # before the fetch, not four thousand API calls later.
-    load_prompt_config(cfg)
+    prompts = load_prompt_config(cfg)
+
+    # `mode` moved into the prompt config (see REQUIRED_PROMPT_KEYS). A copy
+    # left behind here is neither ignored nor obeyed — it has to agree, or the
+    # run stops. Ignoring it silently would be worse than the split it replaced:
+    # a config that plainly reads `mode: llm_spec` would build a title-only
+    # corpus, and the person reading the config would have no reason to doubt it.
+    declared = cfg["prompt"].get("mode")
+    if declared is not None and declared != prompts["mode"]:
+        raise ValueError(
+            f"{path}: prompt.mode is {declared!r}, but prompt config "
+            f"{cfg['prompt_config']!r} declares mode {prompts['mode']!r}.\n"
+            "  The mode belongs to the prompt config now — it decides what the "
+            "prompt says, so it is part of what the id names. Either delete "
+            "prompt.mode from this file, or point prompt_config at the id whose "
+            "mode you actually meant."
+        )
 
     generators = cfg["generate"].get("generators") or []
     if not generators:
@@ -224,8 +247,18 @@ def human_path(cfg: dict) -> Path:
 
 
 def prompts_path(cfg: dict) -> Path:
-    """Stage 3 output: the human corpus plus a spec and a prompt per paper."""
-    return SCIENCE_DIR / f"{cfg['dataset_id']}_prompts.parquet"
+    """Stage 3 output: the human corpus plus a spec and a prompt per paper.
+
+    Carries ``prompt_config`` in the name, as the stage-4 output does. It used
+    to be ``<id>_prompts.parquet`` for every arm, which cost more than a
+    clobbered intermediate: stage 4 takes ``text`` from the generate shard but
+    ``prompt`` from THIS file, and the shard skips calls it has already made. So
+    re-exporting an arm after another arm's prompt stage had run produced a
+    corpus whose ``text`` came from the right prompts and whose ``prompt``
+    column came from the wrong ones — a row that misreports its own input, with
+    nothing in the file to show for it.
+    """
+    return SCIENCE_DIR / f"{cfg['dataset_id']}_prompts_{cfg['prompt_config']}.parquet"
 
 
 def final_path(cfg: dict, variant: str) -> Path:
@@ -255,6 +288,11 @@ def load_prompt_config(cfg: dict) -> dict:
     into ``generated_by`` — and a copied-but-not-renamed file would otherwise
     label a whole corpus with the id of the config it was copied from, which is
     undetectable afterwards.
+
+    ``mode`` is validated here rather than in :func:`load_pipeline_config`
+    because this is the file it belongs to: an unknown mode is a broken prompt
+    config, not a broken pipeline config, and stage 3 reads it from the dict
+    this function returns.
     """
     path = prompt_config_path(cfg)
     if not path.is_file():
@@ -279,6 +317,12 @@ def load_prompt_config(cfg: dict) -> dict:
             f"{cfg['prompt_config']!r}.yaml. These must match — the id is what "
             "gets written into every generated row, so a mismatch mislabels the "
             "whole corpus. If this file was copied, change its id."
+        )
+
+    if prompts["mode"] not in PROMPT_MODES:
+        raise ValueError(
+            f"{path}: mode is {prompts['mode']!r}, must be one of "
+            f"{sorted(PROMPT_MODES)}"
         )
 
     return prompts

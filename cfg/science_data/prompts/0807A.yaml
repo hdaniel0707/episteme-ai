@@ -19,6 +19,29 @@ description: >
   Baseline. Content spec carries the paper's quantitative results so the
   generator never has to invent figures; verbatim phrasing is still banned.
 
+# Which of the two prompt shapes this file describes:
+#
+#   llm_spec   — a model writes a constrained content spec from title +
+#                abstract, and `spec_block` / `results_instruction` below are
+#                substituted into the generation template. Matches how the
+#                essay/wp Ghostbuster prompts were built.
+#   title_only — no spec stage at all; both of those keys are replaced with "",
+#                so the generator sees the title, the field and a target length
+#                and nothing derived from the abstract.
+#
+# It lives here, with the prompts, and NOT in the pipeline config where it used
+# to sit. The mode changes what the prompt says, and the id of this file is the
+# corpus's only record of what the prompt said — `generated_by` is
+# <model_slug>:<prompt_config> and nothing more. Split across two files it was
+# the one input to a generated row that its label did not name.
+#
+# ADDED AFTER science_v1 WAS GENERATED, which the "never edit a file that has
+# produced a corpus" rule above would normally forbid. It is admissible because
+# it is not a prompt: it records what this config was ALREADY run as (llm_spec —
+# the 3000 specs in science_v1_spec.jsonl are the evidence), so no existing
+# row's label changes meaning. Do not take it as licence to edit anything else.
+mode: "llm_spec"
+
 # --------------------------------------------------------------- stage 3 ----
 # Sent to the spec model, once per paper, with the human title + abstract as
 # the user message. The output is the `spec` column.

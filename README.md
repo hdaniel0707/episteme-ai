@@ -834,11 +834,29 @@ content and structure the way a rephrasing setup does.
 [filter.py]          ← Stage 2: admission rules → <id>_human.parquet
    ↓                          (exactly N records per domain)
 [make_prompts.py]    ← Stage 3: one generation prompt per paper
-   ↓                          <id>_prompts.parquet
+   ↓                          <id>_prompts_<prompt_config>.parquet
 [generate_ai.py]     ← Stage 4: prompt → AI abstract, checkpointed per call
    ↓                          <id>_<variant>.parquet   ← promote this
 [analyse_{fetch,filter,prompts,generation}.py]   ← per-stage reports
 ```
+
+**`dataset_id` names the paper set; `prompt_config` names the arm.** Every path
+in `data/science/` derives from those two, and they answer different questions.
+Different papers — a changed domain list, changed fetch/filter thresholds, or
+*any* re-fetch, since OpenAlex's relevance ranking drifts between runs — is a
+new `dataset_id`. Same papers under different prompts, a different mode, or a
+different generator is the *same* `dataset_id` and a new `prompt_config`; the
+prompts parquet, the generate shard key and the stage-4 output all carry the arm
+in their names, so the arms cannot collide.
+
+Follow that and the pipeline has no destructive case: a run that changes the
+paper set writes to different files by construction. Ignore it and one command
+is genuinely dangerous — `run_full_pipeline.py --yes` under an id that already
+has generations re-scrapes, auto-answers the fetch stage's own overwrite prompt,
+and strands every paid call in `<id>_generate.jsonl` against a corpus whose ids
+no longer match. The only symptom is a `N paper(s) dropped` line at export that
+reads like a few failed API calls. Start later in the pipeline
+(`--science-from prompts`) whenever the corpus is one you want to keep.
 
 **Everything lives in `data/science/`.** None of the four stages writes to
 `data/parquet/`. Stage 4's output is the only artifact meant to leave, and
@@ -917,6 +935,16 @@ Every prompt the pipeline sends lives in `cfg/science_data/prompts/<id>.yaml` �
 the spec system prompt, the generation prompt template, and the generation
 system prompt. The main config points at one with `prompt_config: "0807A"`.
 
+Its **`mode`** lives there too, and that is the point rather than an accident of
+layout. `llm_spec` has a model write a content spec of the paper and splices it
+into the generation prompt; `title_only` skips the spec stage entirely and
+leaves the generator the title, the field and a target length. So the mode
+changes what the prompt *says* — and since the id of this file is the corpus's
+only record of what the prompt said, a mode set anywhere else would be the one
+input to a generated row that the row's label does not name. The pipeline config
+may still carry `prompt.mode`, but only agreeing with the prompt config; a
+mismatch fails at load, before anything is spent.
+
 That id is stamped into every generated row:
 
 ```
@@ -953,7 +981,8 @@ it). `combine_domains.py` drops both when it runs, so they cost nothing
 downstream.
 
 The **`prompt`** column carries the verbatim user message that produced the
-row, so the corpus can be read without going back to `<id>_prompts.parquet`.
+row, so the corpus can be read without going back to
+`<id>_prompts_<prompt_config>.parquet`.
 It is **null on every human row** — a human abstract was not written to a
 prompt, and filling the column there with the prompt derived *from* it would
 invite exactly the reading the protocol exists to prevent. It sits last, after

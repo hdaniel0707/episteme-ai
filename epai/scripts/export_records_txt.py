@@ -376,7 +376,8 @@ def main(argv: list[str] | None = None) -> int:
             f"NOTE: no {args.prompt_column!r} column in this parquet, so the "
             "files carry no prompt. A corpus generated before generate_ai.py "
             "started writing it can be rebuilt from its "
-            "<dataset_id>_prompts.parquet — the generate stage is checkpointed, "
+            "<dataset_id>_prompts_<prompt_config>.parquet — the generate stage "
+            "is checkpointed, "
             "so re-running it costs no API calls."
         )
 
