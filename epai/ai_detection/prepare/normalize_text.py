@@ -209,77 +209,17 @@ TEXT_DERIVED = ("binoculars", "binox", "llm_judge", "perplexity", "logprob")
 # Character maps
 # ---------------------------------------------------------------------------
 
-# Grouped so the report can say which class of substitution fired, rather than
-# just "n characters changed".
-UNICODE_GROUPS: dict[str, dict[str, str]] = {
-    "single_quotes": {
-        "‘": "'",  # ‘
-        "’": "'",  # ’  the artifact
-        "‚": "'",  # ‚
-        "‛": "'",  # ‛
-        "′": "'",  # ′ prime
-        "´": "'",  # ´ acute accent used as apostrophe
-        "`": "'",  # ` backtick used as apostrophe
-    },
-    "double_quotes": {
-        "“": '"',  # “
-        "”": '"',  # ”
-        "„": '"',  # „
-        "‟": '"',  # ‟
-        "″": '"',  # ″ double prime
-        "«": '"',  # «
-        "»": '"',  # »
-    },
-    "dashes": {
-        "‐": "-",  # ‐ hyphen
-        "‑": "-",  # ‑ non-breaking hyphen
-        "‒": "-",  # ‒ figure dash
-        "–": "-",  # – en dash
-        "—": "--",  # — em dash
-        "―": "--",  # ― horizontal bar
-        "−": "-",  # − minus sign
-    },
-    "ellipsis": {
-        "…": "...",  # …
-    },
-    "spaces": {
-        " ": " ",  # non-breaking space
-        " ": " ",
-        " ": " ", " ": " ", " ": " ", " ": " ",
-        " ": " ", " ": " ", " ": " ", " ": " ",
-        " ": " ", " ": " ", " ": " ",
-        " ": " ", " ": " ", "　": " ",
-    },
-    "invisible": {
-        "­": "",  # soft hyphen
-        "​": "",  # zero-width space
-        "‌": "",  # zero-width non-joiner
-        "‍": "",  # zero-width joiner
-        "⁠": "",  # word joiner
-        "﻿": "",  # BOM / zero-width no-break space
-    },
-    "bullets": {
-        "•": "*",  # •
-        "·": "*",  # ·
-        "●": "*",  # ●
-        "▪": "*",  # ▪
-    },
-    "ligatures": {
-        "ﬀ": "ff", "ﬁ": "fi", "ﬂ": "fl",
-        "ﬃ": "ffi", "ﬄ": "ffl", "ﬅ": "st", "ﬆ": "st",
-        "Œ": "OE", "œ": "oe", "Æ": "AE", "æ": "ae",
-    },
-    "misc": {
-        "™": "(TM)", "®": "(R)", "©": "(C)",
-        "⁄": "/",  # fraction slash
-        "‹": "<", "›": ">",
-    },
-}
-
-UNICODE_MAP: dict[str, str] = {
-    ch: repl for group in UNICODE_GROUPS.values() for ch, repl in group.items()
-}
-UNICODE_TABLE = str.maketrans(UNICODE_MAP)
+# Imported, not defined here. The pipelines standardise every corpus with this
+# same table before scoring (epai/ai_detection/prepare/standardize_text.py), and
+# a research tool that folded a slightly different set of characters than the
+# corpora were built with would attribute the difference to its own transform.
+# UNICODE_GROUPS stays grouped so the report below can name which class of
+# substitution fired rather than just "n characters changed".
+from epai.utils.text_standardize import (  # noqa: E402
+    UNICODE_GROUPS,
+    UNICODE_MAP,
+    UNICODE_TABLE,
+)
 
 # Leading labels that Ghostbuster / gpt rewrites emit as a header line. The
 # content after the colon is kept; only the label goes.

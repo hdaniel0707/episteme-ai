@@ -2,7 +2,7 @@ r"""Build a science corpus and score it with Binoculars, end to end.
 
     uv run python epai/science_data/run_full_pipeline.py --yes --gpu 0
 
-Four steps, in order:
+Five steps, in order:
 
   1. **science** — the whole ``run_pipeline.py`` chain (fetch → filter →
      prompts → generate, with the analyses interleaved), producing
@@ -10,17 +10,26 @@ Four steps, in order:
   2. **promote** — *copy* that file to ``data/parquet/``. A copy, not a move:
      ``data/science/`` stays the record of what the run actually produced, so a
      later step that mangles the promoted file cannot destroy the only copy.
-  3. **score** — run the Binoculars fork over the promoted file, writing
+  3. **standardize** — ``prepare/standardize_text.py`` over the promoted file,
+     rewriting ``text`` in place for every row, human and generated alike:
+     typographic characters folded to ASCII, whitespace on one convention. This
+     corpus is already symmetric in its *word-level* cleaning — ``clean_abstract``
+     and ``clean_generated`` mirror each other on purpose — but nothing upstream
+     folds an OpenAlex curly apostrophe onto a generated straight one, and that
+     is a tell about the source rather than the author. Removes no text: it
+     checks its own word count and refuses to write if it changed. Skipped when
+     ``standardize.enabled`` is false.
+  4. **score** — run the Binoculars fork over the promoted file, writing
      ``<name>_binox0.parquet`` beside it. The ``-o`` is passed explicitly:
      ``score_parquets.py`` overwrites its input by default, and the unscored
      promoted copy is worth keeping — it is what gets re-scored when the
      detector or its model pair changes.
-  4. **embed** — ``embed/add_embeddings.py`` over the scored file, filling every
+  5. **embed** — ``embed/add_embeddings.py`` over the scored file, filling every
      ``emb_*`` column in place. The corpus is then ready for training.
 
-**Step 3 runs in a different environment.** This repo pins
+**Step 4 runs in a different environment.** This repo pins
 ``transformers>=4.57`` and the fork pins ``>=5.12``, so every step except the
-scoring one runs under this interpreter and step 3 goes through
+scoring one runs under this interpreter and step 4 goes through
 ``uv run --project external/Binoculars``.
 That is the only reason this script shells out for that step instead of
 importing ``Binoculars``: the import would resolve against the wrong venv.
@@ -39,10 +48,13 @@ Resuming, since step 1 is the expensive one:
     --only score             it is already in data/parquet/; just score it
     --science-from prompts   resume *inside* the science pipeline
 
-Stopping early, since steps 3–4 are the GPU-hours:
+Stopping early, since the last two steps are the GPU-hours:
 
-    --until promote          build the corpus and stop before score and embed
+    --until standardize      build the corpus and stop before score and embed
     --from score             later, on a GPU box, finish where that left off
+
+``standardize`` is the boundary, not ``promote``: it rewrites the text, and a
+corpus handed to score before it has run gets scores for text it no longer holds.
 
 ``--from`` and ``--until`` are both inclusive and compose into any window;
 ``--only`` names steps explicitly and cannot be combined with either.
@@ -66,7 +78,7 @@ agree. So a ten-paper end-to-end debug run is that key plus the flags above:
 Run:
     uv run python epai/science_data/run_full_pipeline.py --yes --cpu-threads 16 --gpu 5
     uv run python epai/science_data/run_full_pipeline.py --from promote --gpu 0
-    uv run python epai/science_data/run_full_pipeline.py --until promote --yes
+    uv run python epai/science_data/run_full_pipeline.py --until standardize --yes
     uv run python epai/science_data/run_full_pipeline.py --dry-run
 """
 
@@ -106,6 +118,7 @@ SCIENCE_RUNNER = "epai/science_data/run_pipeline.py"
 BINOCULARS_PROJECT = BASE_DIR / "external" / "Binoculars"
 BINOCULARS_SCRIPT = BINOCULARS_PROJECT / "score_parquets.py"
 EMBED_SCRIPT = "epai/ai_detection/embed/add_embeddings.py"
+STANDARDIZE_SCRIPT = "epai/ai_detection/prepare/standardize_text.py"
 PARQUET_DIR = BASE_DIR / "data" / "parquet"
 
 # The suffix this pipeline gives the scored corpus, passed to score_parquets.py
@@ -113,7 +126,7 @@ PARQUET_DIR = BASE_DIR / "data" / "parquet"
 # decided.
 SCORED_SUFFIX = "_binox0"
 
-STEP_KEYS = ("science", "promote", "score", "embed")
+STEP_KEYS = ("science", "promote", "standardize", "score", "embed")
 
 
 @dataclass
@@ -285,6 +298,52 @@ def step_promote(args: argparse.Namespace, src: Path, dest: Path) -> int:
     return 0
 
 
+def step_standardize(args: argparse.Namespace, cfg: dict, dest: Path) -> int:
+    """Fold typographic characters and layout to one convention, both classes.
+
+    On the promoted corpus rather than the science pipeline's own output, so
+    the run in data/science/ stays exactly as it was generated and the promoted
+    file is the standardised one. In place, before score, because a Binoculars
+    score computed on the pre-standardised text is a number about a document
+    that is no longer in the corpus.
+
+    Mostly a backstop here, unlike in the Ghostbuster pipeline: this corpus is
+    already symmetric by construction — ``rules.clean_abstract`` and
+    ``generate_ai.clean_generated`` mirror each other deliberately, and both
+    end in the same whitespace collapse. What this adds is the character table:
+    an OpenAlex abstract carrying a curly apostrophe and a generated one
+    carrying a straight one is the same tell the Ghostbuster corpus has, and
+    nothing upstream folds it.
+    """
+    banner("standardize", f"{STANDARDIZE_SCRIPT} → {dest.relative_to(BASE_DIR)}")
+
+    std = cfg.get("standardize") or {}
+    if not std.get("enabled", True):
+        print(f"{DIM}standardize.enabled is false — skipped.{RESET}")
+        return 0
+
+    cmd = [
+        sys.executable,
+        STANDARDIZE_SCRIPT,
+        str(dest.relative_to(BASE_DIR)),
+        # Abstracts are single paragraphs, and both cleaners already end in a
+        # \s+ -> " " collapse, so this mode agrees with what upstream produced.
+        "--whitespace", std.get("whitespace", "flat"),
+        "--text-column", args.text_column,
+    ]
+    if not std.get("keep_raw", True):
+        cmd.append("--no-raw")
+    if args.dry_run:
+        cmd.append("--dry-run")
+
+    if not args.dry_run and not dest.is_file():
+        print(f"{RED}Not found: {dest.relative_to(BASE_DIR)}{RESET}\n"
+              f"  The promote step writes it. Run that first.")
+        return 1
+
+    return run_cmd(cmd, args.dry_run)
+
+
 def step_score(args: argparse.Namespace, dest: Path, scored: Path) -> int:
     cmd = [
         "uv", "run", "--project", str(BINOCULARS_PROJECT.relative_to(BASE_DIR)),
@@ -446,9 +505,11 @@ def main() -> None:
     g.add_argument("--from", dest="start_from", metavar="STEP",
                    help=f"start here instead of at the beginning: {', '.join(STEP_KEYS)}")
     g.add_argument("--until", dest="stop_after", metavar="STEP",
-                   help="stop after this step, inclusive. --until promote builds "
-                        "and promotes the corpus and leaves the GPU steps (score, "
-                        "embed) for a later --from score.")
+                   help="stop after this step, inclusive. --until standardize "
+                        "builds, promotes and standardises the corpus and leaves "
+                        "the GPU steps (score, embed) for a later --from score. "
+                        "Stopping at promote instead hands off text that has not "
+                        "been standardised.")
     g.add_argument("--only", nargs="+", metavar="STEP",
                    help="run only these steps (always in pipeline order). Cannot "
                         "be combined with --from or --until.")
@@ -536,6 +597,7 @@ def main() -> None:
     runners = {
         "science": lambda: step_science(args, variant),
         "promote": lambda: step_promote(args, src, dest),
+        "standardize": lambda: step_standardize(args, cfg, dest),
         "score": lambda: step_score(args, dest, scored),
         "embed": lambda: step_embed(args, cfg, scored),
     }

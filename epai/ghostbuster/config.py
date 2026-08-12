@@ -41,6 +41,7 @@ import yaml
 from epai.science_data.config import model_slug
 from epai.utils.embed_select import validate_embedders
 from epai.utils.label_utils import PROMPT_ID_HINT, check_prompt_id, generator_dir_name
+from epai.utils.text_standardize import WHITESPACE_MODES
 
 BASE_DIR = Path(__file__).parent.parent.parent
 
@@ -61,6 +62,7 @@ BINOCULARS_SCRIPT = BINOCULARS_PROJECT / "score_parquets.py"
 # --- in-repo stages --------------------------------------------------------
 PREPARE_DIR = "epai/ai_detection/prepare"
 COMBINE_SCRIPT = f"{PREPARE_DIR}/combine_domains.py"
+STANDARDIZE_SCRIPT = f"{PREPARE_DIR}/standardize_text.py"
 PARQUET_DIR = BASE_DIR / "data" / "parquet"
 
 # Pipeline order, and the order every report prints. A config's `domains` list
@@ -255,6 +257,24 @@ def load_pipeline_config(path: Path) -> dict:
 
     if not isinstance(cfg["prepare"].get("embeddings", False), bool):
         raise ValueError(f"{path}: prepare.embeddings must be true or false")
+
+    # Optional block: a config written before this stage existed still loads,
+    # and gets the stage with its defaults. Absent means enabled, because a
+    # corpus with unstandardised typography is the thing worth needing a
+    # deliberate opt-out for.
+    std = cfg.get("standardize") or {}
+    if not isinstance(std, dict):
+        raise ValueError(f"{path}: standardize must be a mapping")
+    if not isinstance(std.get("enabled", True), bool):
+        raise ValueError(f"{path}: standardize.enabled must be true or false")
+    if not isinstance(std.get("keep_raw", True), bool):
+        raise ValueError(f"{path}: standardize.keep_raw must be true or false")
+    ws = std.get("whitespace", "lines")
+    if ws not in WHITESPACE_MODES:
+        raise ValueError(
+            f"{path}: standardize.whitespace must be one of "
+            f"{sorted(WHITESPACE_MODES)}, got {ws!r}"
+        )
 
     comb = cfg["combine"]
     mode = comb.get("drop_incomplete", "emb")

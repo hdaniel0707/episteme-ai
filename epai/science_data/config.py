@@ -21,6 +21,7 @@ import yaml
 
 from epai.science_data.rules import FilterConfig
 from epai.utils.embed_select import validate_embedders
+from epai.utils.text_standardize import WHITESPACE_MODES
 
 BASE_DIR = Path(__file__).parent.parent.parent
 
@@ -104,6 +105,32 @@ def load_pipeline_config(path: Path) -> dict:
         {k: v for k, v in filt.items() if k not in {"trim_mode", "seed"}}
     )
 
+    # Optional block, and everything in it defaults OFF: these are the
+    # transforms that delete words rather than substituting characters.
+    clean = cfg.get("clean") or {}
+    if not isinstance(clean, dict):
+        raise ValueError(f"{path}: clean must be a mapping")
+    if not isinstance(clean.get("strip_structured_labels", False), bool):
+        raise ValueError(f"{path}: clean.strip_structured_labels must be true or false")
+
+    # Optional block: a config written before this stage existed still loads and
+    # gets the stage with its defaults. Absent means enabled — a corpus whose
+    # two classes spell their apostrophes differently is the case that should
+    # need a deliberate opt-out, not the other way round.
+    std = cfg.get("standardize") or {}
+    if not isinstance(std, dict):
+        raise ValueError(f"{path}: standardize must be a mapping")
+    if not isinstance(std.get("enabled", True), bool):
+        raise ValueError(f"{path}: standardize.enabled must be true or false")
+    if not isinstance(std.get("keep_raw", True), bool):
+        raise ValueError(f"{path}: standardize.keep_raw must be true or false")
+    ws = std.get("whitespace", "flat")
+    if ws not in WHITESPACE_MODES:
+        raise ValueError(
+            f"{path}: standardize.whitespace must be one of "
+            f"{sorted(WHITESPACE_MODES)}, got {ws!r}"
+        )
+
     if not str(cfg.get("prompt_config") or "").strip():
         raise ValueError(
             f"{path}: prompt_config must name a file in cfg/science_data/prompts/ "
@@ -172,6 +199,17 @@ def load_pipeline_config(path: Path) -> dict:
 def embed_config(cfg: dict) -> dict:
     """The optional ``embed`` block, or an empty mapping when it is absent."""
     return cfg.get("embed") or {}
+
+
+def strip_structured_labels_enabled(cfg: dict) -> bool:
+    """Whether both cleaners should remove structured-abstract section labels.
+
+    One function, read by the fetch stage for the human abstracts and by the
+    generate stage for the machine ones. Two call sites reading the same key
+    through the same helper is what stops the two classes being cleaned
+    differently, which is the failure the whole symmetry argument is about.
+    """
+    return bool((cfg.get("clean") or {}).get("strip_structured_labels", False))
 
 
 def filter_config(cfg: dict) -> FilterConfig:

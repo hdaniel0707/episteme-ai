@@ -2,7 +2,7 @@ r"""Build a Ghostbuster corpus with a newer generator and score it, end to end.
 
     uv run python epai/ghostbuster/run_full_pipeline.py --yes --gpu 0
 
-Seven stages, in order:
+Eight stages, in order:
 
   1. **generate**  — ``external/ghostbuster/generate.py``, once per (domain,
      type), in the fork's own environment. Writes
@@ -31,12 +31,24 @@ Seven stages, in order:
      corpus, nothing downstream reads them, and a leftover
      ``essay_<variant>.parquet`` is a corpus-shaped file waiting to be trained
      on by mistake. ``combine.remove_domain_parquets: false`` keeps them.
-  6. **score**     — ``external/Binoculars/score_parquets.py`` over that file,
+  6. **standardize** — ``prepare/standardize_text.py`` over the combined file,
+     rewriting ``text`` in place for every row, human and generated alike:
+     typographic characters folded to ASCII, layout put on one convention. The
+     two classes reach the parquet by different routes — the human side through
+     ``generate.py``'s formatting loops, the AI side straight out of the model —
+     and anything one route does and the other does not is a feature about the
+     route. Measured here: curly-quote rate on the human side runs 4.3% (wp),
+     90.2% (essay), 0.0% (reuter) against one generator's roughly constant rate,
+     so the same feature points at *human* in one domain and *AI* in another,
+     which is what sends cross-domain transfer below chance. It removes no text
+     — it checks its own word count and refuses to write if it changed.
+     Skipped when ``standardize.enabled`` is false.
+  7. **score**     — ``external/Binoculars/score_parquets.py`` over that file,
      writing ``..._binox0.parquet``.
-  7. **embed**     — ``embed/add_embeddings.py`` over the scored file, filling
+  8. **embed**     — ``embed/add_embeddings.py`` over the scored file, filling
      every ``emb_*`` column in place. The corpus is then ready for training.
 
-**Three environments, and stages 1–2 and 6 run outside this one.** This repo
+**Three environments, and stages 1–2 and 7 run outside this one.** This repo
 pins ``transformers>=4.57``; the ghostbuster fork and the Binoculars fork both
 pin ``>=5.12``. So those stages go through ``uv run --project external/<fork>``
 with ``VIRTUAL_ENV`` and ``UV_PROJECT_ENVIRONMENT`` stripped — inherited from an
@@ -104,20 +116,23 @@ Resuming, since stage 1 is the expensive one:
     --only prepare combine    rebuild the parquets from an existing text tree
     --from score              the corpus is combined; just score it
 
-Stopping early, since stages 6–7 are the GPU-hours:
+Stopping early, since the last two stages are the GPU-hours:
 
-    --until combine           build the corpus and stop before score and embed
+    --until standardize       build the corpus and stop before score and embed
     --from score              later, on a GPU box, finish where that left off
+
+``standardize`` is the boundary, not ``combine``: it rewrites the text, and a
+corpus handed to score before it has run gets scores for text it no longer holds.
 
 ``--from`` and ``--until`` are both inclusive and compose into any window;
 ``--only`` names steps explicitly and cannot be combined with either.
 
-**A ten-item debug run**, all seven stages, nothing billed — the fork mocks every
+**A ten-item debug run**, all eight stages, nothing billed — the fork mocks every
 LLM call under ``--debug``, and only ten rows get scored and embedded, so the
 whole thing is minutes rather than a day:
 
     uv run python epai/ghostbuster/run_full_pipeline.py --yes --debug \
-        --gen-limit 10 --score-limit 10 --embed-limit 10 --gpu 0 --until combine --clean
+        --gen-limit 10 --score-limit 10 --embed-limit 10 --gpu 0 --until standardize --clean
 
 Drop ``--debug`` to spend real API calls on ten items per domain, which is the
 run to do before committing to a full one. Read its output knowing three things:
@@ -134,7 +149,7 @@ Run:
     uv run python epai/ghostbuster/run_full_pipeline.py --clean --dry-run
     uv run python epai/ghostbuster/run_full_pipeline.py --clean --yes --gpu 0
     uv run python epai/ghostbuster/run_full_pipeline.py --gen-limit 3 --debug --dry-run
-    uv run python epai/ghostbuster/run_full_pipeline.py --until combine --yes
+    uv run python epai/ghostbuster/run_full_pipeline.py --until standardize --yes
     uv run python epai/ghostbuster/run_full_pipeline.py --from score --gpu 0
 """
 
@@ -154,6 +169,7 @@ from epai.ghostbuster.config import (
     BINOCULARS_PROJECT,
     BINOCULARS_SCRIPT,
     COMBINE_SCRIPT,
+    STANDARDIZE_SCRIPT,
     DEFAULT_CFG_PATH,
     FIX_EMPTY_SCRIPT,
     GB_DATA_DIR,
@@ -198,7 +214,8 @@ RESET = "\033[0m"
 INTERRUPTED = 130
 
 STEP_KEYS = (
-    "generate", "fix-empty", "collect", "prepare", "combine", "score", "embed"
+    "generate", "fix-empty", "collect", "prepare", "combine", "standardize",
+    "score", "embed"
 )
 
 EMBED_SCRIPT = "epai/ai_detection/embed/add_embeddings.py"
@@ -956,6 +973,50 @@ def step_combine(cfg: dict, args: argparse.Namespace, var: str) -> int:
     return 0
 
 
+def step_standardize(cfg: dict, args: argparse.Namespace, var: str) -> int:
+    """Fold typographic characters and layout to one convention, both classes.
+
+    Between combine and score because it must see both classes at once and must
+    run before anything reads the text. The measured reason it exists: the
+    fork's human loops normalise quotes in wp but not in essay, and Reuters is
+    ASCII to begin with, so curly-quote rate on the human side runs 4.3% / 90.2%
+    / 0.0% across wp / essay / reuter against a roughly constant AI rate. That
+    is one feature whose SIGN flips between domains, which is what takes
+    cross-domain transfer below chance rather than to it.
+
+    It never removes text by keyword; the stage checks its own word count and
+    refuses to write if it changed.
+    """
+    src = combined_path(cfg, var)
+    banner("standardize", f"{STANDARDIZE_SCRIPT} → {rel(src)}")
+
+    if not cfg.get("standardize", {}).get("enabled", True):
+        print(f"{DIM}standardize.enabled is false — skipped.{RESET}")
+        print(f"{YELLOW}  The corpus keeps whatever typographic conventions each "
+              f"source and the generator happened to use.{RESET}")
+        return 0
+
+    std = cfg.get("standardize", {})
+    cmd = [
+        sys.executable,
+        str(BASE_DIR / STANDARDIZE_SCRIPT),
+        rel(src),
+        "--whitespace", std.get("whitespace", "lines"),
+        "--text-column", cfg["score"].get("text_column", "text"),
+    ]
+    if not std.get("keep_raw", True):
+        cmd.append("--no-raw")
+    if args.dry_run:
+        cmd.append("--dry-run")
+
+    if not args.dry_run and not src.is_file():
+        print(f"{RED}Not found: {rel(src)}{RESET}\n"
+              f"  The combine stage writes it. Run that first.")
+        return 1
+
+    return run_cmd(cmd, args.dry_run)
+
+
 def step_score(cfg: dict, args: argparse.Namespace, var: str) -> int:
     """Score the combined corpus with the Binoculars fork."""
     score = cfg["score"]
@@ -1129,9 +1190,12 @@ def main() -> None:
     g.add_argument("--from", dest="start_from", metavar="STEP",
                    help=f"start here instead of at the beginning: {', '.join(STEP_KEYS)}")
     g.add_argument("--until", dest="stop_after", metavar="STEP",
-                   help="stop after this step, inclusive. --until combine builds "
-                        "the corpus and leaves the GPU stages (score, embed) for "
-                        "a later --from score.")
+                   help="stop after this step, inclusive. --until standardize "
+                        "builds the corpus and leaves the GPU stages (score, "
+                        "embed) for a later --from score. Stopping at combine "
+                        "instead hands off text that has not been standardised, "
+                        "so the scores would describe text the corpus no longer "
+                        "holds.")
     g.add_argument("--only", nargs="+", metavar="STEP",
                    help="run only these steps (always in pipeline order). Cannot "
                         "be combined with --from or --until.")
@@ -1230,6 +1294,7 @@ def main() -> None:
         "collect": lambda: step_collect(cfg, args, var),
         "prepare": lambda: step_prepare(cfg, args, var),
         "combine": lambda: step_combine(cfg, args, var),
+        "standardize": lambda: step_standardize(cfg, args, var),
         "score": lambda: step_score(cfg, args, var),
         "embed": lambda: step_embed(cfg, args, var),
     }

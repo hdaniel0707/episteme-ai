@@ -72,9 +72,10 @@ from epai.science_data.config import (
     prompt_config_path,
     prompts_path,
     shard_path,
+    strip_structured_labels_enabled,
 )
 from epai.science_data.llm import Shard, openai_text_call, run_resumable
-from epai.science_data.rules import OPTIONAL_NUMERIC_COLUMNS
+from epai.science_data.rules import OPTIONAL_NUMERIC_COLUMNS, strip_structured_labels
 from epai.utils.parquet_utils import coerce_dtypes, load_parquet, save_parquet
 
 load_dotenv()
@@ -123,10 +124,29 @@ OUT_COLUMNS = [
 ]
 
 
-def clean_generated(text: str) -> str:
-    """Normalise generated text the same way the human abstracts were."""
-    text = _LEADING_LABEL_RE.sub("", text)
+def clean_generated(text: str, *, strip_labels: bool = False) -> str:
+    """Normalise generated text the same way the human abstracts were.
+
+    :param strip_labels: remove structured-abstract section labels. OFF by
+        default, and read from the same ``clean.strip_structured_labels`` key
+        the fetch stage reads for the human abstracts -- the two classes are
+        cleaned identically or not at all, which is the whole point.
+
+    Markdown removal has no counterpart on the human side because OpenAlex
+    abstracts do not carry markdown. It is one-directional for the same reason
+    the rest of this is symmetric: it removes a token only one class could ever
+    produce. (It is also why it must not be applied to the human text -- the
+    pattern would eat the underscores in ``k_B`` and ``H_2``.)
+    """
+    # Markdown FIRST. Both label patterns anchor on a word boundary that `**`
+    # defeats, so "**Background:**" would survive the structured-label strip and
+    # then lose only its asterisks -- leaving a bare "Background:" in the AI
+    # class that the human class never contains. Which is the exact artifact
+    # this function exists to prevent.
     text = _MARKDOWN_RE.sub("", text)
+    text = _LEADING_LABEL_RE.sub("", text)
+    if strip_labels:
+        text = strip_structured_labels(text)
     return _WS_RE.sub(" ", text).strip()
 
 
@@ -145,6 +165,9 @@ def _key(paper_id: str, label: str) -> str:
 def generate(df: pd.DataFrame, cfg: dict, prompts: dict, retry_failed: bool) -> Shard:
     client = OpenAI()
     shard = Shard(shard_path(cfg, "generate"))
+    # Same key oa_fetch reads for the human abstracts. Bound once here rather
+    # than inside the lambda so the setting cannot differ between calls.
+    strip_labels = strip_structured_labels_enabled(cfg)
 
     tasks = []
     for gen in cfg["generate"]["generators"]:
@@ -168,7 +191,9 @@ def generate(df: pd.DataFrame, cfg: dict, prompts: dict, retry_failed: bool) -> 
         max_workers=cfg["generate"].get("max_workers", 8),
         desc="generating abstracts",
         retry_failed=retry_failed,
-        payload_of=lambda _k, text: {"abstract": clean_generated(text)},
+        payload_of=lambda _k, text: {
+            "abstract": clean_generated(text, strip_labels=strip_labels)
+        },
     )
     return shard
 

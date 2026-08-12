@@ -239,6 +239,71 @@ generate:
   # complete set of rows. Applied at export, not during generation.
   require_all_generators: true
 
+# ---------------------------------------------------------------- clean ----
+# OPTIONAL. Transforms that remove WORDS, as opposed to the `standardize` stage
+# below, which only substitutes characters. Everything here defaults to false:
+# deleting text by keyword is the one class of change this codebase has been
+# bitten by, and it should be an explicit decision every time.
+clean:
+  # Remove structured-abstract section labels — "Background:", "Methods:",
+  # "Conclusions:" — from BOTH classes. One key, read by the fetch stage for the
+  # human abstracts (rules.clean_abstract) and by the generate stage for the
+  # machine ones (generate_ai.clean_generated), so the two cannot be cleaned
+  # differently.
+  #
+  # FALSE by default. What that means, both ways:
+  #   - OFF (default): no words are deleted. But the labels then survive in the
+  #     human class only, since the prompts forbid the generator from emitting
+  #     them, and that is a token a classifier can learn instantly. It is a real
+  #     asymmetry and nothing else here mitigates it.
+  #   - ON: the labels go, from both classes. The match REQUIRES a colon
+  #     ("Background:" yes, "Background radiation was measured" no), which is
+  #     what keeps it from mangling prose — at the cost of missing all-caps or
+  #     period-separated labels, and any label whose colon was carried by an
+  #     HTML tag that clean_abstract already replaced with a space.
+  #
+  # The cleaner answer for a corpus full of structured abstracts is to not build
+  # it from one: cfg/science_data/queries_3domain.yaml excludes Medicine for
+  # exactly this reason. Turn this on only if you know your domains carry them.
+  strip_structured_labels: false
+
+# ---------------------------------------------------------- standardize ----
+# OPTIONAL, and read only by run_full_pipeline.py's standardize step. It runs
+# epai/ai_detection/prepare/standardize_text.py over the PROMOTED corpus,
+# rewriting `text` in place for every row — human and generated alike — after
+# promote and before score, so the run in data/science/ keeps the text exactly
+# as it was generated.
+#
+# Mostly a backstop for this corpus, unlike the Ghostbuster one. The two classes
+# here are already symmetric by design: rules.clean_abstract and
+# generate_ai.clean_generated mirror each other on purpose (html entities, tags,
+# leading "Abstract:" labels, structured section labels, whitespace), and the
+# prompts forbid titles, headings, section labels and markdown. What this stage
+# adds is the character table — an OpenAlex abstract with a curly apostrophe
+# against a generated one with a straight apostrophe is a tell about the source,
+# not the author, and nothing upstream folds it.
+#
+# WHAT IT WILL NOT DO: remove text by keyword. It substitutes characters and
+# normalises whitespace, and verifies its own word count is unchanged before
+# writing. Word-level cleanup that must apply to both classes belongs upstream,
+# in rules.strip_structured_labels, which both cleaners now call.
+standardize:
+  # false leaves whatever typography OpenAlex and the generator produced.
+  enabled: true
+
+  # "flat" — the whole document becomes one line. Correct here: abstracts are
+  # single paragraphs and both cleaners already end in a \s+ -> " " collapse,
+  # so this agrees with what upstream produced rather than changing it. The
+  # Ghostbuster pipeline uses "lines" instead, because that corpus has real
+  # paragraph structure to keep.
+  whitespace: "flat"
+
+  # Keep the pre-standardisation text in a `text_raw` column, so the transform
+  # can be undone from the corpus alone. Written only when absent, so a second
+  # run never replaces the true original with an already-standardised copy.
+  # false saves a little space and makes the change irreversible.
+  keep_raw: true
+
 # ---------------------------------------------------------------- embed ----
 # OPTIONAL, and read only by run_full_pipeline.py's embed step — the four corpus
 # stages above ignore it, so a config without this block still works everywhere.

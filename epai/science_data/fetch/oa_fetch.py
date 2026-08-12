@@ -80,6 +80,7 @@ from epai.science_data.config import (
     load_pipeline_config,
     load_queries,
     raw_path,
+    strip_structured_labels_enabled,
 )
 from epai.science_data.rules import (
     OA_SELECT,
@@ -324,6 +325,9 @@ def fetch_domain(
     """
     fetch_cfg = cfg["fetch"]
     rules_cfg = filter_config(cfg)
+    # Same key the generate stage reads for the machine abstracts, so both
+    # classes are cleaned the same way or neither is.
+    strip_labels = strip_structured_labels_enabled(cfg)
     quota = math.ceil(fetch_cfg["target_per_domain"] * fetch_cfg.get("overfetch", 1.2))
 
     search = iter_search_bulk if fetch_cfg.get("search_mode") == "bulk" else iter_search
@@ -376,7 +380,7 @@ def fetch_domain(
 
     for query, work in _round_robin(iterators, rate_limited):
         seen_total += 1
-        row = normalise_record_oa(work, domain, query)
+        row = normalise_record_oa(work, domain, query, strip_labels=strip_labels)
 
         prior = seen.lookup(row["paper_id"], normalise_title(row["title"]))
         if prior is not None:

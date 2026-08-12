@@ -18,13 +18,18 @@ Two consequences worth keeping in mind if you add a rule:
 The filter stage re-runs the identical rules over the raw parquet, so the two
 stages cannot drift: there is one implementation, imported twice.
 
-Cleaning happens *before* judging. ``clean_abstract`` strips publisher
-boilerplate, HTML, and structured-abstract labels, and the length/language
-rules then apply to the cleaned text — which is also the text that gets stored.
-Stripping the structured labels ("Background: ... Methods: ...") matters more
-than it looks: those labels appear only in the human class, so leaving them in
-would hand a downstream classifier a formatting tell that has nothing to do
-with authorship.
+Cleaning happens *before* judging. ``clean_abstract`` unescapes entities, drops
+HTML tags, cuts publisher boilerplate and collapses whitespace, and the
+length/language rules then apply to the cleaned text — which is also the text
+that gets stored. The publisher's own text survives beside it in
+``abstract_raw``, so nothing here is unrecoverable.
+
+Structured-abstract labels ("Background: ... Methods: ...") are a special case
+and are left alone by default. They *are* a formatting tell — they appear only
+in the human class, since the prompts forbid the generator from emitting them —
+but removing them means deleting words by keyword, which is the one class of
+transform this codebase has been bitten by. ``clean.strip_structured_labels``
+turns it on, for both classes at once; see :func:`strip_structured_labels`.
 """
 
 from __future__ import annotations
@@ -184,11 +189,48 @@ def as_text(value) -> str:
     return "" if is_missing(value) else str(value)
 
 
-def clean_abstract(raw: str | None) -> tuple[str, list[str]]:
+def strip_structured_labels(text: str) -> str:
+    """Remove structured-abstract section labels, keeping the prose after them.
+
+    OFF by default wherever it is wired in (``clean.strip_structured_labels``).
+    This is the only cleaning step in the pipeline that removes text by
+    KEYWORD rather than substituting characters, and that class of transform
+    has a bad record here: the Ghostbuster fork's ``strip_boilerplate`` deleted
+    the opening paragraph of ~9% of generated essays because "ensure" contains
+    "sure". So it is opt-in, and the corpus keeps its words unless someone asks
+    otherwise.
+
+    The colon is required (see :data:`_STRUCTURED_RE`), and that is what keeps
+    this safe when it *is* enabled -- "Background: we study X" is a label,
+    "Background radiation was measured" is a sentence, and only the first has
+    one. The cost of the strict rule is coverage: an all-caps or
+    period-separated label, or one whose colon was carried by an HTML tag that
+    ``clean_abstract`` already replaced with a space, is not matched.
+
+    Public and shared on purpose. Both :func:`clean_abstract` (human) and
+    ``generate_ai.clean_generated`` (AI) call it, reading one config key, so
+    the two classes cannot end up cleaned differently -- a label the human
+    class contains and the AI class never does is a token a classifier learns
+    instantly, and it says nothing about authorship.
+    """
+    return _STRUCTURED_RE.sub("", text)
+
+
+def clean_abstract(
+    raw: str | None, *, strip_labels: bool = False
+) -> tuple[str, list[str]]:
     """Normalise an abstract; return ``(cleaned_text, applied_fixes)``.
 
     ``applied_fixes`` names each transformation that actually changed the text,
     so the filter analysis can report how dirty the raw corpus was.
+
+    :param strip_labels: also remove structured-abstract section labels.
+        OFF by default, and it is the one transform here that deletes words
+        rather than rewriting characters -- see
+        :func:`strip_structured_labels`. Whatever this is set to, it must match
+        what ``generate_ai.clean_generated`` was given, or the two classes are
+        cleaned differently; both read one config key, ``clean
+        .strip_structured_labels``, so that they cannot disagree.
     """
     text = as_text(raw)
     if not text:
@@ -216,10 +258,11 @@ def clean_abstract(raw: str | None) -> tuple[str, list[str]]:
         fixes.append("abstract_heading")
         text = without_heading
 
-    without_labels = _STRUCTURED_RE.sub("", text)
-    if without_labels != text:
-        fixes.append("structured_labels")
-        text = without_labels
+    if strip_labels:
+        without_labels = strip_structured_labels(text)
+        if without_labels != text:
+            fixes.append("structured_labels")
+            text = without_labels
 
     collapsed = _WS_RE.sub(" ", text).strip()
     if collapsed != text:
@@ -492,7 +535,9 @@ def author_ids_oa(work: dict) -> list[str]:
     return ids
 
 
-def normalise_record_oa(work: dict, domain: str, query: str) -> dict:
+def normalise_record_oa(
+    work: dict, domain: str, query: str, *, strip_labels: bool = False
+) -> dict:
     """Flatten one OpenAlex work into the raw-corpus row shape.
 
     The fields that need explaining rather than just reading:
@@ -528,7 +573,7 @@ def normalise_record_oa(work: dict, domain: str, query: str) -> dict:
     # is a few hundred dict entries, and both the cleaned and the raw column
     # need the same reconstruction.
     raw_abstract = invert_abstract(work.get("abstract_inverted_index"))
-    cleaned, fixes = clean_abstract(raw_abstract)
+    cleaned, fixes = clean_abstract(raw_abstract, strip_labels=strip_labels)
     title = as_text(work.get("display_name") or work.get("title")).strip()
 
     source = (work.get("primary_location") or {}).get("source") or {}
