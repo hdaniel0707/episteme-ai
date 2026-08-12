@@ -32,12 +32,36 @@ so every unjudged row simply drops out of the comparison.
 
 Targets
 -------
-Each parquet is given as ``PATH[:TARGET]``; ``TARGET`` defaults to ``gpt`` when
-omitted, so every file can be compared against a different generator. The split
-is on the first ':', so a target may contain colons of its own — the science
-corpora label their generator ``gpt56luna:0807A`` (model plus prompt version).
+Each parquet is given as ``PATH:TARGET``, where ``TARGET`` is the
+``generated_by`` value to pair against ``human``. It is required, and it is one
+format: ``<model_slug>:<prompt_id>`` — ``gpt35t:0000A``, ``gpt56luna:0807A`` —
+the label :mod:`epai.utils.label_utils` defines and every corpus this repo
+writes now stores, ghostbuster and science alike.
 
-Figures + tables saved to results/<metric>_human_vs_ai/<parquet_stems>/:
+Nothing else is accepted. The bare Ghostbuster-era names (``gpt``, ``gpt_plain``,
+``gpt_prompt1``) are deprecated: a corpus still carrying them was built before
+the convention and should be relabelled with
+``epai/scripts/rename_column_values.py`` rather than analysed under two naming
+schemes. A target is matched against the file EXACTLY — no case folding, no
+prefixes, no guessing which generator was meant — because every near-miss here
+ends as a figure titled with a model that did not write the text.
+
+The path/target split is on the first ':', so the target keeps the colon of its
+own that the format requires: ``x.parquet:gpt56luna:0807A`` is the file
+``x.parquet`` and the generator ``gpt56luna:0807A``.
+
+Where the outputs go
+--------------------
+results/<metric>_human_vs_ai/<file>+<generator>[__<file>+<generator>...][+<domains>]/
+
+One directory per run, named after every (file, generator) pair it compared —
+``binox_human_vs_ai/ghostbuster_gpt35t+gpt35t_0000A/`` — with ``--domains``
+appended when the run was narrowed to some of them. Both halves are needed to
+keep runs apart: the same file is analysed against several of its generators,
+and the same model wrote the AI half of several files. The generator is spelled
+with '_' instead of ':', the directory spelling of a label (label_utils.py).
+
+Contents:
   - human_vs_ai_distance_violin.png    — |human − g| per parquet, MSE annotated
   - human_vs_ai_signed_diff_violin.png — signed human − g (which side scores higher)
   - human_vs_ai_score_distributions.png — per parquet: human vs AI score histograms
@@ -56,21 +80,30 @@ operating threshold is Youden's J optimum on the ROC curve. Classes are balanced
 (paired), so the PR chance baseline is 0.5.
 
 Usage:
-    # every domain of a combined parquet, one violin each
+    # every domain of a combined ghostbuster parquet, one violin each
     uv run python epai/ai_detection/analyse/analyse_score_human_vs_ai.py \
-        data/parquet/ghostbuster_gpt35t.parquet:gpt
-
-    # both generators side by side, all six corpora
-    uv run python epai/ai_detection/analyse/analyse_score_human_vs_ai.py \
-        data/parquet/ghostbuster_gpt35t.parquet:gpt \
-        data/parquet/ghostbuster_gpt54mini.parquet:gpt_plain
+        data/parquet/ghostbuster_gpt35t.parquet:gpt35t:0000A
     
+    uv run python epai/ai_detection/analyse/analyse_score_human_vs_ai.py \
+        data/parquet/ghostbuster_gpt54mini.parquet:gpt54mini:0701A
+
+    uv run python epai/ai_detection/analyse/analyse_score_human_vs_ai.py \
+        data/parquet/ghostbuster_gpt56luna.parquet:gpt56luna:0701A
+
+    # the science corpora read exactly the same way
     uv run python epai/ai_detection/analyse/analyse_score_human_vs_ai.py \
         data/parquet/science_v1_gpt56luna_0807A.parquet:gpt56luna:0807A
 
+    # three generations of the same corpus side by side, one violin per
+    # (file, domain) — each file names the model that wrote its AI half
+    uv run python epai/ai_detection/analyse/analyse_score_human_vs_ai.py \
+        data/parquet/ghostbuster_gpt35t.parquet:gpt35t:0000A \
+        data/parquet/ghostbuster_gpt54mini.parquet:gpt54mini:0701A \
+        data/parquet/ghostbuster_gpt56luna.parquet:gpt56luna:0701A
+
     # one domain, LLM-judge scores instead of Binoculars
     uv run python epai/ai_detection/analyse/analyse_score_human_vs_ai.py \
-        data/parquet/ghostbuster_gpt35t.parquet:gpt --domains wp \
+        data/parquet/ghostbuster_gpt35t.parquet:gpt35t:0000A --domains wp \
         --metric llm_judge --score-cols llm_judge_score_gpt54_mini
 """
 
@@ -90,6 +123,11 @@ import numpy as np
 import pandas as pd
 
 from epai.utils.corpus_utils import CorpusSpec, read_corpus, specs_from_paths
+from epai.utils.label_utils import (
+    GENERATOR_LABEL_RE,
+    check_generator_label,
+    dir_name_from_label,
+)
 from sklearn.metrics import (
     average_precision_score,
     confusion_matrix,
@@ -105,7 +143,6 @@ RESULTS_ROOT = BASE_DIR / "results"
 ID_COL = "id"
 GROUP_COL = "generated_by"
 HUMAN_GROUP = "human"
-DEFAULT_TARGET = "gpt"
 
 
 @dataclass(frozen=True)
@@ -166,6 +203,65 @@ class Tee:
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("\n".join(self._lines) + "\n")
+
+
+# ---------------------------------------------------------------------------
+# Which generator to compare against
+# ---------------------------------------------------------------------------
+
+
+def _generators(df: pd.DataFrame) -> list[str]:
+    """The AI generators present, sorted. ``human`` is the baseline, not a target."""
+    values = df[GROUP_COL].dropna().astype(str).unique()
+    return sorted(v for v in values if v != HUMAN_GROUP)
+
+
+def check_target(target: str, spec: str) -> str:
+    """The target as typed, once it is a ``<model_slug>:<prompt_id>`` label.
+
+    Checked before any file is opened, because the two ways of getting a target
+    wrong are indistinguishable once the parquet is loaded: a corpus that does
+    not hold ``gpt:000A`` and a target that could never be any corpus's label
+    both surface as "no such generator". Naming the format here — while the
+    parquet has not been read, let alone five of them — says which of the two it
+    was.
+    """
+    try:
+        return check_generator_label(target, f"target in {spec!r}")
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def find_target(target: str, df: pd.DataFrame, source: str) -> pd.DataFrame:
+    """The rows generated by ``target``, matched exactly, or a clear exit.
+
+    Exactly — no case folding, no prefix, no fallback to the file's only
+    generator. This comparison names a model in the title of every figure it
+    writes, and there is no spelling of "nearly the label you asked for" that is
+    worth putting there.
+    """
+    rows = df[df[GROUP_COL].astype(str) == target]
+    if not rows.empty:
+        return rows
+
+    available = _generators(df)
+    deprecated = [g for g in available if not GENERATOR_LABEL_RE.match(g)]
+    if deprecated:
+        # Ghostbuster-era labels: the corpus predates the convention, so no
+        # target in the accepted format can ever match it.
+        hint = (
+            f" {deprecated} predate the <model_slug>:<prompt_id> convention — "
+            "relabel the corpus with epai/scripts/rename_column_values.py "
+            "(--old/--new) and analyse it under the label it deserves."
+        )
+    elif available:
+        hint = f" This corpus was generated by {available}."
+    else:
+        hint = (
+            f" This corpus has no AI rows at all: every '{GROUP_COL}' value is "
+            f"'{HUMAN_GROUP}'."
+        )
+    raise SystemExit(f"generator {target!r} not found in {source}.{hint}")
 
 
 # ---------------------------------------------------------------------------
@@ -238,9 +334,10 @@ class PairResult:
     """Human-vs-<target> comparison for one parquet file."""
 
     def __init__(
-        self, parquet: str, target: str, cols: list[str], metric: Metric
+        self, parquet: str, stem: str, target: str, cols: list[str], metric: Metric
     ) -> None:
-        self.parquet = parquet  # file stem, used for labels
+        self.parquet = parquet  # corpus name (domain, or the stem), for labels
+        self.stem = stem  # file the corpus was cut from, for the run directory
         self.target = target
         self.cols = cols
         self.metric = metric
@@ -268,6 +365,16 @@ class PairResult:
         self.cm = np.zeros((2, 2), int)  # [[TN, FP], [FN, TP]] over [human, AI]
 
     @property
+    def corpus(self) -> str:
+        """File and slice — ``ghostbuster_gpt35t/essay``, or just the stem.
+
+        What the summary calls this comparison. The corpus name alone is the
+        domain (``essay``), which says nothing about which of the three
+        ghostbuster corpora it came from.
+        """
+        return self.parquet if self.parquet == self.stem else f"{self.stem}/{self.parquet}"
+
+    @property
     def label(self) -> str:
         return f"{self.parquet}\nvs {self.target}"
 
@@ -287,7 +394,12 @@ def compute_for_spec(
     score_cols: list[str] | None,
     out: Tee,
 ) -> PairResult:
-    """Load one corpus and compute human-vs-``target`` per-id differences."""
+    """Load one corpus and compute human-vs-``target`` per-id differences.
+
+    The lookup is per corpus, not per file: ``--domains`` slices one parquet
+    into several corpora, and a generator can be missing from one domain of a
+    file that holds it in the others.
+    """
     path = spec.path
     if not path.exists():
         raise SystemExit(f"Missing parquet: {path}")
@@ -298,15 +410,12 @@ def compute_for_spec(
             raise SystemExit(f"Column '{col}' missing from {path.name}.")
     cols = _score_columns(df, metric, score_cols, path)
 
-    human = df[df[GROUP_COL] == HUMAN_GROUP]
-    tgt = df[df[GROUP_COL] == target]
+    # Compared as strings, like every other value test against a corpus column
+    # (see read_corpus) — a categorical `generated_by` matches the same way.
+    human = df[df[GROUP_COL].astype(str) == HUMAN_GROUP]
     if human.empty:
         raise SystemExit(f"No '{HUMAN_GROUP}' rows found in {path.name}.")
-    if tgt.empty:
-        raise SystemExit(
-            f"generator '{target}' not found in {path.name} "
-            f"(available: {sorted(df[GROUP_COL].dropna().unique())})"
-        )
+    tgt = find_target(target, df, spec.source)
 
     cols = _usable_columns(cols, human, tgt, path, bool(score_cols))
 
@@ -327,7 +436,7 @@ def compute_for_spec(
     )
     merged = left.merge(right, on=ID_COL, how="outer", indicator=True)
 
-    res = PairResult(spec.name, target, cols, metric)
+    res = PairResult(spec.name, path.stem, target, cols, metric)
     res.n_only_human = int((merged["_merge"] == "left_only").sum())
     res.n_only_target = int((merged["_merge"] == "right_only").sum())
     paired = merged[merged["_merge"] == "both"].reset_index(drop=True)
@@ -688,7 +797,7 @@ def report(results: list[PairResult], fig_dir: Path, out: Tee) -> None:
     rows = []
     for r in results:
         s = _dist_stats(r.distances)
-        out.print(f"\n[{r.parquet}: human vs {r.target}]  columns: {r.cols}")
+        out.print(f"\n[{r.corpus}: human vs {r.target}]  columns: {r.cols}")
         out.print(
             f"  matched pairs={r.n_pairs}  valid={r.n_valid}  skipped={r.n_skipped}"
             f"  (unmatched: only human={r.n_only_human}, only {r.target}={r.n_only_target})"
@@ -722,6 +831,7 @@ def report(results: list[PairResult], fig_dir: Path, out: Tee) -> None:
             )
         rows.append(
             {
+                "file": r.stem,  # which parquet; 'parquet' below is the slice
                 "parquet": r.parquet,
                 "metric": r.metric.key,
                 "target": r.target,
@@ -762,7 +872,7 @@ def report(results: list[PairResult], fig_dir: Path, out: Tee) -> None:
         for r in results:
             if not r.skipped:
                 continue
-            out.print(f"\n  [{r.parquet}: human vs {r.target}] {r.n_skipped} skipped:")
+            out.print(f"\n  [{r.corpus}: human vs {r.target}] {r.n_skipped} skipped:")
             # An unscored generator skips *every* pair (normal for llm_judge),
             # which would otherwise dump thousands of identical lines.
             for sk in r.skipped[:SKIPPED_DETAIL_LIMIT]:
@@ -790,14 +900,50 @@ def report(results: list[PairResult], fig_dir: Path, out: Tee) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _parse_spec(spec: str) -> tuple[Path, str]:
-    """Split a ``PATH[:TARGET]`` spec; TARGET defaults to ``gpt``.
+def run_dir_name(results: list[PairResult], domains: list[str] | None) -> str:
+    """The directory this run writes to, named after everything it compared.
 
-    The split is on the FIRST ':', so everything after it is the target — a
-    generator label may itself contain colons (``gpt56luna:0807A``, generator
-    plus prompt version, is what the science corpora write into
-    ``generated_by``), and splitting on the last ':' would silently move that
-    suffix out of the target and into the path.
+    Every corpus of the run contributes ``<file stem>+<generator>``, deduped,
+    in the order given — the two things that decide what the figures show. The
+    name has to carry BOTH: the file alone collides as soon as one corpus is
+    analysed against two of its generators, and the generator alone collides
+    when the same model wrote the AI half of two corpora (``gpt56luna:0701A``
+    is in ghostbuster_gpt56luna, ``gpt56luna:0807A`` in science_v1).
+
+    It also cannot be named after the CORPORA, which is what it used to be: a
+    combined parquet is split per domain, so three separate runs over
+    ghostbuster_gpt35t / _gpt54mini / _gpt56luna each produced corpora called
+    essay, reuter and wp, and all three wrote over one ``essay__reuter__wp``
+    directory — the figures of the last run standing, under a name that claimed
+    nothing about which model they were about.
+
+    ``--domains`` is appended when it was given, since a run over one domain is
+    a different comparison from the same file's full run, and would otherwise
+    land on top of it. The generator is spelled with '_' rather than ':' — the
+    directory spelling of a label, per epai/utils/label_utils.py.
+    """
+    parts = list(dict.fromkeys(
+        f"{r.stem}+{dir_name_from_label(r.target)}" for r in results
+    ))
+    name = "__".join(parts)
+    if domains:
+        name += "+" + "-".join(dict.fromkeys(domains))
+    return name
+
+
+def _parse_spec(spec: str) -> tuple[Path, str]:
+    """Split a ``PATH:TARGET`` spec into the file and the generator to compare.
+
+    There is no default target. Which generator a corpus holds is a property of
+    that corpus — ``gpt35t:0000A``, ``gpt54mini:0701A``, ``gpt56luna:0807A`` are
+    all in ``data/parquet`` right now — so any name defaulted here would be
+    wrong for most files it was applied to, and wrong in the quietest possible
+    way: a comparison against a generator the corpus does not contain.
+
+    The split is on the FIRST ':', so everything after it is the target — the
+    label format contains a colon of its own (``gpt56luna:0807A``, model plus
+    prompt id), and splitting on the last ':' would move the prompt id out of
+    the target and into the path.
 
     A leading Windows drive letter (``C:\\corpora\\x.parquet``) is not a target
     separator and is skipped before the split.
@@ -807,9 +953,13 @@ def _parse_spec(spec: str) -> tuple[Path, str]:
         drive, head = head, ""
         head, sep, tail = tail.partition(":")
         head = f"{drive}:{head}"
-    if sep and head and tail:
-        return Path(head), tail
-    return Path(spec), DEFAULT_TARGET
+    if not (sep and head and tail):
+        raise SystemExit(
+            f"{spec!r} names no generator. A spec is 'PATH:TARGET', where TARGET "
+            "is the <model_slug>:<prompt_id> label to compare against human — "
+            "e.g. data/parquet/ghostbuster_gpt35t.parquet:gpt35t:0000A"
+        )
+    return Path(head), check_target(tail, spec)
 
 
 def parse_args() -> argparse.Namespace:
@@ -817,8 +967,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "specs",
         nargs="+",
-        help="One or more parquet specs 'PATH[:TARGET]'. TARGET defaults to "
-        f"'{DEFAULT_TARGET}'. Each parquet becomes one violin.",
+        help="One or more parquet specs 'PATH:TARGET', one violin per (file, "
+        "domain). TARGET is required and is the generated_by label to compare "
+        "against human, in the one accepted format <model_slug>:<prompt_id> — "
+        "e.g. data/parquet/ghostbuster_gpt35t.parquet:gpt35t:0000A.",
     )
     parser.add_argument(
         "--domains",
@@ -863,9 +1015,7 @@ def main() -> None:
                 compute_for_spec(corpus, target, metric, args.score_cols, out)
             )
 
-    # Directory named after the corpora involved (deduped, order kept).
-    stems = list(dict.fromkeys(r.parquet for r in results))
-    fig_dir = metric.results_dir / "__".join(stems)
+    fig_dir = metric.results_dir / run_dir_name(results, args.domains)
     print()
     plot_violins(results, fig_dir)
     plot_distributions(results, fig_dir)

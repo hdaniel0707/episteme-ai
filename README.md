@@ -659,8 +659,9 @@ uv run python epai/ai_detection/analyse/analyse_surface_artifacts.py \
     --config cfg/ai_detection/train/clf_cd/clf_cd_example.yaml
 
 # detector scores, human vs AI: violins, ROC/PR, confusion
+# PATH:TARGET, where TARGET is the generated_by label <model_slug>:<prompt_id>
 uv run python epai/ai_detection/analyse/analyse_score_human_vs_ai.py \
-    data/parquet/ghostbuster_gpt35t.parquet:gpt
+    data/parquet/ghostbuster_gpt35t.parquet:gpt35t:0000A
 
 # text length distributions per domain
 uv run python epai/ai_detection/analyse/analyse_text_lengths.py \
