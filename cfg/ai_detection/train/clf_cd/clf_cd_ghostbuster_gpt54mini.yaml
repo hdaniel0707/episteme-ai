@@ -39,8 +39,8 @@
 # alg_id names the output directory under results/clf_cd/<experiment_id>/<alg_id>/.
 # It must be unique across the configs run together, or two of them would write
 # into the same place.
-alg_id: "luar_crud_algs"
-alg_label: "luar_crud — algorithm comparison"
+alg_id: "ghostbuster_gpt54mini"
+alg_label: "ghostbuster_gpt54mini — algorithm comparison"
 
 seed: 42
 
