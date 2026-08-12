@@ -111,11 +111,6 @@ SEED_SUBDIRS = {
 # here instead of after the corpus has been prepared.
 INCOMPLETE_MODES = ("emb", "optional", "none")
 
-# The suffix this pipeline gives the scored corpus. score_parquets.py writes in
-# place unless -o is given, so the pipeline passes -o explicitly and this is the
-# only place the name is decided.
-SCORED_SUFFIX = "_binox0"
-
 REQUIRED_TOP_KEYS = {"dataset_id", "generate", "prepare", "combine", "score", "embed"}
 
 # Directories under a domain that hold the seeded inputs rather than a
@@ -445,14 +440,18 @@ def combined_path(cfg: dict, var: str) -> Path:
 
 
 def scored_path(cfg: dict, var: str) -> Path:
-    """The scored corpus: ``..._gpt56luna_binox0.parquet``.
+    """Where the scored corpus lands — the combined file itself.
 
-    A separate file rather than an in-place update, which is score_parquets.py's
-    default: the combine stage's output is cheap to keep and is the thing to
-    re-score when the detector changes.
+    The score stage writes **in place**, which is score_parquets.py's own
+    default, so this is :func:`combined_path` under the name the later stages
+    ask for it by. It used to be a second file, ``..._gpt56luna_binox0.parquet``,
+    on the reasoning that the unscored corpus is what gets re-scored when the
+    detector changes — but re-scoring is exactly what the score stage already
+    does to a file that has scores (it fills the holes, and ``--recompute``
+    redoes the rest), and the second file only meant every corpus existed twice
+    on disk under two names that had to be kept straight downstream.
     """
-    combined = combined_path(cfg, var)
-    return combined.with_name(f"{combined.stem}{SCORED_SUFFIX}{combined.suffix}")
+    return combined_path(cfg, var)
 
 
 def generate_flag(domain: str, gen_type: str) -> str:

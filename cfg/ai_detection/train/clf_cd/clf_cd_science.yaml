@@ -96,7 +96,7 @@ data:
   #
   # The corpora of one run need not even be cut on the same column, so a raw arm
   # and a normalised arm (two parquet_paths, no `where`) sit in one matrix too.
-  parquet_path: "data/parquet/science_v1_gpt56luna_0807A_binox0.parquet"
+  parquet_path: "data/parquet/science_v1_gpt56luna_0807A.parquet"
 
   datasets:
     - name: "computer_science_gpt56luna"         # short key used in the matrix

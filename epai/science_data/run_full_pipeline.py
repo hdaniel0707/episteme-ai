@@ -19,12 +19,14 @@ Five steps, in order:
      is a tell about the source rather than the author. Removes no text: it
      checks its own word count and refuses to write if it changed. Skipped when
      ``standardize.enabled`` is false.
-  4. **score** — run the Binoculars fork over the promoted file, writing
-     ``<name>_binox0.parquet`` beside it. The ``-o`` is passed explicitly:
-     ``score_parquets.py`` overwrites its input by default, and the unscored
-     promoted copy is worth keeping — it is what gets re-scored when the
-     detector or its model pair changes.
-  5. **embed** — ``embed/add_embeddings.py`` over the scored file, filling every
+  4. **score** — run the Binoculars fork over the promoted file, filling
+     ``binoculars_score`` **in place**, which is ``score_parquets.py``'s own
+     default. No ``-o`` and no second ``_binox0`` file: what a re-score needs is
+     an unscored *original*, and that is ``data/science/``'s copy, which step 2
+     deliberately left there. A scored file is also what ``score_parquets.py``
+     is built to take — it fills the Null rows and leaves the rest alone unless
+     ``--recompute`` says otherwise.
+  5. **embed** — ``embed/add_embeddings.py`` over the same file, filling every
      ``emb_*`` column in place. The corpus is then ready for training.
 
 **Step 4 runs in a different environment.** This repo pins
@@ -61,8 +63,10 @@ corpus handed to score before it has run gets scores for text it no longer holds
 
 **A ten-row debug run** of the two GPU steps, over a corpus that already exists.
 This is the cheap way to check that scoring and embedding work end to end — ten
-rows each, minutes rather than hours, and the output is still a complete copy in
-which only those ten rows were touched:
+rows each, minutes rather than hours. Both steps write into the promoted corpus,
+so what it leaves behind is that corpus with ten scored and embedded rows and the
+rest untouched; ``data/science/`` still holds the clean original, and re-running
+without the limits fills the remaining rows in:
 
     uv run python epai/science_data/run_full_pipeline.py --only score embed \
         --limit 10 --embed-limit 10 --yes --gpu 0
@@ -120,11 +124,6 @@ BINOCULARS_SCRIPT = BINOCULARS_PROJECT / "score_parquets.py"
 EMBED_SCRIPT = "epai/ai_detection/embed/add_embeddings.py"
 STANDARDIZE_SCRIPT = "epai/ai_detection/prepare/standardize_text.py"
 PARQUET_DIR = BASE_DIR / "data" / "parquet"
-
-# The suffix this pipeline gives the scored corpus, passed to score_parquets.py
-# as -o. It writes in place without one, so this is the only place the name is
-# decided.
-SCORED_SUFFIX = "_binox0"
 
 STEP_KEYS = ("science", "promote", "standardize", "score", "embed")
 
@@ -263,8 +262,10 @@ def step_science(args: argparse.Namespace, variant: str) -> int:
 
     banner("science", SCIENCE_RUNNER)
     # The inner runner notifies per stage too. Marking it nested drops its own
-    # "started"/"finished" pushes, which would only repeat this run's.
-    return run_cmd(cmd, args.dry_run, env=notify_utils.nested_env())
+    # "started"/"finished" pushes, which would only repeat this run's, and gives
+    # its stage pushes this run's id and this step's position — otherwise its
+    # counter and this one's interleave on the phone as one run losing its place.
+    return run_cmd(cmd, args.dry_run, env=notify_utils.nested_env("science"))
 
 
 def step_promote(args: argparse.Namespace, src: Path, dest: Path) -> int:
@@ -344,15 +345,17 @@ def step_standardize(args: argparse.Namespace, cfg: dict, dest: Path) -> int:
     return run_cmd(cmd, args.dry_run)
 
 
-def step_score(args: argparse.Namespace, dest: Path, scored: Path) -> int:
+def step_score(args: argparse.Namespace, dest: Path) -> int:
+    """Fill ``binoculars_score`` on the promoted corpus, in place.
+
+    No ``-o``: score_parquets.py writes in place by default, and the copy that
+    survives a mangled score is ``data/science/``'s, which the promote step left
+    untouched on purpose.
+    """
     cmd = [
         "uv", "run", "--project", str(BINOCULARS_PROJECT.relative_to(BASE_DIR)),
         "python", str(BINOCULARS_SCRIPT.relative_to(BASE_DIR)),
         str(dest.relative_to(BASE_DIR)),
-        # Explicit, because score_parquets.py writes IN PLACE by default. The
-        # promoted corpus is worth keeping unscored: it is what gets re-scored
-        # when the detector or its model pair changes.
-        "-o", str(scored.relative_to(BASE_DIR)),
         "--text-column", args.text_column,
         "--batch-size", str(args.batch_size),
     ]
@@ -371,26 +374,24 @@ def step_score(args: argparse.Namespace, dest: Path, scored: Path) -> int:
 
     banner("score", "external/Binoculars/score_parquets.py")
 
-    if not args.dry_run:
-        if not dest.is_file():
-            print(
-                f"{RED}Not found: {dest.relative_to(BASE_DIR)}{RESET}\n"
-                f"  Nothing to score. Run the promote step first."
-            )
-            return 1
-        if scored.exists() and not confirm(
-            f"{YELLOW}{scored.relative_to(BASE_DIR)} already exists and will be "
-            f"overwritten. Continue?{RESET}",
-            args.yes,
-        ):
-            print("Aborted.")
-            return 1
+    if not args.dry_run and not dest.is_file():
+        print(
+            f"{RED}Not found: {dest.relative_to(BASE_DIR)}{RESET}\n"
+            f"  Nothing to score. Run the promote step first."
+        )
+        return 1
 
+    # No overwrite prompt here: the file being overwritten *is* the input, and
+    # score_parquets.py says so itself ("will be overwritten IN PLACE") and
+    # blocks on its own confirmation unless --yes is passed through.
     return run_cmd(cmd, args.dry_run, env=binoculars_env())
 
 
-def step_embed(args: argparse.Namespace, cfg: dict, scored: Path) -> int:
+def step_embed(args: argparse.Namespace, cfg: dict, target: Path) -> int:
     """Fill every ``emb_*`` column on the scored corpus.
+
+    The target is the file the score step wrote, which since scoring became an
+    in-place update is the promoted corpus itself.
 
     In place, which is add_embeddings.py's own default: an embedding is derived
     from the text alone, so a separate file would be the same corpus twice.
@@ -413,7 +414,7 @@ def step_embed(args: argparse.Namespace, cfg: dict, scored: Path) -> int:
     cmd = [
         sys.executable,
         str(BASE_DIR / EMBED_SCRIPT),
-        str(scored.relative_to(BASE_DIR)),
+        str(target.relative_to(BASE_DIR)),
         "--text-col", args.text_column,
     ]
     if embedders:
@@ -433,9 +434,9 @@ def step_embed(args: argparse.Namespace, cfg: dict, scored: Path) -> int:
 
     banner("embed", EMBED_SCRIPT)
 
-    if not args.dry_run and not scored.is_file():
+    if not args.dry_run and not target.is_file():
         print(
-            f"{RED}Not found: {scored.relative_to(BASE_DIR)}{RESET}\n"
+            f"{RED}Not found: {target.relative_to(BASE_DIR)}{RESET}\n"
             f"  Nothing to embed. Run the score step first."
         )
         return 1
@@ -544,7 +545,10 @@ def main() -> None:
     g.add_argument("--observer", default=None, help="observer model (default: the fork's)")
     g.add_argument("--performer", default=None, help="performer model (default: the fork's)")
     g.add_argument("--limit", type=int, default=0,
-                   help="score only the first N rows, for debugging (0 = all)")
+                   help="score only the first N rows, for debugging (0 = all). "
+                        "Scores land in the promoted corpus itself, so this "
+                        "leaves it with N scored rows and the rest Null; a "
+                        "later full run fills them in.")
 
     g = parser.add_argument_group("embed")
     g.add_argument("--embedders", nargs="+", default=None, metavar="NAME",
@@ -574,8 +578,9 @@ def main() -> None:
     )
 
     src = final_path(cfg, variant)
+    # One promoted file, filled in place by standardize, score and embed. The
+    # unscored original stays in data/science/ — that is what the copy is for.
     dest = PARQUET_DIR / src.name
-    scored = dest.with_name(f"{dest.stem}{SCORED_SUFFIX}{dest.suffix}")
 
     steps = select(args)
     preflight(args, cfg, steps)
@@ -585,8 +590,8 @@ def main() -> None:
     print(f"  dataset_id   {cfg['dataset_id']}")
     print(f"  variant      {variant}")
     print(f"  generated    {src.relative_to(BASE_DIR)}")
-    print(f"  promoted     {dest.relative_to(BASE_DIR)}")
-    print(f"  scored       {scored.relative_to(BASE_DIR)}")
+    print(f"  promoted     {dest.relative_to(BASE_DIR)}"
+          f"{DIM}  (standardize, score and embed fill it in place){RESET}")
     print(f"  steps        {' → '.join(steps)}")
     if args.dry_run:
         print(f"\n{YELLOW}--dry-run: nothing will be executed.{RESET}")
@@ -598,8 +603,8 @@ def main() -> None:
         "science": lambda: step_science(args, variant),
         "promote": lambda: step_promote(args, src, dest),
         "standardize": lambda: step_standardize(args, cfg, dest),
-        "score": lambda: step_score(args, dest, scored),
-        "embed": lambda: step_embed(args, cfg, scored),
+        "score": lambda: step_score(args, dest),
+        "embed": lambda: step_embed(args, cfg, dest),
     }
 
     # Phone pushes at every step boundary, for the hours nobody watches this.
@@ -662,12 +667,12 @@ def main() -> None:
 
     print(f"\n{GREEN}Done.{RESET}")
     if "embed" in ran:
-        outcome = f"scored and embedded: {scored.relative_to(BASE_DIR)}"
-        print(f"  Corpus, scored and embedded: {scored.relative_to(BASE_DIR)}")
+        outcome = f"scored and embedded: {dest.relative_to(BASE_DIR)}"
+        print(f"  Corpus, scored and embedded: {dest.relative_to(BASE_DIR)}")
         print("  It is ready for epai/ai_detection/train/ and analyse/.")
     elif "score" in ran:
-        outcome = f"scored corpus: {scored.relative_to(BASE_DIR)}"
-        print(f"  Scored corpus: {scored.relative_to(BASE_DIR)}")
+        outcome = f"scored corpus: {dest.relative_to(BASE_DIR)}"
+        print(f"  Scored corpus: {dest.relative_to(BASE_DIR)}")
     elif "promote" in ran:
         outcome = f"promoted corpus: {dest.relative_to(BASE_DIR)}"
         print(f"  Promoted corpus: {dest.relative_to(BASE_DIR)}")

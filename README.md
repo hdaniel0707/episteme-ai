@@ -285,7 +285,26 @@ five-hour corpus build reports itself to your phone from wherever it is running:
 | ⚠️ `<stage> failed, non-fatal` | an analysis stage failed; the pipeline carries on | default |
 | 🙋 `waiting for input` | the run has stopped at a prompt and will sit there until answered | default |
 | 🚨 `FAILED at <stage>` | a critical stage failed or was interrupted, with the resume command | **high** |
-| 🏁 `done` | every selected stage ran, with the output path and any steps left | default |
+| 🏁 `done` | every selected stage ran, with the last stage's result, the output path and any steps left | default |
+
+Every push of one run carries the same head — `<pipeline> #<pid>` — because one topic carries every
+run you ever start:
+
+```
+science full #4821: science 1/5 > fetch ok (2/9)      ← the nested science_data runner
+science full #4821: promote ok (2/5)
+ghostbuster #4906: score ok (7/8)                     ← a different run, same topic, same evening
+```
+
+That matters in two places. Two pipelines running at once interleave their `(n/N)` counters, and
+without the head the sequence reads as one run losing its place and starting over. And pipeline 3's
+first step *is* the whole of `run_pipeline.py`, a second runner with its own nine stages — it
+reports them under the outer run's id and the outer step it belongs to rather than as a run of its
+own.
+
+The last stage's ✅ is folded into the 🏁 `done` push rather than sent just before it: two pushes
+milliseconds apart can arrive in either order, which is how `embed ok (8/8)` used to turn up *after*
+`done`.
 
 Set one variable in `.env` and subscribe to the same topic in the ntfy app:
 
@@ -389,10 +408,15 @@ Combined files, `ghostbuster_<generator>[_binox<N>].parquet`, written by
 This is what the training and analysis scripts read now — a *corpus* is a
 `(file, domain)` pair rather than a file.
 
-The `_binox0` can sit on either side of the union, and where it sits says which
-order a corpus was built in: `ghostbuster_gpt54mini.parquet` was scored per
-domain and then combined, while pipeline 4 combines first and scores once, giving
-`ghostbuster_<generator>_binox0.parquet`. Same columns either way.
+The `_binox<N>` suffix is **historical**: it marks files scored by hand, or by
+pipelines 3 and 4 before those wrote their scores in place. Where it sits says
+which order such a corpus was built in — `ghostbuster_gpt54mini.parquet` was
+scored per domain and then combined, `ghostbuster_gpt56luna_binox0.parquet`
+combined first and scored once. Both runners now fill `binoculars_score` into
+the corpus they already built, so a run started today produces
+`ghostbuster_<generator>.parquet` and `<dataset_id>_<variant>.parquet` with the
+scores inside them and no second file. Same columns either way; the existing
+`_binox0` files are still valid corpora and nothing has to be renamed.
 
 ---
 
@@ -585,8 +609,9 @@ uv run python epai/ai_detection/fetch/fetch_denario.py
 
 **Binoculars scores** come from the fork in `external/Binoculars`, which runs in its own
 environment. Run it from the repo root. It writes each input **in place** unless `-o` is given, so
-pass `-o` when you want the unscored file kept — which is what pipelines 3 and 4 do, and where the
-`_binox0` suffix comes from:
+pass `-o` when you want the unscored file kept. Pipelines 3 and 4 used to, which is where the
+`_binox0` suffix on the older files comes from; both now score in place, since a scored file is
+what this script re-scores from anyway (it fills the Null rows, and `--recompute` redoes the rest):
 
 ```bash
 # in place: reuter.parquet gains a binoculars_score column
@@ -906,8 +931,8 @@ ai_detection config that globs `data/parquet/`.
 **Or run the whole thing, scoring and embedding included.**
 `run_full_pipeline.py` wraps the four stages above and adds three more:
 `promote` (a *copy* into `data/parquet/`, so `data/science/` stays the record of
-what the run produced), `score` (Binoculars, in the fork's environment, writing
-`<name>_binox0.parquet`), and `embed` (every `emb_*` column, in place). The
+what the run produced), `score` (Binoculars, in the fork's environment, filling
+`binoculars_score` in place), and `embed` (every `emb_*` column, in place). The
 corpus that comes out is ready for `train/` and `analyse/` with nothing left to
 run by hand:
 
@@ -1190,8 +1215,8 @@ command rather than a week of glue:
    ↓                           data/parquet/<domain>_<variant>.parquet
 [combine_domains.py]  ← Stage 5: union with a `domain` column, then drop the inputs
    ↓                           data/parquet/ghostbuster_<variant>.parquet
-[score_parquets.py]   ← Stage 6: Binoculars over the whole corpus
-   ↓                           data/parquet/ghostbuster_<variant>_binox0.parquet
+[score_parquets.py]   ← Stage 6: Binoculars over the whole corpus, in place
+   ↓                           data/parquet/ghostbuster_<variant>.parquet
 [add_embeddings.py]   ← Stage 7: every emb_* column, in place
                               ↳ ready for train/ and analyse/
 ```

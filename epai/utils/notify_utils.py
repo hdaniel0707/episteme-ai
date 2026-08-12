@@ -16,11 +16,22 @@ Configured entirely by the environment, normally through ``.env``:
     somewhere. See ``.env_sample``.
 ``NTFY_SERVER``
     Base URL of the ntfy server. Defaults to ``https://ntfy.sh``.
-``EPAI_NOTIFY_NESTED``
+``EPAI_NOTIFY_NESTED``, ``EPAI_NOTIFY_RUN``, ``EPAI_NOTIFY_PARENT``,
+``EPAI_NOTIFY_STEP``
     Set by a runner that shells out to another runner (pipeline 3's ``science``
-    step is the whole of ``run_pipeline.py``). The inner process still reports
-    its own stages, but drops its "started" and "finished" pushes, which would
-    otherwise duplicate the outer run's.
+    step is the whole of ``run_pipeline.py``) — see :func:`nested_env`, which is
+    the only thing that should write them. The inner process still reports its
+    own stages, but drops its "started" and "finished" pushes, which would
+    otherwise duplicate the outer run's, and it titles what it does send with
+    the *outer* run's identity and the outer step it is: ``science full #4821:
+    science 1/5 > fetch ok (2/9)``.
+
+**Every push of one run carries the same head**, ``<pipeline> #<pid>``, because
+one topic carries every run. Two pipelines started the same evening, or one
+pipeline and the nested runner inside it, otherwise produce interleaved
+``(2/4)``-style counters that read as a single run losing its place and starting
+over — the counters are per-run and always were, but nothing on the notification
+said which run.
 
 This is a *deliberately separate topic* from the Claude Code hook's
 (``.claude/hooks/notify.env``). Same app, two subscriptions: pipeline progress
@@ -60,6 +71,12 @@ from collections.abc import Iterable
 TOPIC_VAR = "NTFY_PIPELINE_TOPIC"
 SERVER_VAR = "NTFY_SERVER"
 NESTED_VAR = "EPAI_NOTIFY_NESTED"
+
+# Propagated to a nested runner so its pushes are readable as part of the run
+# that launched it, rather than as a second run with its own counter.
+RUN_VAR = "EPAI_NOTIFY_RUN"        # the whole run tree's id (the outer pid)
+PARENT_VAR = "EPAI_NOTIFY_PARENT"  # the outer pipeline's name
+STEP_VAR = "EPAI_NOTIFY_STEP"      # the outer step this process is, "science 1/5"
 
 DEFAULT_SERVER = "https://ntfy.sh"
 
@@ -206,14 +223,42 @@ class Notifier:
         self.pipeline = pipeline
         self.label = label
         self.steps = list(steps)
-        self.nested = bool(os.environ.get(NESTED_VAR))
+        # Inherited when this process was launched by another runner, freshly
+        # minted otherwise. The pid is the id because it is unique among the
+        # runs that can overlap and it is what identifies the run in `ps`.
+        self.run_id = os.environ.get(RUN_VAR, "").strip() or str(os.getpid())
+        self.parent = os.environ.get(PARENT_VAR, "").strip()
+        self.parent_step = os.environ.get(STEP_VAR, "").strip()
+        self.nested = bool(self.parent or os.environ.get(NESTED_VAR))
         # Resolved once: with no topic configured every method is a no-op, and
         # there is no point re-reading the environment a dozen times to
         # rediscover that.
         self.enabled = bool(enabled and _topic())
         self.done = 0
+        # The last stage's result, held back so :meth:`finished` can carry it.
+        self.final = ""
 
     # -- helpers ------------------------------------------------------------
+
+    def _head(self) -> str:
+        """``ghostbuster #48213`` — identical on every push of one run.
+
+        The outer pipeline's name for a nested runner, so the whole run tree
+        reads as one thing. Without this, a phone showing one topic cannot tell
+        two concurrent runs' counters apart.
+        """
+        return f"{self.parent or self.pipeline} #{self.run_id}"
+
+    def _title(self, event: str) -> str:
+        """``science full #4821: science 1/5 > fetch ok (2/9)``.
+
+        The middle part appears only in a nested runner, where two counters are
+        genuinely in play: the outer step this whole process is, and this
+        process's own stage within it.
+        """
+        if self.parent_step:
+            return f"{self._head()}: {self.parent_step} > {event}"
+        return f"{self._head()}: {event}"
 
     def _body(self, *lines: str) -> str:
         """Prefix every push with which corpus this is, then the detail."""
@@ -222,6 +267,13 @@ class Notifier:
     def _next(self) -> str:
         return self.steps[self.done] if self.done < len(self.steps) else ""
 
+    def step_label(self, key: str) -> str:
+        """``science 1/5`` — the step about to run, as a nested child should
+        name the thing it is part of. See :func:`nested_env`."""
+        if not self.steps:
+            return key
+        return f"{key} {min(self.done + 1, len(self.steps))}/{len(self.steps)}"
+
     # -- events -------------------------------------------------------------
 
     def started(self, detail: str = "") -> bool:
@@ -229,7 +281,7 @@ class Notifier:
         if not self.enabled or self.nested:
             return False
         return push(
-            f"{self.pipeline}: started",
+            self._title("started"),
             self._body(detail, " -> ".join(self.steps)),
             tags="rocket",
             priority="low",
@@ -255,6 +307,14 @@ class Notifier:
         An interrupted stage is never a warning, whatever its ``critical``
         flag: the runners stop on a Ctrl-C from any stage, because what it
         saved is partial and everything downstream would consume it.
+
+        **The last stage's success is not pushed here.** It is held in
+        ``self.final`` for :meth:`finished` to carry, because the two would
+        otherwise be posted milliseconds apart and ntfy makes no promise about
+        the order two pushes that close together arrive in — which is how "embed
+        ok (8/8)" kept turning up *after* "done". A nested runner sends no
+        "finished" push at all, so there is nothing to fold into and its last
+        stage is reported normally.
         """
         if not self.enabled:
             return False
@@ -263,8 +323,11 @@ class Notifier:
 
         if code == 0:
             nxt = self._next()
+            if not nxt and not self.nested:
+                self.final = f"{key} ok in {elapsed(seconds)}"
+                return False
             return push(
-                f"{self.pipeline}: {key} ok ({position})",
+                self._title(f"{key} ok ({position})"),
                 self._body(
                     elapsed(seconds),
                     f"next: {nxt}" if nxt else "last stage",
@@ -274,7 +337,7 @@ class Notifier:
             )
         if not critical and code != INTERRUPTED:
             return push(
-                f"{self.pipeline}: {key} failed, non-fatal ({position})",
+                self._title(f"{key} failed, non-fatal ({position})"),
                 self._body(
                     f"exit {code} after {elapsed(seconds)}",
                     "Diagnostic stage - the pipeline is carrying on.",
@@ -294,7 +357,7 @@ class Notifier:
         if not self.enabled:
             return False
         return push(
-            f"{self.pipeline}: waiting for input",
+            self._title("waiting for input"),
             self._body(question, "The run is parked until you answer."),
             tags="raising_hand",
             priority="default",
@@ -313,7 +376,7 @@ class Notifier:
             return False
         state = "interrupted at" if code == INTERRUPTED else "FAILED at"
         return push(
-            f"{self.pipeline}: {state} {key}",
+            self._title(f"{state} {key}"),
             self._body(
                 f"exit {code} after {elapsed(seconds)}",
                 f"Resume: {resume}" if resume else "",
@@ -323,12 +386,20 @@ class Notifier:
         )
 
     def finished(self, detail: str = "", seconds: float = 0.0) -> bool:
-        """Every selected stage ran and the run is done."""
+        """Every selected stage ran and the run is done.
+
+        Carries the last stage's own line, which :meth:`stage` held back rather
+        than push a second notification into the same instant — see there.
+        """
         if not self.enabled or self.nested:
             return False
         return push(
-            f"{self.pipeline}: done ({len(self.steps)} stages)",
-            self._body(f"total {elapsed(seconds)}" if seconds else "", detail),
+            self._title(f"done ({len(self.steps)} stages)"),
+            self._body(
+                self.final,
+                f"total {elapsed(seconds)}" if seconds else "",
+                detail,
+            ),
             tags="checkered_flag",
             priority="default",
         )
@@ -383,15 +454,29 @@ def self_test() -> int:
     return 0 if ok else 1
 
 
-def nested_env(env: dict[str, str] | None = None) -> dict[str, str]:
-    """A child process's environment, marked as a nested run.
+def nested_env(
+    step_key: str = "",
+    env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """A child process's environment, marked as part of *this* run.
 
     For a runner that shells out to another runner: the child reports its own
     stages, but suppresses the "started" and "finished" pushes that would
-    duplicate this run's.
+    duplicate this run's, and titles the rest with this run's id and the step it
+    is — ``science full #4821: science 1/5 > fetch ok (2/9)``. Pass ``step_key``
+    as the outer step's key; its position is filled in from the notifier's own
+    progress, so the call site does not have to know it.
+
+    Without this, the child configured a notifier of its own and pushed a second
+    independent ``(n/N)`` counter under a second pipeline name, which on a phone
+    reading one topic looks like the run restarting mid-flight.
     """
+    parent = active()
     child = dict(env if env is not None else os.environ)
     child[NESTED_VAR] = "1"
+    child[RUN_VAR] = parent.run_id
+    child[PARENT_VAR] = parent.parent or parent.pipeline
+    child[STEP_VAR] = parent.step_label(step_key) if step_key else parent.parent_step
     return child
 
 

@@ -44,8 +44,9 @@ Eight stages, in order:
      — it checks its own word count and refuses to write if it changed.
      Skipped when ``standardize.enabled`` is false.
   7. **score**     — ``external/Binoculars/score_parquets.py`` over that file,
-     writing ``..._binox0.parquet``.
-  8. **embed**     — ``embed/add_embeddings.py`` over the scored file, filling
+     filling ``binoculars_score`` **in place**. No second ``_binox0`` file: a
+     scored corpus is what that script re-scores from anyway.
+  8. **embed**     — ``embed/add_embeddings.py`` over the same file, filling
      every ``emb_*`` column in place. The corpus is then ready for training.
 
 **Three environments, and stages 1–2 and 7 run outside this one.** This repo
@@ -1018,10 +1019,18 @@ def step_standardize(cfg: dict, args: argparse.Namespace, var: str) -> int:
 
 
 def step_score(cfg: dict, args: argparse.Namespace, var: str) -> int:
-    """Score the combined corpus with the Binoculars fork."""
+    """Score the combined corpus with the Binoculars fork, in place.
+
+    In place — no ``-o`` — which is score_parquets.py's own default. The stage
+    used to write ``..._binox0.parquet`` beside the input to keep an unscored
+    copy for re-scoring, but a file that already has scores is exactly what that
+    script is built to take: it fills the rows that are Null and leaves the rest
+    alone unless ``--recompute`` says otherwise. So the second file bought
+    nothing and cost a second full copy of every corpus, under a name every
+    later stage had to know about.
+    """
     score = cfg["score"]
     src = combined_path(cfg, var)
-    out = scored_path(cfg, var)
 
     gpu = args.gpu if args.gpu is not None else score.get("gpu")
     cpu_threads = (
@@ -1034,10 +1043,6 @@ def step_score(cfg: dict, args: argparse.Namespace, var: str) -> int:
 
     extra = [
         rel(src),
-        # Explicit, because score_parquets.py writes IN PLACE by default. The
-        # combined corpus is worth keeping unscored: it is what gets re-scored
-        # when the detector or its model pair changes.
-        "-o", rel(out),
         "--text-column", score.get("text_column", "text"),
         "--batch-size", str(batch_size),
     ]
@@ -1056,19 +1061,14 @@ def step_score(cfg: dict, args: argparse.Namespace, var: str) -> int:
 
     banner("score", f"{rel(BINOCULARS_SCRIPT)}")
 
-    if not args.dry_run:
-        if not src.is_file():
-            print(f"{RED}Not found: {rel(src)}{RESET}\n"
-                  f"  Nothing to score. Run the combine stage first.")
-            return 1
-        if out.exists() and not confirm(
-            f"{YELLOW}{rel(out)} already exists and will be overwritten. "
-            f"Continue?{RESET}",
-            args.yes,
-        ):
-            print("Aborted.")
-            return 1
+    if not args.dry_run and not src.is_file():
+        print(f"{RED}Not found: {rel(src)}{RESET}\n"
+              f"  Nothing to score. Run the combine stage first.")
+        return 1
 
+    # No overwrite prompt here: the file being overwritten *is* the input, and
+    # score_parquets.py says so itself ("will be overwritten IN PLACE") and
+    # blocks on its own confirmation unless --yes is passed through.
     return run_cmd(
         fork_cmd(BINOCULARS_PROJECT, rel(BINOCULARS_SCRIPT), extra),
         args.dry_run,
@@ -1079,9 +1079,10 @@ def step_score(cfg: dict, args: argparse.Namespace, var: str) -> int:
 def step_embed(cfg: dict, args: argparse.Namespace, var: str) -> int:
     """Fill every ``emb_*`` column on the scored corpus.
 
-    In place, which is add_embeddings.py's own default and how the existing
-    ``*_binox0.parquet`` files were built: an embedding is derived from the text
-    alone, so a separate file would be the same corpus twice.
+    In place, which is add_embeddings.py's own default: an embedding is derived
+    from the text alone, so a separate file would be the same corpus twice. The
+    target is the file the score stage wrote, which since scoring became an
+    in-place update is the combined corpus itself.
 
     Runs in *this* environment, unlike the two forks — the embedders live in
     ``epai/utils/embedding_utils.py``.
@@ -1246,7 +1247,9 @@ def main() -> None:
                         "embed.batch_size to override those.")
     g.add_argument("--score-limit", type=int, default=None, metavar="N",
                    help="score only the first N rows, for timing a run. "
-                        "Overrides score.limit.")
+                        "Overrides score.limit. Scores land in the combined "
+                        "corpus itself, so this leaves it with N scored rows "
+                        "and the rest Null; a later full run fills them in.")
     g.add_argument("--embed-limit", type=int, default=None, metavar="N",
                    help="embed only the first N rows, for timing a run. "
                         "Overrides embed.limit.")
@@ -1279,8 +1282,8 @@ def main() -> None:
     print(f"  per-domain   "
           f"{', '.join(rel(domain_parquet(cfg, var, d)) for d in domains(cfg))}"
           f"{DIM + '  (removed after combine)' + RESET if removing else ''}")
-    print(f"  combined     {rel(combined)}")
-    print(f"  scored       {rel(scored_path(cfg, var))}")
+    print(f"  combined     {rel(combined)}{DIM}  (score and embed fill it in "
+          f"place){RESET}")
     print(f"  steps        {' → '.join(steps)}")
     if args.dry_run:
         print(f"\n{YELLOW}--dry-run: nothing will be executed.{RESET}")
