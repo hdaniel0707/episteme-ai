@@ -250,6 +250,8 @@ def load_pipeline_config(path: Path) -> dict:
         raise ValueError(f"{path}: generate.max_workers must be an integer >= 1")
     if not isinstance(gen.get("fix_empty", True), bool):
         raise ValueError(f"{path}: generate.fix_empty must be true or false")
+    if not isinstance(gen.get("strip_boilerplate", False), bool):
+        raise ValueError(f"{path}: generate.strip_boilerplate must be true or false")
 
     if not isinstance(cfg["prepare"].get("embeddings", False), bool):
         raise ValueError(f"{path}: prepare.embeddings must be true or false")

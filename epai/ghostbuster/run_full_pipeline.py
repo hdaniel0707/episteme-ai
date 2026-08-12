@@ -323,6 +323,18 @@ def model_args(cfg: dict, gen_type: str | None = None) -> list[str]:
     return out
 
 
+def boilerplate_args(cfg: dict) -> list[str]:
+    """``--strip_boilerplate`` for the fork, only when the config asks for it.
+
+    Off unless set, matching the fork's own default. It must be passed
+    identically to the generate and fix-empty stages: the two scripts
+    post-process replies with the same function, and a refill that ran under a
+    different setting from the run it is patching is a document that does not
+    match the corpus it lands in.
+    """
+    return ["--strip_boilerplate"] if cfg["generate"].get("strip_boilerplate", False) else []
+
+
 def preflight(cfg: dict, args: argparse.Namespace, steps: list[str]) -> None:
     """Fail before stage 1 for anything knowable now."""
     needs_fork = any(k in steps for k in ("generate", "fix-empty"))
@@ -455,6 +467,7 @@ def step_generate(cfg: dict, args: argparse.Namespace) -> int:
                 # concurrency in the stage. It is what separates an overnight
                 # run from a coffee-length one.
                 "--workers", str(workers),
+                *boilerplate_args(cfg),
             ]
             if limit is not None:
                 extra += ["--limit", str(limit)]
@@ -501,6 +514,9 @@ def step_fix_empty(cfg: dict, args: argparse.Namespace) -> int:
                 # neighbours got.
                 "--out_name", output_dir_name(cfg, gen_type),
                 *model_args(cfg, gen_type),
+                # Same setting the generate stage ran under, for the same
+                # reason --out_name is repeated here.
+                *boilerplate_args(cfg),
             ]
             if args.debug:
                 extra.append("--debug")
