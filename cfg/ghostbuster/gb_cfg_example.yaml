@@ -185,7 +185,7 @@ embed:
   # checked in the preflight, so a typo fails before the generation starts
   # rather than at the last stage.
   #
-  # null runs add_embeddings.py's own EMBEDDERS list — all thirteen, including
+  # null runs add_embeddings.py's own EMBEDDERS list — all fifteen, including
   # openai_small and openai_large, which are BILLED PER ROW. Naming them here is
   # the way to keep that deliberate.
   #
@@ -195,7 +195,25 @@ embed:
   #   raw LM     roberta
   #   style      styledistance  style_wegmann  luar  luar_crud
   #   api        openai_small  openai_large        ← billed
-  embedders: ["specter2", "mpnet", "luar"]
+  #
+  # This list is every one of them EXCEPT the two OpenAI endpoints (billed per
+  # row) and qwen3 (a 4B-parameter encoder — far and away the heaviest of the
+  # local models, and the reason for the smaller batch size in
+  # BATCH_SIZE_OVERRIDE). Written out rather than left null so that adding an
+  # embedder to add_embeddings.py does not silently start billing this run.
+  embedders:
+    - "specter2"
+    - "scincl"
+    - "scibert"
+    - "mpnet"
+    - "minilm"
+    - "e5"
+    - "bge"
+    - "roberta"
+    - "styledistance"
+    - "style_wegmann"
+    - "luar"
+    - "luar_crud"
 
   # Column to embed. Kept separate from score.text_column because the two
   # scripts spell the flag differently (--text-column vs --text-col); set both

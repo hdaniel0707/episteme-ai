@@ -254,7 +254,7 @@ embed:
   # the corpus has been built and scored.
   #
   # null (or no `embedders` key) runs add_embeddings.py's own EMBEDDERS list —
-  # all thirteen, including openai_small and openai_large, which are BILLED PER
+  # all fifteen, including openai_small and openai_large, which are BILLED PER
   # ROW. Naming them here is the way to keep that deliberate.
   #
   # Available:
@@ -263,7 +263,25 @@ embed:
   #   raw LM     roberta
   #   style      styledistance  style_wegmann  luar  luar_crud
   #   api        openai_small  openai_large        ← billed
-  embedders: ["specter2", "mpnet", "luar"]
+  #
+  # This list is every one of them EXCEPT the two OpenAI endpoints (billed per
+  # row) and qwen3 (a 4B-parameter encoder — far and away the heaviest of the
+  # local models, and the reason for the smaller batch size in
+  # BATCH_SIZE_OVERRIDE). Written out rather than left null so that adding an
+  # embedder to add_embeddings.py does not silently start billing this run.
+  embedders:
+    - "specter2"
+    - "scincl"
+    - "scibert"
+    - "mpnet"
+    - "minilm"
+    - "e5"
+    - "bge"
+    - "roberta"
+    - "styledistance"
+    - "style_wegmann"
+    - "luar"
+    - "luar_crud"
 
   # null keeps the script's per-model batch sizes (128, with smaller values for
   # qwen3/LUAR and larger for the OpenAI endpoints).
