@@ -103,6 +103,9 @@ Run:
     uv run python epai/ai_detection/train/run_clf_cross_domain.py --dry-run
     uv run python epai/ai_detection/train/run_clf_cross_domain.py \
         --cfg cfg/ai_detection/train/clf_cd/clf_cd_example.yaml --no-plots
+    
+    uv run python epai/ai_detection/train/run_clf_cross_domain.py \
+            --cfg cfg/ai_detection/train/clf_cd/clf_cd_science.yaml
 """
 
 from __future__ import annotations
