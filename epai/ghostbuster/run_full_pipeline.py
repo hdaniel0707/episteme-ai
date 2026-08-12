@@ -180,6 +180,7 @@ from epai.ghostbuster.config import (
     types,
     variant,
 )
+from epai.utils import notify_utils
 from epai.utils.embed_select import check_embedder_names
 
 # Defined here rather than imported from another pipeline's runner: these are
@@ -257,6 +258,10 @@ def run_cmd(
 def confirm(question: str, assume_yes: bool) -> bool:
     if assume_yes:
         return True
+    # Push before blocking, not after: an unattended run that reaches a prompt
+    # does nothing whatsoever until someone answers it, and the whole point of
+    # the notifications is to not discover that four hours later.
+    notify_utils.active().blocked(question)
     try:
         return input(f"{question} [y/N]: ").strip().lower() in ("y", "yes")
     except EOFError:
@@ -1213,6 +1218,17 @@ def main() -> None:
         "embed": lambda: step_embed(cfg, args, var),
     }
 
+    # Phone pushes at every step boundary, for the hours nobody watches this.
+    # Silent unless NTFY_PIPELINE_TOPIC is set; see epai/utils/notify_utils.py.
+    # Configured before the clean step so that step's prompt can report itself.
+    notify = notify_utils.configure(
+        "ghostbuster",
+        f"{cfg['dataset_id']} {var}",
+        steps,
+        enabled=not args.dry_run,
+    )
+    notify.started(f"{len(steps)} steps")
+
     # Before the first step, not as one of them: it is about the state a run
     # starts from, so it has to happen whichever step that run begins at.
     if args.clean and step_clean(cfg, args, var, steps) != 0:
@@ -1229,6 +1245,7 @@ def main() -> None:
             print(f"\n{YELLOW}Interrupted during {key}.{RESET}")
             code = INTERRUPTED
         results.append(Result(key, code, time.monotonic() - start))
+        notify.stage(key, code, results[-1].seconds)
 
         if code != 0:
             # Every step consumes the one before it, so there is no useful work
@@ -1250,10 +1267,14 @@ def main() -> None:
     print(f"\n  total {sum(r.seconds for r in results):.1f}s")
 
     if failed is not None:
+        resume = (
+            f"uv run python epai/ghostbuster/run_full_pipeline.py --from {failed}"
+        )
+        notify.failed(failed, results[-1].code, results[-1].seconds, resume=resume)
         print(
             f"\n{RED}Stopped at '{failed}'.{RESET}\n"
             f"  Fix the cause, then resume with:\n"
-            f"    uv run python epai/ghostbuster/run_full_pipeline.py --from {failed}"
+            f"    {resume}"
         )
         sys.exit(1)
 
@@ -1263,12 +1284,17 @@ def main() -> None:
 
     print(f"\n{GREEN}Done.{RESET}")
     if "embed" in ran:
+        outcome = f"scored and embedded: {rel(scored_path(cfg, var))}"
         print(f"  Corpus, scored and embedded: {rel(scored_path(cfg, var))}")
         print(f"  It is ready for epai/ai_detection/train/ and analyse/.")
     elif "score" in ran:
+        outcome = f"scored corpus: {rel(scored_path(cfg, var))}"
         print(f"  Scored corpus: {rel(scored_path(cfg, var))}")
     elif "combine" in ran:
+        outcome = f"combined corpus: {rel(combined)}"
         print(f"  Combined corpus: {rel(combined)}")
+    else:
+        outcome = ""
 
     # The steps that were selected away, and how to pick them up. Only worth
     # saying when the run stopped short on purpose — a completed pipeline has
@@ -1278,6 +1304,14 @@ def main() -> None:
         print(f"  Remaining: {' → '.join(remaining)}\n"
               f"  Resume with: uv run python epai/ghostbuster/run_full_pipeline.py "
               f"--from {remaining[0]}")
+
+    notify.finished(
+        " | ".join(part for part in (
+            outcome,
+            f"remaining: {' -> '.join(remaining)}" if remaining else "",
+        ) if part),
+        sum(r.seconds for r in results),
+    )
 
 
 if __name__ == "__main__":

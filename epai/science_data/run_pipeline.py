@@ -57,6 +57,7 @@ from epai.science_data.config import (
     generated_by_label,
     load_pipeline_config,
 )
+from epai.utils import notify_utils
 
 RED = "\033[91m"
 YELLOW = "\033[93m"
@@ -263,6 +264,16 @@ def main() -> None:
             f"ask before overwriting an existing raw corpus.{RESET}"
         )
 
+    # Phone pushes at every stage boundary, for the hours nobody watches this.
+    # Silent unless NTFY_PIPELINE_TOPIC is set; see epai/utils/notify_utils.py.
+    notify = notify_utils.configure(
+        "science_data",
+        f"{cfg['dataset_id']} {variant}",
+        [s.key for s in stages],
+        enabled=not args.dry_run,
+    )
+    notify.started(f"{len(stages)} stages")
+
     results: list[tuple[Stage, int, float]] = []
     failed_critical = None
 
@@ -274,6 +285,7 @@ def main() -> None:
             code, seconds = INTERRUPTED, 0.0
 
         results.append((stage, code, seconds))
+        notify.stage(stage.key, code, seconds, critical=stage.critical)
 
         if code == 0:
             continue
@@ -320,11 +332,20 @@ def main() -> None:
     print(f"\n  total {total:.1f}s")
 
     if failed_critical is not None:
+        resume = (
+            f"uv run python epai/science_data/run_pipeline.py "
+            f"--from {failed_critical.key}"
+        )
+        notify.failed(
+            failed_critical.key,
+            results[-1][1],
+            results[-1][2],
+            resume=resume,
+        )
         print(
             f"\n{RED}Pipeline stopped at '{failed_critical.key}'.{RESET}\n"
             f"  Fix the cause, then resume with:\n"
-            f"    uv run python epai/science_data/run_pipeline.py "
-            f"--from {failed_critical.key}"
+            f"    {resume}"
         )
         sys.exit(1)
 
@@ -332,8 +353,13 @@ def main() -> None:
         print(f"\n{YELLOW}Dry run — nothing was executed.{RESET}")
         return
 
-    if not args.no_hint and any(s.key == "generate" for s, code, _ in results if code == 0):
-        out = final_path(cfg, variant)
+    out = final_path(cfg, variant)
+    generated = any(s.key == "generate" for s, code, _ in results if code == 0)
+    notify.finished(
+        f"corpus: {out.relative_to(BASE_DIR)}" if generated else "", total
+    )
+
+    if not args.no_hint and generated:
         print(
             f"\n{GREEN}Done.{RESET} Promote the result when you are happy with it:\n"
             f"  mv {out.relative_to(BASE_DIR)} data/parquet/{out.name}"

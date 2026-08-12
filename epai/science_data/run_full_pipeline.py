@@ -99,6 +99,7 @@ from epai.science_data.run_pipeline import (
     RESET,
     YELLOW,
 )
+from epai.utils import notify_utils
 from epai.utils.embed_select import check_embedder_names
 
 SCIENCE_RUNNER = "epai/science_data/run_pipeline.py"
@@ -145,6 +146,10 @@ def run_cmd(cmd: list[str], dry_run: bool, env: dict[str, str] | None = None) ->
 def confirm(question: str, assume_yes: bool) -> bool:
     if assume_yes:
         return True
+    # Push before blocking, not after: an unattended run that reaches a prompt
+    # does nothing whatsoever until someone answers it, and the whole point of
+    # the notifications is to not discover that four hours later.
+    notify_utils.active().blocked(question)
     try:
         return input(f"{question} [y/N]: ").strip().lower() in ("y", "yes")
     except EOFError:
@@ -244,7 +249,9 @@ def step_science(args: argparse.Namespace, variant: str) -> int:
         cmd.append("--skip-analyse")
 
     banner("science", SCIENCE_RUNNER)
-    return run_cmd(cmd, args.dry_run)
+    # The inner runner notifies per stage too. Marking it nested drops its own
+    # "started"/"finished" pushes, which would only repeat this run's.
+    return run_cmd(cmd, args.dry_run, env=notify_utils.nested_env())
 
 
 def step_promote(args: argparse.Namespace, src: Path, dest: Path) -> int:
@@ -533,6 +540,16 @@ def main() -> None:
         "embed": lambda: step_embed(args, cfg, scored),
     }
 
+    # Phone pushes at every step boundary, for the hours nobody watches this.
+    # Silent unless NTFY_PIPELINE_TOPIC is set; see epai/utils/notify_utils.py.
+    notify = notify_utils.configure(
+        "science full",
+        f"{cfg['dataset_id']} {variant}",
+        steps,
+        enabled=not args.dry_run,
+    )
+    notify.started(f"{len(steps)} steps")
+
     results: list[Result] = []
     failed = None
 
@@ -544,6 +561,7 @@ def main() -> None:
             print(f"\n{YELLOW}Interrupted during {key}.{RESET}")
             code = INTERRUPTED
         results.append(Result(key, code, time.monotonic() - start))
+        notify.stage(key, code, results[-1].seconds)
 
         if code != 0:
             # Every step consumes the one before it, so there is no useful work
@@ -565,10 +583,14 @@ def main() -> None:
     print(f"\n  total {sum(r.seconds for r in results):.1f}s")
 
     if failed is not None:
+        resume = (
+            f"uv run python epai/science_data/run_full_pipeline.py --from {failed}"
+        )
+        notify.failed(failed, results[-1].code, results[-1].seconds, resume=resume)
         print(
             f"\n{RED}Stopped at '{failed}'.{RESET}\n"
             f"  Fix the cause, then resume with:\n"
-            f"    uv run python epai/science_data/run_full_pipeline.py --from {failed}"
+            f"    {resume}"
         )
         sys.exit(1)
 
@@ -578,12 +600,17 @@ def main() -> None:
 
     print(f"\n{GREEN}Done.{RESET}")
     if "embed" in ran:
+        outcome = f"scored and embedded: {scored.relative_to(BASE_DIR)}"
         print(f"  Corpus, scored and embedded: {scored.relative_to(BASE_DIR)}")
         print("  It is ready for epai/ai_detection/train/ and analyse/.")
     elif "score" in ran:
+        outcome = f"scored corpus: {scored.relative_to(BASE_DIR)}"
         print(f"  Scored corpus: {scored.relative_to(BASE_DIR)}")
     elif "promote" in ran:
+        outcome = f"promoted corpus: {dest.relative_to(BASE_DIR)}"
         print(f"  Promoted corpus: {dest.relative_to(BASE_DIR)}")
+    else:
+        outcome = ""
 
     # The steps that were selected away, and how to pick them up. Only worth
     # saying when the run stopped short on purpose — a completed pipeline has
@@ -593,6 +620,14 @@ def main() -> None:
         print(f"  Remaining: {' → '.join(remaining)}\n"
               f"  Resume with: uv run python epai/science_data/run_full_pipeline.py "
               f"--from {remaining[0]}")
+
+    notify.finished(
+        " | ".join(part for part in (
+            outcome,
+            f"remaining: {' -> '.join(remaining)}" if remaining else "",
+        ) if part),
+        sum(r.seconds for r in results),
+    )
 
 
 if __name__ == "__main__":

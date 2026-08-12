@@ -22,6 +22,7 @@ All four draw on the shared library under `epai/utils/` and `epai/algs/`.
   - [Environments](#environments)
   - [Updating a submodule](#updating-a-submodule)
   - [Claude Code notifications — optional](#claude-code-notifications--optional)
+  - [Pipeline notifications — optional](#pipeline-notifications--optional)
 - [Git LFS — Store Folder](#git-lfs--store-folder)
 - [Environment Variables](#environment-variables)
 - [File Naming Convention](#file-naming-convention)
@@ -271,6 +272,37 @@ and nothing breaks: the hook still chimes locally, it just sends no push.
 
 Full details, including what each hook event fires on, are in `.claude/hooks/README.md`.
 
+### Pipeline notifications — optional
+
+The same idea for the runs themselves, whether or not Claude Code is involved. Pipeline 3
+(`science_data`) and pipeline 4 (`ghostbuster`) push to ntfy at every stage boundary, so a
+five-hour corpus build reports itself to your phone from wherever it is running:
+
+| Push | When | Priority |
+|---|---|---|
+| 🚀 `started` | the run begins, listing its stages | low |
+| ✅ `<stage> ok (3/7)` | a stage finished, with its wall clock and what comes next | default |
+| ⚠️ `<stage> failed, non-fatal` | an analysis stage failed; the pipeline carries on | default |
+| 🙋 `waiting for input` | the run has stopped at a prompt and will sit there until answered | default |
+| 🚨 `FAILED at <stage>` | a critical stage failed or was interrupted, with the resume command | **high** |
+| 🏁 `done` | every selected stage ran, with the output path and any steps left | default |
+
+Set one variable in `.env` and subscribe to the same topic in the ntfy app:
+
+```bash
+echo "epai-pipeline-$(openssl rand -hex 6)"     # pick an unguessable topic
+$EDITOR .env                                    # NTFY_PIPELINE_TOPIC=...
+```
+
+Use a **different topic from the Claude Code hook above** — same app, two subscriptions. They are
+different feeds: one is "a turn ended", the other is "the GPU stage you started before dinner is
+done". Both treat the topic name as the credential, for the reason given above.
+
+With `NTFY_PIPELINE_TOPIC` unset nothing is sent and nothing changes. Sending is best-effort
+throughout: a DNS failure, a 502 or a rate limit is swallowed, never retried, and cannot fail a
+run. `--dry-run` sends nothing either. Details are in the module docstring of
+`epai/utils/notify_utils.py`.
+
 ---
 
 ## Git LFS — Store Folder
@@ -324,6 +356,8 @@ cp .env_sample .env
 | `ANTHROPIC_API_KEY` | `citation_impact/prepare/prepare_data.py`, `external/ghostbuster/generate.py` | Claude Haiku abstract rephrasing; the ghostbuster generator's `claude` type |
 | `GOOGLE_API_KEY` | `citation_impact/prepare/prepare_data.py` | Gemini abstract rephrasing |
 | `HF_TOKEN` | `citation_impact/score/add_naip_scores.py`, `external/Binoculars/score_parquets.py` | HuggingFace token — for the NAIP Gradio API (optional, avoids rate limits) and for pulling the Binoculars observer/performer models |
+| `NTFY_PIPELINE_TOPIC` | `utils/notify_utils.py`, via both pipeline runners | **Optional, but treat it as a secret.** ntfy topic for per-stage phone notifications. Unset means no pushes. See [Pipeline notifications](#pipeline-notifications--optional) |
+| `NTFY_SERVER` | `utils/notify_utils.py` | **Optional, not a secret.** Self-hosted ntfy base URL; defaults to `https://ntfy.sh` |
 
 The Semantic Scholar key is optional but strongly recommended — without it you will be heavily rate-limited. The LLM keys are only needed if you enable the `ADD_GEN_AI` flag in `prepare_data.py`.
 
@@ -1437,6 +1471,7 @@ The `epai/utils/` and `epai/algs/` modules are shared and should not be modified
 | `epai/utils/env_utils.py` | `.env` variable and installed-package checks |
 | `epai/utils/genai_utils.py` | Multi-LLM abstract rephrasing (OpenAI, Anthropic, Gemini) |
 | `epai/utils/label_utils.py` | The `generated_by` convention: `<model>:<prompt_id>` in a corpus, `<model>_<prompt_id>` as a directory, and the map between them |
+| `epai/utils/notify_utils.py` | Per-stage phone notifications from the pipeline runners via ntfy. Best-effort and silent unless `NTFY_PIPELINE_TOPIC` is set |
 | `epai/utils/parquet_utils.py` | Parquet save/load helpers |
 | `epai/utils/oa_utils.py` | OpenAlex API client (no key; `OPENALEX_MAILTO` for the polite pool) |
 | `epai/utils/s2_utils.py` | Semantic Scholar API client |
