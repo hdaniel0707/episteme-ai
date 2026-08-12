@@ -98,11 +98,16 @@ BASE_DIR = Path(__file__).parent.parent.parent.parent
 NO_DOMAIN = "(whole file)"
 
 # A text this short is not a document. The number is not arbitrary: the
-# ghostbuster generators size their request as round_to_100(human word count),
-# and that rounds HALF TO EVEN -- so a human original of 50 words or fewer asks
-# the model for a ZERO-word document and gets an empty or near-empty answer
-# back. Rows in that band are the ones to look at when blank generations appear
-# with no API error to explain them.
+# ghostbuster generators size their request against the human partner's word
+# count, so a very short human original asks for a very short machine one and
+# the pair is uninformative either way.
+#
+# It used to be worse. The budget was round_to_100(human words), and round() is
+# HALF TO EVEN -- so a human original of 50 words or fewer asked the model for a
+# ZERO-word document and got an empty answer back, with no API error to explain
+# it. generate.py now uses round_to_50() with a floor of 50, so new corpora
+# cannot contain that failure; corpora built before it (ghostbuster_gpt35t,
+# ghostbuster_gpt54mini) still can, which is why this check stays.
 SHORT_WORDS = 25
 
 RULE = 92

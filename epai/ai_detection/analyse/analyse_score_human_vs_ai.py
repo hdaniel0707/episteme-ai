@@ -33,7 +33,9 @@ so every unjudged row simply drops out of the comparison.
 Targets
 -------
 Each parquet is given as ``PATH[:TARGET]``; ``TARGET`` defaults to ``gpt`` when
-omitted, so every file can be compared against a different generator.
+omitted, so every file can be compared against a different generator. The split
+is on the first ':', so a target may contain colons of its own — the science
+corpora label their generator ``gpt56luna:0807A`` (model plus prompt version).
 
 Figures + tables saved to results/<metric>_human_vs_ai/<parquet_stems>/:
   - human_vs_ai_distance_violin.png    — |human − g| per parquet, MSE annotated
@@ -62,6 +64,9 @@ Usage:
     uv run python epai/ai_detection/analyse/analyse_score_human_vs_ai.py \
         data/parquet/ghostbuster_gpt35t.parquet:gpt \
         data/parquet/ghostbuster_gpt54mini.parquet:gpt_plain
+    
+    uv run python epai/ai_detection/analyse/analyse_score_human_vs_ai.py \
+        data/parquet/science_v1_gpt56luna_0807A.parquet:gpt56luna:0807A
 
     # one domain, LLM-judge scores instead of Binoculars
     uv run python epai/ai_detection/analyse/analyse_score_human_vs_ai.py \
@@ -788,14 +793,22 @@ def report(results: list[PairResult], fig_dir: Path, out: Tee) -> None:
 def _parse_spec(spec: str) -> tuple[Path, str]:
     """Split a ``PATH[:TARGET]`` spec; TARGET defaults to ``gpt``.
 
-    The target is taken from the substring after the last ':' only when that
-    substring is non-empty and contains no path separator (so Windows drive
-    letters / ordinary paths without a target are left intact).
+    The split is on the FIRST ':', so everything after it is the target — a
+    generator label may itself contain colons (``gpt56luna:0807A``, generator
+    plus prompt version, is what the science corpora write into
+    ``generated_by``), and splitting on the last ':' would silently move that
+    suffix out of the target and into the path.
+
+    A leading Windows drive letter (``C:\\corpora\\x.parquet``) is not a target
+    separator and is skipped before the split.
     """
-    if ":" in spec:
-        head, sep, tail = spec.rpartition(":")
-        if head and tail and "/" not in tail and "\\" not in tail:
-            return Path(head), tail
+    head, sep, tail = spec.partition(":")
+    if sep and len(head) == 1 and head.isalpha() and tail[:1] in ("\\", "/"):
+        drive, head = head, ""
+        head, sep, tail = tail.partition(":")
+        head = f"{drive}:{head}"
+    if sep and head and tail:
+        return Path(head), tail
     return Path(spec), DEFAULT_TARGET
 
 

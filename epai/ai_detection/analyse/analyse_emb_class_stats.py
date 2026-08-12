@@ -89,7 +89,10 @@ Outputs saved to results/emb_class_stats/<name>/:
 Usage:
     # one combined parquet = three corpora, one per domain
     uv run python epai/ai_detection/analyse/analyse_emb_class_stats.py \
-        data/parquet/ghostbuster_gpt54mini.parquet
+        data/parquet/ghostbuster_gpt56luna.parquet --emb-col emb_luar
+    
+    uv run python epai/ai_detection/analyse/analyse_emb_class_stats.py \
+        data/parquet/science_v1_gpt56luna_0807A.parquet --emb-col emb_luar
 
     # one domain of it, with a different embedder (the geometry changes with it)
     uv run python epai/ai_detection/analyse/analyse_emb_class_stats.py \

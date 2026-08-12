@@ -21,7 +21,7 @@ the same name is overwritten, but files from a previous export of a different
 corpus are left where they are, and reported.
 
 Run:
-    uv run python epai/scripts/export_records_txt.py data/parquet/science_v1_gpt54mini_0807A.parquet
+    uv run python epai/scripts/export_records_txt.py data/parquet/science_v1_gpt56luna_0807A.parquet
     uv run python epai/scripts/export_records_txt.py corpus.parquet --sample 25 --seed 0
     uv run python epai/scripts/export_records_txt.py corpus.parquet --where domain=biology --limit 10
     uv run python epai/scripts/export_records_txt.py corpus.parquet -o /tmp/look --wrap 0

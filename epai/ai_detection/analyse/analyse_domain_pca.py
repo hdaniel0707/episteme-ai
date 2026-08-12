@@ -41,6 +41,9 @@ Usage:
     
     uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
             data/parquet/ghostbuster_gpt54mini_10w.parquet
+    
+    uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
+        data/parquet/science_v1_gpt56luna_0807A.parquet --feature emb_luar
 
     # another embedding
     uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
