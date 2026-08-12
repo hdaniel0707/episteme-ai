@@ -245,6 +245,9 @@ def load_pipeline_config(path: Path) -> dict:
     seed = gen.get("seed", 0)
     if not isinstance(seed, int):
         raise ValueError(f"{path}: generate.seed must be an integer")
+    workers = gen.get("max_workers", 8)
+    if not isinstance(workers, int) or workers < 1:
+        raise ValueError(f"{path}: generate.max_workers must be an integer >= 1")
     if not isinstance(gen.get("fix_empty", True), bool):
         raise ValueError(f"{path}: generate.fix_empty must be true or false")
 

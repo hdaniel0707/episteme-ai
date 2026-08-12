@@ -6,7 +6,10 @@ Seven stages, in order:
 
   1. **generate**  — ``external/ghostbuster/generate.py``, once per (domain,
      type), in the fork's own environment. Writes
-     ``external/ghostbuster/data/<domain>/<model_slug>_<prompt_id>/``.
+     ``external/ghostbuster/data/<domain>/<model_slug>_<prompt_id>/``. Runs
+     ``generate.max_workers`` calls at a time (``--workers`` overrides); the
+     domains themselves are still sequential subprocesses, so that setting is
+     the only concurrency the stage has.
   2. **fix-empty** — ``fix_empty_generations.py``, once per (domain, type),
      refilling files that came back blank. Skipped when
      ``generate.fix_empty`` is false.
@@ -264,17 +267,27 @@ def confirm(question: str, assume_yes: bool) -> bool:
         return False
 
 
-def submodule_env() -> dict[str, str]:
+def submodule_env(cuda: bool = True) -> dict[str, str]:
     """The environment for a subprocess that runs in one of the forks.
 
-    Both variables are set by an outer ``uv run`` and point at *this* repo's
-    venv; leaving either in place makes ``uv run --project external/<fork>``
-    either warn and ignore it or, worse, honour it and import the wrong
-    transformers.
+    ``VIRTUAL_ENV`` and ``UV_PROJECT_ENVIRONMENT`` are set by an outer ``uv
+    run`` and point at *this* repo's venv; leaving either in place makes ``uv
+    run --project external/<fork>`` either warn and ignore it or, worse, honour
+    it and import the wrong transformers.
+
+    ``cuda=False`` hides every GPU from the subprocess. The generate and
+    fix-empty stages are pure API calls, but they ``import utils`` to reach
+    ``utils/prompt_utils.py``, and the fork's ``utils/__init__.py`` does
+    ``from .write_logprobs import *``, which imports torch — so torch loads,
+    probes the driver, and prints a CUDA warning in a stage that will never use
+    a GPU. Hiding the devices silences it and, more to the point, keeps an
+    hours-long generate run from holding a context on a card another job wants.
     """
     env = dict(os.environ)
     env.pop("VIRTUAL_ENV", None)
     env.pop("UV_PROJECT_ENVIRONMENT", None)
+    if not cuda:
+        env["CUDA_VISIBLE_DEVICES"] = ""
     return env
 
 
@@ -413,6 +426,7 @@ def step_generate(cfg: dict, args: argparse.Namespace) -> int:
     """
     gen = cfg["generate"]
     limit = args.gen_limit if args.gen_limit is not None else gen.get("limit")
+    workers = args.workers if args.workers is not None else gen.get("max_workers", 8)
 
     banner("generate", f"{rel(GHOSTBUSTER_PROJECT)}/{GENERATE_SCRIPT}")
     if args.debug:
@@ -431,6 +445,11 @@ def step_generate(cfg: dict, args: argparse.Namespace) -> int:
                 "--out_name", out_name,
                 *model_args(cfg, gen_type),
                 "--seed", str(gen.get("seed", 0)),
+                # The fork calls one document at a time per worker, and the
+                # domains here run as separate subprocesses, so this is the only
+                # concurrency in the stage. It is what separates an overnight
+                # run from a coffee-length one.
+                "--workers", str(workers),
             ]
             if limit is not None:
                 extra += ["--limit", str(limit)]
@@ -443,7 +462,7 @@ def step_generate(cfg: dict, args: argparse.Namespace) -> int:
                 fork_cmd(GHOSTBUSTER_PROJECT, GENERATE_SCRIPT, extra),
                 args.dry_run,
                 cwd=GHOSTBUSTER_PROJECT,
-                env=submodule_env(),
+                env=submodule_env(cuda=False),
             )
             if code != 0:
                 print(f"{RED}generate failed for {domain}/{gen_type} "
@@ -456,8 +475,11 @@ def step_fix_empty(cfg: dict, args: argparse.Namespace) -> int:
     """Refill blank generations, one (domain, type) at a time.
 
     The fork's script takes exactly one flag per invocation and asks before
-    writing anything, so an unattended run has its answer piped in. It exits 0
-    when there is nothing to do, which is the common case.
+    writing anything, so an unattended run passes ``--yes``. It exits 0 when
+    there is nothing to do, which is the common case, and also when files are
+    left empty — only ``--strict`` there makes that an error, and it must not
+    be passed from here: the six blank essay seeds are unfixable and present in
+    every run, so a strict fix-empty would abort every pipeline.
     """
     banner("fix-empty", f"{rel(GHOSTBUSTER_PROJECT)}/{FIX_EMPTY_SCRIPT}")
 
@@ -477,14 +499,18 @@ def step_fix_empty(cfg: dict, args: argparse.Namespace) -> int:
             ]
             if args.debug:
                 extra.append("--debug")
+            if args.yes:
+                extra.append("--yes")
 
             print(f"{BOLD}  {domain}/{gen_type}{RESET}")
             code = run_cmd(
                 fork_cmd(GHOSTBUSTER_PROJECT, FIX_EMPTY_SCRIPT, extra),
                 args.dry_run,
                 cwd=GHOSTBUSTER_PROJECT,
-                env=submodule_env(),
-                # Its prompt is a bare input(); with no stdin it would raise.
+                env=submodule_env(cuda=False),
+                # Belt and braces behind --yes: the fork's prompt is a bare
+                # input(), so an unattended run without the flag would block on
+                # an inherited stdin or raise EOFError on a closed one.
                 stdin_text="y\n" if args.yes else None,
             )
             if code != 0:
@@ -1108,6 +1134,11 @@ def main() -> None:
                    help="override generate.limit — items per domain. Note the "
                         "fork's --limit caps reuter's (author, index) list, so a "
                         "small value gives one author's articles, not a sample.")
+    g.add_argument("--workers", type=int, default=None, metavar="N",
+                   help="concurrent API calls in the generate stage. Overrides "
+                        "generate.max_workers (default 8). 1 is the old "
+                        "strictly-sequential behaviour; lower it if the account's "
+                        "rate limit is being hit.")
     g.add_argument("--debug", action="store_true",
                    help="pass --debug to the fork: every LLM call is mocked, no "
                         "keys needed. For testing the plumbing.")

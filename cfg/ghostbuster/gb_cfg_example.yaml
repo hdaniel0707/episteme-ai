@@ -90,6 +90,21 @@ generate:
   # stages, which this pipeline does not run; kept so the command is complete.
   seed: 0
 
+  # Concurrent API calls inside one generate.py invocation. The fork used to
+  # issue them one at a time, which is why a full run took an order of magnitude
+  # longer than the science pipeline's — that one has run at 8 workers all along
+  # (see science_cfg_example.yaml), and this matches it.
+  #
+  # Safe by construction, not by luck: each call is a stateless request whose
+  # prompt is built before it is submitted, so two in flight share nothing and
+  # cannot mix one document's inputs into another's. What DOES cap this is the
+  # account's rate limit — a 429 costs a retry with backoff, so past some point
+  # raising it makes the run slower, not faster.
+  #
+  # --workers on the command line overrides this. 1 restores the old sequential
+  # behaviour.
+  max_workers: 8
+
   # Re-run fix_empty_generations.py after generating, to refill files that came
   # back blank. Costs one API call per empty file and nothing when there are
   # none.
