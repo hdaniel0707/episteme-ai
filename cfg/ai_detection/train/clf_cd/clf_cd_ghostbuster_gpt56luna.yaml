@@ -130,7 +130,7 @@ data:
 # One entry, as here, holds the representation fixed and makes the run below an
 # ALGORITHM comparison: any difference in the ranking is the algorithm's.
 feature_sets:
-  - emb_luar
+  - emb_luar_crud
 
 # Several entries compare representations instead. Swap this in for the above:
 #
