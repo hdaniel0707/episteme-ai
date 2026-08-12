@@ -16,3 +16,14 @@ old/
 *.egg-info/
 dist/
 build/
+
+# Claude Code: commit the notification hook's mechanism, never its secrets or
+# runtime state. notify.env holds the ntfy topic (a bearer capability); the log
+# holds verbatim hook payloads, including prompt text and transcript paths.
+/.claude/*
+!/.claude/settings.json
+!/.claude/hooks/
+/.claude/hooks/*
+!/.claude/hooks/notify.sh
+!/.claude/hooks/notify.env.example
+!/.claude/hooks/README.md

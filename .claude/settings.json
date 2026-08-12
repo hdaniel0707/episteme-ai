@@ -1,0 +1,41 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/notify.sh\"",
+            "timeout": 15,
+            "statusMessage": "Sending completion notification"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/notify.sh\"",
+            "timeout": 15,
+            "statusMessage": "Sending input-needed notification"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "AskUserQuestion|ExitPlanMode",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/notify.sh\"",
+            "timeout": 15,
+            "statusMessage": "Sending question notification"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -21,6 +21,7 @@ All four draw on the shared library under `epai/utils/` and `epai/algs/`.
   - [CUDA wheels — compute server only](#cuda-wheels--compute-server-only)
   - [Environments](#environments)
   - [Updating a submodule](#updating-a-submodule)
+  - [Claude Code notifications — optional](#claude-code-notifications--optional)
 - [Git LFS — Store Folder](#git-lfs--store-folder)
 - [Environment Variables](#environment-variables)
 - [File Naming Convention](#file-naming-convention)
@@ -246,6 +247,29 @@ that project's `pyproject.toml` or `uv.lock`; plain code changes need nothing, t
 
 When editing a fork, commit and push **inside** `external/<fork>` first, then commit the
 moved pointer here — otherwise the pin references a commit nobody else can fetch.
+
+### Claude Code notifications — optional
+
+Stages in this repo run long enough that you will not sit and watch them. If you drive them
+through [Claude Code](https://claude.com/claude-code), `.claude/hooks/notify.sh` pushes a
+notification to your phone when a turn ends or when Claude is blocked waiting on you — via
+[ntfy](https://ntfy.sh), which needs no account.
+
+```bash
+cp .claude/hooks/notify.env.example .claude/hooks/notify.env
+$EDITOR .claude/hooks/notify.env     # set NTFY_TOPIC to something unguessable
+```
+
+Then subscribe to the same topic in the ntfy app, or open `https://ntfy.sh/<topic>` in a browser.
+The hook is already registered in the tracked `.claude/settings.json`; Claude Code will ask you to
+approve it the first time it sees it.
+
+Pick the topic name carefully and keep it out of version control — `notify.env` is gitignored for
+that reason. The public ntfy server has no per-topic authentication, so the topic name is the only
+thing gating access, and the pushes quote the tail of what Claude last said. Skip the file entirely
+and nothing breaks: the hook still chimes locally, it just sends no push.
+
+Full details, including what each hook event fires on, are in `.claude/hooks/README.md`.
 
 ---
 
