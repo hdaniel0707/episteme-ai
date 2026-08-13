@@ -124,6 +124,29 @@ UNICODE_MAP: dict[str, str] = {
 }
 UNICODE_TABLE = str.maketrans(UNICODE_MAP)
 
+# The one group that can move a whitespace-split token count.
+#
+# Every other substitution is non-whitespace to non-whitespace, and every
+# character in ``spaces`` is ALREADY whitespace to ``str.split``, so neither can
+# join or divide a token. ``invisible`` is the exception: its characters are not
+# whitespace, but they map to "" -- so a "word" consisting of nothing but
+# zero-width characters vanishes and the token count drops by one, without a
+# single readable word having been removed. :func:`count_words` is the count
+# that ignores them, and it is the one the pipeline's no-text-lost check must be
+# stated over.
+_INVISIBLE_TABLE = str.maketrans({ch: "" for ch in UNICODE_GROUPS["invisible"]})
+
+
+def count_words(text: str) -> int:
+    """Whitespace-split word count, blind to zero-width characters.
+
+    ``len(text.split())`` counts a run of zero-width characters between two
+    spaces as a word; a reader would not. Use this wherever a word count is
+    compared across :func:`standardize_text`, or the comparison reports a loss
+    that never happened.
+    """
+    return len(text.translate(_INVISIBLE_TABLE).split())
+
 
 # ---------------------------------------------------------------------------
 # Whitespace

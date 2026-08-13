@@ -42,7 +42,9 @@ WHAT IT WILL NOT DO
 Remove text by keyword. No preambles, no section labels, no titles, no
 reference lists. Those are content edits and they hide in a diff; this stage is
 character substitution and whitespace only, so the word count of every document
-survives it. Word-level cleanup that a corpus genuinely needs belongs upstream,
+survives it — counted with ``count_words``, which ignores tokens made of
+nothing but zero-width characters, since deleting those is the job.
+Word-level cleanup that a corpus genuinely needs belongs upstream,
 in the generator, applied to both classes by construction -- which is what
 ``science_data.rules.strip_structured_labels`` does.
 
@@ -73,6 +75,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from epai.utils.parquet_utils import load_parquet, save_parquet  # noqa: E402
 from epai.utils.text_standardize import (  # noqa: E402
     WHITESPACE_MODES,
+    count_words,
     standardize_text,
     substitution_counts,
 )
@@ -221,17 +224,37 @@ def main() -> int:
     # Word count is preserved by construction -- this stage substitutes
     # characters, it does not delete text. A mismatch means a transform is
     # doing more than it claims, which is the failure worth catching loudly.
-    words_before = original.map(lambda t: len(t.split())).sum()
-    words_after = standardised.map(lambda t: len(t.split())).sum()
+    #
+    # count_words, not len(t.split()): a run of zero-width characters standing
+    # between two spaces is a token to str.split and a word to nobody. Deleting
+    # it is this stage's job and it moves the naive count without any text
+    # having been lost, so the invariant is stated over words a reader can see.
+    words_before = original.map(count_words)
+    words_after = standardised.map(count_words)
+    total_before, total_after = words_before.sum(), words_after.sum()
 
     print(f"\n  rows changed        {changed} of {len(df)}")
-    print(f"  words before/after  {words_before} / {words_after}")
-    if words_before != words_after:
-        print(f"{RED}  Word count changed by {words_after - words_before}. This stage "
+    print(f"  words before/after  {total_before} / {total_after}")
+    if total_before != total_after:
+        delta = words_after - words_before
+        offenders = delta[delta != 0]
+        print(f"{RED}  Word count changed by {total_after - total_before}. This stage "
               f"must never add or remove words —\n  a transform is doing more than "
               f"substitution. Not writing.{RESET}")
+        print(f"  {len(offenders)} row(s) changed length; first few:")
+        for idx, d in offenders.head(5).items():
+            print(f"    row {idx}: {words_before[idx]} → {words_after[idx]} ({d:+d})")
+            print(f"      {DIM}{original[idx][:120]!r}{RESET}")
         return 1
     print(f"  {GREEN}word count preserved{RESET}")
+
+    # Not silent: these tokens really are gone from the text, and the line above
+    # deliberately does not count them. Say so rather than let the two numbers
+    # agree for a reason nobody can see.
+    zero_width = original.map(lambda t: len(t.split())).sum() - total_before
+    if zero_width:
+        print(f"{DIM}  ({zero_width} zero-width-only token(s) dropped — no readable "
+              f"word removed){RESET}")
 
     if args.dry_run:
         print(f"\n{YELLOW}--dry-run: nothing written.{RESET}")
