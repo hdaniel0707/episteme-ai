@@ -39,8 +39,8 @@
 # alg_id names the output directory under results/clf_cd/<experiment_id>/<alg_id>/.
 # It must be unique across the configs run together, or two of them would write
 # into the same place.
-alg_id: "science_v1"
-alg_label: "science_v1 — algorithm comparison"
+alg_id: "science_v3"
+alg_label: "science_v3 — algorithm comparison"
 
 seed: 42
 
