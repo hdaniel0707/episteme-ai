@@ -12,7 +12,7 @@
 #   uv run python epai/ghostbuster/run_full_pipeline.py --from collect
 #
 # ...or stop before the GPU stages and finish them later, elsewhere:
-#   uv run python epai/ghostbuster/run_full_pipeline.py --until combine --yes
+#   uv run python epai/ghostbuster/run_full_pipeline.py --until standardize --yes
 #   uv run python epai/ghostbuster/run_full_pipeline.py --from score --gpu 0
 #
 # BEFORE THE FIRST RUN the shared inputs must be seeded by hand into
@@ -25,7 +25,7 @@
 # <variant> is derived from the model below. Keep it "ghostbuster" unless this
 # is a different corpus rather than a different generator — the existing files
 # are ghostbuster_gpt35t.parquet and ghostbuster_gpt54mini.parquet.
-dataset_id: "ghostbuster"
+dataset_id: "x_ghostbuster"
 
 # ------------------------------------------------------------- generate ----
 # Runs external/ghostbuster/generate.py, once per domain, in the fork's own uv
@@ -110,6 +110,26 @@ generate:
   # none.
   fix_empty: true
 
+  # Upstream Ghostbuster's reuter/essay post-processing: drop the reply's first
+  # line when it contains "sure", "certainly" or "title", meant to remove chat
+  # preambles ("Sure, here's a 150-word essay:") and "Title:" headers, which are
+  # formatting tells a detector would learn instead of the writing.
+  #
+  # FALSE, because as written it costs far more than it removes:
+  #   - the test is a SUBSTRING match on the whole first line, so it fires on
+  #     "ensure", "measure", "pressure", "entitled";
+  #   - the first line is checked AFTER blank lines are collapsed, so for a
+  #     single-paragraph reply the first line IS the whole document.
+  # Measured against the human corpus, ~9% of essay and ~3% of reuter first
+  # paragraphs contain one of those substrings — i.e. that share of generations
+  # lost their opening paragraph, silently, with no empty file to notice.
+  #
+  # NOTE FOR COMPARABILITY: this was upstream's behaviour continuously since
+  # 2023, so ghostbuster_gpt35t and ghostbuster_gpt54mini were both built with
+  # it ON. A corpus generated with it off differs from those in post-processing
+  # as well as in model. wp never had it and is unaffected either way.
+  strip_boilerplate: false
+
 # -------------------------------------------------------------- prepare ----
 # Runs epai/ai_detection/prepare/prepare_{essay,wp,reuter}.py over the collected
 # text tree, one parquet per domain: data/parquet/<domain>_<variant>.parquet
@@ -150,9 +170,56 @@ combine:
   # them, e.g. while iterating on one domain's prepare script.
   remove_domain_parquets: true
 
+# ---------------------------------------------------------- standardize ----
+# Runs epai/ai_detection/prepare/standardize_text.py over the combined corpus,
+# rewriting `text` IN PLACE for every row — human and generated alike — before
+# anything reads it.
+#
+# WHY THIS STAGE EXISTS. The two classes reach the parquet by different routes:
+# the human side through generate.py's per-domain formatting loops, the AI side
+# straight out of the model. Anything one route does and the other does not is a
+# feature about the route, not about authorship. Measured on the human side of
+# this corpus:
+#
+#     wp/human      1000 docs   curly quotes   4.3%   en/em dash   6.1%
+#     essay/human    994 docs   curly quotes  90.2%   en/em dash  18.4%
+#     reuter/human  1000 docs   curly quotes   0.0%   en/em dash   0.0%
+#
+# One generator produced the AI side of all three, so its rate is roughly
+# constant. "Curly quote" therefore means HUMAN in essay and AI in reuter — the
+# same feature with the sign reversed between domains, which is precisely what
+# drives cross-domain transfer BELOW chance instead of merely to it.
+#
+# WHAT IT WILL NOT DO: remove text by keyword. No preambles, no titles, no
+# section labels, no reference lists. It substitutes characters and normalises
+# whitespace, and it verifies its own word count is unchanged before writing —
+# see generate.strip_boilerplate above for why that guard is there.
+standardize:
+  # false keeps whatever typographic conventions each source and the generator
+  # happened to use. Only worth doing to reproduce a corpus built before this
+  # stage existed — ghostbuster_gpt35t and ghostbuster_gpt54mini both were.
+  enabled: true
+
+  # How layout is put on one convention:
+  #   lines  one line per paragraph; runs of blank lines collapse to a single
+  #          newline. Matches what the human loops already do in all three
+  #          domains — and fixes wp, where the human side collapses blank lines
+  #          TWICE and the AI side once, making blank-line rate a class label.
+  #   flat   the whole document becomes one line. For single-paragraph corpora;
+  #          the science pipeline uses this.
+  whitespace: "lines"
+
+  # Keep the pre-standardisation text in a `text_raw` column, so the transform
+  # can be undone from the corpus alone. Written only when absent, so a second
+  # run never replaces the true original with an already-standardised copy.
+  # false saves a little space and makes the change irreversible.
+  keep_raw: true
+
 # ---------------------------------------------------------------- score ----
 # Runs external/Binoculars/score_parquets.py once over the combined corpus, in
-# the fork's own uv environment, writing <combined>_binox0.parquet.
+# the fork's own uv environment, filling `binoculars_score` IN PLACE — there is
+# no second _binox0 file. The stage then reads the column back and fails if the
+# scorer reported success without writing it.
 score:
   text_column: "text"
   batch_size: 1

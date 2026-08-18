@@ -117,6 +117,7 @@ from epai.science_data.run_pipeline import (
 )
 from epai.utils import notify_utils
 from epai.utils.embed_select import check_embedder_names
+from epai.utils.parquet_utils import BINOX_COLUMN, check_column_filled
 
 SCIENCE_RUNNER = "epai/science_data/run_pipeline.py"
 BINOCULARS_PROJECT = BASE_DIR / "external" / "Binoculars"
@@ -351,6 +352,13 @@ def step_score(args: argparse.Namespace, dest: Path) -> int:
     No ``-o``: score_parquets.py writes in place by default, and the copy that
     survives a mangled score is ``data/science/``'s, which the promote step left
     untouched on purpose.
+
+    **The exit code is not the whole test.** score_parquets.py catches a
+    per-file failure on purpose, so one bad file cannot lose the rest of a
+    multi-file run; it used to report the skip and still exit 0, and a corpus
+    once went through this step, through embed, and out of a "successful"
+    pipeline with no score column at all. The fork exits non-zero for that now,
+    and this step also looks at the file it was supposed to have written.
     """
     cmd = [
         "uv", "run", "--project", str(BINOCULARS_PROJECT.relative_to(BASE_DIR)),
@@ -384,7 +392,13 @@ def step_score(args: argparse.Namespace, dest: Path) -> int:
     # No overwrite prompt here: the file being overwritten *is* the input, and
     # score_parquets.py says so itself ("will be overwritten IN PLACE") and
     # blocks on its own confirmation unless --yes is passed through.
-    return run_cmd(cmd, args.dry_run, env=binoculars_env())
+    code = run_cmd(cmd, args.dry_run, env=binoculars_env())
+    if code != 0 or args.dry_run:
+        return code
+
+    ok, message = check_column_filled(dest, BINOX_COLUMN, args.limit or None)
+    print(message)
+    return 0 if ok else 1
 
 
 def step_embed(args: argparse.Namespace, cfg: dict, target: Path) -> int:

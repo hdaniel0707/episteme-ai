@@ -37,13 +37,16 @@ Usage:
         data/parquet/ghostbuster_gpt35t.parquet
     
     uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
-            data/parquet/ghostbuster_gpt54mini.parquet
+        data/parquet/ghostbuster_gpt54mini.parquet
     
     uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
-            data/parquet/ghostbuster_gpt54mini_10w.parquet
+        data/parquet/ghostbuster_gpt54mini_10w.parquet
     
     uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
-        data/parquet/science_v1_gpt56luna_0807A.parquet --feature emb_luar
+        data/parquet/ghostbuster_gpt56luna.parquet
+    
+    uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
+        data/parquet/science_v3_gpt56luna_0811A.parquet
 
     # another embedding
     uv run python epai/ai_detection/analyse/analyse_domain_pca.py \

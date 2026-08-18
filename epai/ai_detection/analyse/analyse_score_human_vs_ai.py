@@ -93,6 +93,9 @@ Usage:
     # the science corpora read exactly the same way
     uv run python epai/ai_detection/analyse/analyse_score_human_vs_ai.py \
         data/parquet/science_v1_gpt56luna_0807A.parquet:gpt56luna:0807A
+    
+    uv run python epai/ai_detection/analyse/analyse_score_human_vs_ai.py \
+        data/parquet/science_v3_gpt56luna_0811A.parquet:gpt56luna:0811A
 
     # three generations of the same corpus side by side, one violin per
     # (file, domain) — each file names the model that wrote its AI half
