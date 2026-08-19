@@ -1,4 +1,5 @@
 from pathlib import Path
+import textwrap
 
 import numpy as np
 from scipy import stats
@@ -12,6 +13,19 @@ from sklearn.metrics import mean_squared_error, r2_score
 # Consistent colors per LLM family are defined in cfg/colors.yaml and loaded via
 # color_utils so every plotting script shares one source of truth.
 from epai.utils.color_utils import llm_color as _llm_color
+
+# The reported metrics and how each is meant to be read (its reference level, its
+# direction, the caption it needs) live with the code that computes them, so a
+# figure can never disagree with the number it is drawing. cd_core imports
+# nothing from here, so this direction of the dependency is the safe one.
+from epai.utils.cd_core import (
+    CD_CHANCE_RATE,
+    MetricSpec,
+    cell_metric_specs,
+    present_metric_specs,
+    split_diag,
+    transported_fpr_key,
+)
 
 
 def plot_pca_2d_cat(
@@ -890,8 +904,23 @@ def plot_clf_results(exp_dir: Path, show_random: bool = True) -> None:
 ########################################################################
 
 # Chance level of the binarised human-vs-machine problem. Both classes are
-# balanced, so 0.50 is the meaningful midpoint every figure is anchored to.
-CD_CHANCE = 0.5
+# balanced, so 0.50 is the meaningful midpoint every RATE figure is anchored to.
+# TPR at a fixed FPR is not a rate metric in that sense -- its chance level is
+# the FPR itself -- so each metric carries its own reference on its MetricSpec
+# and only accuracy / macro F1 / AUROC use this one.
+CD_CHANCE = CD_CHANCE_RATE
+
+# Sequential ramps for the metrics whose reference sits near zero. A diverging
+# map anchored at 1% would be white at one end of the scale and give a working
+# detector the same colour as a broken one; "more ink = more of the thing" reads
+# correctly there, with the reference drawn on the colour bar instead.
+#
+# Two of them, because the direction is not the same for every metric: more TPR
+# is good and more FPR is bad, so a realized-FPR matrix drawn in the same blue as
+# a TPR one would paint a threshold that blew up into 40% false accusations in
+# exactly the colour that means "working" everywhere else on the page.
+CD_SEQ_CMAP = "Blues"  # higher is better
+CD_SEQ_CMAP_BAD = "Reds"  # higher is worse
 
 
 def _cd_matrix(summary: dict, names: list[str], key: str) -> np.ndarray:
@@ -910,18 +939,48 @@ def _plot_cd_matrix(
     title: str,
     cbar_label: str,
     fig,
+    *,
+    reference: float = CD_CHANCE,
+    diverging: bool = True,
+    higher_is_better: bool = True,
+    extra: np.ndarray | None = None,
+    extra_fmt: str = "",
 ) -> None:
     """One annotated source x target heatmap.
 
-    Diverging map anchored at chance: red = below chance, white = chance,
-    blue = above. The in-domain diagonal is boxed, because those cells answer a
-    different question (held-out same-corpus) than the off-diagonal ones.
+    ``diverging`` anchors a red/white/blue map at ``reference``: red = below,
+    white = at it, blue = above. It is the right encoding for a metric whose
+    reference sits mid-scale (accuracy, macro F1, AUROC at 0.5) and the wrong one
+    for a metric whose reference is near zero, where a sequential ramp is used
+    and the reference is marked on the colour bar only.
+
+    ``extra`` adds a second annotated quantity to every cell -- the realized FPR
+    beside a transported TPR, which must be read together: a TPR of 0.98 means
+    nothing without knowing whether the threshold that bought it cost 1% or 40%
+    false positives.
+
+    The in-domain diagonal is boxed, because those cells answer a different
+    question (held-out same-corpus) than the off-diagonal ones.
     """
     n = len(labels)
-    im = ax.imshow(mat, vmin=0.0, vmax=1.0, cmap="RdBu")
+    if diverging:
+        # Symmetric about the reference so the white midpoint lands on it, and
+        # reversed for a lower-is-better metric so red always means "worse".
+        half = max(reference, 1.0 - reference)
+        im = ax.imshow(
+            mat,
+            vmin=reference - half,
+            vmax=reference + half,
+            cmap="RdBu" if higher_is_better else "RdBu_r",
+        )
+    else:
+        im = ax.imshow(
+            mat, vmin=0.0, vmax=1.0,
+            cmap=CD_SEQ_CMAP if higher_is_better else CD_SEQ_CMAP_BAD,
+        )
     cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     cbar.set_label(cbar_label)
-    cbar.ax.axhline(CD_CHANCE, color="black", linewidth=1.2, linestyle="--")
+    cbar.ax.axhline(reference, color="black", linewidth=1.2, linestyle="--")
 
     ax.set_xticks(range(n))
     ax.set_yticks(range(n))
@@ -939,13 +998,29 @@ def _plot_cd_matrix(
 
     for i in range(n):
         for j in range(n):
-            # Ink stays readable on both poles of the diverging ramp.
-            strong = abs(mat[i, j] - CD_CHANCE) > 0.32
-            color = "white" if strong else "black"
+            value = mat[i, j]
+            # Ink stays readable on both poles of the diverging ramp, and on the
+            # dark end of the sequential one.
+            if not np.isfinite(value):
+                color = "black"
+            elif diverging:
+                color = "white" if abs(value - reference) > 0.32 else "black"
+            else:
+                color = "white" if value > 0.55 else "black"
+            text = (
+                "n/a" if not np.isfinite(value) else f"{value*100:.1f}"
+            ) + f"\n±{std[i, j]*100:.1f}"
+            if extra is not None:
+                text += (
+                    f"\n{extra_fmt}n/a"
+                    if not np.isfinite(extra[i, j])
+                    else f"\n{extra_fmt}{extra[i, j]*100:.1f}"
+                )
+            text += f"\nn={int(counts[i, j])}"
             ax.text(
                 j,
                 i,
-                f"{mat[i, j]*100:.1f}\n±{std[i, j]*100:.1f}\nn={int(counts[i, j])}",
+                text,
                 ha="center",
                 va="center",
                 fontsize=8,
@@ -959,6 +1034,135 @@ def _plot_cd_matrix(
         )
 
 
+#: Characters per caption line, and the height one line occupies. The captions
+#: under these figures explain what a metric claims, which is not optional
+#: reading here -- a transported TPR is actively misleading without it -- so they
+#: are wrapped to fit rather than trimmed to a length that happens to render.
+CD_NOTE_WIDTH = 135
+CD_NOTE_LINE_IN = 7.5 * 1.35 / 72  # one line at fontsize 7.5
+CD_NOTE_MARGIN_IN = 0.10
+
+
+def _wrap_note(*paragraphs: str) -> str:
+    """Wrap caption paragraphs to ``CD_NOTE_WIDTH`` and join them with newlines."""
+    lines: list[str] = []
+    for para in paragraphs:
+        if para:
+            lines.extend(textwrap.wrap(para, CD_NOTE_WIDTH))
+    return "\n".join(lines)
+
+
+def _note_strip(note: str, fig) -> float:
+    """Figure-fraction height to reserve below the axes for ``note``."""
+    n_lines = note.count("\n") + 1 if note else 0
+    inches = n_lines * CD_NOTE_LINE_IN + CD_NOTE_MARGIN_IN
+    return min(0.45, inches / fig.get_figheight())
+
+
+def _level_of(key: str) -> float:
+    """The FPR level baked into a metric key: ``tpr_at_srcfpr_0.01`` -> ``0.01``."""
+    return float(key.rsplit("_", 1)[-1])
+
+
+def _metric_bar_positions(specs: list[MetricSpec]) -> np.ndarray:
+    """x positions for one grouped bar per metric."""
+    return np.arange(len(specs), dtype=float)
+
+
+def _save_cd_metric_summary(
+    out_dir: Path,
+    specs: list["MetricSpec"],
+    summary: dict,
+    names: list[str],
+    alg_label: str,
+    subtitle: str,
+) -> None:
+    """Every metric on one axis: in-domain vs transfer, with each reference marked.
+
+    The point of a single figure is the *shape* across metrics, which no
+    individual matrix shows. A model can hold its accuracy and its AUROC under
+    transfer and still lose almost all of its transported TPR, because the
+    ordering survived and the calibration did not -- on this figure that reads as
+    two pairs of near-equal bars followed by one that collapses, which is the
+    finding stated in one glance.
+
+    Each metric is drawn against its OWN reference (a red dash per group): 50%
+    for accuracy, macro F1 and AUROC, the nominal FPR for the TPR@FPR ones. A
+    shared chance line would be wrong for most of the bars here.
+    """
+    if not specs:
+        return
+
+    x = _metric_bar_positions(specs)
+    in_domain, transfer, refs = [], [], []
+    for spec in specs:
+        mat = _cd_matrix(summary, names, f"{spec.key}_mean")
+        off_mask = ~np.eye(len(names), dtype=bool)
+        with np.errstate(invalid="ignore"):
+            in_domain.append(float(np.nanmean(np.diag(mat))))
+            transfer.append(float(np.nanmean(mat[off_mask])) if len(names) > 1 else np.nan)
+        refs.append(spec.reference)
+    in_domain, transfer = np.array(in_domain), np.array(transfer)
+
+    fig, ax = plt.subplots(figsize=(max(5.5, 1.5 * len(specs) + 2.0), 6.6))
+    w = 0.38
+    b1 = ax.bar(x - w / 2, in_domain, w, color="steelblue",
+                label="in-domain (diagonal)")
+    b2 = ax.bar(x + w / 2, transfer, w, color="orange",
+                label="transfer (off-diagonal)")
+    ax.bar_label(b1, fmt="%.3f", fontsize=8, padding=2)
+    ax.bar_label(b2, fmt="%.3f", fontsize=8, padding=2)
+
+    # One reference dash per group, spanning both its bars. Drawn per metric
+    # because they genuinely differ; a single axhline would be a lie on 4 of 9.
+    for xi, ref in zip(x, refs):
+        ax.plot([xi - w, xi + w], [ref, ref], color="red", linewidth=1.6,
+                linestyle="--", zorder=4)
+    ax.plot([], [], color="red", linewidth=1.6, linestyle="--",
+            label="reference (chance, or the nominal FPR)")
+
+    # A realized FPR is the one bar where *up* is bad; say so on the tick rather
+    # than trusting the reader to remember which of nine columns inverts.
+    ax.set_xticks(x)
+    ax.set_xticklabels(
+        [
+            spec.label.replace(" (", "\n(") + ("\n↓ lower is better" if not spec.higher_is_better else "")
+            for spec in specs
+        ],
+        fontsize=7.5,
+    )
+    ax.set_ylim(0, 1.34)
+    ax.set_ylabel("Value")
+    # A horizontal band above the bars: which group is tallest depends on the
+    # result, so a corner legend collides with the data on some runs and not
+    # others.
+    ax.legend(fontsize=8, loc="upper center", ncol=3, frameon=False)
+    fig.suptitle(f"{alg_label} — every metric, in-domain vs transfer\n{subtitle}")
+    # The (a)/(b) explanation is only printed when those bars are actually on the
+    # figure. A matrix written before the score metrics existed draws accuracy and
+    # macro F1 alone, and a caption explaining thresholds it does not show would
+    # send the reader looking for bars that are not there.
+    has_operating_points = any(spec.key.startswith("tpr_at_") for spec in specs)
+    note = _wrap_note(
+        "(a) 'target-calibrated' fits the threshold on the cell being tested — "
+        "separability only. (b) 'transported' fits it to the nominal FPR on the "
+        "SOURCE's held-out split and carries it over unchanged — the deployable "
+        "number, and the only pair that can expose a score distribution that "
+        "shifted while its ordering survived."
+        if has_operating_points else "",
+        "The transported bars equal the target-calibrated ones on the diagonal by "
+        "construction, so only their transfer bars carry new information."
+        if has_operating_points else
+        "This matrix carries no ranking score, so only the label-derived metrics "
+        "are shown. Re-run it to get AUROC and TPR@FPR — they cannot be recovered "
+        "from a confusion matrix.",
+    )
+    fig.text(0.01, 0.01, note, fontsize=7.5, color="dimgray", va="bottom")
+    fig.tight_layout(rect=(0, _note_strip(note, fig), 1, 1))
+    fig.savefig(out_dir / "cross_domain_metrics_summary.png", dpi=150)
+    plt.close(fig)
+
+
 def _save_clf_cd_figures(out_dir: Path, payload: dict) -> None:
     """Save the transfer matrices and the in-domain vs transfer summary bars."""
     names: list[str] = payload["dataset_names"]
@@ -969,52 +1173,76 @@ def _save_clf_cd_figures(out_dir: Path, payload: dict) -> None:
     alg_label = payload.get("alg_label", payload.get("alg_id", out_dir.name))
 
     n_runs = cfg["model"]["n_runs"]
+    # No "chance = 50%" here any more: this subtitle is shared by every metric
+    # figure, and chance is 50% for only three of them. Each figure states its own
+    # reference on its colour bar and in its caption instead.
     subtitle = (
         f"{cfg['model']['ml_alg']} · {', '.join(cfg['features'])} · "
-        f"{n_runs} seeds · grouped by {cfg['data']['group_col']!r} · "
-        f"chance = {CD_CHANCE*100:.0f}%"
+        f"{n_runs} seeds · grouped by {cfg['data']['group_col']!r}"
     )
 
     acc = _cd_matrix(summary, names, "accuracy_mean")
-    acc_std = _cd_matrix(summary, names, "accuracy_std")
-    f1 = _cd_matrix(summary, names, "macro_f1_mean")
-    f1_std = _cd_matrix(summary, names, "macro_f1_std")
     counts = _cd_matrix(summary, names, "n")
+    specs = present_metric_specs(summary, names)
 
     size = max(7.0, 1.6 * len(names) + 3.0)
 
-    # Figure 1: accuracy matrix.
-    fig, ax = plt.subplots(figsize=(size, size * 0.85))
-    _plot_cd_matrix(
-        ax, acc, acc_std, counts, labels,
-        f"{alg_label} — cross-domain accuracy (%)\n{subtitle}",
-        "Accuracy (dashed = chance)", fig,
-    )
-    fig.text(
-        0.01, 0.01,
-        "Boxed diagonal = in-domain (held-out grouped test split of the SAME corpus). "
-        "Off-diagonal = transfer to an unseen corpus.\n"
-        "Cells show mean ± std over seeds; n = test rows. Target rows whose group was "
-        "seen in training are excluded.",
-        fontsize=7.5, color="dimgray",
-    )
-    fig.tight_layout(rect=(0, 0.06, 1, 1))
-    fig.savefig(out_dir / "cross_domain_accuracy.png", dpi=150)
-    plt.close(fig)
+    # One matrix figure per metric the summary holds: accuracy, macro F1, AUROC,
+    # and each TPR@FPR operating point under both readings. They are separate
+    # figures rather than panels of one because each is a full n x n table that
+    # deserves its own annotation, and because the caption each needs is
+    # different -- a transported TPR means nothing without the (b) explanation,
+    # and accuracy means nothing with it.
+    for spec in specs:
+        mat = _cd_matrix(summary, names, f"{spec.key}_mean")
+        std = _cd_matrix(summary, names, f"{spec.key}_std")
+        # A transported TPR is drawn with the FPR it actually cost, in the same
+        # cell. The pair is the measurement; either half alone is misleading.
+        extra_key = (
+            transported_fpr_key(_level_of(spec.key))
+            if spec.key.startswith("tpr_at_srcfpr_")
+            else None
+        )
+        extra = (
+            _cd_matrix(summary, names, f"{extra_key}_mean")
+            if extra_key and f"{extra_key}_mean" in summary[names[0]][names[0]]
+            else None
+        )
 
-    # Figure 2: macro-F1 matrix — accuracy alone hides a model that predicts one
-    # class on an unseen corpus.
-    fig, ax = plt.subplots(figsize=(size, size * 0.85))
-    _plot_cd_matrix(
-        ax, f1, f1_std, counts, labels,
-        f"{alg_label} — cross-domain macro F1 (%)\n{subtitle}",
-        "Macro F1 (dashed = chance)", fig,
-    )
-    fig.tight_layout(rect=(0, 0.03, 1, 1))
-    fig.savefig(out_dir / "cross_domain_macro_f1.png", dpi=150)
-    plt.close(fig)
+        fig, ax = plt.subplots(figsize=(size, size * 0.85))
+        _plot_cd_matrix(
+            ax, mat, std, counts, labels,
+            f"{alg_label} — cross-domain, {spec.label} (%)\n{subtitle}",
+            f"{spec.label} (dashed = {spec.reference*100:g}%)", fig,
+            reference=spec.reference,
+            diverging=spec.diverging,
+            higher_is_better=spec.higher_is_better,
+            extra=extra,
+            extra_fmt="FPR ",
+        )
+        note = _wrap_note(
+            "Boxed diagonal = in-domain (held-out grouped test split of the SAME "
+            "corpus). Off-diagonal = transfer to an unseen corpus. "
+            "Cells show mean ± std over seeds"
+            + (", then the realized FPR" if extra is not None else "")
+            + "; n = test rows. Target rows whose group was seen in training are "
+            "excluded.",
+            spec.note,
+        )
+        # The caption is a variable number of lines, so the strip reserved for it
+        # is sized from the line count rather than from a constant that happens
+        # to fit the longest one.
+        strip = _note_strip(note, fig)
+        fig.text(0.01, 0.01, note, fontsize=7.5, color="dimgray", va="bottom")
+        fig.tight_layout(rect=(0, strip, 1, 1))
+        fig.savefig(out_dir / f"cross_domain_{spec.filename}.png", dpi=150)
+        plt.close(fig)
 
-    # Figure 3: in-domain vs transfer, per train set and per test set.
+    _save_cd_metric_summary(out_dir, specs, summary, names, alg_label, subtitle)
+
+    # In-domain vs transfer, per train set and per test set. Accuracy only: this
+    # figure asks "which corpus fails", and one metric per panel is what makes
+    # that legible. The all-metric view is the figure above.
     diag = np.diag(acc)
     off_mask = ~np.eye(len(names), dtype=bool)
     out_mean = np.array(
@@ -1132,9 +1360,9 @@ def _cd_baseline_style(row: dict) -> dict:
 def _cd_baseline_legend_styles(order: list[dict], is_baseline) -> list[dict]:
     """The distinct baseline styles present, in the order the families are listed.
 
-    Deduplicated so a family with three variants (fitted plus two cutoffs) still
-    contributes exactly one legend entry, and stable so the left and right panels
-    of a figure list the same families in the same order.
+    Deduplicated so a family that appears on several rows still contributes
+    exactly one legend entry, and stable so the left and right panels of a figure
+    list the same families in the same order.
     """
     seen: dict[str, dict] = {}
     for row, baseline in zip(order, is_baseline):
@@ -1162,7 +1390,275 @@ def _cd_row_mark(row: dict) -> str:
     return ""
 
 
-def _plot_cd_comparison(
+def _num(value, default: float = float("nan")) -> float:
+    """One aggregate as a float; a missing or unparseable value becomes NaN."""
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _series(rows: list[dict], key: str, default: float = float("nan")) -> np.ndarray:
+    """One aggregate across comparison rows, as a float array."""
+    return np.array([_num(r.get(key), default) for r in rows], dtype=float)
+
+
+def _cell_of(row: dict, key: str, i: int, j: int) -> float:
+    """One cell of a comparison row's metric matrix, NaN if the row lacks it."""
+    mat = row.get(key)
+    try:
+        return float(mat[i][j])
+    except (TypeError, IndexError, KeyError, ValueError):
+        return float("nan")
+
+
+def _metric_imshow_kwargs(spec: MetricSpec) -> dict:
+    """vmin / vmax / cmap for one metric, matching :func:`_plot_cd_matrix`.
+
+    Shared so a metric is coloured identically wherever it appears -- a reader
+    moving between a variant's own matrix and the cross-variant one should not
+    have to re-learn what red means.
+    """
+    if spec.diverging:
+        half = max(spec.reference, 1.0 - spec.reference)
+        return {
+            "vmin": spec.reference - half,
+            "vmax": spec.reference + half,
+            "cmap": "RdBu" if spec.higher_is_better else "RdBu_r",
+        }
+    return {
+        "vmin": 0.0,
+        "vmax": 1.0,
+        "cmap": CD_SEQ_CMAP if spec.higher_is_better else CD_SEQ_CMAP_BAD,
+    }
+
+
+def _metric_text_color(value: float, spec: MetricSpec) -> str:
+    """Readable annotation colour on this metric's ramp."""
+    if not np.isfinite(value):
+        return "black"
+    if spec.diverging:
+        return "white" if abs(value - spec.reference) > 0.32 else "black"
+    return "white" if value > 0.55 else "black"
+
+
+def _ensure_row_aggregates(rows: list[dict]) -> list[dict]:
+    """Fill each row's per-metric aggregates from its matrix where they are absent.
+
+    Comparison payloads written before the score metrics existed carry the
+    accuracy and macro-F1 matrices but only the *unqualified* accuracy
+    aggregates (``transfer_mean``, ``in_domain_mean``, ...). Recomputing from the
+    matrix -- which is present, and is what those aggregates were derived from in
+    the first place -- lets an old ``variant_comparison.json`` draw its accuracy
+    and macro-F1 comparisons through exactly the same metric-driven path as a new
+    one, instead of silently producing no figures at all.
+
+    Rows are copied, so a replot never mutates the payload it was handed.
+    """
+    out = []
+    for row in rows:
+        row = dict(row)
+        for spec in cell_metric_specs():
+            if f"in_domain_{spec.key}_mean" in row or spec.key not in row:
+                continue
+            mat = np.asarray(row[spec.key], dtype=float)
+            if mat.ndim != 2 or mat.shape[0] != mat.shape[1] or not mat.size:
+                continue
+            diag, off = split_diag(mat)
+            with np.errstate(invalid="ignore"):
+                row[f"in_domain_{spec.key}_mean"] = float(np.nanmean(diag))
+                row[f"in_domain_{spec.key}_std"] = float(np.nanstd(diag))
+                row[f"transfer_{spec.key}_mean"] = (
+                    float(np.nanmean(off)) if off.size else float("nan")
+                )
+                row[f"transfer_{spec.key}_std"] = (
+                    float(np.nanstd(off)) if off.size else float("nan")
+                )
+                row[f"transfer_{spec.key}_worst"] = (
+                    (float(np.nanmin(off)) if spec.higher_is_better
+                     else float(np.nanmax(off)))
+                    if off.size and np.isfinite(off).any() else float("nan")
+                )
+        out.append(row)
+    return out
+
+
+#: The metrics whose comparison figures stay in the experiment directory itself.
+#: Every other metric, and the all-metric grid, is written to
+#: ``CD_OTHER_FIGURES_DIR`` beneath it -- nine metrics x two figures plus the
+#: grid is nineteen files at the top level of a run, which buries the two that
+#: are actually read first. Nothing is dropped or drawn differently; this only
+#: decides which directory a figure lands in, so widening the headline set is a
+#: matter of adding a key here.
+#:
+#: The TPR here is ``tpr_at_srcfpr_0.01``, the TRANSPORTED reading: the threshold
+#: is calibrated to 1% FPR on the source's held-out split and carried to the
+#: target unchanged, which is the number a deployed detector would actually get.
+#: The target-calibrated ``tpr_at_fpr_0.01`` -- threshold read off the tested
+#: cell's own ROC -- is separability under an ideal that assumes labelled human
+#: text from the target corpus, so it sits with the rest.
+#:
+#: A transported TPR is only half a measurement: it is bought at a realized FPR
+#: that the ranked figure does not draw. Add ``fpr_at_srcfpr_0.01`` here to put
+#: the other half beside it.
+CD_HEADLINE_METRICS: tuple[str, ...] = ("auroc", "tpr_at_srcfpr_0.01")
+
+#: Sub-directory of an experiment holding every non-headline comparison figure.
+CD_OTHER_FIGURES_DIR = "other_figures"
+
+#: Which KIND of figure a headline metric keeps beside the JSON. Only the ranked
+#: one: it is the summary of a metric, where the per-cell matrix is the detail
+#: behind it and belongs with the detail. Two headline metrics therefore mean
+#: exactly two files at the top of a run directory, not four.
+CD_HEADLINE_KINDS: frozenset[str] = frozenset({"ranked"})
+
+
+def _cd_figure_dir(exp_dir: Path, metric_key: str | None, kind: str) -> Path:
+    """Where one comparison figure is written, creating the directory if needed.
+
+    ``kind`` is ``"ranked"`` (bars + scatter), ``"matrix"`` (every source->target
+    cell) or ``"all"`` (the all-metric grid), and ``metric_key`` is None for the
+    last of those -- the grid is the overview of everything the run measured, so
+    it is never a headline on its own.
+    """
+    if kind in CD_HEADLINE_KINDS and metric_key in CD_HEADLINE_METRICS:
+        return exp_dir
+    out = exp_dir / CD_OTHER_FIGURES_DIR
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
+def _comparison_specs(rows: list[dict]) -> list[MetricSpec]:
+    """The metrics these comparison rows can actually be drawn under."""
+    return [
+        m for m in cell_metric_specs()
+        if any(np.isfinite(_num(r.get(f"transfer_{m.key}_mean"))) for r in rows)
+    ]
+
+
+def _finite_or_none(value) -> float | None:
+    """One aggregate as a hashable value, with every non-finite mapped to None."""
+    number = _num(value)
+    return float(number) if np.isfinite(number) else None
+
+
+def _row_metric_signature(row: dict, spec: MetricSpec) -> tuple:
+    """Everything a comparison figure draws for one row under one metric.
+
+    Two rows with the same signature produce the same bar, the same scatter point
+    and the same matrix line, so drawing both says nothing the first did not.
+    The mark and the baseline family are part of it: a ★ row and a plain row that
+    happened to tie are still two different claims and must not merge.
+    """
+    matrix = row.get(spec.key)
+    cells: tuple = ()
+    if matrix is not None:
+        try:
+            flat = np.asarray(matrix, dtype=float).ravel()
+        except (TypeError, ValueError):
+            flat = np.array([], dtype=float)
+        cells = tuple(_finite_or_none(v) for v in flat.tolist())
+    aggregates = tuple(
+        _finite_or_none(row.get(f"{where}_{spec.key}_{stat}"))
+        for where in ("in_domain", "transfer")
+        for stat in ("mean", "std", "worst")
+    )
+    return (
+        _cd_row_mark(row),
+        _cd_baseline_style(row)["label"] if row.get("baseline") else "",
+        cells,
+        aggregates,
+    )
+
+
+def _collapsed_label(rows: list[dict]) -> str:
+    """Row label for a merged group.
+
+    A score baseline family collapses to the family's own name -- ``binoculars``,
+    not a list of the rows that merged. The row *is* the Binoculars score, which
+    is the whole content of these metrics; what was configured on top of it is a
+    fact about the config and belongs in the caption, not in the name of a row it
+    does not distinguish.
+
+    Anything else that merged keeps every member's name, joined, since there is
+    no family name to fall back on and picking one member's would be a lie.
+    """
+    kinds = {r.get("baseline_kind") for r in rows}
+    kind = kinds.pop() if len(kinds) == 1 else None
+    if kind:
+        return str(kind)
+    return " = ".join(str(r.get("label", "")) for r in rows)
+
+
+def _collapse_identical_rows(rows: list[dict], spec: MetricSpec) -> list[dict]:
+    """Rows that would draw identically under ``spec``, merged into one.
+
+    The case this exists for is two rows that are the SAME score on the same
+    seeds and splits. A threshold enters exactly one metric family -- the
+    confusion matrix, so accuracy and macro F1. AUROC sweeps every threshold; a
+    target-calibrated TPR@FPR reads its cutoff off the tested cell's own ROC; a
+    transported TPR/FPR reads it off the source split's ROC at the nominal level.
+    None of the three ever sees a declared cutoff, so any two rows over one score
+    column come out bit-identical there, and drawing them twice reads as two
+    references agreeing where there is only one. (Score baselines are one row per
+    family now, so this mostly catches an algorithm entered twice under two ids.)
+
+    Equality is exact and taken from what the figure actually draws
+    (:func:`_row_metric_signature`), not from the rows being baselines, so this
+    also catches an algorithm entered twice under two ids -- and never merges
+    rows that merely round to the same value.
+
+    Only the per-metric figures collapse. ``<noun>_comparison_all.png`` keeps
+    every row, because there the accuracy and macro-F1 columns are what tell the
+    cutoffs apart, and a row missing from that grid would hide the split.
+    """
+    groups: dict[tuple, list[dict]] = {}
+    for row in rows:
+        groups.setdefault(_row_metric_signature(row, spec), []).append(row)
+    if all(len(g) == 1 for g in groups.values()):
+        return rows
+
+    out: list[dict] = []
+    for group in groups.values():
+        if len(group) == 1:
+            out.append(group[0])
+            continue
+        merged = dict(group[0])
+        merged["label"] = _collapsed_label(group)
+        merged["collapsed_n"] = len(group)
+        merged["collapsed_labels"] = [str(r.get("label", "")) for r in group]
+        out.append(merged)
+    return out
+
+
+def _collapse_note(rows: list[dict]) -> str:
+    """Caption naming what each merged row stands for, or ``''`` if none merged.
+
+    The row label says what the row is, not that it absorbed others, so this is
+    the only place the merge is spelled out -- and it names the absorbed rows
+    rather than counting them, because "which three" is the question a reader who
+    notices the missing rows is actually asking.
+    """
+    merged = [r for r in rows if int(r.get("collapsed_n", 1)) > 1]
+    if not merged:
+        return ""
+    note = "; ".join(
+        f"{r['label']} is {int(r['collapsed_n'])} rows whose cells are identical "
+        f"under this metric, drawn once "
+        f"({', '.join(r.get('collapsed_labels', []))})"
+        for r in merged
+    ) + "."
+    if any(r.get("baseline") for r in merged):
+        note += (
+            " A cutoff enters the confusion matrix and nothing else, so rows over "
+            "one score column separate on accuracy and macro F1 alone."
+        )
+    return note + " The all-metric grid keeps every row."
+
+
+def _draw_cd_comparison_set(
     exp_dir: Path,
     rows: list[dict],
     names: list[str],
@@ -1173,16 +1669,90 @@ def _plot_cd_comparison(
     subtitle: str,
     row_label,
 ) -> None:
+    """Every comparison figure for one experiment: one set per metric, plus ``_all``.
+
+    ``<noun>_comparison_<metric>.png`` and ``<noun>_comparison_<metric>_matrix.png``
+    for each metric the payload holds, and ``<noun>_comparison_all.png`` putting
+    every metric on one grid. The per-metric files are what make a ranking
+    disagreement findable: a variant can top the accuracy comparison and sit
+    mid-table on TPR at 1% FPR, and with only the accuracy figure there is
+    nowhere that shows up.
+
+    Every metric is still drawn; only the headline ones
+    (:data:`CD_HEADLINE_METRICS`) are written beside the JSON, and the rest go to
+    ``<exp_dir>/other_figures/`` so the directory opens on the two figures the
+    run is read on rather than on nineteen.
+    """
+    rows = _ensure_row_aggregates(rows)
+    specs = _comparison_specs(rows)
+    if not specs:
+        print(f"No comparable metrics in {exp_dir}")
+        return
+
+    for spec in specs:
+        # Per metric, because whether two rows coincide is a property of the
+        # metric: the score baselines are one row on AUROC and every TPR@FPR
+        # reading, and three separate rows on accuracy and macro F1.
+        _plot_cd_comparison(
+            _cd_figure_dir(exp_dir, spec.key, "ranked"),
+            _collapse_identical_rows(rows, spec), names, label_of,
+            alg_label,
+            spec=spec, noun=noun, subtitle=subtitle, row_label=row_label,
+            matrix_dir=_cd_figure_dir(exp_dir, spec.key, "matrix"),
+        )
+
+    slug = noun.replace(" ", "_")
+    order_desc = sorted(
+        rows, key=lambda r: _num(r.get("transfer_accuracy_mean")), reverse=True
+    )
+    _plot_cd_comparison_metrics(
+        _cd_figure_dir(exp_dir, None, "all"), order_desc, alg_label,
+        noun=noun, slug=slug, subtitle=subtitle, row_label=row_label,
+    )
+    headline = [s.short for s in specs if s.key in CD_HEADLINE_METRICS]
+    print(
+        f"Comparison plots saved to: {exp_dir}"
+        + (f" ({', '.join(headline)}; the rest in {CD_OTHER_FIGURES_DIR}/)"
+           if headline else f" (all in {CD_OTHER_FIGURES_DIR}/)")
+    )
+
+
+def _plot_cd_comparison(
+    out_dir: Path,
+    rows: list[dict],
+    names: list[str],
+    label_of: dict,
+    alg_label: str,
+    *,
+    spec: MetricSpec,
+    noun: str,
+    subtitle: str,
+    row_label,
+    matrix_dir: Path | None = None,
+) -> None:
     """Shared body for the embedding / algorithm cross-domain comparisons.
 
-    Both comparisons rank the same per-item schema (``label``, ``accuracy``
-    matrix, in-domain / transfer means, ``baseline`` flag) by transfer accuracy
-    and draw the same two figures. Only the wording, the row label and the output
-    filenames differ, so those are the parameters:
+    Draws ONE metric's pair of figures. The caller loops over every metric the
+    payload holds, so ``algorithm_comparison_accuracy.png`` and
+    ``algorithm_comparison_auroc.png`` are the same figure asking the same
+    question of different numbers -- which is the point, since the ranking does
+    not have to agree between them.
 
+    Both comparisons rank the same per-item schema (``label``, the metric's
+    source x target matrix, its in-domain / transfer aggregates, ``baseline``
+    flag) and draw the same two figures. Only the wording, the row label and the
+    output filenames differ, so those are the parameters:
+
+      * ``spec`` -- which metric to draw: its label, its reference level, its
+        direction, and the key its aggregates are stored under. It also names the
+        output files, ``<noun>_comparison_<metric>[_matrix].png``. Which
+        *directory* they land in is the caller's call (see
+        :func:`_cd_figure_dir`), not this function's: the ranked figure goes to
+        ``out_dir`` and the matrix to ``matrix_dir``, which default to the same
+        place and differ only for a headline metric, whose ranked figure is
+        promoted to the run directory while its matrix stays with the detail.
       * ``noun`` -- what the varying axis is called ("feature set", "algorithm",
-        "variant"); used in titles, the scatter legend, and — with its spaces
-        turned to underscores — the ``<noun>_comparison[_matrix].png`` filenames.
+        "variant"); used in titles and the scatter legend.
       * ``subtitle`` -- the caller's one-line description (the sweep differs:
         embeddings share an algorithm, algorithms share a feature set).
       * ``row_label(r)`` -- the y-axis label for item ``r``.
@@ -1205,15 +1775,25 @@ def _plot_cd_comparison(
     # The noun reads as prose in the titles ("per feature set"), so it is only
     # squashed where it has to be a filename.
     slug = noun.replace(" ", "_")
-    order = sorted(rows, key=lambda r: r["transfer_mean"])
+    key = spec.key
+    # barh draws the first row at the bottom, so ascending puts the best on top
+    # -- and "best" inverts for a realized FPR, where the smallest value wins.
+    order = sorted(
+        rows,
+        key=lambda r: _num(r.get(f"transfer_{key}_mean")),
+        reverse=not spec.higher_is_better,
+    )
     is_baseline = np.array([bool(r.get("baseline")) for r in order])
     is_hybrid = np.array([bool(r.get("hybrid")) for r in order])
     labels = [row_label(r) for r in order]
-    in_domain = np.array([r["in_domain_mean"] for r in order])
-    transfer = np.array([r["transfer_mean"] for r in order])
-    transfer_std = np.array([r["transfer_std"] for r in order])
-    in_domain_std = np.array([r["in_domain_std"] for r in order])
-    transfer_min = np.array([r["transfer_min"] for r in order])
+    in_domain = _series(order, f"in_domain_{key}_mean")
+    transfer = _series(order, f"transfer_{key}_mean")
+    transfer_std = _series(order, f"transfer_{key}_std", default=0.0)
+    in_domain_std = _series(order, f"in_domain_{key}_std", default=0.0)
+    transfer_min = _series(order, f"transfer_{key}_worst")
+    worst_label = (
+        "worst transfer cell" if spec.higher_is_better else "worst (highest) transfer cell"
+    )
 
     # Figure 1: ranked bars + the in-domain/transfer scatter.
     height = max(5.0, 0.42 * len(order) + 2.4)
@@ -1221,10 +1801,10 @@ def _plot_cd_comparison(
 
     y = np.arange(len(order))
     h = 0.38
-    b1 = axes[0].barh(y + h / 2, in_domain, h, xerr=in_domain_std, capsize=2,
-                      color="steelblue", label="in-domain (diagonal)")
-    b2 = axes[0].barh(y - h / 2, transfer, h, xerr=transfer_std, capsize=2,
-                      color="orange", label="transfer (off-diagonal)")
+    b1 = axes[0].barh(y + h / 2, np.nan_to_num(in_domain), h, xerr=in_domain_std,
+                      capsize=2, color="steelblue", label="in-domain (diagonal)")
+    b2 = axes[0].barh(y - h / 2, np.nan_to_num(transfer), h, xerr=transfer_std,
+                      capsize=2, color="orange", label="transfer (off-diagonal)")
     axes[0].bar_label(b1, fmt="%.3f", fontsize=7, padding=2)
     axes[0].bar_label(b2, fmt="%.3f", fontsize=7, padding=2)
     # Hatch the baseline's bars so it never reads as just another item, in its
@@ -1242,8 +1822,9 @@ def _plot_cd_comparison(
             bar.set_linewidth(CD_HATCH_LINEWIDTH)
     # Worst single transfer cell: a mean can hide one collapsed corpus pair.
     axes[0].scatter(transfer_min, y - h / 2, marker="|", s=90, color="black",
-                    zorder=3, label="worst transfer cell")
-    axes[0].axvline(CD_CHANCE, linestyle="--", color="red", linewidth=1.2, label="chance")
+                    zorder=3, label=worst_label)
+    axes[0].axvline(spec.reference, linestyle="--", color="red", linewidth=1.2,
+                    label=f"reference ({spec.reference*100:g}%)")
     axes[0].set_yticks(y)
     # Only the ★ / ◆ is coloured -- the name itself stays black, so the colour on
     # the row means "baseline family", not "this row is special in some way". A
@@ -1280,8 +1861,8 @@ def _plot_cd_comparison(
             )
         )
     axes[0].set_xlim(0.0, 1.18)
-    axes[0].set_xlabel("Accuracy")
-    axes[0].set_title("Ranked by transfer accuracy")
+    axes[0].set_xlabel(spec.label + ("" if spec.higher_is_better else "  (lower is better)"))
+    axes[0].set_title(f"Ranked by transfer — {spec.label}")
     handles, _ = axes[0].get_legend_handles_labels()
     # Star glyphs matching the ★ prefixes on the row labels: one entry per
     # baseline family present, in that family's colour, so the legend says which
@@ -1298,6 +1879,15 @@ def _plot_cd_comparison(
             Line2D([], [], linestyle="none", marker="D", color=CD_HYBRID_COLOR,
                    markersize=6, label="hybrid (extra features)")
         )
+    # A merged row is named for what it is, not for the merge, so nothing on the
+    # bar says one happened; the legend is where that is stated, and the caption
+    # of the matrix figure names the rows behind it. Only when one is actually on
+    # the figure -- on accuracy and macro F1 the same run collapses nothing.
+    if any(int(r.get("collapsed_n", 1)) > 1 for r in order):
+        handles.append(
+            Line2D([], [], linestyle="none", marker="", color="none",
+                   label="rows identical under this metric are drawn once")
+        )
     # Legend below the axes so it never sits over the bars / worst-cell marks.
     axes[0].legend(
         handles=handles, fontsize=8, loc="upper center",
@@ -1306,8 +1896,9 @@ def _plot_cd_comparison(
 
     axes[1].plot([0, 1], [0, 1], linestyle=":", color="gray", linewidth=1.0,
                  label="no loss under transfer")
-    axes[1].axhline(CD_CHANCE, linestyle="--", color="red", linewidth=1.2, label="chance")
-    axes[1].axvline(CD_CHANCE, linestyle="--", color="red", linewidth=1.2)
+    axes[1].axhline(spec.reference, linestyle="--", color="red", linewidth=1.2,
+                    label=f"reference ({spec.reference*100:g}%)")
+    axes[1].axvline(spec.reference, linestyle="--", color="red", linewidth=1.2)
     item_pts = ~is_baseline & ~is_hybrid
     axes[1].scatter(in_domain[item_pts], transfer[item_pts], s=45,
                     color=CD_ITEM_COLOR, zorder=3, label=noun)
@@ -1335,11 +1926,16 @@ def _plot_cd_comparison(
     for r, x_val, y_val in zip(order, in_domain, transfer):
         axes[1].annotate(r["label"], (x_val, y_val), textcoords="offset points",
                          xytext=(5, 4), fontsize=7.5)
-    lo = min(0.45, float(min(transfer.min(), in_domain.min())) - 0.05)
-    axes[1].set_xlim(lo, 1.02)
-    axes[1].set_ylim(lo, 1.02)
-    axes[1].set_xlabel("In-domain accuracy (diagonal)")
-    axes[1].set_ylabel("Transfer accuracy (off-diagonal)")
+    # The floor follows the data and the metric's reference rather than sitting
+    # at 0.45: a TPR@1%FPR panel clipped to an accuracy-shaped window would put
+    # every point against the left edge.
+    finite = np.concatenate([transfer[np.isfinite(transfer)],
+                             in_domain[np.isfinite(in_domain)]])
+    lo = float(min(spec.reference, finite.min() if finite.size else 0.0)) - 0.05
+    axes[1].set_xlim(max(-0.03, lo), 1.02)
+    axes[1].set_ylim(max(-0.03, lo), 1.02)
+    axes[1].set_xlabel(f"In-domain (diagonal) — {spec.label}")
+    axes[1].set_ylabel(f"Transfer (off-diagonal) — {spec.label}")
     axes[1].set_title("Does the in-domain score survive an unseen corpus?")
     n_leg1 = len(axes[1].get_legend_handles_labels()[0])
     axes[1].legend(
@@ -1347,7 +1943,7 @@ def _plot_cd_comparison(
         ncol=min(n_leg1, 3), frameon=False,
     )
 
-    fig.suptitle(f"{alg_label} — {noun} comparison\n{subtitle}")
+    fig.suptitle(f"{alg_label} — {noun} comparison: {spec.label}\n{subtitle}")
     # bbox_inches="tight" so the below-axes legends are included, not clipped.
     fig.tight_layout(rect=(0, 0.02, 1, 1))
     # The hatch stroke weight is an rcParam read at draw time, not an artist
@@ -1356,7 +1952,8 @@ def _plot_cd_comparison(
     # and restored so no other figure in the process inherits it.
     prev_hatch_lw = plt.rcParams["hatch.linewidth"]
     plt.rcParams["hatch.linewidth"] = CD_HATCH_LINEWIDTH
-    fig.savefig(exp_dir / f"{slug}_comparison.png", dpi=150, bbox_inches="tight")
+    fig.savefig(out_dir / f"{slug}_comparison_{spec.filename}.png", dpi=150,
+                bbox_inches="tight")
     plt.rcParams["hatch.linewidth"] = prev_hatch_lw
     plt.close(fig)
 
@@ -1368,7 +1965,7 @@ def _plot_cd_comparison(
     ]
     mat = np.array(
         [
-            [r["accuracy"][names.index(s)][names.index(t)] for s, t in pairs]
+            [_cell_of(r, key, names.index(s), names.index(t)) for s, t in pairs]
             for r in order_desc
         ],
         dtype=float,
@@ -1377,17 +1974,19 @@ def _plot_cd_comparison(
     fig, ax = plt.subplots(
         figsize=(max(9.0, 1.25 * len(pairs) + 3.0), max(4.5, 0.36 * len(order) + 3.0))
     )
-    im = ax.imshow(mat, vmin=0.0, vmax=1.0, cmap="RdBu", aspect="auto")
+    im = ax.imshow(mat, aspect="auto", **_metric_imshow_kwargs(spec))
     cbar = fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02)
-    cbar.set_label("Accuracy (dashed = chance)")
-    cbar.ax.axhline(CD_CHANCE, color="black", linewidth=1.2, linestyle="--")
+    cbar.set_label(f"{spec.label} (dashed = {spec.reference*100:g}%)")
+    cbar.ax.axhline(spec.reference, color="black", linewidth=1.2, linestyle="--")
 
     ax.set_xticks(range(len(pairs)))
     ax.set_xticklabels(pair_labels, fontsize=7.5, rotation=45, ha="right")
     ax.set_yticks(range(len(order_desc)))
     ax.set_yticklabels([row_label(r) for r in order_desc], fontsize=8)
     ax.set_xlabel("TRAINED ON → TESTED ON", fontweight="bold", labelpad=8)
-    ax.set_title(f"{alg_label} — every transfer cell, per {noun}\n{subtitle}")
+    ax.set_title(
+        f"{alg_label} — every transfer cell, per {noun}: {spec.label}\n{subtitle}"
+    )
 
     ax.set_xticks(np.arange(-0.5, len(pairs), 1), minor=True)
     ax.set_yticks(np.arange(-0.5, len(order_desc), 1), minor=True)
@@ -1396,9 +1995,10 @@ def _plot_cd_comparison(
 
     for i in range(mat.shape[0]):
         for j in range(mat.shape[1]):
-            strong = abs(mat[i, j] - CD_CHANCE) > 0.32
-            ax.text(j, i, f"{mat[i, j]*100:.1f}", ha="center", va="center",
-                    fontsize=7, color="white" if strong else "black")
+            value = mat[i, j]
+            ax.text(j, i, "n/a" if not np.isfinite(value) else f"{value*100:.1f}",
+                    ha="center", va="center", fontsize=7,
+                    color=_metric_text_color(value, spec))
     # Boxed columns are in-domain: they answer a different question from the rest.
     for j, (s, t) in enumerate(pairs):
         if s == t:
@@ -1407,22 +2007,132 @@ def _plot_cd_comparison(
                               edgecolor="black", linewidth=2.0)
             )
 
-    note = (
+    note = _wrap_note(
         "Boxed columns = in-domain (held-out split of the same corpus); the rest "
-        "are transfer to an unseen corpus.\nRows are ordered by mean transfer "
-        "accuracy, best first. ★ marks a zero-shot baseline (no classifier trained)."
-    )
-    if is_hybrid.any():
-        note += (
-            "\n◆ marks a hybrid: trained on extra features beyond the shared set, "
+        f"are transfer to an unseen corpus. Rows are ordered by mean transfer "
+        f"{spec.label}, best first. ★ marks a zero-shot baseline (no "
+        "classifier trained)."
+        + (
+            " ◆ marks a hybrid: trained on extra features beyond the shared set, "
             "so its row is not comparable on equal information."
-        )
-    fig.text(0.01, 0.01, note, fontsize=7.5, color="dimgray")
-    fig.tight_layout(rect=(0, 0.05, 1, 1))
-    fig.savefig(exp_dir / f"{slug}_comparison_matrix.png", dpi=150)
+            if is_hybrid.any() else ""
+        ),
+        _collapse_note(order_desc),
+        spec.note,
+    )
+    fig.text(0.01, 0.01, note, fontsize=7.5, color="dimgray", va="bottom")
+    fig.tight_layout(rect=(0, _note_strip(note, fig), 1, 1))
+    fig.savefig(
+        (matrix_dir or out_dir) / f"{slug}_comparison_{spec.filename}_matrix.png",
+        dpi=150,
+    )
     plt.close(fig)
 
-    print(f"Comparison plots saved to: {exp_dir}")
+
+def _plot_cd_comparison_metrics(
+    out_dir: Path,
+    order_desc: list[dict],
+    alg_label: str,
+    *,
+    noun: str,
+    slug: str,
+    subtitle: str,
+    row_label,
+) -> None:
+    """Every variant under every metric, in-domain beside transfer.
+
+    The ranked bars answer "which variant transfers best on accuracy". This
+    answers the question that follows it: does the ranking hold under the metric
+    the run will actually be reported on? It frequently does not -- accuracy is
+    generous to a detector whose score merely separates on average, and TPR at a
+    1% FPR is not -- and a reader who only ever sees the accuracy ranking has no
+    way to find that out.
+
+    Two heatmaps side by side, rows already ordered by transfer accuracy. Every
+    column is a rate in [0, 1] so one shared scale is honest, but the columns do
+    NOT share a reference: each header carries its own, and a realized-FPR column
+    is marked as the one where up is bad.
+    """
+    specs = [
+        m
+        for m in cell_metric_specs()
+        if any(f"in_domain_{m.key}_mean" in r for r in order_desc)
+    ]
+    if not specs or not order_desc:
+        return
+
+    panels = (
+        ("in_domain", "In-domain (diagonal)"),
+        ("transfer", "Transfer (off-diagonal)"),
+    )
+    mats = [
+        np.array(
+            [
+                [float(r.get(f"{prefix}_{m.key}_mean", np.nan)) for m in specs]
+                for r in order_desc
+            ],
+            dtype=float,
+        )
+        for prefix, _ in panels
+    ]
+
+    col_labels = [
+        f"{m.short}\n({m.reference*100:g}%{'' if m.higher_is_better else ', ↓'})"
+        for m in specs
+    ]
+    row_labels = [row_label(r) for r in order_desc]
+
+    # Stacked, not side by side: with nine metric columns and a handful of
+    # variants each panel is a wide, short strip, and two of them abreast make a
+    # figure three times wider than it is tall. Sharing the x axis also puts one
+    # set of column headers under both panels, where the ↓ marks read once.
+    fig, axes = plt.subplots(
+        2, 1,
+        figsize=(
+            max(9.0, 1.05 * len(specs) + 4.5),
+            max(6.0, 2 * 0.42 * len(order_desc) + 4.2),
+        ),
+        sharex=True,
+    )
+    for ax, mat, (_, title) in zip(axes, mats, panels):
+        im = ax.imshow(mat, vmin=0.0, vmax=1.0, cmap=CD_SEQ_CMAP, aspect="auto")
+        ax.set_xticks(range(len(specs)))
+        ax.set_xticklabels(col_labels, fontsize=7.5, rotation=45, ha="right")
+        ax.set_yticks(range(len(order_desc)))
+        ax.set_yticklabels(row_labels, fontsize=8)
+        ax.set_title(title, fontsize=10)
+        ax.set_xticks(np.arange(-0.5, len(specs), 1), minor=True)
+        ax.set_yticks(np.arange(-0.5, len(order_desc), 1), minor=True)
+        ax.grid(which="minor", color="white", linewidth=2)
+        ax.tick_params(which="minor", length=0)
+        for i in range(mat.shape[0]):
+            for j in range(mat.shape[1]):
+                value = mat[i, j]
+                ax.text(
+                    j, i,
+                    "n/a" if not np.isfinite(value) else f"{value*100:.1f}",
+                    ha="center", va="center", fontsize=7,
+                    color=(
+                        "white" if np.isfinite(value) and value > 0.55 else "black"
+                    ),
+                )
+        fig.colorbar(im, ax=ax, fraction=0.04, pad=0.02).set_label("Value")
+
+    fig.suptitle(f"{alg_label} — every metric, per {noun}\n{subtitle}")
+    note = _wrap_note(
+        "Rows keep the transfer-accuracy order of the ranked figure, best first, so "
+        "a ranking that reorders under another metric is visible as a column that "
+        "does not descend.",
+        "Each column has its own reference, printed under its name; ↓ marks the "
+        "columns where a HIGHER value is worse (the FPR a transported threshold "
+        "actually cost).",
+        "tpr@X is (a), calibrated on the cell being tested. tprT@X / fprT@X are (b), "
+        "calibrated on the source's held-out split and carried over unchanged.",
+    )
+    fig.text(0.01, 0.01, note, fontsize=7.5, color="dimgray", va="bottom")
+    fig.tight_layout(rect=(0, _note_strip(note, fig), 1, 1))
+    fig.savefig(out_dir / f"{slug}_comparison_all.png", dpi=150)
+    plt.close(fig)
 
 
 def plot_clf_cd_comparison(exp_dir: Path, payload: dict) -> None:
@@ -1434,17 +2144,30 @@ def plot_clf_cd_comparison(exp_dir: Path, payload: dict) -> None:
     holding its full source x target accuracy matrix and the in-domain /
     transfer means taken from it.
 
-    Two figures, named after whichever axis the run actually varied
-    (``payload["noun"]``: embedding, algorithm, or variant when both moved):
+    Figures are named after whichever axis the run actually varied
+    (``payload["noun"]``: embedding, algorithm, or variant when both moved), and
+    the first two are drawn once per metric -- accuracy, macro F1, AUROC, and
+    each TPR@FPR operating point under both readings:
 
-      * ``<noun>_comparison.png`` -- in-domain vs transfer per variant, ranked,
-        next to the same two numbers as a scatter. The scatter is what separates
-        "this variant is good" from "this variant is good *at this corpus*":
-        points near the diagonal keep their score off-domain, points far below it
-        have learned the corpus.
-      * ``<noun>_comparison_matrix.png`` -- every source->target cell of every
-        variant in one heatmap, for the cases the means average away (one corpus
-        pair that collapses while the rest hold up).
+      * ``<noun>_comparison_<metric>.png`` -- in-domain vs transfer per variant,
+        ranked, next to the same two numbers as a scatter. The scatter is what
+        separates "this variant is good" from "this variant is good *at this
+        corpus*": points near the diagonal keep their score off-domain, points
+        far below it have learned the corpus.
+      * ``<noun>_comparison_<metric>_matrix.png`` -- every source->target cell of
+        every variant in one heatmap, for the cases the means average away (one
+        corpus pair that collapses while the rest hold up).
+      * ``<noun>_comparison_all.png`` -- every metric on one grid, in-domain
+        beside transfer. The overview: it is where a ranking that holds on
+        accuracy and falls apart at a 1% FPR operating point becomes visible.
+
+    Only the headline metrics (:data:`CD_HEADLINE_METRICS`) are written into
+    ``exp_dir`` itself. Every other metric's pair, and the all-metric grid, goes
+    to ``exp_dir/other_figures/``: nothing is skipped, but a run directory that
+    opens on nineteen files opens on none of them in particular.
+
+    A payload written before the score metrics existed carries only the accuracy
+    and macro-F1 matrices, and draws exactly those two sets.
     """
     rows: list[dict] = payload.get("variants") or []
     if not rows:
@@ -1458,7 +2181,7 @@ def plot_clf_cd_comparison(exp_dir: Path, payload: dict) -> None:
     dims = {r.get("feature_dim") for r in rows}
     show_dim = len(dims) > 1
 
-    _plot_cd_comparison(
+    _draw_cd_comparison_set(
         exp_dir,
         rows,
         payload["dataset_names"],
@@ -1493,9 +2216,9 @@ def plot_clf_cd_emb_comparison(exp_dir: Path, payload: dict) -> None:
     subtitle = (
         f"{cfg['model']['ml_alg']} · {cfg['model']['n_runs']} seeds · "
         f"grouped by {cfg['data']['group_col']!r} · "
-        f"{len(names)} corpora · chance = {CD_CHANCE*100:.0f}%"
+        f"{len(names)} corpora"
     )
-    _plot_cd_comparison(
+    _draw_cd_comparison_set(
         exp_dir, rows, names, label_of, alg_label,
         noun="embedding", subtitle=subtitle,
         row_label=lambda r: (
@@ -1532,9 +2255,9 @@ def plot_clf_cd_alg_comparison(exp_dir: Path, payload: dict) -> None:
     subtitle = (
         f"features: {feats} · {cfg['model']['n_runs']} seeds · "
         f"grouped by {cfg['data']['group_col']!r} · "
-        f"{len(names)} corpora · chance = {CD_CHANCE*100:.0f}%"
+        f"{len(names)} corpora"
     )
-    _plot_cd_comparison(
+    _draw_cd_comparison_set(
         exp_dir, rows, names, label_of, alg_label,
         noun="algorithm", subtitle=subtitle,
         row_label=lambda r: f"{_cd_row_mark(r)}{r['label']}",
@@ -1618,7 +2341,82 @@ def plot_clf_id_result(out_dir: Path) -> None:
     fig.tight_layout(rect=(0, 0.04, 1, 1))
     fig.savefig(out_dir / "in_domain_confusion.png", dpi=150)
     plt.close(fig)
+
+    _save_id_metric_figure(out_dir, payload)
     print(f"Plot saved to: {out_dir}")
+
+
+def _save_id_metric_figure(out_dir: Path, payload: dict) -> None:
+    """One variant's metrics on the fitted rows and the held-out ones.
+
+    The same train-vs-test reading the confusion figure's title carries for
+    accuracy, extended to every metric -- because the gap is not the same size
+    for all of them. A model can lose almost nothing in accuracy across the split
+    and lose a large share of its TPR at 1% FPR, since that operating point lives
+    in the tail of the human distribution, which is exactly the part a fitted
+    model has pushed furthest away on the rows it saw.
+
+    The transported columns (``tprT`` / ``fprT``) have no train bar on purpose:
+    their threshold is calibrated ON the training rows, so scoring it back there
+    would report the nominal FPR by construction and say nothing.
+    """
+    s = payload["summary"]
+    specs = [m for m in cell_metric_specs() if f"{m.key}_mean" in s]
+    if not specs:
+        return
+
+    alg_label = payload.get("alg_label", out_dir.name)
+    x = _metric_bar_positions(specs)
+    test = np.array([float(s.get(f"{m.key}_mean", np.nan)) for m in specs])
+    test_std = np.array([float(s.get(f"{m.key}_std", 0.0)) for m in specs])
+    train = np.array([float(s.get(f"train_{m.key}_mean", np.nan)) for m in specs])
+    train_std = np.array([float(s.get(f"train_{m.key}_std", 0.0)) for m in specs])
+
+    fig, ax = plt.subplots(figsize=(max(5.5, 1.5 * len(specs) + 2.0), 6.4))
+    w = 0.38
+    b1 = ax.bar(x - w / 2, np.nan_to_num(train, nan=0.0), w, yerr=train_std,
+                capsize=2, color=ID_TRAIN_COLOR, label="train (fitted on these rows)")
+    b2 = ax.bar(x + w / 2, test, w, yerr=test_std, capsize=2,
+                color=ID_TEST_COLOR, label="test (held out)")
+    # Labelled from the real values so a missing train bar reads as blank rather
+    # than as a confident 0.000.
+    ax.bar_label(b1, labels=["" if not np.isfinite(v) else f"{v:.3f}" for v in train],
+                 fontsize=8, padding=2)
+    ax.bar_label(b2, fmt="%.3f", fontsize=8, padding=2)
+
+    for xi, spec in zip(x, specs):
+        ax.plot([xi - w, xi + w], [spec.reference] * 2, color="red",
+                linewidth=1.6, linestyle="--", zorder=4)
+    ax.plot([], [], color="red", linewidth=1.6, linestyle="--",
+            label="reference (chance, or the nominal FPR)")
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(
+        [
+            m.label.replace(" (", "\n(")
+            + ("" if m.higher_is_better else "\n↓ lower is better")
+            for m in specs
+        ],
+        fontsize=7.5,
+    )
+    ax.set_ylim(0, 1.34)
+    ax.set_ylabel("Value")
+    ax.legend(fontsize=8, loc="upper center", ncol=3, frameon=False)
+    fig.suptitle(f"{alg_label} — every metric, train vs held-out\n"
+                 f"in-domain only · {len(payload.get('per_seed', []))} seed(s)")
+    note = _wrap_note(
+        "One corpus, split in two: both bars are the SAME data. This is an upper "
+        "bound on a deployed detector, not an estimate of one.",
+        "tpr@X (a) fits its threshold on the rows it scores. tprT@X / fprT@X (b) "
+        "fit it to X% FPR on the TRAINING rows and carry it to the held-out ones — "
+        "so they have no train bar, and fprT@X missing its nominal level here means "
+        "the operating point is not stable even within one corpus."
+        if any(m.key.startswith("tpr_at_") for m in specs) else "",
+    )
+    fig.text(0.01, 0.01, note, fontsize=7.5, color="dimgray", va="bottom")
+    fig.tight_layout(rect=(0, _note_strip(note, fig), 1, 1))
+    fig.savefig(out_dir / "in_domain_metrics.png", dpi=150)
+    plt.close(fig)
 
 
 # Train and test are the same measurement on two row sets, so they are one hue
@@ -1836,7 +2634,82 @@ def plot_clf_id_comparison(exp_dir: Path, payload: dict) -> None:
     fig.savefig(exp_dir / f"{slug}_comparison.png", dpi=150, bbox_inches="tight")
     plt.rcParams["hatch.linewidth"] = prev
     plt.close(fig)
+
+    _plot_id_comparison_metrics(
+        exp_dir, list(reversed(order)), alg_label,
+        noun=noun, slug=slug, subtitle=payload.get("subtitle", ""),
+    )
     print(f"Comparison plot saved to: {exp_dir}")
+
+
+def _plot_id_comparison_metrics(
+    exp_dir: Path,
+    order_desc: list[dict],
+    alg_label: str,
+    *,
+    noun: str,
+    slug: str,
+    subtitle: str,
+) -> None:
+    """Every in-domain variant under every metric, held-out rows only.
+
+    The in-domain counterpart of ``_plot_cd_comparison_metrics``, and the same
+    question: whether the accuracy ranking survives being asked at a low-FPR
+    operating point. Only the held-out columns are drawn -- the train ones belong
+    to the per-variant figure, where the pair is the point.
+    """
+    specs = [
+        m for m in cell_metric_specs() if any(f"{m.key}_mean" in r for r in order_desc)
+    ]
+    if not specs or not order_desc:
+        return
+
+    mat = np.array(
+        [[float(r.get(f"{m.key}_mean", np.nan)) for m in specs] for r in order_desc],
+        dtype=float,
+    )
+    col_labels = [
+        f"{m.short}\n({m.reference*100:g}%{'' if m.higher_is_better else ', ↓'})"
+        for m in specs
+    ]
+    row_labels = [f"{_cd_row_mark(r)}{r['label']}" for r in order_desc]
+
+    fig, ax = plt.subplots(
+        figsize=(
+            max(9.0, 1.05 * len(specs) + 4.5),
+            max(4.5, 0.42 * len(order_desc) + 3.4),
+        )
+    )
+    im = ax.imshow(mat, vmin=0.0, vmax=1.0, cmap=CD_SEQ_CMAP, aspect="auto")
+    fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02).set_label("Value")
+    ax.set_xticks(range(len(specs)))
+    ax.set_xticklabels(col_labels, fontsize=7.5, rotation=45, ha="right")
+    ax.set_yticks(range(len(order_desc)))
+    ax.set_yticklabels(row_labels, fontsize=8)
+    ax.set_xticks(np.arange(-0.5, len(specs), 1), minor=True)
+    ax.set_yticks(np.arange(-0.5, len(order_desc), 1), minor=True)
+    ax.grid(which="minor", color="white", linewidth=2)
+    ax.tick_params(which="minor", length=0)
+    for i in range(mat.shape[0]):
+        for j in range(mat.shape[1]):
+            value = mat[i, j]
+            ax.text(
+                j, i, "n/a" if not np.isfinite(value) else f"{value*100:.1f}",
+                ha="center", va="center", fontsize=7,
+                color="white" if np.isfinite(value) and value > 0.55 else "black",
+            )
+
+    fig.suptitle(f"{alg_label} — every metric, per {noun} (held out)\n{subtitle}")
+    note = _wrap_note(
+        "Rows keep the held-out accuracy order, best first: a column that does not "
+        "descend is a ranking that does not survive that metric.",
+        "Each column carries its own reference; ↓ marks the columns where a higher "
+        "value is worse. In-domain only — see run_clf_cross_domain.py for transfer.",
+    )
+    fig.text(0.01, 0.01, note, fontsize=7.5, color="dimgray", va="bottom")
+    fig.tight_layout(rect=(0, _note_strip(note, fig), 1, 1))
+    fig.savefig(exp_dir / f"{slug}_comparison_all.png", dpi=150)
+    plt.close(fig)
 
 
 ########################################################################
@@ -2616,8 +3489,9 @@ def _loo_baselines(payload: dict) -> list[tuple[str, str]]:
                     names.append(name)
                 labels.setdefault(name, entry.get("label", name))
 
-    # `binoculars_vanilla_0.901531` is too wide for a legend; the variant plus the
-    # cutoff is all the label has to carry.
+    # Older payloads carry per-cutoff names such as `binoculars_vanilla_0.901531`,
+    # which are too wide for a legend; the variant plus the cutoff is all the
+    # label has to carry.
     def pretty(name: str) -> str:
         return labels.get(name, name).replace("binoculars_", "binoculars ").replace("_", " ")
 
@@ -2778,8 +3652,7 @@ def _save_loo_gap_figure(
         0.01, 0.01,
         "Blue = the pooled trained model wins on the held-out slice; "
         "red = the Binoculars baseline wins.\nAll accuracies on the same "
-        "out-of-domain rows (fitted = threshold from the training pool, "
-        "vanilla = fixed cutoff, fit to nothing).",
+        "out-of-domain rows, at the baseline's fixed cutoff.",
         fontsize=7.5, color="dimgray",
     )
     fig.tight_layout(rect=(0, 0.06, 1, 1))
@@ -2829,9 +3702,8 @@ def _save_clf_loo_figures(out_dir: Path, payload: dict) -> None:
     )
     if baselines:
         note += (
-            "\nHatched = zero-shot Binoculars on the same out-of-domain rows; "
-            "'fitted' calibrates its cutoff on the training pool, 'vanilla' uses a "
-            "fixed cutoff and sees no labels at all."
+            "\nHatched = zero-shot Binoculars on the same out-of-domain rows, at "
+            "a fixed cutoff that sees no labels at all."
         )
     fig.text(0.01, 0.005, note, fontsize=7.5, color="dimgray")
     fig.tight_layout(rect=(0, 0.11, 1, 1))

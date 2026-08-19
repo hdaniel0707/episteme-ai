@@ -15,6 +15,14 @@ here, so the runner (``epai/ai_detection/train/run_clf_cross_domain.py``) and th
 hyper-parameter search (``run_sweep_cross_domain.py``) cannot drift apart on the
 split, the missing-value rule, the group exclusion or the metric definitions.
 
+Every cell is reported under several metrics, not just accuracy: accuracy and
+macro F1 from the predicted labels, AUROC and TPR at a fixed FPR from the
+continuous score behind them. The last of those is reported *twice*, once with
+the threshold fit on the cell being tested and once with the source's threshold
+transported to it, and the difference between those two readings is where the
+transfer failure this experiment hunts actually shows up. See the "Score
+metrics" section below for what each one claims.
+
 Three invariants this module exists to hold:
 
   * **Binarised target.** The corpora do not agree on generator names (``gpt``
@@ -38,7 +46,13 @@ import json
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, roc_curve
+from sklearn.metrics import (
+    accuracy_score,
+    confusion_matrix,
+    f1_score,
+    roc_auc_score,
+    roc_curve,
+)
 from sklearn.model_selection import GroupShuffleSplit
 from tqdm import tqdm
 
@@ -48,6 +62,11 @@ from epai.utils.train_utils import CLF_TARGET_COL, is_missing
 
 # Binarised target: human -> 0, any generator -> 1.
 BINARY_CLASSES = ["human", "machine"]
+
+# Chance level of a rate metric on the binarised task. The classes are balanced,
+# so accuracy, macro F1 and AUROC are all read against 0.5. TPR at a fixed FPR is
+# NOT -- its chance level is the FPR itself; see MetricSpec.reference.
+CD_CHANCE_RATE = 0.5
 
 # Embedding columns are stored under this prefix. It is only ever stripped, for
 # display: a config names its columns literally, since a feature set may mix an
@@ -60,15 +79,14 @@ EMB_PREFIX = "emb_"
 # be dropped into the design matrix as a 0/1 feature -- a leakage sanity check.
 BIN_SUFFIX = "__bin"
 
-# Zero-shot score baselines: no model is fitted, only a threshold on one scalar
-# column. Each output lands in its own subdirectory, alongside the variants.
+# Zero-shot score baselines: no model is fitted, only a fixed threshold on one
+# scalar column. Each output lands in its own subdirectory, alongside the
+# variants.
 DEFAULT_BINOX_COL = "binoculars_score"
 
 # The LLM judge writes P(human) per row -- 1.0 => human, 0.0 => machine -- so a
-# LOW score means machine, the same direction as Binoculars. 0.5 is the natural
-# fit-nothing cutoff.
+# LOW score means machine, the same direction as Binoculars.
 DEFAULT_JUDGE_COL = "llm_judge_score_gpt54_mini"
-DEFAULT_JUDGE_VANILLA = (0.5,)
 
 
 # ---------------------------------------------------------------------------
@@ -115,26 +133,26 @@ def binary_text_features(cfg: dict) -> list[str]:
 class BaselineKind:
     """One family of zero-shot score baselines, as a config block describes it.
 
-    The two families differ in exactly three things -- which config block turns
-    them on, which column holds the score, and which end of that score means
-    *machine*. Everything else (the fitted/vanilla split, the grouped evaluation,
-    the payload shape) is shared, so a third detector is one more entry here.
+    The families differ in exactly three things -- which config block turns them
+    on, which column holds the score, and which end of that score means
+    *machine*. Everything else (the grouped evaluation, the payload shape) is
+    shared, so a third detector is one more entry here.
+
+    A family contributes exactly ONE variant, and its cutoff is always taken
+    from the config: nothing about a baseline is fitted. The headline metrics
+    are AUROC and TPR at a fixed FPR, and neither reads the declared cutoff --
+    an ROC sweeps every threshold. Calibrating one on the source (Youden's J,
+    as earlier versions did) therefore bought nothing but a second row that was
+    bit-identical under every metric the run is read on, so the cutoff now only
+    has to be a documented, fixed operating point for the label-derived numbers
+    (accuracy, macro F1, the confusion matrix) to mean something.
     """
 
-    key: str  # names the output folders: <key>_fitted, <key>_vanilla_<thr>
+    key: str  # names the output folder and the comparison row
     cfg_key: str  # the config block that configures it
     default_col: str
     machine_is_high: bool  # True when a *high* score means machine-written
     label: str  # human-readable, for preflight messages
-    default_vanilla: tuple[float, ...] = ()  # cutoffs used when none is given
-
-    @property
-    def fitted_name(self) -> str:
-        return f"{self.key}_fitted"
-
-    @property
-    def vanilla_prefix(self) -> str:
-        return f"{self.key}_vanilla_"
 
     @property
     def rule(self) -> str:
@@ -158,7 +176,6 @@ BASELINE_KINDS: tuple[BaselineKind, ...] = (
         default_col=DEFAULT_JUDGE_COL,
         machine_is_high=False,  # the judge reports P(human), so LOW means machine
         label="LLM judge",
-        default_vanilla=DEFAULT_JUDGE_VANILLA,
     ),
 )
 
@@ -185,80 +202,50 @@ def baseline_columns(cfg: dict) -> list[str]:
 
 
 def format_threshold(value: float) -> str:
-    """Compact rendering of a threshold, for labels and output-folder names."""
+    """Compact rendering of a threshold, for labels and log lines."""
     return f"{float(value):g}"
 
 
-def vanilla_thresholds(cfg: dict, kind: BaselineKind) -> list[float]:
-    """The fixed cutoffs one baseline asks for, from its ``vanilla_threshold``.
+def baseline_threshold(cfg: dict, kind: BaselineKind) -> float | None:
+    """The fixed cutoff one baseline family asks for, from its ``threshold``.
 
-    Scalar or list. An absent key falls back to the kind's ``default_vanilla``
-    (empty for Binoculars, whose published cutoffs are corpus-specific and must
-    be named explicitly; 0.5 for the judge, whose scale fixes the neutral point),
-    and an explicit ``vanilla_threshold: []`` skips the vanilla variant. Malformed
-    entries are dropped here and reported by ``check_score_baselines`` instead.
+    A single number, and there is no default: a cutoff is a claim about where
+    this detector is operated, so it is named in the config or the family does
+    not run. Malformed or missing values read as None here and are reported by
+    ``check_score_baselines`` instead.
     """
     spec = cfg.get(kind.cfg_key)
     if not isinstance(spec, dict):
-        return []
-    if "vanilla_threshold" not in spec:
-        return list(kind.default_vanilla)
-    value = spec.get("vanilla_threshold")
-    if value is None:
-        return []
-    values = value if isinstance(value, (list, tuple)) else [value]
-    return [
-        float(v)
-        for v in values
-        if isinstance(v, (int, float)) and not isinstance(v, bool)
-    ]
+        return None
+    value = spec.get("threshold")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
 
 
 def baseline_kind_specs(cfg: dict, kind: BaselineKind) -> list[dict]:
-    """The variants of ONE baseline family, or [] when that family is off.
+    """The ONE variant of a baseline family, or [] when that family is off.
 
-    Two variants, and the distinction matters when reading the comparison:
-
-      * ``<kind>_fitted`` -- the cutoff is calibrated per source on its
-        *training* split (Youden's J). No classifier is trained, but the
-        threshold is still fit on data, so it is not free of the source corpus;
-      * ``<kind>_vanilla_<threshold>`` -- a cutoff taken straight from the
-        config and applied everywhere, fit to nothing. The genuinely zero-shot
-        reference, and the only row in the table that saw no labels at all.
-
-    The fitted variant always runs; one vanilla variant runs per threshold, so a
-    config can compare several published cutoffs.
+    The cutoff comes straight from the config and is applied unchanged to every
+    source and target -- fit to nothing, the genuinely zero-shot reference the
+    trained variants are measured against. A family with no usable ``threshold``
+    contributes nothing (``check_score_baselines`` says why).
     """
     col = baseline_col(cfg, kind)
-    if not col:
+    threshold = baseline_threshold(cfg, kind)
+    if not col or threshold is None:
         return []
 
-    common = {
-        "kind": kind.key,
-        "column": col,
-        "machine_is_high": kind.machine_is_high,
-    }
-    specs = [
+    return [
         {
-            **common,
-            "variant": "fitted",
-            "threshold": None,
-            "name": kind.fitted_name,
-            "label": kind.fitted_name,
+            "kind": kind.key,
+            "column": col,
+            "machine_is_high": kind.machine_is_high,
+            "threshold": threshold,
+            "name": kind.key,
+            "label": kind.key,
         }
     ]
-    for thr in vanilla_thresholds(cfg, kind):
-        name = f"{kind.vanilla_prefix}{format_threshold(thr)}"
-        specs.append(
-            {
-                **common,
-                "variant": "vanilla",
-                "threshold": float(thr),
-                "name": name,
-                "label": name,
-            }
-        )
-    return specs
 
 
 def baseline_specs(cfg: dict) -> list[dict]:
@@ -276,17 +263,15 @@ def describe_variant(variant: dict) -> str:
     threshold opposite ways, and a log line that only shows the number would be
     ambiguous between them.
     """
-    cutoff = (
-        "threshold fit per source"
-        if variant["threshold"] is None
-        else f"fixed threshold {format_threshold(variant['threshold'])}"
-    )
     rule = (
         "score>=thr ⇒ machine"
         if variant.get("machine_is_high")
         else "score<=thr ⇒ machine"
     )
-    return f"{variant['column']}, {cutoff}, {rule}"
+    return (
+        f"{variant['column']}, fixed threshold "
+        f"{format_threshold(variant['threshold'])}, {rule}"
+    )
 
 
 def check_baseline_block(cfg: dict, kind: BaselineKind, report: Report) -> None:
@@ -305,27 +290,25 @@ def check_baseline_block(cfg: dict, kind: BaselineKind, report: Report) -> None:
     if not isinstance(col, str) or not col.strip():
         report.error(f"'{kind.cfg_key}.column' must be a non-empty string")
 
-    thr = bx.get("vanilla_threshold")
-    if thr is not None:
-        values = thr if isinstance(thr, (list, tuple)) else [thr]
-        # An explicit empty list is the documented way to skip the variant.
-        if isinstance(thr, (list, tuple)) and not values:
-            return
-        ok = all(
-            isinstance(v, (int, float)) and not isinstance(v, bool) for v in values
+    if "vanilla_threshold" in bx:
+        # The fitted/vanilla split is gone: a baseline is one fixed cutoff now.
+        report.error(
+            f"'{kind.cfg_key}.vanilla_threshold' is no longer read -- the "
+            f"baseline is a single fixed cutoff; rename it to "
+            f"'{kind.cfg_key}.threshold' with one number"
         )
-        if not ok:
-            report.error(
-                f"'{kind.cfg_key}.vanilla_threshold' must be a number or a "
-                "list of numbers"
-            )
-        elif len({format_threshold(v) for v in values}) != len(values):
-            # Each threshold names an output folder; two that render the same
-            # would overwrite one another.
-            report.error(
-                f"'{kind.cfg_key}.vanilla_threshold' has entries that are "
-                f"indistinguishable once formatted: {values}"
-            )
+
+    if not bx.get("enabled", True):
+        return
+
+    thr = bx.get("threshold")
+    if thr is None:
+        report.error(
+            f"'{kind.cfg_key}.threshold' is required when the baseline is "
+            f"enabled: the cutoff is never fitted, so it has to be named here"
+        )
+    elif isinstance(thr, bool) or not isinstance(thr, (int, float)):
+        report.error(f"'{kind.cfg_key}.threshold' must be a single number")
 
 
 def check_score_baselines(cfg: dict, report: Report) -> None:
@@ -579,15 +562,230 @@ def print_split_composition(composition: dict, indent: str = "  ") -> None:
             )
 
 
-def metrics_dict(y: np.ndarray, y_pred: np.ndarray) -> dict:
+# ---------------------------------------------------------------------------
+# Score metrics: AUROC and TPR at a fixed FPR
+# ---------------------------------------------------------------------------
+#
+# Accuracy answers "how often is the label right", which is not the question a
+# deployed detector is graded on. Accusing a human of writing with an LLM is the
+# expensive error, so the operating point that matters is a low false-positive
+# one, and the number that matters there is the true-positive rate *at* it --
+# TPR@FPR (Sarvazyan et al., arXiv:2412.05139, which reports TPR at FPR = 1% and
+# finds values as low as 0% for detectors whose headline accuracy looks fine).
+#
+# Neither TPR@FPR nor AUROC is recoverable from a confusion matrix: both read the
+# *ranking* of a continuous score, which is why the algorithms grew
+# ``decision_score`` and why these numbers cannot be backfilled onto a matrix
+# that was already run.
+#
+# TWO WAYS TO READ TPR@FPR, AND THEY ARE NOT THE SAME CLAIM
+# ---------------------------------------------------------
+# A TPR@FPR needs a threshold placed at that FPR, and *which rows the threshold
+# is placed on* is the whole difference between a separability measure and a
+# deployment measure. Both are reported, under distinct key prefixes:
+#
+#   (a) ``tpr_at_fpr_<level>``  -- the threshold is read off the evaluation
+#       set's own ROC curve. This is the literature's number, including the
+#       paper above. It is a point on the ROC curve and so measures separability
+#       only: it assumes a calibrator with access to human text from the very
+#       corpus being tested.
+#
+#   (b) ``tpr_at_srcfpr_<level>`` -- the threshold is calibrated to hit that FPR
+#       on the SOURCE corpus's held-out split, then applied unchanged to the
+#       target. ``fpr_at_srcfpr_<level>`` reports what FPR that threshold
+#       actually produced there. This is the deployable number: a real detector
+#       is calibrated once and then meets text it has never seen.
+#
+# (b) is the one this experiment exists to measure. A model can hold its AUROC
+# under transfer -- the score still separates -- while its 1%-FPR threshold lands
+# at 30% FPR on the target, because the score *distribution* shifted even though
+# the ordering survived. That failure is invisible to (a), to accuracy and to
+# AUROC alike, and it is the difference between "this detector ranks well" and
+# "this detector can be deployed".
+#
+# On the diagonal the source's held-out split IS the evaluation set, so (b)
+# degenerates to (a) by construction and its realized FPR is the nominal level.
+# Only the off-diagonal cells of the (b) matrices carry new information; the
+# diagonal is there so the two matrices are read on the same axes.
+#
+# A caveat that no key can carry: at FPR = 1% the threshold is set by the
+# ~n_human/100 most machine-looking human rows -- 3 rows on a 300-human in-domain
+# split, 10 on a 1000-human transfer cell. The estimate is correspondingly
+# coarse, and the seed-to-seed spread understates its sampling error. 5% is the
+# headline for that reason and 1% is the stress number.
+
+#: FPR operating points every run reports, tightest first.
+TPR_AT_FPR_LEVELS: tuple[float, ...] = (0.01, 0.05)
+
+
+def level_tag(level: float) -> str:
+    """A level as it appears in a metric key / filename: 0.01 -> ``'0.01'``."""
+    return f"{float(level):g}"
+
+
+def oracle_tpr_key(level: float) -> str:
+    """Key for variant (a): TPR at a threshold fit on the evaluation set itself."""
+    return f"tpr_at_fpr_{level_tag(level)}"
+
+
+def transported_tpr_key(level: float) -> str:
+    """Key for variant (b): TPR under the source-calibrated threshold."""
+    return f"tpr_at_srcfpr_{level_tag(level)}"
+
+
+def transported_fpr_key(level: float) -> str:
+    """Key for variant (b): the FPR that threshold actually produced here."""
+    return f"fpr_at_srcfpr_{level_tag(level)}"
+
+
+def score_metric_keys(levels: tuple[float, ...] = TPR_AT_FPR_LEVELS) -> list[str]:
+    """Every score-derived per-cell key, in reporting order.
+
+    Drives the seed aggregation, the printed tables and the figures, so a new
+    operating point is added in exactly one place (``TPR_AT_FPR_LEVELS``).
+    """
+    keys = ["auroc"]
+    for level in levels:
+        keys += [
+            oracle_tpr_key(level),
+            transported_tpr_key(level),
+            transported_fpr_key(level),
+        ]
+    return keys
+
+
+def auroc_score(y: np.ndarray, scores: np.ndarray) -> float:
+    """AUROC with machine (``y == 1``) as the positive class. NaN if single-class.
+
+    Deliberately *not* orientation-corrected. A detector whose score runs the
+    wrong way scores below 0.5 and should read that way: flipping it to
+    ``1 - auroc`` would present a broken detector as a working one, which is
+    exactly how an inverted Binoculars score hides inside a fitted threshold.
+    """
+    y = np.asarray(y)
+    if np.unique(y).size < 2:
+        return float("nan")
+    return float(roc_auc_score(y, np.asarray(scores, dtype=float)))
+
+
+def roc_point_at_fpr(
+    y: np.ndarray, scores: np.ndarray, level: float
+) -> tuple[float, float]:
+    """``(tpr, threshold)`` at the largest achievable FPR <= ``level``.
+
+    The threshold is in ``score >= threshold ⇒ machine`` form, matching
+    sklearn's ``roc_curve``. The FPR grid is discrete -- it can only step at an
+    observed human score -- so the *achievable* point at or below the level is
+    taken rather than an interpolated one, which is the conservative reading and
+    the one that corresponds to a threshold you could actually deploy.
+
+    When no threshold reaches the level (fewer than ``1/level`` human rows, or
+    ties in the tail), ``roc_curve``'s leading point stands: TPR 0 at an
+    infinite threshold, i.e. "this operating point is not reachable here".
+    Returns ``(nan, nan)`` on a single-class set, where there is no ROC at all.
+    """
+    y = np.asarray(y)
+    if np.unique(y).size < 2:
+        return float("nan"), float("nan")
+    fpr, tpr, thr = roc_curve(y, np.asarray(scores, dtype=float))
+    # fpr is non-decreasing and starts at 0, so this is never empty.
+    idx = int(np.flatnonzero(fpr <= level)[-1])
+    return float(tpr[idx]), float(thr[idx])
+
+
+def rates_at_threshold(
+    y: np.ndarray, scores: np.ndarray, threshold: float
+) -> tuple[float, float]:
+    """``(tpr, fpr)`` when a FIXED threshold is applied: ``score >= thr ⇒ machine``.
+
+    The realized FPR is the point of the pair. A transported threshold is only
+    as good as the FPR it actually delivers on the corpus it lands on, and a TPR
+    quoted without it is meaningless -- 100% TPR at 100% FPR is a detector that
+    calls everything machine.
+    """
+    y = np.asarray(y)
+    scores = np.asarray(scores, dtype=float)
+    if not np.isfinite(threshold):
+        # An unreachable calibration point: nothing is called machine.
+        pred = np.zeros(len(y), dtype=bool)
+    else:
+        pred = scores >= threshold
+    n_pos, n_neg = int((y == 1).sum()), int((y == 0).sum())
+    tpr = float(pred[y == 1].mean()) if n_pos else float("nan")
+    fpr = float(pred[y == 0].mean()) if n_neg else float("nan")
+    return tpr, fpr
+
+
+def calibrate_thresholds(
+    y: np.ndarray,
+    scores: np.ndarray,
+    levels: tuple[float, ...] = TPR_AT_FPR_LEVELS,
+) -> dict[str, float]:
+    """Per level, the threshold that hits that FPR on THESE rows. Keyed by tag.
+
+    The calibration half of variant (b): fit here, then hand to
+    :func:`score_metrics` as ``cal_thresholds`` for the rows the model has never
+    seen.
+    """
+    return {
+        level_tag(level): roc_point_at_fpr(y, scores, level)[1] for level in levels
+    }
+
+
+def score_metrics(
+    y: np.ndarray,
+    scores: np.ndarray,
+    cal_thresholds: dict[str, float] | None = None,
+    levels: tuple[float, ...] = TPR_AT_FPR_LEVELS,
+) -> dict:
+    """AUROC plus both readings of TPR@FPR for one evaluation set.
+
+    ``cal_thresholds`` is what :func:`calibrate_thresholds` returned on the
+    source's held-out split. Without it only variant (a) is reported -- there is
+    no transported threshold to apply -- and the ``*_at_srcfpr_*`` keys are
+    absent rather than NaN, so a payload never claims a number it did not make.
+    """
+    y = np.asarray(y)
+    scores = np.asarray(scores, dtype=float)
+    out: dict = {"auroc": auroc_score(y, scores)}
+
+    for level in levels:
+        tag = level_tag(level)
+        tpr_a, thr_a = roc_point_at_fpr(y, scores, level)
+        out[oracle_tpr_key(level)] = tpr_a
+        # The threshold behind (a), so a cell can be traced without re-deriving
+        # it, and so the two thresholds can be compared side by side.
+        out[f"threshold_at_fpr_{tag}"] = thr_a
+
+        if cal_thresholds is not None and tag in cal_thresholds:
+            thr_b = cal_thresholds[tag]
+            tpr_b, fpr_b = rates_at_threshold(y, scores, thr_b)
+            out[transported_tpr_key(level)] = tpr_b
+            out[transported_fpr_key(level)] = fpr_b
+            out[f"threshold_at_srcfpr_{tag}"] = float(thr_b)
+    return out
+
+
+def metrics_dict(
+    y: np.ndarray,
+    y_pred: np.ndarray,
+    scores: np.ndarray | None = None,
+    cal_thresholds: dict[str, float] | None = None,
+) -> dict:
     """The metrics of one evaluation set. Identical for every kind of variant.
 
     Trained classifiers, hybrids and threshold rules all end at a vector of
     predicted labels, so they all report the same keys -- which is what lets
     their matrices sit in one comparison and one figure.
+
+    ``scores`` is the continuous ranking score behind those labels, where the
+    variant has one (see ``ClfAlgorithm.decision_score``). It adds AUROC and the
+    two TPR@FPR readings documented above; without it the label-only keys are
+    all that is written, which is what an algorithm that cannot rank its rows
+    should report.
     """
     y_pred = np.asarray(y_pred)
-    return {
+    out = {
         "accuracy": float(accuracy_score(y, y_pred)),
         "macro_f1": float(f1_score(y, y_pred, average="macro", zero_division=0)),
         "confusion": confusion_matrix(
@@ -599,6 +797,29 @@ def metrics_dict(y: np.ndarray, y_pred: np.ndarray) -> dict:
             for c, n in zip(*np.unique(y, return_counts=True))
         },
     }
+    if scores is not None:
+        out.update(score_metrics(y, scores, cal_thresholds))
+    return out
+
+
+def mean_std_over_seeds(runs: list[dict], key: str) -> dict:
+    """``{key}_mean`` / ``{key}_std`` over the seeds that reported ``key``.
+
+    Returns ``{}`` when no seed did, so a label-only variant simply has no AUROC
+    keys instead of a column of NaNs that plots and rankings then have to guard.
+    NaN values (a single-class evaluation set has no ROC) are averaged with
+    ``nanmean``: one degenerate seed should not erase the others.
+    """
+    values = [float(r[key]) for r in runs if key in r]
+    if not values:
+        return {}
+    arr = np.asarray(values, dtype=float)
+    if not np.isfinite(arr).any():
+        return {f"{key}_mean": float("nan"), f"{key}_std": float("nan")}
+    return {
+        f"{key}_mean": float(np.nanmean(arr)),
+        f"{key}_std": float(np.nanstd(arr)),
+    }
 
 
 def aggregate_seeds(
@@ -607,10 +828,19 @@ def aggregate_seeds(
     """Collapse ``per_seed[i][source][target]`` into one summary matrix.
 
     ``mean_keys`` names extra per-cell scalars to average as ``<key>_mean`` --
-    the baselines' fitted ``threshold``, which the classifiers do not have.
+    the baselines' ``threshold``, which the classifiers do not have.
     Everything else that is constant across seeds (row counts, the number of
     excluded groups) is taken from the first seed rather than averaged.
+
+    The score metrics (AUROC, both TPR@FPR readings, the thresholds behind them)
+    are averaged when present and skipped when the variant produced no ranking
+    score, so an algorithm without one keeps exactly the schema it had before.
     """
+    score_keys = score_metric_keys() + [
+        f"threshold_at_{side}_{level_tag(lvl)}"
+        for lvl in TPR_AT_FPR_LEVELS
+        for side in ("fpr", "srcfpr")
+    ]
     summary: dict[str, dict] = {}
     for source in names:
         summary[source] = {}
@@ -634,61 +864,224 @@ def aggregate_seeds(
                 "excluded": runs[0]["excluded"],
                 "class_balance": runs[0]["class_balance"],
             }
+            for key in score_keys:
+                cell.update(mean_std_over_seeds(runs, key))
             for key in mean_keys:
                 cell[f"{key}_mean"] = float(np.mean([r[key] for r in runs]))
             summary[source][target] = cell
     return summary
 
 
+@dataclass(frozen=True)
+class MetricSpec:
+    """One reported per-cell metric: how to name it, read it and colour it.
+
+    Every consumer -- the seed aggregation, the printed tables, the per-variant
+    matrices, the comparison figures and the sweep's objective list -- is driven
+    off this list, so adding an operating point means adding entries here and
+    nothing else.
+
+    ``reference`` is the value the metric is read against, and it is NOT 0.5 for
+    everything: a random detector scores 0.5 accuracy but only ``level`` TPR at
+    FPR ``level``, so painting TPR@1%FPR on an accuracy scale would make every
+    working detector look broken. For a realized FPR the reference is the
+    nominal level the threshold was calibrated to and ``higher_is_better`` is
+    False -- that cell is a miss in whichever direction it departs from it.
+    """
+
+    key: str  # per-cell stem; the summary holds <key>_mean and <key>_std
+    label: str  # axis and colour-bar label
+    short: str  # column header in the printed tables
+    reference: float
+    higher_is_better: bool = True
+    diverging: bool = True  # diverging colour map anchored at `reference`
+    note: str = ""  # one line under the figure, where the metric needs one
+
+    @property
+    def filename(self) -> str:
+        """Figure stem: ``tpr_at_fpr_0.01`` -> ``cross_domain_tpr_at_fpr_0.01.png``."""
+        return self.key
+
+
+def cell_metric_specs(
+    levels: tuple[float, ...] = TPR_AT_FPR_LEVELS
+) -> list[MetricSpec]:
+    """Every metric a cell can hold, in reporting order. See :class:`MetricSpec`."""
+    specs = [
+        MetricSpec(
+            "accuracy", "Accuracy", "acc", CD_CHANCE_RATE,
+            note="Both classes are balanced, so chance is 50%.",
+        ),
+        MetricSpec(
+            "macro_f1", "Macro F1", "f1", CD_CHANCE_RATE,
+            note="Accuracy alone hides a model that predicts one class on an "
+                 "unseen corpus.",
+        ),
+        MetricSpec(
+            "auroc", "AUROC", "auroc", CD_CHANCE_RATE,
+            note="Ranking quality, independent of any threshold and of the class "
+                 "balance. Below 0.5 means the score runs the wrong way — it is "
+                 "left uncorrected on purpose.",
+        ),
+    ]
+    for level in levels:
+        tag = level_tag(level)
+        pct = f"{level * 100:g}%"
+        specs.append(
+            MetricSpec(
+                oracle_tpr_key(level),
+                f"TPR @ {pct} FPR (target-calibrated)",
+                f"tpr@{pct}",
+                float(level),
+                diverging=False,
+                note=f"(a) The threshold is read off THIS cell's own ROC curve, so "
+                     f"it assumes human text from the corpus being tested is "
+                     f"available to calibrate on. Chance is {pct}.",
+            )
+        )
+        specs.append(
+            MetricSpec(
+                transported_tpr_key(level),
+                f"TPR @ {pct} source FPR (transported)",
+                f"tprT@{pct}",
+                float(level),
+                diverging=False,
+                note=f"(b) The threshold is calibrated to {pct} FPR on the SOURCE "
+                     f"corpus's held-out split and applied unchanged here. Read it "
+                     f"beside the realized FPR — a high TPR at a blown FPR is not "
+                     f"a detection.",
+            )
+        )
+        specs.append(
+            MetricSpec(
+                transported_fpr_key(level),
+                f"Realized FPR @ {pct} source FPR",
+                f"fprT@{pct}",
+                float(level),
+                higher_is_better=False,
+                diverging=False,
+                note=f"(b) What the source-calibrated threshold actually cost in "
+                     f"false accusations here. It is {pct} on the diagonal by "
+                     f"construction; every point above that is calibration that "
+                     f"did not transfer.",
+            )
+        )
+    return specs
+
+
+def present_metric_specs(summary: dict, names: list[str]) -> list[MetricSpec]:
+    """The metrics this summary actually holds, in reporting order.
+
+    A variant whose algorithm has no ranking score, and any matrix written
+    before the score metrics existed, carry accuracy and macro F1 only; every
+    reader iterates this rather than the full list so both keep working.
+    """
+    if not names:
+        return []
+    first = summary[names[0]][names[0]]
+    return [m for m in cell_metric_specs() if f"{m.key}_mean" in first]
+
+
+def matrix_of(summary: dict, names: list[str], key: str) -> np.ndarray:
+    """Source x target matrix of one ``<key>_mean``; NaN where a cell lacks it."""
+    return np.array(
+        [
+            [float(summary[s][t].get(key, float("nan"))) for t in names]
+            for s in names
+        ],
+        dtype=float,
+    )
+
+
+def split_diag(mat: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """``(diagonal, off-diagonal)`` of a square matrix, both flattened."""
+    off_mask = ~np.eye(mat.shape[0], dtype=bool)
+    return np.diag(mat), mat[off_mask]
+
+
 def summarise_variant(payload: dict) -> dict:
-    """Collapse one variant's matrix into the numbers the comparison ranks on."""
+    """Collapse one variant's matrix into the numbers the comparison ranks on.
+
+    Every metric the summary holds gets the same four aggregates -- its full
+    matrix, the in-domain (diagonal) mean, the transfer (off-diagonal) mean, and
+    the worst transfer cell -- under ``<metric>``, ``in_domain_<metric>_mean``,
+    ``transfer_<metric>_mean`` and ``transfer_<metric>_worst``. "Worst" follows
+    the metric's direction, so it is the minimum for a TPR and the *maximum* for
+    a realized FPR, which is the cell that would get someone falsely accused.
+
+    The accuracy aggregates keep their historical unqualified names
+    (``in_domain_mean``, ``transfer_mean``, ``transfer_min``, ``gap``) as well,
+    because the comparison figures and every ``variant_comparison.json`` already
+    written read them.
+    """
     names = payload["dataset_names"]
     summary = payload["summary"]
+    specs = present_metric_specs(summary, names)
 
-    acc = np.array(
-        [[summary[s][t]["accuracy_mean"] for t in names] for s in names], dtype=float
-    )
-    acc_std = np.array(
-        [[summary[s][t]["accuracy_std"] for t in names] for s in names], dtype=float
-    )
-    f1 = np.array(
-        [[summary[s][t]["macro_f1_mean"] for t in names] for s in names], dtype=float
-    )
-
-    diag = np.diag(acc)
-    off = acc[~np.eye(len(names), dtype=bool)]
-    f1_off = f1[~np.eye(len(names), dtype=bool)]
-
-    return {
+    row: dict = {
         "variant": payload.get("variant", payload.get("label", "")),
         "label": payload.get("label", payload.get("variant", "")),
         "feature_dim": payload["feature_dim"],
-        "accuracy": acc.tolist(),
-        "accuracy_std": acc_std.tolist(),
-        "macro_f1": f1.tolist(),
-        "in_domain_mean": float(diag.mean()),
-        "in_domain_std": float(diag.std()),
-        "in_domain_min": float(diag.min()),
-        "transfer_mean": float(off.mean()),
-        "transfer_std": float(off.std()),
-        "transfer_min": float(off.min()),
-        "transfer_f1_mean": float(f1_off.mean()),
-        # How much of the in-domain score does not survive leaving the corpus.
-        "gap": float(diag.mean() - off.mean()),
+        "metrics": [m.key for m in specs],
         "baseline": bool(payload.get("baseline")),
     }
+
+    for spec in specs:
+        mat = matrix_of(summary, names, f"{spec.key}_mean")
+        diag, off = split_diag(mat)
+        # nan-aware: a single-class evaluation cell has no ROC and reports NaN
+        # for the score metrics, and one such cell must not void the whole row.
+        with np.errstate(invalid="ignore"):
+            diag_mean = float(np.nanmean(diag)) if diag.size else float("nan")
+            off_mean = float(np.nanmean(off)) if off.size else float("nan")
+            worst = (
+                (float(np.nanmin(off)) if spec.higher_is_better else float(np.nanmax(off)))
+                if off.size and np.isfinite(off).any()
+                else float("nan")
+            )
+        row[spec.key] = mat.tolist()
+        row[f"{spec.key}_std"] = matrix_of(
+            summary, names, f"{spec.key}_std"
+        ).tolist()
+        row[f"in_domain_{spec.key}_mean"] = diag_mean
+        row[f"in_domain_{spec.key}_std"] = (
+            float(np.nanstd(diag)) if diag.size else float("nan")
+        )
+        row[f"transfer_{spec.key}_mean"] = off_mean
+        row[f"transfer_{spec.key}_std"] = (
+            float(np.nanstd(off)) if off.size else float("nan")
+        )
+        row[f"transfer_{spec.key}_worst"] = worst
+        # In-domain minus transfer, in the metric's own direction: always "how
+        # much was lost by leaving the corpus", never a sign that flips meaning.
+        row[f"{spec.key}_gap"] = (
+            diag_mean - off_mean if spec.higher_is_better else off_mean - diag_mean
+        )
+
+    # Historical accuracy aliases. Kept unqualified because they are what the
+    # comparison figures, the ranking and every sweep config already name.
+    row.update(
+        accuracy_std=row.get("accuracy_std"),
+        in_domain_mean=row["in_domain_accuracy_mean"],
+        in_domain_std=row["in_domain_accuracy_std"],
+        in_domain_min=float(np.nanmin(np.diag(np.array(row["accuracy"])))),
+        transfer_mean=row["transfer_accuracy_mean"],
+        transfer_std=row["transfer_accuracy_std"],
+        transfer_min=row["transfer_accuracy_worst"],
+        transfer_f1_mean=row.get("transfer_macro_f1_mean", float("nan")),
+        gap=row["accuracy_gap"],
+    )
+    return row
 
 
 def summarise_baseline(payload: dict) -> dict:
     """A baseline's comparison row: a variant row, relabelled and flagged.
 
-    The label is the variant's (``binoculars_fitted`` / ``llm_judge_vanilla_0.5``
-    / ...), so variants never collapse into one indistinguishable "baseline" row
-    in the ranking.
+    The label is the family's (``binoculars`` / ``llm_judge``), so two baselines
+    never collapse into one indistinguishable "baseline" row in the ranking.
     """
     row = summarise_variant(payload)
     row["baseline"] = True
-    row["baseline_variant"] = payload.get("baseline_variant", "fitted")
     row["baseline_kind"] = payload.get("baseline_kind", BASELINE_KINDS[0].key)
     return row
 
@@ -885,31 +1278,19 @@ def check_splits(
 # ---------------------------------------------------------------------------
 
 
-def fit_score_threshold(
-    scores: np.ndarray, y: np.ndarray, machine_is_high: bool = False
-) -> float:
-    """Youden's-J optimal cutoff for a detector score, fit on a training split.
+def oriented_scores(scores: np.ndarray, machine_is_high: bool) -> np.ndarray:
+    """The detector score turned into a machine-ness score: higher = machine.
 
-    Positive class is machine (``y == 1``). The ROC needs a decision score that
-    is *higher* for machine, so a score that is *low* for machine goes in as
-    ``-score`` and the cutoff is flipped back ("predict machine when
-    ``score <= cutoff``"). Both current baselines are that way round: Binoculars
-    by construction, the LLM judge because it reports P(human). A detector that
-    scored P(machine) would pass ``machine_is_high=True`` and go in as is
-    ("predict machine when ``score >= cutoff``"). This is the rule used in
-    ``epai/ai_detection/analyse/analyse_binox_human_vs_ai.py``, except the
-    threshold is calibrated here on the *training* split rather than the
-    evaluation set, so the diagonal stays an honest held-out number and the
-    off-diagonal is a real transfer of the source's threshold to an unseen corpus.
-
-    Falls back to the score median if the split holds a single class (no ROC).
+    Binoculars and the LLM judge both read LOW ⇒ machine, so they are negated to
+    match the convention every score metric assumes (and that a trained
+    classifier's ``decision_score`` already follows). This is a fixed
+    re-orientation declared by the baseline's ``machine_is_high``, never one
+    inferred from the data: flipping a detector because it happened to score
+    below 0.5 AUROC on this corpus would launder a broken detector into a
+    working one, and finding that it is broken is the point.
     """
-    if np.unique(y).size < 2:
-        return float(np.median(scores))
-    sign = 1.0 if machine_is_high else -1.0
-    fpr, tpr, thr = roc_curve(y, sign * scores)
-    j = tpr - fpr
-    return float(sign * thr[int(np.argmax(j))])
+    scores = np.asarray(scores, dtype=float)
+    return scores if machine_is_high else -scores
 
 
 def evaluate_score_rule(
@@ -917,36 +1298,55 @@ def evaluate_score_rule(
     y: np.ndarray,
     threshold: float,
     machine_is_high: bool = False,
+    cal_thresholds: dict[str, float] | None = None,
 ) -> dict:
-    """Score the threshold rule, read in the metric's direction, on one eval set."""
+    """Score the threshold rule, read in the metric's direction, on one eval set.
+
+    The threshold rule gives the labels; the oriented score gives AUROC and both
+    TPR@FPR readings. ``cal_thresholds`` are on the *oriented* scale, i.e. what
+    :func:`calibrate_thresholds` returned for this source's held-out split.
+    """
     y_pred = (
         (scores >= threshold) if machine_is_high else (scores <= threshold)
     ).astype(int)
-    return metrics_dict(y, y_pred)
+    return metrics_dict(
+        y,
+        y_pred,
+        scores=oriented_scores(scores, machine_is_high),
+        cal_thresholds=cal_thresholds,
+    )
 
 
 def run_score_baseline(cfg: dict, out_dir: Path, variant: dict) -> dict:
     """Full source x target matrix for one zero-shot score-baseline variant.
 
-    No classifier is trained either way. ``variant`` comes from
+    No classifier is trained and no threshold is fitted. ``variant`` comes from
     ``baseline_specs`` and carries the column and the direction as well as the
-    cutoff; with ``threshold: None`` the cutoff is calibrated per source on its
-    training split, and with a number it is that fixed value, used unchanged for
-    every source and target.
+    cutoff, which is taken from the config and used unchanged for every source
+    and target.
 
-    Both take the *same* grouped split, seeds and group exclusion as a trained
-    variant, even the fixed-threshold one which fits nothing: the diagonal must
-    still be a held-out split and the off-diagonal must still drop target rows
-    whose group was seen, or the rows would not line up with the trained models
-    they are compared against. The payload is shaped identically to a trained
-    variant's, so it drops into the same figures and comparison.
+    It still takes the *same* grouped split, seeds and group exclusion as a
+    trained variant, although it fits nothing: the diagonal must still be a
+    held-out split and the off-diagonal must still drop target rows whose group
+    was seen, or the rows would not line up with the trained models it is
+    compared against. The payload is shaped identically to a trained variant's,
+    so it drops into the same figures and comparison.
 
     One caveat this cannot paper over: a score column that is Null for some rows
     (the LLM judge only scores the generators it was asked for) makes those rows
     disappear from the baseline's evaluation set. The row counts printed here and
     in the preflight are what the baseline actually stands on.
+
+    The declared cutoff enters exactly one metric family -- the confusion
+    matrix, so accuracy and macro F1. The headline metrics never see it: AUROC
+    sweeps every threshold, a target-calibrated TPR@FPR reads its cutoff off the
+    tested cell's own ROC, and a transported one reads it off the source split's
+    ROC at the nominal level. That also means the baseline is not zero-shot
+    under those metrics -- placing a threshold at a nominal FPR needs human rows
+    to place it on, and so does an ROC. Its claim to have seen no labels holds
+    only for the label-derived numbers.
     """
-    fixed_threshold = variant["threshold"]
+    threshold = float(variant["threshold"])
     score_col: str = variant["column"]
     machine_is_high: bool = bool(variant.get("machine_is_high", False))
 
@@ -986,16 +1386,19 @@ def run_score_baseline(cfg: dict, out_dir: Path, variant: dict) -> dict:
             s_s, y_s = scores_all[source], df_s["y"].to_numpy()
             groups_s = df_s["group"].to_numpy()
 
-            # Same grouped split the classifiers take, so the calibration set is
-            # the same rows they train on.
+            # Same grouped split the classifiers take. The baseline's cutoff
+            # never looks at the training half; the split is kept only so its
+            # evaluation rows are the ones every other row of the table stands on.
             train_idx, test_idx = grouped_split(y_s, groups_s, test_size, seed)
             train_groups = set(groups_s[train_idx])
-            # The vanilla variant never looks at the training split -- it is kept
-            # only so the evaluation rows match every other row of the table.
-            threshold = (
-                fit_score_threshold(s_s[train_idx], y_s[train_idx], machine_is_high)
-                if fixed_threshold is None
-                else float(fixed_threshold)
+
+            # The transported operating points of variant (b): thresholds fixed
+            # to hit each nominal FPR on the SOURCE's held-out split, then
+            # carried unchanged to every target. Calibrated on the held-out half
+            # rather than the training half so that the trained variants and the
+            # baselines transport a threshold fit on the same rows.
+            cal_thresholds = calibrate_thresholds(
+                y_s[test_idx], oriented_scores(s_s[test_idx], machine_is_high)
             )
 
             seed_res[source] = {}
@@ -1003,12 +1406,13 @@ def run_score_baseline(cfg: dict, out_dir: Path, variant: dict) -> dict:
                 if target == source:
                     # In-domain: the corpus's own held-out grouped test split.
                     res = evaluate_score_rule(
-                        s_s[test_idx], y_s[test_idx], threshold, machine_is_high
+                        s_s[test_idx], y_s[test_idx], threshold, machine_is_high,
+                        cal_thresholds=cal_thresholds,
                     )
                     res["excluded"] = 0
                 else:
                     df_t = data[target]
-                    # Target rows whose group was seen while calibrating would be
+                    # Target rows whose group was seen while training would be
                     # a free hit, exactly as for the trained models, so drop them.
                     keep = ~df_t["group"].isin(train_groups).to_numpy()
                     res = evaluate_score_rule(
@@ -1016,6 +1420,7 @@ def run_score_baseline(cfg: dict, out_dir: Path, variant: dict) -> dict:
                         df_t.loc[keep, "y"].to_numpy(),
                         threshold,
                         machine_is_high,
+                        cal_thresholds=cal_thresholds,
                     )
                     res["excluded"] = int((~keep).sum())
                 res["train_n"] = int(len(train_idx))
@@ -1024,8 +1429,8 @@ def run_score_baseline(cfg: dict, out_dir: Path, variant: dict) -> dict:
 
         per_seed.append(seed_res)
 
-    # 'threshold_mean' is the same for every target of a source (and for every
-    # cell of a vanilla variant), but is kept per cell for a uniform schema.
+    # 'threshold_mean' is the config's cutoff in every cell, but is kept per cell
+    # for a uniform schema.
     summary = aggregate_seeds(per_seed, names, mean_keys=("threshold",))
 
     # Shaped like a trained variant's payload so plot_clf_cd_result works
@@ -1033,7 +1438,9 @@ def run_score_baseline(cfg: dict, out_dir: Path, variant: dict) -> dict:
     bx_cfg = dict(cfg)
     bx_cfg["features"] = [score_col]
     bx_cfg["model"] = dict(cfg["model"])
-    bx_cfg["model"]["ml_alg"] = f"{variant['kind']} ({variant['variant']})"
+    bx_cfg["model"]["ml_alg"] = (
+        f"{variant['kind']} (fixed threshold {format_threshold(threshold)})"
+    )
     bx_cfg["alg_id"] = f"{cfg['alg_id']}__{variant['name']}"
     bx_cfg["alg_label"] = f"{cfg['alg_label']} — {variant['label']}"
 
@@ -1043,13 +1450,10 @@ def run_score_baseline(cfg: dict, out_dir: Path, variant: dict) -> dict:
         "variant": variant["name"],
         "label": variant["label"],
         "baseline": True,
-        "baseline_variant": variant["variant"],
         "baseline_kind": variant["kind"],
         "machine_is_high": machine_is_high,
         "column": score_col,
-        # None for the fitted variant, whose cutoff is per source and lives in
-        # each cell's 'threshold_mean' instead.
-        "threshold": None if fixed_threshold is None else float(fixed_threshold),
+        "threshold": threshold,
         "feature_dim": 1,
         "dataset_names": names,
         "dataset_labels": labels,
@@ -1069,34 +1473,63 @@ def run_score_baseline(cfg: dict, out_dir: Path, variant: dict) -> dict:
 
 
 def print_matrix(alg_label: str, summary: dict, names: list[str]) -> None:
-    """Print the source x target accuracy matrix; the diagonal is in-domain."""
+    """Print the source x target matrix of every metric the summary holds.
+
+    One block per metric, all on the same axes, so accuracy and TPR@1%FPR are
+    read against each other rather than in separate reports -- which is the
+    whole reason for adding the second one.
+    """
     w = max(len(n) for n in names) + 2
-    print(f"\n{'='*72}")
-    print(f"  {alg_label} — ACCURACY  (rows = TRAINED ON, cols = TESTED ON)")
-    print("  [diagonal] = in-domain held-out; off-diagonal = transfer")
-    print(f"{'='*72}\n")
+    specs = present_metric_specs(summary, names)
 
-    print(" " * w + "".join(f"{n:>18}" for n in names))
-    for source in names:
-        row = f"{source:<{w}}"
-        for target in names:
-            s = summary[source][target]
-            cell = f"{s['accuracy_mean']*100:5.1f}%"
-            cell = f"[{cell}]" if s["in_domain"] else f" {cell} "
-            row += f"{cell:>18}"
-        print(row)
+    for spec in specs:
+        mat = matrix_of(summary, names, f"{spec.key}_mean")
+        diag, off = split_diag(mat)
+        print(f"\n{'='*72}")
+        print(
+            f"  {alg_label} — {spec.label.upper()}  "
+            f"(rows = TRAINED ON, cols = TESTED ON)"
+        )
+        print("  [diagonal] = in-domain held-out; off-diagonal = transfer")
+        print(f"{'='*72}\n")
 
-    off = [summary[s][t]["accuracy_mean"] for s in names for t in names if s != t]
-    diag = [summary[s][s]["accuracy_mean"] for s in names]
-    print(f"\n  in-domain (diagonal) mean : {np.mean(diag)*100:5.1f}%")
-    print(f"  transfer  (off-diag) mean : {np.mean(off)*100:5.1f}%")
-    print(f"  transfer  (off-diag) min  : {np.min(off)*100:5.1f}%")
-    print("\n  Chance is 50% (both classes are balanced). A transfer mean near")
-    print("  chance means the in-domain score is corpus-specific, not 'AI-ness'.")
+        print(" " * w + "".join(f"{n:>18}" for n in names))
+        for i, source in enumerate(names):
+            row = f"{source:<{w}}"
+            for j in range(len(names)):
+                cell = f"{mat[i, j]*100:5.1f}%"
+                cell = f"[{cell}]" if i == j else f" {cell} "
+                row += f"{cell:>18}"
+            print(row)
+
+        with np.errstate(invalid="ignore"):
+            worst = (
+                float(np.nanmin(off)) if spec.higher_is_better else float(np.nanmax(off))
+            )
+            print(f"\n  in-domain (diagonal) mean : {np.nanmean(diag)*100:5.1f}%")
+            print(f"  transfer  (off-diag) mean : {np.nanmean(off)*100:5.1f}%")
+            print(
+                f"  transfer  (off-diag) "
+                f"{'min' if spec.higher_is_better else 'max'}  : {worst*100:5.1f}%"
+            )
+        print(f"  reference                 : {spec.reference*100:5.1f}%")
+        if spec.note:
+            print(f"\n  {spec.note}")
+
+    print(
+        "\n  A transfer mean near the reference means the in-domain score is "
+        "corpus-specific,\n  not 'AI-ness'."
+    )
 
 
 def print_ranking(alg_label: str, rows: list[dict], noun: str = "variant") -> None:
-    """Rank by transfer accuracy -- the point of the whole run."""
+    """Rank by transfer accuracy -- the point of the whole run.
+
+    Two tables: the accuracy ranking as before, then the same rows under every
+    other metric, transfer-side only. Splitting them keeps the first table the
+    width it always was while still putting AUROC and the two TPR@FPR readings
+    next to the accuracy that a reader would otherwise take at face value.
+    """
     order = sorted(rows, key=lambda r: r["transfer_mean"], reverse=True)
     width = max(28, max((len(r["label"]) for r in order), default=0) + 4)
     print()
@@ -1119,6 +1552,7 @@ def print_ranking(alg_label: str, rows: list[dict], noun: str = "variant") -> No
     print("  in-domain = mean of the diagonal (held-out, same corpus)")
     print("  transfer  = mean of the off-diagonal (unseen corpus); chance is 50%")
     print("  gap       = in-domain − transfer, i.e. what does not survive transfer")
+    print_metric_ranking(order, noun=noun, width=width)
     if any(r.get("baseline") for r in order):
         print("  ★ zero-shot baseline: no classifier trained")
     hybrids = [r for r in order if r.get("hybrid")]
@@ -1128,3 +1562,54 @@ def print_ranking(alg_label: str, rows: list[dict], noun: str = "variant") -> No
             f"  ◆ hybrid: trained on the shared features PLUS {', '.join(cols)}, so "
             f"it is not ranked on equal information"
         )
+
+
+def print_metric_ranking(
+    order: list[dict], noun: str = "variant", width: int = 32
+) -> None:
+    """The transfer side of every metric, one column each, rows already ordered.
+
+    Only the transfer (off-diagonal) numbers: the in-domain ones are near-perfect
+    for everything here and printing both would double the width to say nothing.
+    A row missing a metric prints ``—`` rather than a NaN, which is what a
+    variant whose algorithm has no ranking score genuinely has.
+    """
+    specs = [
+        m
+        for m in cell_metric_specs()
+        if any(f"transfer_{m.key}_mean" in r for r in order)
+    ]
+    # Accuracy already had its own table above; this one exists for the rest.
+    specs = [m for m in specs if m.key != "accuracy"]
+    if not specs or not order:
+        return
+
+    col = 12
+    header = f"{noun:<{width}}" + "".join(f"{m.short:>{col}}" for m in specs)
+    print()
+    print("=" * max(RULE, len(header)))
+    print("  TRANSFER (off-diagonal) UNDER EVERY OTHER METRIC")
+    print("=" * max(RULE, len(header)))
+    print(header)
+    print("-" * max(RULE, len(header)))
+    for r in order:
+        mark = "★ " if r.get("baseline") else ("◆ " if r.get("hybrid") else "  ")
+        line = f"{mark + r['label']:<{width}}"
+        for m in specs:
+            value = r.get(f"transfer_{m.key}_mean")
+            line += (
+                f"{'—':>{col}}"
+                if value is None or not np.isfinite(value)
+                else f"{value*100:>{col-1}.1f}%"
+            )
+        print(line)
+    print("-" * max(RULE, len(header)))
+    for m in specs:
+        arrow = "higher is better" if m.higher_is_better else "LOWER is better"
+        print(f"  {m.short:<10} {m.label} — reference {m.reference*100:g}%, {arrow}")
+    print(
+        "  tpr@X   (a) threshold fit on the cell being tested — separability only.\n"
+        "  tprT@X  (b) threshold fit to X% FPR on the SOURCE's held-out split and\n"
+        "          carried over unchanged — the deployable number. fprT@X is what\n"
+        "          that threshold actually cost in false positives on the target."
+    )

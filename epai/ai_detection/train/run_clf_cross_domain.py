@@ -19,6 +19,32 @@ mechanics of that matrix -- the grouped split, the binarised target, the
 exclusion of target rows whose group was seen in training -- live in
 ``epai/utils/cd_core.py`` and are identical for everything below.
 
+METRICS
+-------
+Every cell is reported under several metrics, each with its own matrix and its
+own figure: accuracy and macro F1 from the predicted labels, and AUROC plus TPR
+at 1% and 5% FPR from the continuous score behind them. Accusing a human is the
+expensive error, so the low-FPR operating point is the one a deployed detector
+is actually graded on.
+
+TPR@FPR appears twice, and the pair is the point:
+
+  * ``tpr_at_fpr_<level>``    -- (a) the threshold is fit on the cell being
+    tested. This is what the literature reports, and it measures separability:
+    it assumes human text from the target corpus is available to calibrate on.
+  * ``tpr_at_srcfpr_<level>`` -- (b) the threshold is fit to that FPR on the
+    SOURCE's held-out split and carried to the target unchanged, with
+    ``fpr_at_srcfpr_<level>`` recording what it actually cost there.
+
+A model can hold its AUROC and its (a) score under transfer while its (b) score
+collapses, because the score distribution shifted even though the ordering
+survived -- which is invisible to accuracy, to AUROC and to (a) alike. On the
+diagonal (b) degenerates to (a) by construction; only the off-diagonal is new.
+
+None of this is recoverable from a matrix already on disk: a confusion matrix
+cannot be turned back into a ranking, so a run predating these metrics has to be
+re-run rather than replotted.
+
 VARIANTS
 --------
 What this script varies is *what* goes through the matrix. A run is the cross
@@ -72,11 +98,13 @@ BASELINES
 ---------
 Optional zero-shot score baselines, each one more matrix marked with a ★ in the
 comparison. Two families, configured by ``binoculars_baseline`` and
-``llm_judge_baseline``, each contributing a ``<kind>_fitted`` variant whose
-cutoff is calibrated per source and one ``<kind>_vanilla_<threshold>`` per fixed
-cutoff, fit to nothing at all. Both read their score the same way round -- *low*
-means machine for Binoculars by construction and for the LLM judge because it
-reports P(human) -- and the judge's default vanilla cutoff is 0.5.
+``llm_judge_baseline``, each contributing exactly ONE variant: the ``threshold``
+its block names, fit to nothing at all and applied unchanged to every source and
+target. Nothing about a baseline is calibrated -- the headline metrics (AUROC,
+TPR at a fixed FPR) never read the declared cutoff, which enters only accuracy,
+macro F1 and the confusion matrix. Both families read their score the same way
+round -- *low* means machine for Binoculars by construction and for the LLM
+judge because it reports P(human).
 
 PREFLIGHT
 ---------
@@ -134,6 +162,7 @@ from epai.utils.cd_core import (
     Prepared,
     aggregate_seeds,
     baseline_specs,
+    calibrate_thresholds,
     check_baseline_datasets,
     check_dataset,
     check_splits,
@@ -169,6 +198,7 @@ from epai.utils.variant_utils import (
     fit_alg,
     predict_alg,
     resolved_params,
+    score_alg,
     variant_columns,
 )
 from epai.utils.visualization_utils import (
@@ -424,6 +454,27 @@ def run_variant(
                 Z_s[train_idx] if Z_s is not None else None,
             )
 
+            # The source's held-out split, scored once: it is the in-domain
+            # evaluation set AND the calibration set for the transported
+            # thresholds of variant (b). Held-out rather than training rows on
+            # purpose -- a model's scores on the rows it was fitted on push the
+            # human distribution away from the boundary, which would make the
+            # transported threshold reflect the overfit rather than the corpus.
+            #
+            # The consequence, stated plainly because no key can carry it: on the
+            # diagonal the calibration set *is* the evaluation set, so the
+            # transported reading degenerates to the target-calibrated one there
+            # and only the off-diagonal cells of the (b) matrices are new
+            # information.
+            s_test = score_alg(
+                alg, X_s[test_idx], Z_s[test_idx] if Z_s is not None else None
+            )
+            cal_thresholds = (
+                calibrate_thresholds(y_s[test_idx], s_test)
+                if s_test is not None
+                else None
+            )
+
             seed_res[source] = {}
             for target in names:
                 if target == source:
@@ -435,6 +486,8 @@ def run_variant(
                             X_s[test_idx],
                             Z_s[test_idx] if Z_s is not None else None,
                         ),
+                        scores=s_test,
+                        cal_thresholds=cal_thresholds,
                     )
                     res["excluded"] = 0
                 else:
@@ -444,13 +497,17 @@ def run_variant(
                     # was trained on would be a free hit, so drop it.
                     keep = ~df_t["group"].isin(train_groups).to_numpy()
                     Z_t = Z_all[target]
+                    X_t = X_all[target][keep]
+                    Z_keep = Z_t[keep] if Z_t is not None else None
                     res = metrics_dict(
                         df_t.loc[keep, "y"].to_numpy(),
-                        predict_alg(
-                            alg,
-                            X_all[target][keep],
-                            Z_t[keep] if Z_t is not None else None,
+                        predict_alg(alg, X_t, Z_keep),
+                        scores=(
+                            score_alg(alg, X_t, Z_keep)
+                            if cal_thresholds is not None
+                            else None
                         ),
+                        cal_thresholds=cal_thresholds,
                     )
                     res["excluded"] = int((~keep).sum())
                 res["train_n"] = int(len(train_idx))
@@ -525,10 +582,12 @@ def comparison_subtitle(cfg: dict, n_corpora: int) -> str:
         feats += f" (◆ also + {', '.join(aux)})"
 
     algo = algs[0]["label"] if len(algs) == 1 else f"{len(algs)} algorithms"
+    # No chance level here: this line is shared by every per-metric comparison
+    # figure, and chance is 50% for accuracy / macro F1 / AUROC but the nominal
+    # FPR for the TPR@FPR ones. Each figure prints its own reference instead.
     return (
         f"{feats} · {algo} · {cfg['model']['n_runs']} seeds · "
-        f"grouped by {cfg['data']['group_col']!r} · "
-        f"{n_corpora} corpora · chance = 50%"
+        f"grouped by {cfg['data']['group_col']!r} · {n_corpora} corpora"
     )
 
 
@@ -625,11 +684,11 @@ def run_config(cfg_path: Path, cfg: dict, alg_dir: Path) -> None:
 
         del data, X_all
 
-    # Optional zero-shot score baselines: per enabled family, the source-fit
-    # threshold plus a fixed one per configured cutoff. Binoculars reads low ⇒
-    # machine, the LLM judge high ⇒ machine; the variant carries its own
-    # direction, so both are run by the same loop. Run after the variants so they
-    # show up as extra rows in the comparison.
+    # Optional zero-shot score baselines: one row per enabled family, at the
+    # fixed cutoff its block names. Binoculars and the LLM judge both read low ⇒
+    # machine; the variant carries its own direction, so both are run by the same
+    # loop. Run after the variants so they show up as extra rows in the
+    # comparison.
     for bl in baseline_specs(cfg):
         tqdm.write(f"\n→ {bl['label']}  ({describe_variant(bl)})")
         bl_dir = alg_dir / bl["name"]

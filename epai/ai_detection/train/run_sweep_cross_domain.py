@@ -76,7 +76,7 @@ from epai.ai_detection.train.replot_sweep import (
     draw_plots,
     read_trials_file,
 )
-from epai.utils.cd_core import load_prepared, summarise_variant
+from epai.utils.cd_core import cell_metric_specs, load_prepared, summarise_variant
 from epai.utils.config_utils import RESET, YELLOW, rel
 from epai.utils.corpus_utils import dataset_specs
 from epai.utils.preflight_utils import Report, print_report
@@ -90,14 +90,34 @@ RED = "\033[91m"
 DIM = "\033[2m"
 RULE = 100
 
-#: Metrics of ``cd_core.summarise_variant`` a sweep may rank on.
-OBJECTIVE_METRICS = {
-    "transfer_mean",
-    "transfer_min",
-    "transfer_f1_mean",
-    "in_domain_mean",
-    "gap",
-}
+
+def _objective_metrics() -> set[str]:
+    """Metrics of ``cd_core.summarise_variant`` a sweep may rank on.
+
+    The accuracy aggregates keep their historical unqualified names, and every
+    metric ``cd_core`` reports contributes its four aggregates as well -- so a
+    sweep can optimise the number the run will actually be reported on. That
+    matters more here than anywhere else: searching on ``transfer_min``
+    (accuracy) and then publishing TPR@1%FPR optimises one thing and reports
+    another, and the two do not have to move together.
+
+    A metric only a *scored* variant produces is still listed: the objective is
+    NaN for an algorithm with no ranking score, and ``score_trial`` rejects a
+    non-finite objective with that reason attached, which is the right failure.
+    """
+    names = {"transfer_mean", "transfer_min", "transfer_f1_mean", "in_domain_mean", "gap"}
+    for spec in cell_metric_specs():
+        names |= {
+            f"in_domain_{spec.key}_mean",
+            f"transfer_{spec.key}_mean",
+            f"transfer_{spec.key}_worst",
+            f"{spec.key}_gap",
+        }
+    return names
+
+
+#: Metrics of ``cd_core.summarise_variant`` a sweep may rank on. See above.
+OBJECTIVE_METRICS = _objective_metrics()
 
 #: One trial's record in trials.jsonl. Every field is written even when the
 #: trial is rejected, so a resumed sweep never re-runs a known-bad setting.
@@ -136,6 +156,27 @@ def load_sweep_config(path: Path) -> dict:
         )
     if obj["direction"] not in {"max", "min"}:
         raise ValueError(f"{path}: objective.direction must be 'max' or 'min'")
+
+    # Every metric knows which way is better, and one of them inverts: a realized
+    # FPR is the one number here you want SMALLER. Maximising it would search for
+    # the setting whose transported threshold falsely accuses the most humans, and
+    # would do so silently while reporting a rising objective -- so it is an
+    # error, not a warning.
+    wrong_way = {
+        f"{prefix}{spec.key}{suffix}": spec.higher_is_better
+        for spec in cell_metric_specs()
+        for prefix, suffix in (
+            ("transfer_", "_mean"), ("transfer_", "_worst"),
+            ("in_domain_", "_mean"),
+        )
+    }
+    higher_is_better = wrong_way.get(obj["metric"])
+    if higher_is_better is False and obj["direction"] == "max":
+        raise ValueError(
+            f"{path}: objective.metric {obj['metric']!r} is a false-positive rate, "
+            f"where LOWER is better, but objective.direction is 'max'. Use "
+            f"direction: min."
+        )
 
     halving = cfg.setdefault("halving", {})
     halving.setdefault("enabled", True)
@@ -368,7 +409,11 @@ def score_trial(payload: dict, objective: dict) -> tuple[float | None, dict, str
     carries no objective and never enters the ranking.
     """
     metrics = summarise_variant(payload)
-    value = float(metrics[objective["metric"]])
+    # .get, not [...]: an objective naming a score metric is legal even when the
+    # algorithm has no ranking score to produce it, and the honest outcome there
+    # is a rejected trial ("objective is not finite") rather than a KeyError that
+    # takes down the sweep on its first trial.
+    value = float(metrics.get(objective["metric"], float("nan")))
 
     floor = float(objective.get("min_in_domain", 0.0))
     if metrics["in_domain_mean"] < floor:
@@ -458,7 +503,20 @@ def run_trial(
                     "transfer_min",
                     "transfer_f1_mean",
                     "gap",
+                    # Every score metric's transfer and in-domain aggregate, so a
+                    # leaderboard shows what a trial cost at the operating point
+                    # even when the search was ranked on something else.
+                    *(
+                        k2
+                        for spec in cell_metric_specs()
+                        for k2 in (
+                            f"in_domain_{spec.key}_mean",
+                            f"transfer_{spec.key}_mean",
+                            f"transfer_{spec.key}_worst",
+                        )
+                    ),
                 )
+                if k in metrics
             },
             accuracy=metrics["accuracy"],
             dataset_names=names,

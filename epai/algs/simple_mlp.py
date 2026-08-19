@@ -14,6 +14,7 @@ from ._torch_common import (
     FeatureNormalizer,
     TrainHParams,
     hparams_dict,
+    logit_margin,
     mlp_layers,
     parse_dims,
     read_hparams,
@@ -56,7 +57,9 @@ class SimpleMLPAlg(ClfAlgorithm):
       * ``val_frac`` -- hold this fraction of the training rows out (grouped) and
         early-stop on it, restoring the best weights (default 0, which instead
         early-stops on the training loss -- the old behaviour);
-      * ``val_metric`` -- ``loss`` or ``accuracy`` (default ``loss``);
+      * ``val_metric`` -- ``loss``, ``accuracy`` or ``auroc`` (default ``loss``);
+        ``auroc`` early-stops on how well the score *orders* the two classes,
+        which is what a run reported at a low-FPR operating point is graded on;
       * ``dropout`` / ``input_dropout`` -- between hidden layers / on the raw
         feature vector (defaults 0.1 / 0.0);
       * ``norm_layer`` -- ``none`` or ``layernorm`` (default ``none``);
@@ -113,12 +116,18 @@ class SimpleMLPAlg(ClfAlgorithm):
         return self
 
     @torch.no_grad()
-    def predict(self, X: np.ndarray) -> np.ndarray:
+    def _logits(self, X: np.ndarray) -> torch.Tensor:
         Xs = self.normalizer.transform(X)
         X_t = torch.from_numpy(Xs).to(self.device)
         self.model.eval()
-        logits = self.model(X_t)
-        return logits.argmax(dim=1).cpu().numpy()
+        return self.model(X_t)
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        return self._logits(X).argmax(dim=1).cpu().numpy()
+
+    def decision_score(self, X: np.ndarray) -> np.ndarray:
+        """The machine-minus-human logit margin. See :func:`logit_margin`."""
+        return logit_margin(self._logits(X))
 
     def save(self, path: Path) -> None:
         # Move to CPU first so the pickle can be loaded on a machine without a GPU.

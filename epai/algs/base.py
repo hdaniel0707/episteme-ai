@@ -57,6 +57,21 @@ class ClfAlgorithm(ABC):
     every other subclass keeps the plain two-argument signature, and a config
     that names an auxiliary column for an algorithm which does not declare
     ``uses_aux`` is a preflight error rather than a silently ignored key.
+
+    Scores as well as labels
+    ------------------------
+    ``predict`` commits to a threshold, and a confusion matrix cannot be undone:
+    AUROC and TPR@FPR are functions of the *ranking* of a continuous score and
+    are not recoverable from predicted labels. So every algorithm also exposes
+    :meth:`decision_score` -- one number per row, higher meaning *more machine*.
+    The default implementation covers every sklearn-backed subclass here (it
+    reads ``predict_proba`` or ``decision_function`` off the fitted estimator),
+    so only the torch ones override it.
+
+    The score is used for ranking and for thresholding, never as a probability:
+    nothing downstream assumes it is calibrated, in [0, 1], or comparable
+    between algorithms. An algorithm with no meaningful score raises
+    ``NotImplementedError`` and the runners fall back to the label-only metrics.
     """
 
     #: Registry key / output-folder name. Overridden by every concrete subclass.
@@ -137,6 +152,43 @@ class ClfAlgorithm(ABC):
     def predict(self, X: np.ndarray) -> np.ndarray:
         """Predicted class labels (0 = human, 1 = machine), one per row of ``X``."""
         raise NotImplementedError
+
+    def decision_score(self, X: np.ndarray) -> np.ndarray:
+        """Continuous machine-ness score, one per row of ``X``. Higher = machine.
+
+        The default reads the fitted estimator, which covers every sklearn-backed
+        subclass: ``predict_proba`` where there is one (logistic, gradient
+        boosting), the signed distance from ``decision_function`` otherwise
+        (``SVC`` is fitted with ``probability=False``, and Platt-scaling it would
+        cost a 5-fold refit to buy calibration that no metric here reads).
+
+        The probability column is picked by looking up class 1 in ``classes_``
+        rather than by position: the two happen to coincide for a 0/1 target, but
+        an algorithm that ever saw its classes in another order would otherwise
+        return the score of the wrong class -- silently, and with an AUROC of
+        1 - AUROC, which looks like a result rather than a bug.
+        """
+        model = getattr(self, "model", None)
+        if model is None:
+            raise NotImplementedError(
+                f"{self.name}: decision_score needs a fitted 'model' attribute; "
+                f"override decision_score if this algorithm stores its model "
+                f"elsewhere."
+            )
+        # hasattr, not a try/except: sklearn's Pipeline exposes predict_proba
+        # only when its final estimator has one, via an `available_if` descriptor
+        # that raises AttributeError on *access*.
+        if hasattr(model, "predict_proba"):
+            proba = np.asarray(model.predict_proba(X), dtype=np.float64)
+            classes = np.asarray(getattr(model, "classes_", [0, 1]))
+            idx = int(np.flatnonzero(classes == 1)[0]) if (classes == 1).any() else -1
+            return proba[:, idx]
+        if hasattr(model, "decision_function"):
+            return np.asarray(model.decision_function(X), dtype=np.float64).ravel()
+        raise NotImplementedError(
+            f"{self.name}: no predict_proba or decision_function on the fitted "
+            f"model, so it cannot produce a ranking score."
+        )
 
     def save(self, path: Path) -> None:
         """Persist the fitted algorithm. Default: joblib-pickle the whole object.

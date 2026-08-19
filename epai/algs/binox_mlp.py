@@ -22,6 +22,7 @@ from ._torch_common import (
     TrainHParams,
     hidden_block,
     hparams_dict,
+    logit_margin,
     mlp_layers,
     parse_dims,
     parse_normalize,
@@ -220,7 +221,7 @@ class BinoxMLPAlg(ClfAlgorithm):
         return self
 
     @torch.no_grad()
-    def predict(self, X: np.ndarray, Z: np.ndarray | None = None) -> np.ndarray:
+    def _logits(self, X: np.ndarray, Z: np.ndarray | None) -> torch.Tensor:
         if Z is None:
             raise ValueError(
                 f"{type(self).__name__} needs the auxiliary Binoculars column at "
@@ -231,8 +232,14 @@ class BinoxMLPAlg(ClfAlgorithm):
         X_t = torch.from_numpy(Xs).to(self.device)
         Z_t = torch.from_numpy(Zs).to(self.device)
         self.model.eval()
-        logits = self.model(X_t, Z_t)
-        return logits.argmax(dim=1).cpu().numpy()
+        return self.model(X_t, Z_t)
+
+    def predict(self, X: np.ndarray, Z: np.ndarray | None = None) -> np.ndarray:
+        return self._logits(X, Z).argmax(dim=1).cpu().numpy()
+
+    def decision_score(self, X: np.ndarray, Z: np.ndarray | None = None) -> np.ndarray:
+        """The machine-minus-human logit margin. See :func:`logit_margin`."""
+        return logit_margin(self._logits(X, Z))
 
     def save(self, path: Path) -> None:
         # Move to CPU first so the pickle can be loaded on a machine without a GPU.

@@ -284,36 +284,34 @@ model:
 # Optional zero-shot score baselines
 # ---------------------------------------------------------------------------
 
-# No classifier is trained by either family; each variant becomes one more ★ row
-# in the comparison, a fixed reference the trained variants are measured against.
-# Drop the key or set enabled: false to skip a family.
+# No classifier is trained by either family; each becomes exactly ONE more ★ row
+# in the comparison -- `binoculars` / `llm_judge` -- a fixed reference the
+# trained variants are measured against. Drop the key or set enabled: false to
+# skip a family.
 #
-#   <kind>_fitted            -> always runs. The cutoff is calibrated per source
-#                               on its TRAINING split (Youden's J) and applied
-#                               unchanged to every corpus. No model, but the
-#                               threshold still comes from the source data, so it
-#                               is not zero-shot in the strict sense.
-#   <kind>_vanilla_<value>   -> one per `vanilla_threshold`. The cutoff is taken
-#                               straight from this file and used everywhere, fit
-#                               to nothing at all -- the only rows in the table
-#                               that saw no labels. Omit `vanilla_threshold` to
-#                               skip it; give a list to compare several published
-#                               cutoffs, or [] to skip the variant.
+# Nothing here is fitted. `threshold` is taken straight from this file and used
+# unchanged for every source and every target, so the row saw no labels at all.
+# It is required whenever the family is enabled: the run is read on AUROC and
+# TPR@FPR, neither of which ever looks at the declared cutoff (an ROC sweeps
+# every threshold), so the cutoff only has to be a documented operating point
+# for the label-derived numbers -- accuracy, macro F1, the confusion matrix.
+# Calibrating it per source, as earlier versions did, produced a second row that
+# was bit-identical under every headline metric.
 #
-# Both take the same grouped split, seeds and group exclusion as the trained
-# variants, so every row of the comparison is scored on the same rows.
+# The baseline takes the same grouped split, seeds and group exclusion as the
+# trained variants, so every row of the comparison is scored on the same rows.
 # 0.9015310749276843 is the cutoff from the Binoculars paper (the accuracy mode;
-# the low-FPR mode uses a different one).
+# the low-FPR mode uses 0.8536432310785527).
 binoculars_baseline:
   enabled: true
   column: "binoculars_score"
-  vanilla_threshold: [0.9015310749276843, 0.8536432310785527]
+  threshold: 0.9015310749276843
 
-# The same two baselines on the LLM-judge score written by
+# The same baseline on the LLM-judge score written by
 # epai/ai_detection/llm_judge/add_llm_judge_scores.py. The judge reports P(human)
 # -- 1.0 => human, 0.0 => machine -- so LOW means machine, the same direction as
-# Binoculars, and the rule is `score <= threshold => machine`. Its
-# `vanilla_threshold` defaults to 0.5, the judge's own neutral point.
+# Binoculars, and the rule is `score <= threshold => machine`. 0.5 is the judge's
+# own neutral point.
 #
 # The judge only scores the generators it was asked for, so rows with a Null
 # score drop out of THIS baseline (and only this one) -- the preflight prints the
@@ -322,7 +320,7 @@ binoculars_baseline:
 llm_judge_baseline:
   enabled: false
   column: "llm_judge_score_gpt54_mini"
-  vanilla_threshold: [0.5]
+  threshold: 0.5
 
 # ---------------------------------------------------------------------------
 # Preflight guards (checked before training; never affect the fitting itself)

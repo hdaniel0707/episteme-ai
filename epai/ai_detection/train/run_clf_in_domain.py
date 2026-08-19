@@ -52,6 +52,23 @@ The spread over seeds is NOT a confidence interval. The seeds resample the same
 corpus, so their test halves overlap heavily; the reported +- is smaller than the
 binomial error of a single test set and understates the real uncertainty.
 
+METRICS
+-------
+Accuracy and macro F1 from the labels; AUROC and TPR at 1% and 5% FPR from the
+continuous score behind them, on both row sets. The gap is not the same size for
+all of them: a model can lose almost nothing in accuracy across the split and a
+large share of its TPR at 1% FPR, because that operating point lives in the tail
+of the human distribution -- exactly the part a fitted model has pushed furthest
+away on the rows it saw.
+
+``tprT@X`` / ``fprT@X`` are the transported reading: the threshold is calibrated
+to X% FPR on the TRAINING rows and applied to the held-out ones, and ``fprT@X``
+is the FPR it actually produced there. This is the weakest possible test of a
+calibration -- one corpus, one generator, two random halves -- so a realized FPR
+that already misses its nominal level here says the operating point is not stable
+even before transfer is asked about. See ``run_clf_cross_domain.py``, where the
+same threshold is carried to a corpus the model has never seen.
+
 ``report_by`` names columns to describe the split by (``domain``,
 ``generated_by``). They are read and kept aligned with the design matrix but
 never stacked into it -- the model must not see ``domain``. The split is grouped
@@ -92,14 +109,19 @@ from epai.algs import build_algorithm
 from epai.utils.cd_core import (
     BINARY_CLASSES,
     baseline_specs,
+    calibrate_thresholds,
+    cell_metric_specs,
     check_dataset,
     describe_variant,
     evaluate_score_rule,
-    fit_score_threshold,
+    format_threshold,
     grouped_split,
     load_prepared,
+    mean_std_over_seeds,
     metrics_dict,
+    oriented_scores,
     print_split_composition,
+    score_metric_keys,
     split_composition,
 )
 from epai.utils.config_utils import (
@@ -125,6 +147,7 @@ from epai.utils.variant_utils import (
     fit_alg,
     predict_alg,
     resolved_params,
+    score_alg,
     variant_columns,
 )
 from epai.utils.visualization_utils import (
@@ -306,12 +329,18 @@ def aggregate_runs(per_seed: list[dict]) -> dict:
     ``overfit_gap`` is train minus test accuracy. It is the number to read before
     the headline: a model at 99.9% train and 99.5% test has learned the corpus, a
     model at 99.9% and 85% has memorised it.
+
+    Every score metric present (AUROC, both TPR@FPR readings, the thresholds
+    behind them) is averaged the same way, on the held-out rows and on the
+    training rows, so the overfit question can be asked of them too -- an AUROC
+    of 1.000 on train and 0.94 on test is the same story the accuracy gap tells,
+    read where the low-FPR operating point actually lives.
     """
     accs = [r["accuracy"] for r in per_seed]
     f1s = [r["macro_f1"] for r in per_seed]
     tr_accs = [r["train_accuracy"] for r in per_seed]
     tr_f1s = [r["train_macro_f1"] for r in per_seed]
-    return {
+    out = {
         "accuracy_mean": float(np.mean(accs)),
         "accuracy_std": float(np.std(accs)),
         "macro_f1_mean": float(np.mean(f1s)),
@@ -326,12 +355,21 @@ def aggregate_runs(per_seed: list[dict]) -> dict:
         "n": per_seed[0]["n"],
         "class_balance": per_seed[0]["class_balance"],
     }
+    for key in score_metric_keys():
+        out.update(mean_std_over_seeds(per_seed, key))
+        out.update(mean_std_over_seeds(per_seed, f"train_{key}"))
+    return out
 
 
 def summarise(payload: dict) -> dict:
-    """One variant's comparison row: what the ranking and the figures read."""
+    """One variant's comparison row: what the ranking and the figures read.
+
+    Every score metric the summary holds is carried through under its own name,
+    train and test alike, so the comparison figures can draw one panel per
+    metric without reopening each variant's ``in_domain.json``.
+    """
     s = payload["summary"]
-    return {
+    row = {
         "variant": payload["variant"],
         "label": payload["label"],
         "feature_dim": payload["feature_dim"],
@@ -348,6 +386,12 @@ def summarise(payload: dict) -> dict:
         "baseline": bool(payload.get("baseline")),
         "baseline_kind": payload.get("baseline_kind"),
     }
+    for key in score_metric_keys():
+        for name in (f"{key}_mean", f"{key}_std", f"train_{key}_mean",
+                     f"train_{key}_std"):
+            if name in s:
+                row[name] = s[name]
+    return row
 
 
 def run_variant(
@@ -384,9 +428,32 @@ def run_variant(
         alg.set_fit_groups(groups[train_idx])
         fit_alg(alg, X[train_idx], y[train_idx], Z[train_idx] if Z is not None else None)
 
+        Z_train = Z[train_idx] if Z is not None else None
+        Z_test = Z[test_idx] if Z is not None else None
+
+        # There is no second corpus here, so the transported operating point of
+        # variant (b) is transported across the split instead: the threshold is
+        # calibrated to each nominal FPR on the TRAINING rows and the realized
+        # FPR is read on the held-out ones. That is the weakest possible test of
+        # a calibration -- same corpus, same generator, same everything -- and a
+        # realized FPR that already misses its nominal level here says the
+        # operating point is not even stable within one corpus, before transfer
+        # is asked about at all.
+        #
+        # It is also biased in a known direction: the model was fitted on those
+        # rows, so its human scores there sit further from the boundary than they
+        # will anywhere else, and the threshold comes out too strict. Read the
+        # realized FPR as a floor.
+        s_train = score_alg(alg, X[train_idx], Z_train)
+        cal_thresholds = (
+            calibrate_thresholds(y[train_idx], s_train) if s_train is not None else None
+        )
+
         res = metrics_dict(
             y[test_idx],
-            predict_alg(alg, X[test_idx], Z[test_idx] if Z is not None else None),
+            predict_alg(alg, X[test_idx], Z_test),
+            scores=score_alg(alg, X[test_idx], Z_test),
+            cal_thresholds=cal_thresholds,
         )
         # The same model on the rows it was fitted on. Not a result -- it is the
         # denominator for one: train minus test is what the model failed to
@@ -394,11 +461,15 @@ def run_variant(
         # 0.4-point gap than at a 15-point one.
         train_res = metrics_dict(
             y[train_idx],
-            predict_alg(alg, X[train_idx], Z[train_idx] if Z is not None else None),
+            predict_alg(alg, X[train_idx], Z_train),
+            scores=s_train,
         )
         res["train_accuracy"] = train_res["accuracy"]
         res["train_macro_f1"] = train_res["macro_f1"]
         res["train_confusion"] = train_res["confusion"]
+        for key in score_metric_keys():
+            if key in train_res:
+                res[f"train_{key}"] = train_res[key]
         res["train_n"] = int(len(train_idx))
         per_seed.append(res)
 
@@ -443,18 +514,18 @@ def run_variant(
 
 
 def run_baseline(cfg: dict, spec: CorpusSpec, bl: dict, out_dir: Path) -> dict:
-    """One zero-shot score baseline on the held-out split. No classifier is fitted.
+    """One zero-shot score baseline on the held-out split. Nothing is fitted.
 
     Same split and seeds as the trained variants, so its row lands in the same
-    table. The fitted variant calibrates its cutoff on the training half
-    (Youden's J); the vanilla one takes the cutoff from the config and never
-    looks at the data at all.
+    table. The cutoff is the config's and never looks at the data at all; the
+    split matters only because it decides which rows the baseline is read on.
     """
     group_col: str = cfg["data"]["group_col"]
     human_label: str = cfg["data"]["human_label"]
     n_runs: int = cfg["model"]["n_runs"]
     test_size: float = cfg["model"].get("test_size", 0.30)
     col, machine_is_high = bl["column"], bool(bl.get("machine_is_high", False))
+    threshold = float(bl["threshold"])
 
     prep = load_prepared(spec, [col], group_col, human_label)
     note = f"  ({prep.n_missing_dropped} row(s) without a {col})" if prep.n_missing_dropped else ""
@@ -467,23 +538,30 @@ def run_baseline(cfg: dict, spec: CorpusSpec, bl: dict, out_dir: Path) -> dict:
     per_seed: list[dict] = []
     for i in range(n_runs):
         train_idx, test_idx = grouped_split(y, groups, test_size, cfg["seed"] + i)
-        threshold = (
-            fit_score_threshold(scores[train_idx], y[train_idx], machine_is_high)
-            if bl["threshold"] is None
-            else float(bl["threshold"])
+        # Variant (b) across the split, as for the trained variants -- except
+        # that a zero-shot score is not fitted to the training rows at all, so
+        # this one is unbiased: a realized FPR that misses its nominal level here
+        # is the detector's score distribution moving between two random halves
+        # of ONE corpus, with no overfitting to blame it on.
+        cal_thresholds = calibrate_thresholds(
+            y[train_idx], oriented_scores(scores[train_idx], machine_is_high)
         )
         res = evaluate_score_rule(
-            scores[test_idx], y[test_idx], threshold, machine_is_high
+            scores[test_idx], y[test_idx], threshold, machine_is_high,
+            cal_thresholds=cal_thresholds,
         )
-        # The same cutoff on the half it was calibrated on. For a `_fitted`
-        # variant the gap is the optimism of the calibration itself; for a
-        # `_vanilla` one it should be ~0, since that cutoff saw no data at all.
+        # The same cutoff on the training half. The gap against the held-out
+        # half should be ~0: the cutoff saw no data at all, so there is no
+        # calibration optimism for it to carry.
         train_res = evaluate_score_rule(
             scores[train_idx], y[train_idx], threshold, machine_is_high
         )
         res["train_accuracy"] = train_res["accuracy"]
         res["train_macro_f1"] = train_res["macro_f1"]
         res["train_confusion"] = train_res["confusion"]
+        for key in score_metric_keys():
+            if key in train_res:
+                res[f"train_{key}"] = train_res[key]
         res["train_n"] = int(len(train_idx))
         res["threshold"] = float(threshold)
         per_seed.append(res)
@@ -493,7 +571,10 @@ def run_baseline(cfg: dict, spec: CorpusSpec, bl: dict, out_dir: Path) -> dict:
 
     bl_cfg = dict(cfg)
     bl_cfg["features"] = [col]
-    bl_cfg["model"] = {**cfg["model"], "ml_alg": f"{bl['kind']} ({bl['variant']})"}
+    bl_cfg["model"] = {
+        **cfg["model"],
+        "ml_alg": f"{bl['kind']} (fixed threshold {format_threshold(threshold)})",
+    }
     bl_cfg["alg_id"] = f"{cfg['alg_id']}__{bl['name']}"
     bl_cfg["alg_label"] = f"{cfg['alg_label']} — {bl['label']}"
 
@@ -503,11 +584,10 @@ def run_baseline(cfg: dict, spec: CorpusSpec, bl: dict, out_dir: Path) -> dict:
         "variant": bl["name"],
         "label": bl["label"],
         "baseline": True,
-        "baseline_variant": bl["variant"],
         "baseline_kind": bl["kind"],
         "machine_is_high": machine_is_high,
         "column": col,
-        "threshold": None if bl["threshold"] is None else float(bl["threshold"]),
+        "threshold": threshold,
         "feature_dim": 1,
         "classes": BINARY_CLASSES,
         "config": bl_cfg,
@@ -536,6 +616,34 @@ def print_result(label: str, summary: dict) -> None:
         f"{summary['macro_f1_mean']*100:>11.1f}% ± {summary['macro_f1_std']*100:<4.1f}"
     )
     print(f"  {'gap':<12}{summary['overfit_gap']*100:>11.1f} points  (train − test)")
+
+    # The score metrics, on the same two row sets. Skipped entirely for a variant
+    # whose algorithm has no ranking score.
+    specs = [
+        m for m in cell_metric_specs()
+        if f"{m.key}_mean" in summary and m.key not in ("accuracy", "macro_f1")
+    ]
+    if specs:
+        print(f"\n{'':14}" + "".join(f"{m.short:>18}" for m in specs))
+        for side, prefix in (("train", "train_"), ("test", "")):
+            row = f"  {side:<12}"
+            for m in specs:
+                mean = summary.get(f"{prefix}{m.key}_mean")
+                std = summary.get(f"{prefix}{m.key}_std")
+                row += (
+                    f"{'—':>18}"
+                    if mean is None or not np.isfinite(mean)
+                    else f"{mean*100:>11.1f}% ± {(std or 0.0)*100:<4.1f}"
+                )
+            print(row)
+        print(
+            "\n  tpr@X is (a): the threshold is fit on the very rows it is scored\n"
+            "  on. tprT@X / fprT@X are (b): the threshold is fit to X% FPR on the\n"
+            "  TRAINING rows and carried to the held-out ones — fprT@X is what it\n"
+            "  actually cost there. Within one corpus this is the easiest possible\n"
+            "  test of a calibration; a miss here will only widen under transfer."
+        )
+
     print(f"\n  train / test rows : {summary['train_n']} / {summary['n']}   "
           f"{summary['class_balance']}")
     print("\n  In-domain only. Chance is 50%; a score here says nothing about an")

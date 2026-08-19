@@ -436,6 +436,21 @@ def predict_alg(alg, X: np.ndarray, Z: np.ndarray | None) -> np.ndarray:
     return alg.predict(X, Z) if alg.uses_aux else alg.predict(X)
 
 
+def score_alg(alg, X: np.ndarray, Z: np.ndarray | None) -> np.ndarray | None:
+    """The continuous machine-ness score, or None if this algorithm has none.
+
+    Mirrors ``predict_alg``'s two signatures. AUROC and TPR@FPR need a ranking,
+    which a label vector cannot supply, so every runner asks for one here and
+    falls back to the label-only metrics when the answer is None. Returning None
+    rather than raising is deliberate: a scoreless algorithm should cost its
+    variant the score metrics, not the whole matrix.
+    """
+    try:
+        return alg.decision_score(X, Z) if alg.uses_aux else alg.decision_score(X)
+    except NotImplementedError:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Preflight: the config checks both runners share
 # ---------------------------------------------------------------------------

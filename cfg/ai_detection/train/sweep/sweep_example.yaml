@@ -48,12 +48,35 @@ algorithm:
 # in that case rather than letting it pass quietly.
 holdout: ["wp_gpt54mini"]
 
-# What the search maximises.
+# What the search maximises. The accuracy aggregates keep their short names:
 #   transfer_min  -> the WORST off-diagonal cell. The one to optimise if the
 #                    detector has to hold up on a corpus you have not seen;
 #                    a mean hides one collapsed target behind two good ones.
 #   transfer_mean -> average off-diagonal accuracy.
 #   gap           -> in-domain minus transfer (pair with direction: min).
+#
+# Every other reported metric contributes the same four aggregates, named
+# transfer_<metric>_mean / transfer_<metric>_worst / in_domain_<metric>_mean /
+# <metric>_gap. Worth using: searching on accuracy and then publishing TPR@1%FPR
+# optimises one number and reports another, and they do not have to move
+# together.
+#   transfer_auroc_mean               -> ranking quality under transfer; the
+#                                        threshold-free choice, and the most
+#                                        stable objective on small corpora.
+#   transfer_tpr_at_fpr_0.05_mean     -> (a) TPR at 5% FPR, threshold fit on the
+#                                        cell being tested. Separability at a
+#                                        low-FPR operating point.
+#   transfer_tpr_at_srcfpr_0.05_mean  -> (b) the same operating point with the
+#                                        SOURCE's threshold carried over — the
+#                                        deployable number, and the hardest one.
+#   transfer_fpr_at_srcfpr_0.05_worst -> the false-positive rate that transported
+#                                        threshold actually cost. LOWER is
+#                                        better, so it needs direction: min —
+#                                        pairing it with max is a config error.
+#
+# At 1% FPR the estimate rests on roughly n_human/100 rows per cell, so it is a
+# noisy thing to search on; 0.05 is the better objective and 0.01 the number to
+# read afterwards.
 #
 # min_in_domain is a floor, not a target: a model that has collapsed to always
 # predicting one class scores the majority share on every corpus, which can beat
@@ -110,7 +133,10 @@ search:
   # fires once the model stops fitting the training set better, i.e. after it has
   # overfit. It is kept in the space as the control, not because it is sensible.
   val_frac: [0.0, 0.15, 0.25]
-  val_metric: ["loss", "accuracy"]
+  # "auroc" early-stops on how well the score ORDERS the two classes rather than
+  # on the argmax at 0.5. Two epochs can share an accuracy and have very
+  # different tails, and the tail is what a TPR@FPR objective reads.
+  val_metric: ["loss", "accuracy", "auroc"]
 
   # --- architecture -------------------------------------------------------
   #

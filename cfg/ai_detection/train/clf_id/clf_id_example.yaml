@@ -187,23 +187,23 @@ report_by: [domain, generated_by]
 # Optional zero-shot score baselines
 # ---------------------------------------------------------------------------
 
-# No classifier is trained by either family; each variant becomes one more ★ row
-# in the comparison, the fixed reference the trained variants are measured
-# against. Same split and seeds as the trained variants. Drop the key or set
-# enabled: false to skip a family.
+# No classifier is trained by either family; each becomes exactly ONE more ★ row
+# in the comparison -- `binoculars` / `llm_judge` -- the fixed reference the
+# trained variants are measured against. Same split and seeds as the trained
+# variants. Drop the key or set enabled: false to skip a family.
 #
-#   <kind>_fitted            -> the cutoff is calibrated on the TRAINING half
-#                               (Youden's J) and applied to the held-out half.
-#   <kind>_vanilla_<value>   -> one per `vanilla_threshold`, taken straight from
-#                               this file and fit to nothing at all.
+# Nothing here is fitted: `threshold` is taken straight from this file, applied
+# to the held-out half, and is required whenever the family is enabled. The run
+# is read on AUROC and TPR@FPR, and neither ever looks at the declared cutoff --
+# it enters only accuracy, macro F1 and the confusion matrix.
 #
 # Both read LOW = machine: Binoculars by construction, the LLM judge because it
 # reports P(human). 0.9015310749276843 is the cutoff from the Binoculars paper
-# (accuracy mode); the judge's `vanilla_threshold` defaults to 0.5.
+# (accuracy mode); 0.5 is the judge's own neutral point.
 binoculars_baseline:
   enabled: true
   column: "binoculars_score"
-  vanilla_threshold: [0.9015310749276843]
+  threshold: 0.9015310749276843
 
 # The judge only scores the generators it was asked for, so rows with a Null
 # score drop out of THIS baseline (and only this one) — the preflight prints the
@@ -211,7 +211,7 @@ binoculars_baseline:
 llm_judge_baseline:
   enabled: false
   column: "llm_judge_score_gpt54_mini"
-  vanilla_threshold: [0.5]
+  threshold: 0.5
 
 # ---------------------------------------------------------------------------
 # Preflight guards (checked before training; never affect the fitting itself)

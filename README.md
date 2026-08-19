@@ -839,7 +839,7 @@ failed to generalise even inside the corpus:
 algorithm                    dim     train      test     gap   test n
   SVM (RBF)                  512    100.0%     99.5%     0.5     1799
   Logistic Regression        512     99.9%     98.7%     1.2     1799
-★ binoculars_fitted            1     86.8%     86.4%     0.4     1799
+★ binoculars                   1     86.8%     86.4%     0.4     1799
 ```
 
 `report_by: [domain, generated_by]` breaks the split down by any column and draws

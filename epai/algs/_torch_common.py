@@ -44,6 +44,7 @@ from dataclasses import asdict, dataclass, field, fields
 import numpy as np
 import torch
 import torch.nn as nn
+from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import GroupShuffleSplit, ShuffleSplit
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
@@ -52,7 +53,28 @@ from torch.utils.data import DataLoader, TensorDataset
 NORMALIZE_STEPS = {"none", "standard", "l2"}
 
 #: Quantities ``val_metric`` may early-stop on, and whether bigger is better.
-VAL_METRICS = {"loss": False, "accuracy": True}
+#:
+#: ``auroc`` is the one to reach for when the run is reported at a low-FPR
+#: operating point. ``accuracy`` stops on the argmax at 0.5, which is blind to
+#: how the two classes are *ordered* either side of it -- two epochs with the
+#: same accuracy can have very different tails, and the tail is exactly what
+#: TPR@1%FPR reads.
+VAL_METRICS = {"loss": False, "accuracy": True, "auroc": True}
+
+
+def logit_margin(logits: torch.Tensor) -> np.ndarray:
+    """Machine-minus-human logit, as float64. A ranking score, not a probability.
+
+    Deliberately not ``softmax(...)[:, 1]``. The metrics that read this are
+    evaluated in the tail of the human distribution -- TPR at 1% FPR is set by a
+    handful of the most machine-looking human rows -- and in float32 a confident
+    model saturates softmax to exactly 1.0 for a large share of rows. Those ties
+    are indistinguishable to a threshold, so the tail resolution the metric needs
+    is destroyed by the very transform that makes the number look like a
+    probability. The margin is monotone in that probability and keeps every
+    distinct ordering the network actually produced.
+    """
+    return (logits[:, 1] - logits[:, 0]).to(torch.float64).cpu().numpy()
 
 
 # ---------------------------------------------------------------------------
@@ -522,4 +544,10 @@ def _val_score(
     logits = model(*val_tensors)
     if hp.val_metric == "accuracy":
         return float((logits.argmax(dim=1) == y_val).float().mean().item())
+    if hp.val_metric == "auroc":
+        # split_train_val guarantees both classes are present here, so this is
+        # never the degenerate single-class case roc_auc_score rejects.
+        return float(
+            roc_auc_score(y_val.cpu().numpy(), logit_margin(logits))
+        )
     return float(loss_fn(logits, y_val).item())
