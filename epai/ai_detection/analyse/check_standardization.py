@@ -94,6 +94,7 @@ Usage:
     # the suite: are these four built the same way?
     uv run python epai/ai_detection/analyse/check_standardization.py \
         data/parquet/ghostbuster_gpt35t.parquet \
+        data/parquet/ghostbuster_gpt35ts.parquet \
         data/parquet/ghostbuster_gpt54mini.parquet \
         data/parquet/ghostbuster_gpt56luna.parquet \
         data/parquet/science_v3_gpt56luna_0811A.parquet
