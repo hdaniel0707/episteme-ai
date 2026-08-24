@@ -11,8 +11,8 @@ baseline and can be compared with it on the same threshold sweeps.
 threshold rule is ``score <= thr ⇒ machine`` for either. Scores written by an
 earlier version of this script are P(machine) -- the opposite -- and the column
 name does not distinguish the two, so a file scored before the flip has to be
-re-judged: drop the stale column with ``delete_parquet_columns.py`` in this
-folder and run this script again.
+re-judged: drop the stale column with
+``epai/scripts/delete_parquet_columns.py`` and run this script again.
 
 The judge sees the document and nothing else -- no label, no ``generated_by``,
 no domain, no neighbouring rows -- which is the point: the score has to be
