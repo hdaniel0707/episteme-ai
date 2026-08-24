@@ -7,6 +7,7 @@ import plotly.graph_objects as go
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 from matplotlib.offsetbox import AnnotationBbox, HPacker, TextArea
+from matplotlib.ticker import MaxNLocator
 import json
 from sklearn.metrics import mean_squared_error, r2_score
 
@@ -19,9 +20,12 @@ from epai.utils.color_utils import llm_color as _llm_color
 # figure can never disagree with the number it is drawing. cd_core imports
 # nothing from here, so this direction of the dependency is the safe one.
 from epai.utils.cd_core import (
+    BY_SEED_SUFFIX,
     CD_CHANCE_RATE,
+    SCORE_DIST_KEY,
     MetricSpec,
     cell_metric_specs,
+    level_tag,
     present_metric_specs,
     split_diag,
     transported_fpr_key,
@@ -1052,11 +1056,20 @@ def _wrap_note(*paragraphs: str) -> str:
     return "\n".join(lines)
 
 
+def _note_in(note: str) -> float:
+    """Height in INCHES of the caption strip for ``note``.
+
+    Separate from :func:`_note_strip` because a figure whose height is composed
+    from its parts needs the inches before there is a figure to take a fraction
+    of.
+    """
+    n_lines = note.count("\n") + 1 if note else 0
+    return n_lines * CD_NOTE_LINE_IN + CD_NOTE_MARGIN_IN
+
+
 def _note_strip(note: str, fig) -> float:
     """Figure-fraction height to reserve below the axes for ``note``."""
-    n_lines = note.count("\n") + 1 if note else 0
-    inches = n_lines * CD_NOTE_LINE_IN + CD_NOTE_MARGIN_IN
-    return min(0.45, inches / fig.get_figheight())
+    return min(0.45, _note_in(note) / fig.get_figheight())
 
 
 def _level_of(key: str) -> float:
@@ -1067,100 +1080,6 @@ def _level_of(key: str) -> float:
 def _metric_bar_positions(specs: list[MetricSpec]) -> np.ndarray:
     """x positions for one grouped bar per metric."""
     return np.arange(len(specs), dtype=float)
-
-
-def _save_cd_metric_summary(
-    out_dir: Path,
-    specs: list["MetricSpec"],
-    summary: dict,
-    names: list[str],
-    alg_label: str,
-    subtitle: str,
-) -> None:
-    """Every metric on one axis: in-domain vs transfer, with each reference marked.
-
-    The point of a single figure is the *shape* across metrics, which no
-    individual matrix shows. A model can hold its accuracy and its AUROC under
-    transfer and still lose almost all of its transported TPR, because the
-    ordering survived and the calibration did not -- on this figure that reads as
-    two pairs of near-equal bars followed by one that collapses, which is the
-    finding stated in one glance.
-
-    Each metric is drawn against its OWN reference (a red dash per group): 50%
-    for accuracy, macro F1 and AUROC, the nominal FPR for the TPR@FPR ones. A
-    shared chance line would be wrong for most of the bars here.
-    """
-    if not specs:
-        return
-
-    x = _metric_bar_positions(specs)
-    in_domain, transfer, refs = [], [], []
-    for spec in specs:
-        mat = _cd_matrix(summary, names, f"{spec.key}_mean")
-        off_mask = ~np.eye(len(names), dtype=bool)
-        with np.errstate(invalid="ignore"):
-            in_domain.append(float(np.nanmean(np.diag(mat))))
-            transfer.append(float(np.nanmean(mat[off_mask])) if len(names) > 1 else np.nan)
-        refs.append(spec.reference)
-    in_domain, transfer = np.array(in_domain), np.array(transfer)
-
-    fig, ax = plt.subplots(figsize=(max(5.5, 1.5 * len(specs) + 2.0), 6.6))
-    w = 0.38
-    b1 = ax.bar(x - w / 2, in_domain, w, color="steelblue",
-                label="in-domain (diagonal)")
-    b2 = ax.bar(x + w / 2, transfer, w, color="orange",
-                label="transfer (off-diagonal)")
-    ax.bar_label(b1, fmt="%.3f", fontsize=8, padding=2)
-    ax.bar_label(b2, fmt="%.3f", fontsize=8, padding=2)
-
-    # One reference dash per group, spanning both its bars. Drawn per metric
-    # because they genuinely differ; a single axhline would be a lie on 4 of 9.
-    for xi, ref in zip(x, refs):
-        ax.plot([xi - w, xi + w], [ref, ref], color="red", linewidth=1.6,
-                linestyle="--", zorder=4)
-    ax.plot([], [], color="red", linewidth=1.6, linestyle="--",
-            label="reference (chance, or the nominal FPR)")
-
-    # A realized FPR is the one bar where *up* is bad; say so on the tick rather
-    # than trusting the reader to remember which of nine columns inverts.
-    ax.set_xticks(x)
-    ax.set_xticklabels(
-        [
-            spec.label.replace(" (", "\n(") + ("\n↓ lower is better" if not spec.higher_is_better else "")
-            for spec in specs
-        ],
-        fontsize=7.5,
-    )
-    ax.set_ylim(0, 1.34)
-    ax.set_ylabel("Value")
-    # A horizontal band above the bars: which group is tallest depends on the
-    # result, so a corner legend collides with the data on some runs and not
-    # others.
-    ax.legend(fontsize=8, loc="upper center", ncol=3, frameon=False)
-    fig.suptitle(f"{alg_label} — every metric, in-domain vs transfer\n{subtitle}")
-    # The (a)/(b) explanation is only printed when those bars are actually on the
-    # figure. A matrix written before the score metrics existed draws accuracy and
-    # macro F1 alone, and a caption explaining thresholds it does not show would
-    # send the reader looking for bars that are not there.
-    has_operating_points = any(spec.key.startswith("tpr_at_") for spec in specs)
-    note = _wrap_note(
-        "(a) 'target-calibrated' fits the threshold on the cell being tested — "
-        "separability only. (b) 'transported' fits it to the nominal FPR on the "
-        "SOURCE's held-out split and carries it over unchanged — the deployable "
-        "number, and the only pair that can expose a score distribution that "
-        "shifted while its ordering survived."
-        if has_operating_points else "",
-        "The transported bars equal the target-calibrated ones on the diagonal by "
-        "construction, so only their transfer bars carry new information."
-        if has_operating_points else
-        "This matrix carries no ranking score, so only the label-derived metrics "
-        "are shown. Re-run it to get AUROC and TPR@FPR — they cannot be recovered "
-        "from a confusion matrix.",
-    )
-    fig.text(0.01, 0.01, note, fontsize=7.5, color="dimgray", va="bottom")
-    fig.tight_layout(rect=(0, _note_strip(note, fig), 1, 1))
-    fig.savefig(out_dir / "cross_domain_metrics_summary.png", dpi=150)
-    plt.close(fig)
 
 
 def _save_clf_cd_figures(out_dir: Path, payload: dict) -> None:
@@ -1183,16 +1102,19 @@ def _save_clf_cd_figures(out_dir: Path, payload: dict) -> None:
 
     acc = _cd_matrix(summary, names, "accuracy_mean")
     counts = _cd_matrix(summary, names, "n")
-    specs = present_metric_specs(summary, names)
+    # Only the plotted metrics. The summary still HOLDS every key -- macro F1,
+    # the target-calibrated TPR, the realized FPR, the 5% level -- and the
+    # printed tables still report them; they simply do not each get a matrix.
+    plotted = set(CD_PLOT_METRICS)
+    specs = [m for m in present_metric_specs(summary, names) if m.key in plotted]
 
     size = max(7.0, 1.6 * len(names) + 3.0)
 
-    # One matrix figure per metric the summary holds: accuracy, macro F1, AUROC,
-    # and each TPR@FPR operating point under both readings. They are separate
-    # figures rather than panels of one because each is a full n x n table that
-    # deserves its own annotation, and because the caption each needs is
-    # different -- a transported TPR means nothing without the (b) explanation,
-    # and accuracy means nothing with it.
+    # One matrix figure per plotted metric. Separate figures rather than panels
+    # of one because each is a full n x n table that deserves its own
+    # annotation, and because the caption each needs is different -- a
+    # transported TPR means nothing without the (b) explanation, and accuracy
+    # means nothing with it.
     for spec in specs:
         mat = _cd_matrix(summary, names, f"{spec.key}_mean")
         std = _cd_matrix(summary, names, f"{spec.key}_std")
@@ -1238,11 +1160,9 @@ def _save_clf_cd_figures(out_dir: Path, payload: dict) -> None:
         fig.savefig(out_dir / f"cross_domain_{spec.filename}.png", dpi=150)
         plt.close(fig)
 
-    _save_cd_metric_summary(out_dir, specs, summary, names, alg_label, subtitle)
-
     # In-domain vs transfer, per train set and per test set. Accuracy only: this
-    # figure asks "which corpus fails", and one metric per panel is what makes
-    # that legible. The all-metric view is the figure above.
+    # figure asks "which corpus fails", which is a different question from "how
+    # does this variant rank", and one metric per panel is what makes it legible.
     diag = np.diag(acc)
     off_mask = ~np.eye(len(names), dtype=bool)
     out_mean = np.array(
@@ -1284,6 +1204,228 @@ def _save_clf_cd_figures(out_dir: Path, payload: dict) -> None:
     fig.savefig(out_dir / "cross_domain_summary.png", dpi=150)
     plt.close(fig)
 
+    # The mechanism behind the transported TPR, where the payload kept the raw
+    # scores to draw it from. Silently skipped where it did not.
+    plot_cd_score_hist(out_dir, payload)
+
+
+#: Human vs machine on the figures that draw the two CLASSES apart, rather than
+#: a variant's summary numbers. Blue is human, red is machine, and the pairing is
+#: fixed -- it is the convention a reader of detection figures already has, and
+#: these panels are meant to be read at a glance.
+#:
+#: It deliberately does not match the dumbbell palette (steelblue = in-domain,
+#: orange = transfer): those hues answer "which side of the matrix", these answer
+#: "which class", and the two questions never appear on one axis.
+CD_HUMAN_COLOR = "#3d6fb4"
+CD_MACHINE_COLOR = "#c5392f"
+#: The transported cut. Near-black: both hues on the panel are spoken for, and
+#: red here means "machine", not "reference".
+CD_CUT_COLOR = "0.12"
+#: Bins per panel, shared across the grid.
+CD_SCORE_BINS = 56
+
+
+def _score_dist_range(
+    cells: dict, thresholds: dict, names: list[str]
+) -> tuple[float, float]:
+    """x limits shared by every panel, so the panels can be compared at all.
+
+    The 0.3 / 99.7 percentiles of the pooled scores, then widened to hold every
+    threshold with room to spare. Scores outside the window are CLIPPED into the
+    end bins by the caller rather than dropped -- what the figure is read for is
+    the share of each class either side of the cut, and a dropped tail is exactly
+    the mass a 1% operating point lives in.
+    """
+    pooled = np.concatenate(
+        [
+            np.asarray(cells[s][t]["scores"], dtype=float)
+            for s in names
+            for t in names
+            if t in cells.get(s, {})
+        ]
+        or [np.array([0.0, 1.0])]
+    )
+    pooled = pooled[np.isfinite(pooled)]
+    if pooled.size == 0:
+        return 0.0, 1.0
+    lo, hi = np.percentile(pooled, [0.3, 99.7])
+    cuts = [v for v in thresholds.values() if np.isfinite(v)]
+    if cuts:
+        lo, hi = min(lo, min(cuts)), max(hi, max(cuts))
+    pad = 0.06 * max(hi - lo, 1e-9)
+    return float(lo - pad), float(hi + pad)
+
+
+def plot_cd_score_hist(out_dir: Path, payload: dict) -> None:
+    """Where the transported cut falls in each corpus's two score distributions.
+
+    This is the figure behind ``tpr_at_srcfpr_<level>``. Every other figure
+    reports that number; this one shows the mechanism that produces it, because
+    no aggregate can:
+
+      * On the **diagonal** panel of a row, the cut is placed so that exactly
+        ``level`` of the HUMAN scores fall at or right of it. That is the whole
+        definition of the operating point, and it is a construction on blue
+        alone -- the machine scores have no say in where the line goes.
+      * On every **off-diagonal** panel of that row, the same line is drawn
+        again, unmoved. Nothing is re-fitted. What changes is the corpus under
+        it.
+
+    So a row reads left to right as one question: does the line still mean what
+    it meant when it was placed? A detector whose score distributions merely
+    shift -- ordering intact, AUROC intact -- shows up here as red mass sliding
+    across a stationary line, which is the failure the transported TPR exists to
+    catch and the one that accuracy and AUROC both miss.
+
+    Bars are each class's share of ITSELF, not counts: the cells have very
+    different row counts (a held-out split against a whole corpus), and only the
+    share makes panels comparable. It also makes the two numbers printed on each
+    panel readable off the picture -- red area right of the line is the TPR, blue
+    area right of it is the realized FPR.
+
+    Needs ``payload[SCORE_DIST_KEY]``, written by the runners for one seed. A
+    payload from before that existed simply gets no figure: the scores cannot be
+    recovered from a matrix.
+    """
+    dist = payload.get(SCORE_DIST_KEY) or {}
+    cells = dist.get("cells") or {}
+    thresholds = dist.get("thresholds") or {}
+    names: list[str] = payload["dataset_names"]
+    if not cells or not thresholds:
+        return
+
+    label_of: dict = payload.get("dataset_labels", {})
+    labels = [label_of.get(n, n) for n in names]
+    alg_label = payload.get("alg_label", payload.get("alg_id", out_dir.name))
+    level = float(dist.get("level", 0.01))
+    pct = f"{level * 100:g}%"
+    n = len(names)
+
+    lo, hi = _score_dist_range(cells, thresholds, names)
+    edges = np.linspace(lo, hi, CD_SCORE_BINS + 1)
+
+    note = _wrap_note(
+        f"Each row's cut is set on its diagonal panel, where {pct} of human "
+        "scores fall right of it, then drawn unmoved across the row. Bars are "
+        "each class's share of itself: red right of the line is the TPR, blue "
+        f"right of it the realized FPR. Seed {dist.get('seed', 0)}."
+    )
+
+    panel = 2.35
+    title_in, legend_in = 0.72, 0.30
+    note_in = _note_in(note)
+    fig_w = max(9.0, panel * n + 2.0)
+    fig_h = title_in + panel * n + 0.55 + legend_in + note_in
+    fig, axes = plt.subplots(
+        n, n, figsize=(fig_w, fig_h), sharex=True, sharey=True, squeeze=False
+    )
+
+    for i, source in enumerate(names):
+        cut = float(thresholds.get(source, np.nan))
+        for j, target in enumerate(names):
+            ax = axes[i][j]
+            cell = (cells.get(source) or {}).get(target)
+            if not cell:
+                ax.set_axis_off()
+                continue
+            scores = np.asarray(cell["scores"], dtype=float)
+            y = np.asarray(cell["y"], dtype=int)
+
+            # The cut's own panel is the one that defined it. Tinted and named,
+            # so a reader scanning a row can see where the line came from -- the
+            # whole figure is the difference between that panel and the others.
+            if i == j:
+                ax.set_facecolor("#eef2f7")
+                ax.text(0.025, 0.94, "cut set here", transform=ax.transAxes,
+                        ha="left", va="top", fontsize=8, style="italic",
+                        color="0.35")
+            # Everything at or right of the line is called machine. A faint band
+            # rather than an arrow: it has to be legible under the bars.
+            if np.isfinite(cut):
+                ax.axvspan(cut, hi, color="0.90", zorder=0)
+
+            for cls, color in ((0, CD_HUMAN_COLOR), (1, CD_MACHINE_COLOR)):
+                values = scores[y == cls]
+                if not values.size:
+                    continue
+                ax.hist(
+                    np.clip(values, lo, hi), bins=edges,
+                    weights=np.full(values.size, 1.0 / values.size),
+                    color=color, alpha=0.55, edgecolor=color, linewidth=0.6,
+                    zorder=2,
+                )
+            if np.isfinite(cut):
+                ax.axvline(cut, color=CD_CUT_COLOR, linewidth=1.6, zorder=4)
+
+            # Recomputed from the stored scores, not read off the summary, so the
+            # numbers printed here cannot disagree with the bars beside them.
+            # Unclipped: clipping is a drawing device and must not move a rate.
+            for cls, color, name in (
+                (1, CD_MACHINE_COLOR, "TPR"), (0, CD_HUMAN_COLOR, "FPR")
+            ):
+                values = scores[y == cls]
+                rate = (
+                    float((values >= cut).mean())
+                    if values.size and np.isfinite(cut) else float("nan")
+                )
+                ax.text(
+                    0.975, 0.94 if cls == 1 else 0.80,
+                    f"{name} {rate:.3f}" if np.isfinite(rate) else f"{name}  n/a",
+                    transform=ax.transAxes, ha="right", va="top",
+                    fontsize=8.5, fontfamily="monospace", color=color,
+                    fontweight="bold" if cls == 1 else "normal",
+                )
+
+            if i == 0:
+                ax.set_title(labels[j], fontsize=9.5, pad=6)
+            if j == 0:
+                ax.set_ylabel(labels[i], fontsize=9.5, fontweight="bold")
+            ax.tick_params(labelsize=7.5)
+            for side in ("top", "right"):
+                ax.spines[side].set_visible(False)
+
+    axes[0][0].set_xlim(lo, hi)
+    from matplotlib.patches import Patch
+    from matplotlib.lines import Line2D
+
+    handles = [
+        Patch(facecolor=CD_HUMAN_COLOR, alpha=0.55, edgecolor=CD_HUMAN_COLOR,
+              label="human"),
+        Patch(facecolor=CD_MACHINE_COLOR, alpha=0.55, edgecolor=CD_MACHINE_COLOR,
+              label="AI"),
+        Line2D([], [], color=CD_CUT_COLOR, linewidth=1.6,
+               label=f"cut at {pct} source FPR"),
+        Patch(facecolor="0.90", edgecolor="none", label="called machine"),
+    ]
+
+    fig.suptitle(
+        f"{alg_label} — score distributions and the transported {pct} FPR cut\n"
+        "rows: CALIBRATED ON  ·  columns: TESTED ON"
+    )
+    # Placed by hand: supxlabel's default y lands in the caption strip, and every
+    # strip on this figure is already known in inches.
+    fig.supxlabel(
+        "decision score  (higher = more machine-like)", fontsize=9.5,
+        y=(note_in + legend_in + 0.16) / fig_h,
+    )
+    fig.text(0.01, CD_NOTE_MARGIN_IN / fig_h, note, fontsize=7.5, color="dimgray",
+             va="bottom")
+    fig.subplots_adjust(
+        top=1.0 - title_in / fig_h,
+        bottom=(0.55 + legend_in + note_in) / fig_h,
+        left=0.075, right=0.985, hspace=0.22, wspace=0.10,
+    )
+    fig.legend(
+        handles=handles, fontsize=8.5, loc="lower center",
+        bbox_to_anchor=(0.5, (note_in + 0.04) / fig_h),
+        bbox_transform=fig.transFigure, ncol=4, frameon=False,
+    )
+    fig.savefig(
+        out_dir / f"cross_domain_score_hist_{level_tag(level)}.png", dpi=150
+    )
+    plt.close(fig)
+
 
 def plot_clf_cd_result(alg_dir: Path) -> None:
     """Plot one cross-domain result directory from its ``cross_domain.json``.
@@ -1316,18 +1458,36 @@ def plot_clf_cd_results(exp_dir: Path) -> None:
     print(f"Plots saved to: {exp_dir}")
 
 
-# Zero-shot baseline families, styled apart on the comparison figure. The two
-# read their score in opposite directions and are not the same claim, so they get
-# their own colour, hatch and legend entry rather than collapsing into one
-# "baseline" item. The hatches are deliberately sparse: they mark a bar as a
-# baseline without competing with the value printed on it.
+# The hues every cross-domain figure is built from, and the only ones.
+#
+# Hue says WHICH SIDE of the matrix a number came from -- ● transfer
+# (off-diagonal), ○ in-domain (diagonal) -- and nothing else. It does not also
+# encode what produced the row: every variant's transfer dot is the same orange,
+# a zero-shot baseline's included, because the axis is a comparison and a row
+# drawn in its own colour reads as a different kind of measurement rather than a
+# competitor on the same scale.
+#
+# What marks a baseline is the ★ on its row label, in one place. The old figure
+# had it three ways at once -- an oversized ★ marker, a crimson hue, and the
+# label mark -- with crimson also meaning "reference line" a few inches away.
+CD_IN_DOMAIN_COLOR = "steelblue"
+CD_TRANSFER_COLOR = "orange"
+# The ★ on a baseline's row label and in the legend. Same orange as the dot it
+# stands for, so the mark and the mark's data point read as one thing.
+CD_BASELINE_COLOR = CD_TRANSFER_COLOR
+
+# Zero-shot baseline families. The hatch is what tells them apart wherever a
+# figure draws bars rather than markers; on the marker figures they are told
+# apart by the family name on the legend's ★ entry.
 CD_BASELINE_STYLES: dict[str, dict] = {
-    "binoculars": {"label": "Binoculars baseline", "color": "crimson", "hatch": "/"},
-    "llm_judge": {"label": "LLM Judge baseline", "color": "darkviolet", "hatch": "\\"},
+    "binoculars": {"label": "Binoculars baseline", "color": CD_BASELINE_COLOR,
+                   "hatch": "/"},
+    "llm_judge": {"label": "LLM Judge baseline", "color": CD_BASELINE_COLOR,
+                  "hatch": "\\"},
 }
 # A baseline whose family cannot be told (an older payload, a third detector).
 CD_BASELINE_FALLBACK = {
-    "label": "zero-shot baseline", "color": "black", "hatch": "-"
+    "label": "zero-shot baseline", "color": CD_BASELINE_COLOR, "hatch": "-"
 }
 CD_HATCH_LINEWIDTH = 0.8  # bar outline *and* hatch stroke weight
 # The hatch is only a "this is a baseline" flag, so it is drawn in translucent
@@ -1400,50 +1560,6 @@ def _num(value, default: float = float("nan")) -> float:
         return default
 
 
-def _series(rows: list[dict], key: str, default: float = float("nan")) -> np.ndarray:
-    """One aggregate across comparison rows, as a float array."""
-    return np.array([_num(r.get(key), default) for r in rows], dtype=float)
-
-
-def _cell_of(row: dict, key: str, i: int, j: int) -> float:
-    """One cell of a comparison row's metric matrix, NaN if the row lacks it."""
-    mat = row.get(key)
-    try:
-        return float(mat[i][j])
-    except (TypeError, IndexError, KeyError, ValueError):
-        return float("nan")
-
-
-def _metric_imshow_kwargs(spec: MetricSpec) -> dict:
-    """vmin / vmax / cmap for one metric, matching :func:`_plot_cd_matrix`.
-
-    Shared so a metric is coloured identically wherever it appears -- a reader
-    moving between a variant's own matrix and the cross-variant one should not
-    have to re-learn what red means.
-    """
-    if spec.diverging:
-        half = max(spec.reference, 1.0 - spec.reference)
-        return {
-            "vmin": spec.reference - half,
-            "vmax": spec.reference + half,
-            "cmap": "RdBu" if spec.higher_is_better else "RdBu_r",
-        }
-    return {
-        "vmin": 0.0,
-        "vmax": 1.0,
-        "cmap": CD_SEQ_CMAP if spec.higher_is_better else CD_SEQ_CMAP_BAD,
-    }
-
-
-def _metric_text_color(value: float, spec: MetricSpec) -> str:
-    """Readable annotation colour on this metric's ramp."""
-    if not np.isfinite(value):
-        return "black"
-    if spec.diverging:
-        return "white" if abs(value - spec.reference) > 0.32 else "black"
-    return "white" if value > 0.55 else "black"
-
-
 def _ensure_row_aggregates(rows: list[dict]) -> list[dict]:
     """Fill each row's per-metric aggregates from its matrix where they are absent.
 
@@ -1485,56 +1601,57 @@ def _ensure_row_aggregates(rows: list[dict]) -> list[dict]:
     return out
 
 
-#: The metrics whose comparison figures stay in the experiment directory itself.
-#: Every other metric, and the all-metric grid, is written to
-#: ``CD_OTHER_FIGURES_DIR`` beneath it -- nine metrics x two figures plus the
-#: grid is nineteen files at the top level of a run, which buries the two that
-#: are actually read first. Nothing is dropped or drawn differently; this only
-#: decides which directory a figure lands in, so widening the headline set is a
-#: matter of adding a key here.
+#: The metrics every cross-domain figure is drawn for, in reporting order, and
+#: the only ones. This is a PLOTTING filter, not a measurement one: a run still
+#: computes and writes every key ``cell_metric_specs()`` defines -- macro F1, the
+#: target-calibrated TPR, the realized FPR, the 5% operating point -- into its
+#: JSONs and its printed tables. They simply do not each get a figure. Nine
+#: metrics x two figure kinds plus a grid was fifty-odd files per run, which
+#: buries the three a run is actually read on.
 #:
-#: The TPR here is ``tpr_at_srcfpr_0.01``, the TRANSPORTED reading: the threshold
-#: is calibrated to 1% FPR on the source's held-out split and carried to the
-#: target unchanged, which is the number a deployed detector would actually get.
-#: The target-calibrated ``tpr_at_fpr_0.01`` -- threshold read off the tested
-#: cell's own ROC -- is separability under an ideal that assumes labelled human
-#: text from the target corpus, so it sits with the rest.
+#: The TPR here is the TRANSPORTED reading: the threshold is calibrated to 1% FPR
+#: on the SOURCE's held-out split and carried to the target unchanged, which is
+#: the number a deployed detector would actually get. The target-calibrated
+#: ``tpr_at_fpr_0.01`` -- threshold read off the tested cell's own ROC -- assumes
+#: labelled human text from the target corpus and is not that number.
 #:
-#: A transported TPR is only half a measurement: it is bought at a realized FPR
-#: that the ranked figure does not draw. Add ``fpr_at_srcfpr_0.01`` here to put
-#: the other half beside it.
-CD_HEADLINE_METRICS: tuple[str, ...] = ("auroc", "tpr_at_srcfpr_0.01")
+#: A transported TPR is half a measurement: it is bought at a realized FPR, and
+#: that FPR is not plotted. It is not lost either -- it is annotated inside the
+#: cells of the per-variant TPR matrix (see :func:`_save_clf_cd_figures`), which
+#: is where the pair has to be read together anyway.
+CD_PLOT_METRICS: tuple[str, ...] = ("auroc", "tpr_at_srcfpr_0.01", "accuracy")
 
-#: Sub-directory of an experiment holding every non-headline comparison figure.
-CD_OTHER_FIGURES_DIR = "other_figures"
+#: Fraction of the axis span kept clear on the right for the per-row numbers.
+CD_GUTTER_FRAC = 0.26
 
-#: Which KIND of figure a headline metric keeps beside the JSON. Only the ranked
-#: one: it is the summary of a metric, where the per-cell matrix is the detail
-#: behind it and belongs with the detail. Two headline metrics therefore mean
-#: exactly two files at the top of a run directory, not four.
-CD_HEADLINE_KINDS: frozenset[str] = frozenset({"ranked"})
+#: The one spread these figures draw: ±1 SD of the aggregate over seeds.
+#:
+#: A Student-t interval on the mean used to be drawn beside it, and it was the
+#: same number twice: at n seeds the interval's half-width is
+#: ``t(0.975, n-1)/sqrt(n)`` x the SD, which is 1.24x at n=5. Two marks for one
+#: quantity is cognitive load carrying no information, so the SD stands alone --
+#: it answers "how far does this move if I re-seed", which is the question a
+#: reader of a seed-averaged figure actually has, and it does not invite the
+#: "the intervals overlap, so it is not significant" reading, which is not a
+#: valid inference here.
+#:
+#: Thin and opaque rather than thick and translucent: a 5pt bar reads as the
+#: datum and drowns the marker that IS the datum.
+CD_SD_LINEWIDTH = 2.6
 
-
-def _cd_figure_dir(exp_dir: Path, metric_key: str | None, kind: str) -> Path:
-    """Where one comparison figure is written, creating the directory if needed.
-
-    ``kind`` is ``"ranked"`` (bars + scatter), ``"matrix"`` (every source->target
-    cell) or ``"all"`` (the all-metric grid), and ``metric_key`` is None for the
-    last of those -- the grid is the overview of everything the run measured, so
-    it is never a headline on its own.
-    """
-    if kind in CD_HEADLINE_KINDS and metric_key in CD_HEADLINE_METRICS:
-        return exp_dir
-    out = exp_dir / CD_OTHER_FIGURES_DIR
-    out.mkdir(parents=True, exist_ok=True)
-    return out
+#: Marker size of a mean. One size and one shape for every row: a baseline used
+#: to draw an oversized ★ here and now draws the same ● as everything else.
+CD_MARKER_SIZE = 8.0
 
 
 def _comparison_specs(rows: list[dict]) -> list[MetricSpec]:
-    """The metrics these comparison rows can actually be drawn under."""
+    """The plotted metrics (:data:`CD_PLOT_METRICS`) these rows can be drawn under."""
+    by_key = {m.key: m for m in cell_metric_specs()}
     return [
-        m for m in cell_metric_specs()
-        if any(np.isfinite(_num(r.get(f"transfer_{m.key}_mean"))) for r in rows)
+        by_key[key]
+        for key in CD_PLOT_METRICS
+        if key in by_key
+        and any(np.isfinite(_num(r.get(f"transfer_{key}_mean"))) for r in rows)
     ]
 
 
@@ -1610,9 +1727,9 @@ def _collapse_identical_rows(rows: list[dict], spec: MetricSpec) -> list[dict]:
     also catches an algorithm entered twice under two ids -- and never merges
     rows that merely round to the same value.
 
-    Only the per-metric figures collapse. ``<noun>_comparison_all.png`` keeps
-    every row, because there the accuracy and macro-F1 columns are what tell the
-    cutoffs apart, and a row missing from that grid would hide the split.
+    The merge is per metric, so a family that draws as one row on AUROC still
+    draws as several on accuracy -- which is the only place a declared cutoff
+    shows up, and therefore the only figure that can tell those rows apart.
     """
     groups: dict[tuple, list[dict]] = {}
     for row in rows:
@@ -1626,62 +1743,30 @@ def _collapse_identical_rows(rows: list[dict], spec: MetricSpec) -> list[dict]:
             out.append(group[0])
             continue
         merged = dict(group[0])
+        # The label is the whole disclosure: a merged row prints every member's
+        # name joined by " = ", so the rows that vanished are named where the
+        # reader is already looking, not in a caption under the figure.
         merged["label"] = _collapsed_label(group)
-        merged["collapsed_n"] = len(group)
-        merged["collapsed_labels"] = [str(r.get("label", "")) for r in group]
         out.append(merged)
     return out
-
-
-def _collapse_note(rows: list[dict]) -> str:
-    """Caption naming what each merged row stands for, or ``''`` if none merged.
-
-    The row label says what the row is, not that it absorbed others, so this is
-    the only place the merge is spelled out -- and it names the absorbed rows
-    rather than counting them, because "which three" is the question a reader who
-    notices the missing rows is actually asking.
-    """
-    merged = [r for r in rows if int(r.get("collapsed_n", 1)) > 1]
-    if not merged:
-        return ""
-    note = "; ".join(
-        f"{r['label']} is {int(r['collapsed_n'])} rows whose cells are identical "
-        f"under this metric, drawn once "
-        f"({', '.join(r.get('collapsed_labels', []))})"
-        for r in merged
-    ) + "."
-    if any(r.get("baseline") for r in merged):
-        note += (
-            " A cutoff enters the confusion matrix and nothing else, so rows over "
-            "one score column separate on accuracy and macro F1 alone."
-        )
-    return note + " The all-metric grid keeps every row."
 
 
 def _draw_cd_comparison_set(
     exp_dir: Path,
     rows: list[dict],
-    names: list[str],
-    label_of: dict,
     alg_label: str,
     *,
     noun: str,
     subtitle: str,
     row_label,
 ) -> None:
-    """Every comparison figure for one experiment: one set per metric, plus ``_all``.
+    """One ranked figure per plotted metric, written flat into ``exp_dir``.
 
-    ``<noun>_comparison_<metric>.png`` and ``<noun>_comparison_<metric>_matrix.png``
-    for each metric the payload holds, and ``<noun>_comparison_all.png`` putting
-    every metric on one grid. The per-metric files are what make a ranking
-    disagreement findable: a variant can top the accuracy comparison and sit
-    mid-table on TPR at 1% FPR, and with only the accuracy figure there is
-    nowhere that shows up.
-
-    Every metric is still drawn; only the headline ones
-    (:data:`CD_HEADLINE_METRICS`) are written beside the JSON, and the rest go to
-    ``<exp_dir>/other_figures/`` so the directory opens on the two figures the
-    run is read on rather than on nineteen.
+    ``<noun>_comparison_<metric>.png`` for each of :data:`CD_PLOT_METRICS` the
+    payload actually holds. Three files, no sub-directory. The per-metric split
+    is what makes a ranking disagreement findable: a variant can top the accuracy
+    comparison and sit mid-table on TPR at 1% source FPR, and with only one of
+    them there is nowhere that shows up.
     """
     rows = _ensure_row_aggregates(rows)
     specs = _comparison_specs(rows)
@@ -1690,449 +1775,544 @@ def _draw_cd_comparison_set(
         return
 
     for spec in specs:
-        # Per metric, because whether two rows coincide is a property of the
-        # metric: the score baselines are one row on AUROC and every TPR@FPR
-        # reading, and three separate rows on accuracy and macro F1.
+        # Collapsed per metric, because whether two rows coincide is a property
+        # of the metric: the score baselines are one row on AUROC and every
+        # TPR@FPR reading, and separate rows on accuracy.
         _plot_cd_comparison(
-            _cd_figure_dir(exp_dir, spec.key, "ranked"),
-            _collapse_identical_rows(rows, spec), names, label_of,
-            alg_label,
+            exp_dir, _collapse_identical_rows(rows, spec), alg_label,
             spec=spec, noun=noun, subtitle=subtitle, row_label=row_label,
-            matrix_dir=_cd_figure_dir(exp_dir, spec.key, "matrix"),
+        )
+    print(
+        f"Comparison plots saved to: {exp_dir} "
+        f"({', '.join(s.short for s in specs)})"
+    )
+
+
+
+def _cd_gutter(
+    ax,
+    values: np.ndarray,
+    spec: MetricSpec,
+    *,
+    gutter_frac: float = CD_GUTTER_FRAC,
+    nbins: int = 6,
+) -> float:
+    """Set data-driven x limits with room on the right for the numbers.
+
+    The old figure hardcoded ``0..1.18``. On AUROC that is the bug the whole
+    panel suffers from: every trained classifier lives between 0.96 and 0.98, so
+    the entire result -- and every error bar on it -- is three pixels wide. The
+    limits follow the data instead, and the numbers move into a reserved gutter
+    on the right rather than floating at the end of a bar.
+
+    Two things it then has to get right, and used not to:
+
+      * **The metric's ceiling is a real edge.** Every metric drawn here is a
+        rate in [0, 1], so padding past 1.0 invents axis the data cannot reach --
+        the within-dataset AUROC figure was ticking 1.005 and 1.020, values AUROC
+        does not have. The padded limits are clamped into ``[spec.floor,
+        spec.ceiling]`` wherever the data itself stays inside them.
+      * **Perfect has to be labelled.** ``MaxNLocator`` keeps only the ticks
+        falling inside the range, and on the suite AUROC figure that dropped
+        every tick above 0.90: the in-domain circles sat at 0.999 with nothing to
+        read them against, which is how a figure of near-perfect in-domain scores
+        managed not to show where perfect was. The ceiling is forced into the
+        tick list whenever the axis reaches it.
+
+    Ticks still stop at the gutter -- one inside it would advertise a scale where
+    there is only text -- and a faint grid is drawn from them, because over
+    twenty rows the eye cannot carry a marker's position to the axis unaided.
+
+    ``values`` is everything that must fit, the reference line included where it
+    belongs -- the caller decides, because on the right half of a broken axis it
+    does not (the reference sits in the stretch that was cut out).
+
+    ``gutter_frac`` is the share of the axis kept clear on the right for the
+    per-row numbers. Pass 0.0 on a panel that carries no numbers, so it spends
+    its whole width on data. ``nbins`` is the tick budget -- lower it on a narrow
+    panel, where six ticks collide and the forced ceiling tick makes the last
+    gap tighter still.
+
+    Returns the x of the gutter's left edge, so the caller can rule it off.
+    """
+    finite = np.asarray([v for v in values if np.isfinite(v)], dtype=float)
+    if not finite.size:
+        finite = np.asarray([spec.reference], dtype=float)
+    lo, hi = float(finite.min()), float(finite.max())
+    pad = max(0.015, 0.05 * (hi - lo))
+    lo = max(lo - pad, spec.floor) if lo >= spec.floor else lo - pad
+    hi = min(hi + pad, spec.ceiling) if hi <= spec.ceiling else hi + pad
+    span = max(hi - lo, 1e-6)
+    ax.set_xlim(lo, hi + gutter_frac * span)
+
+    ticks = [t for t in MaxNLocator(nbins=nbins).tick_values(lo, hi) if lo <= t <= hi]
+    if hi >= spec.ceiling and not any(abs(t - spec.ceiling) < 1e-9 for t in ticks):
+        # Drop only what the ceiling would sit on top of, then pin it: an
+        # unlabelled ceiling is the failure this branch exists for.
+        step = (
+            (max(ticks) - min(ticks)) / (len(ticks) - 1) if len(ticks) > 1 else span
+        )
+        ticks = [t for t in ticks if spec.ceiling - t > 0.55 * step] + [spec.ceiling]
+    ax.set_xticks(sorted(ticks))
+    _cd_xgrid(ax)
+    return hi
+
+
+def _cd_xgrid(ax) -> None:
+    """A faint rule down from every x tick, behind the data.
+
+    Not decoration: these figures put twenty rows against an axis whose
+    interesting span is a few hundredths wide, and without a grid the reader has
+    to carry a marker's position across empty paper to read it.
+    """
+    ax.grid(axis="x", color="0.92", linewidth=0.6, zorder=0)
+    ax.set_axisbelow(True)
+
+
+def _cd_zebra(ax, y: np.ndarray, idx: int) -> None:
+    """Alternating background band, so a long row list stays trackable."""
+    if idx % 2 == 1:
+        ax.axhspan(y[idx] - 0.5, y[idx] + 0.5, color=CD_SUITE_BAND_COLOR, zorder=0)
+
+
+def _cd_by_seed(source: dict, stem: str) -> list[float]:
+    """One ``<stem>_by_seed`` list off a comparison row or a per-dataset cell."""
+    values = (source or {}).get(f"{stem}{BY_SEED_SUFFIX}")
+    if not isinstance(values, list):
+        return []
+    return [_num(v) for v in values]
+
+
+def _cd_seed_stats(source: dict, stem: str) -> tuple:
+    """``(mean, sd, n)`` over the seeds behind one aggregate.
+
+    ``n`` is the number of seeds, and those n numbers are the only datapoints any
+    of these figures has. Each is one seed's whole aggregate recomputed -- that
+    seed's mean over the diagonal, or over the off-diagonal -- NOT the spread of
+    the individual cells around that mean, which is what the payload's ``_std``
+    holds and what the old whisker showed. The two differ by about a factor of
+    ten here, and only this one is an uncertainty on the number the run is ranked
+    by.
+
+    ``sd`` is the sample SD (``ddof=1``). It is NaN with fewer than two seeds --
+    a payload written before the per-seed record existed cannot have one
+    recovered from it -- and legitimately 0.0 when the seeds agree exactly, which
+    is a fact about the variant and not a missing measurement. The two cases draw
+    differently; see :func:`_cd_draw_estimate`.
+
+    Falls back to the stored ``<stem>_mean`` for the marker, so a row without a
+    per-seed record still plots -- it simply plots without a bar.
+    """
+    values = np.array(
+        [v for v in _cd_by_seed(source, stem) if np.isfinite(v)], dtype=float
+    )
+    stored = _num((source or {}).get(f"{stem}_mean"))
+    if values.size < 2:
+        return (stored if np.isfinite(stored) else float("nan"),
+                float("nan"), int(values.size))
+    return float(values.mean()), float(values.std(ddof=1)), int(values.size)
+
+
+def _cd_draw_estimate(
+    ax,
+    y: float,
+    stats_tuple: tuple,
+    *,
+    color: str,
+    filled: bool,
+    scale: float = 1.0,
+    zorder: int = 5,
+) -> None:
+    """One mean and its ±1 SD bar over seeds, on row ``y``.
+
+    Shape is fixed: ``●`` filled for a transfer mean, ``○`` open for an in-domain
+    one, on every row whatever produced it. ``color`` is the only thing that
+    varies, and it is what says trained / baseline.
+
+    ``scale`` shrinks the whole mark for a subordinate row -- the per-dataset
+    lines under a block's mean line -- so the summary reads as the summary
+    without needing a different symbol for it.
+
+    Three cases, drawn apart on purpose:
+
+      * **sd > 0** -- the bar.
+      * **sd == 0** with seeds behind it -- a short upright tick at the mean.
+        The seeds agreed exactly, which happens and means something: a zero-shot
+        score does not depend on the seed, so a threshold-free metric on a fixed
+        evaluation set comes out identical every time. Drawn rather than left
+        blank so it cannot be misread as the third case.
+      * **sd is NaN** -- fewer than two seeds on record. Marker alone.
+    """
+    mean, sd, _n = stats_tuple
+    if not np.isfinite(mean):
+        return
+    if np.isfinite(sd) and sd > 0:
+        ax.plot([mean - sd, mean + sd], [y, y], color=color,
+                linewidth=CD_SD_LINEWIDTH * scale, solid_capstyle="butt",
+                zorder=zorder - 1)
+    elif np.isfinite(sd):
+        ax.plot([mean, mean], [y - 0.22 * scale, y + 0.22 * scale], color=color,
+                linewidth=CD_SD_LINEWIDTH * scale, solid_capstyle="butt",
+                zorder=zorder - 1)
+    ax.plot(
+        mean, y, marker="o", markersize=CD_MARKER_SIZE * scale,
+        markerfacecolor=color if filled else "white",
+        markeredgecolor="black" if filled else color,
+        markeredgewidth=0.7 * scale if filled else 1.8 * scale,
+        zorder=zorder,
+    )
+
+
+def _cd_transfer_color(row: dict) -> str:
+    """The hue of one row's transfer end: baseline family, or the trained orange."""
+    return (
+        _cd_baseline_style(row)["color"] if row.get("baseline")
+        else CD_TRANSFER_COLOR
+    )
+
+
+def _cd_seed_legend(order: list[dict], n_seeds: int) -> list:
+    """Legend entries shared by the ranked figure and the cross-dataset one."""
+    from matplotlib.lines import Line2D
+
+    def mark(color: str, filled: bool, label: str) -> Line2D:
+        return Line2D(
+            [], [], linestyle="none", marker="o", markersize=CD_MARKER_SIZE,
+            markerfacecolor=color if filled else "white",
+            markeredgecolor="black" if filled else color,
+            markeredgewidth=0.8 if filled else 1.8, label=label,
         )
 
-    slug = noun.replace(" ", "_")
-    order_desc = sorted(
-        rows, key=lambda r: _num(r.get("transfer_accuracy_mean")), reverse=True
+    handles = [
+        mark(CD_TRANSFER_COLOR, True, "transfer (off-diagonal)"),
+        mark(CD_IN_DOMAIN_COLOR, False, "in-domain (diagonal)"),
+    ]
+    # The ★, not a second dot: a baseline's transfer dot is the same orange as
+    # everyone else's, so a marker entry here would just repeat the first one.
+    # What needs explaining is the mark on its row label.
+    is_baseline = [bool(r.get("baseline")) for r in order]
+    handles += [
+        Line2D([], [], linestyle="none", marker="*", color=style["color"],
+               markeredgecolor="black", markeredgewidth=0.4, markersize=11,
+               label=f"★ {style['label']} (zero-shot)")
+        for style in _cd_baseline_legend_styles(order, is_baseline)
+    ]
+    handles.append(
+        Line2D([], [], color="0.45", linewidth=CD_SD_LINEWIDTH,
+               solid_capstyle="butt",
+               label=f"±1 SD over {n_seeds} seeds" if n_seeds else "±1 SD over seeds")
     )
-    _plot_cd_comparison_metrics(
-        _cd_figure_dir(exp_dir, None, "all"), order_desc, alg_label,
-        noun=noun, slug=slug, subtitle=subtitle, row_label=row_label,
+    if any(r.get("hybrid") for r in order):
+        handles.append(
+            Line2D([], [], linestyle="none", marker="D", color=CD_HYBRID_COLOR,
+                   markersize=6, label="hybrid (extra features)")
+        )
+    return handles
+
+
+def _cd_seed_note(n_seeds: int) -> str:
+    """The caption both figures carry: one line, what the bar is.
+
+    It says what the bar IS and nothing else. Everything the caption used to
+    explain is either already visible or lives where it belongs: merged rows
+    name themselves in their own label (``_collapsed_label``), a broken axis
+    carries its break marks, and what a metric claims is on the per-variant
+    matrix for that metric, which is the figure that has to carry it -- a
+    transported TPR is misleading without its (b) note, and that note is on the
+    figure where the transported TPR's cells actually are.
+    """
+    seeds = f"{n_seeds} seeds" if n_seeds else "the seeds"
+    return (
+        f"Bar = ±1 SD over {seeds}, of each seed's own mean. "
+        "A tick instead of a bar: the seeds agreed exactly."
     )
-    headline = [s.short for s in specs if s.key in CD_HEADLINE_METRICS]
-    print(
-        f"Comparison plots saved to: {exp_dir}"
-        + (f" ({', '.join(headline)}; the rest in {CD_OTHER_FIGURES_DIR}/)"
-           if headline else f" (all in {CD_OTHER_FIGURES_DIR}/)")
+
+
+def _cd_axis_break(main: np.ndarray, other: np.ndarray) -> tuple | None:
+    """``((lo0, hi0), (lo1, hi1))`` when the rows want a broken x axis, else None.
+
+    The case this exists for is AUROC with a zero-shot baseline on the figure.
+    Every trained item sits between 0.966 and 0.975 and the baseline sits at
+    0.317, so one axis spanning both gives the entire trained result about one
+    percent of the width -- and its error bars rather less than a pixel, which is
+    how the figure came to look as though the run had no variance in it.
+
+    Both facts are worth keeping: how far below the baseline is, and what
+    separates the items above it. A break keeps both at the cost of one
+    convention every reader already knows. It is only taken when it earns
+    itself -- when the items would otherwise be squeezed into under a fifth of
+    the axis and there is a real empty gap to break across, rather than a
+    continuum someone might read across.
+    """
+    main = main[np.isfinite(main)]
+    other = other[np.isfinite(other)]
+    if main.size == 0 or other.size == 0:
+        return None
+    full = max(float(max(main.max(), other.max()) - min(main.min(), other.min())), 1e-9)
+    if float(np.ptp(main)) > 0.20 * full:
+        return None
+    # The gap has to be on one side: a baseline inside the cluster's range is not
+    # an outlier and there is nothing to break across.
+    if other.max() < main.min():
+        gap = float(main.min() - other.max())
+        segments = ((other.min(), other.max()), (main.min(), main.max()))
+    elif other.min() > main.max():
+        gap = float(other.min() - main.max())
+        segments = ((main.min(), main.max()), (other.min(), other.max()))
+    else:
+        return None
+    return segments if gap > 0.40 * full else None
+
+
+def _cd_pad(lo: float, hi: float, frac: float = 0.08) -> tuple[float, float]:
+    """A segment widened enough that its extreme markers are not on the spine."""
+    pad = max(0.008, frac * max(hi - lo, 1e-9))
+    return lo - pad, hi + pad
+
+
+def _cd_draw_break_marks(left, right) -> None:
+    """The two slashes that say the axis is cut, one pair on each facing spine."""
+    kw = dict(marker=[(-1, -0.6), (1, 0.6)], markersize=7, linestyle="none",
+              color="0.35", mec="0.35", mew=1.0, clip_on=False)
+    left.plot([1, 1], [0, 1], transform=left.transAxes, **kw)
+    right.plot([0, 0], [0, 1], transform=right.transAxes, **kw)
+
+
+def _plot_cd_ranked(
+    out_dir: Path,
+    order: list[dict],
+    alg_label: str,
+    *,
+    spec: MetricSpec,
+    noun: str,
+    slug: str,
+    subtitle: str,
+    row_label,
+) -> None:
+    """One metric, one panel: every item's two means with their seed error bars.
+
+    A row is a dumbbell -- ``●`` its transfer (off-diagonal) mean, ``○`` its
+    in-domain (diagonal) mean, the link between them the generalisation gap --
+    and each end carries ±1 SD of that mean over seeds.
+
+    What is deliberately NOT here is the per-cell detail. An earlier version drew
+    every source->target cell on the row, coloured by target, beside a paired
+    per-cell difference against the best item. It was correct and it was too much
+    to read. Every one of those numbers is still on the per-variant matrices this
+    run writes; this figure answers the one question ahead of them -- how the
+    items rank, and whether the gaps between them survive the seeds.
+
+    The x axis follows the data, stops at the metric's ceiling, and breaks where
+    a zero-shot baseline would otherwise flatten it (see :func:`_cd_axis_break`).
+    It has to: the seed spread on AUROC is a few thousandths, and on an axis
+    padded out to 1.18 for bar labels it would be invisible -- which is how the
+    original figure came to look as though it had no variance at all.
+    """
+    key = spec.key
+    y = np.arange(len(order))
+    in_stats = [_cd_seed_stats(r, f"in_domain_{key}") for r in order]
+    tr_stats = [_cd_seed_stats(r, f"transfer_{key}") for r in order]
+    n_seeds = max((s[2] for s in tr_stats), default=0)
+
+    def bounds(stats_list, mask) -> np.ndarray:
+        return np.array(
+            [
+                b
+                for keep, (mean, sd, _n) in zip(mask, stats_list)
+                if keep
+                for b in (mean, mean - sd, mean + sd)
+            ],
+            dtype=float,
+        )
+
+    plain = [not r.get("baseline") for r in order]
+    base = [bool(r.get("baseline")) for r in order]
+    main_vals = np.concatenate([bounds(in_stats, plain), bounds(tr_stats, plain)])
+    base_vals = np.concatenate([bounds(in_stats, base), bounds(tr_stats, base)])
+    all_vals = np.concatenate([main_vals, base_vals, [spec.reference]])
+    segments = _cd_axis_break(main_vals, np.concatenate([base_vals, [spec.reference]]))
+
+    note = _cd_seed_note(n_seeds)
+    handles = _cd_seed_legend(order, n_seeds)
+    plot_in = max(3.4, 0.46 * len(order) + 1.9)
+    legend_in = _legend_strip_in(len(handles), ncol_max=4)
+    note_in = _note_in(note)
+    # The x-label is placed by hand rather than by set_xlabel, because a broken
+    # axis is two axes and would otherwise get two labels for one scale. That
+    # means reserving its strip here too.
+    xlabel_in = 0.52
+    title_in = 0.62  # the two-line suptitle
+    fig_h = title_in + plot_in + xlabel_in + legend_in + note_in
+    # Room for the row labels, which hang outside the axes as offset boxes and so
+    # are invisible to any automatic layout. Sized to the longest one actually
+    # drawn rather than to a guess, at roughly the width of a character at the
+    # size _draw_cd_row_mark_label uses.
+    label_in = min(
+        5.0,
+        max(1.1, 0.18 + 0.072 * max((len(row_label(r)) for r in order), default=0)),
     )
+
+    fig_w = 13.0
+    if segments:
+        fig, axes = plt.subplots(
+            1, 2, figsize=(fig_w, fig_h), sharey=True,
+            gridspec_kw={"width_ratios": [1.0, 3.4], "wspace": 0.035},
+        )
+    else:
+        fig, ax_one = plt.subplots(figsize=(fig_w, fig_h))
+        axes = [ax_one]
+    gutter_ax = axes[-1]
+
+    def draw(ax) -> None:
+        for idx, row in enumerate(order):
+            _cd_zebra(ax, y, idx)
+            in_mean, tr_mean = in_stats[idx][0], tr_stats[idx][0]
+            if np.isfinite(in_mean) and np.isfinite(tr_mean):
+                ax.plot([tr_mean, in_mean], [y[idx]] * 2, linestyle=":",
+                        color=CD_SUITE_MEAN_COLOR, linewidth=1.2, zorder=2)
+            _cd_draw_estimate(ax, y[idx], in_stats[idx], color=CD_IN_DOMAIN_COLOR,
+                              filled=False, zorder=5)
+            # Same ● whatever produced the row; the hue is what says zero-shot
+            # baseline. A ★ here would make shape carry two meanings at once.
+            _cd_draw_estimate(ax, y[idx], tr_stats[idx],
+                              color=_cd_transfer_color(row), filled=True, zorder=7)
+        ax.axvline(spec.reference, linestyle="--", color="red", linewidth=1.2,
+                   zorder=1)
+
+    for ax in axes:
+        draw(ax)
+
+    if segments:
+        axes[0].set_xlim(*_cd_pad(*segments[0]))
+        lo1, hi1 = _cd_pad(*segments[1])
+        gutter_x = _cd_gutter(axes[1], np.array([lo1, hi1]), spec)
+        axes[0].spines["right"].set_visible(False)
+        axes[1].spines["left"].set_visible(False)
+        axes[1].tick_params(left=False)
+        axes[0].set_xticks(MaxNLocator(nbins=3).tick_values(*segments[0]))
+        axes[0].set_xlim(*_cd_pad(*segments[0]))
+        _cd_xgrid(axes[0])
+        _cd_draw_break_marks(axes[0], axes[1])
+    else:
+        gutter_x = _cd_gutter(axes[0], all_vals, spec)
+    gutter_ax.axvline(gutter_x, color="0.85", linewidth=0.8, zorder=1)
+
+    for idx in range(len(order)):
+        tr_mean, in_mean = tr_stats[idx][0], in_stats[idx][0]
+        gutter_ax.text(
+            0.995, y[idx],
+            ("n/a" if not np.isfinite(tr_mean) else f"{tr_mean:.3f}")
+            + " / "
+            + ("n/a" if not np.isfinite(in_mean) else f"{in_mean:.3f}"),
+            transform=gutter_ax.get_yaxis_transform(), ha="right", va="center",
+            fontsize=7.5, fontfamily="monospace",
+        )
+    gutter_ax.text(0.995, 0.995, "transfer / in-dom.", transform=gutter_ax.transAxes,
+                   ha="right", va="top", fontsize=7.0, color="dimgray",
+                   fontfamily="monospace")
+
+    axes[0].set_yticks(y)
+    axes[0].set_yticklabels([""] * len(order))
+    for idx, row in enumerate(order):
+        _draw_cd_row_mark_label(axes[0], row_label(row), row, y[idx])
+    axes[0].set_ylim(-0.6, len(order) - 0.4)
+
+    # No axes title: the figure title above already names the metric, and
+    # repeating it over a single panel just pushes the plot down.
+    fig.suptitle(
+        f"{alg_label} — {noun} comparison, ranked by transfer: {spec.label}"
+        f"\n{subtitle}"
+    )
+    fig.text(0.01, CD_NOTE_MARGIN_IN / fig_h, note, fontsize=7.5, color="dimgray",
+             va="bottom")
+    # subplots_adjust, not tight_layout: a broken axis carries break marks drawn
+    # outside the axes with clip_on=False, and tight_layout refuses such a figure
+    # ("Axes that are not compatible with tight_layout") -- it warns, does
+    # nothing, and the strip below ends up printed over the plot. Every strip
+    # here is already known in inches, so placing them is arithmetic.
+    fig.subplots_adjust(
+        top=1.0 - title_in / fig_h,
+        bottom=(xlabel_in + legend_in + note_in) / fig_h,
+        left=label_in / fig_w,
+        right=0.985,
+        wspace=0.035,
+    )
+    box = [ax.get_position() for ax in axes]
+    centre = (box[0].x0 + box[-1].x1) / 2
+    fig.legend(
+        handles=handles, fontsize=7.5, loc="lower center",
+        bbox_to_anchor=(centre, note_in / fig_h),
+        bbox_transform=fig.transFigure,
+        ncol=max(1, min(len(handles), 4)), frameon=False,
+    )
+    # One label under the pair, not one per segment: a break is still one scale.
+    fig.text(
+        centre, (note_in + legend_in) / fig_h,
+        spec.label + ("" if spec.higher_is_better else "  (lower is better)")
+        + f"    ·    reference {spec.reference*100:g}%",
+        ha="center", va="bottom", fontsize=10,
+    )
+    fig.savefig(out_dir / f"{slug}_comparison_{spec.filename}.png", dpi=150,
+                bbox_inches="tight")
+    plt.close(fig)
 
 
 def _plot_cd_comparison(
     out_dir: Path,
     rows: list[dict],
-    names: list[str],
-    label_of: dict,
     alg_label: str,
     *,
     spec: MetricSpec,
     noun: str,
     subtitle: str,
     row_label,
-    matrix_dir: Path | None = None,
 ) -> None:
-    """Shared body for the embedding / algorithm cross-domain comparisons.
+    """Rank the items of one experiment under ONE metric, best transfer on top.
 
-    Draws ONE metric's pair of figures. The caller loops over every metric the
-    payload holds, so ``algorithm_comparison_accuracy.png`` and
-    ``algorithm_comparison_auroc.png`` are the same figure asking the same
-    question of different numbers -- which is the point, since the ranking does
-    not have to agree between them.
+    Both the embedding and the algorithm comparison rank the same per-item schema
+    (``label``, its in-domain / transfer aggregates and their per-seed record, a
+    ``baseline`` flag), so only the wording and the output filename differ and
+    those are the parameters:
 
-    Both comparisons rank the same per-item schema (``label``, the metric's
-    source x target matrix, its in-domain / transfer aggregates, ``baseline``
-    flag) and draw the same two figures. Only the wording, the row label and the
-    output filenames differ, so those are the parameters:
-
-      * ``spec`` -- which metric to draw: its label, its reference level, its
-        direction, and the key its aggregates are stored under. It also names the
-        output files, ``<noun>_comparison_<metric>[_matrix].png``. Which
-        *directory* they land in is the caller's call (see
-        :func:`_cd_figure_dir`), not this function's: the ranked figure goes to
-        ``out_dir`` and the matrix to ``matrix_dir``, which default to the same
-        place and differ only for a headline metric, whose ranked figure is
-        promoted to the run directory while its matrix stays with the detail.
+      * ``spec`` -- which metric to draw: its label, its reference, its
+        direction, its ceiling, and the key its aggregates are stored under. It
+        also names the output file, ``<noun>_comparison_<metric>.png``.
       * ``noun`` -- what the varying axis is called ("feature set", "algorithm",
-        "variant"); used in titles and the scatter legend.
-      * ``subtitle`` -- the caller's one-line description (the sweep differs:
+        "variant"); used in titles, filenames and legends.
+      * ``subtitle`` -- the caller's one-line description (the sweeps differ:
         embeddings share an algorithm, algorithms share a feature set).
       * ``row_label(r)`` -- the y-axis label for item ``r``.
 
-    Zero-shot baselines (``baseline: true``) are marked with a ★ and faintly
-    hatched bars so they never read as just another item, and each *family* of
-    baseline (``baseline_kind``: Binoculars, LLM judge) gets its own colour, hatch
-    pattern and legend entry on both panels -- they are opposite-direction rules
-    on different scores, so one merged "baseline" item would hide which is which.
-    The colour is carried by the ★ and the legend only; the hatch itself is
-    translucent black so it stays a background texture. Hybrids
-    (``hybrid: true``) are
-    marked more lightly -- a ◆ on the row label and their own scatter marker, but
-    plain bars -- because they were trained on extra information (the Binoculars
-    score on top of the shared feature set) and their rank should carry that
-    caveat without the bars becoming unreadable.
+    Zero-shot baselines (``baseline: true``) draw the same ● in the same orange
+    as every other row -- the figure is a comparison, and a row in its own hue
+    reads as a different kind of measurement rather than a competitor on one
+    scale. A ★ on the row label is what marks them. Hybrids (``hybrid: true``)
+    carry a ◆ there for the same reason: they were trained on extra information
+    (the Binoculars score on top of the shared feature set) and their rank should
+    say so.
+
+    This used to write a second figure beside the ranked one: every source->target
+    cell of every item as a heatmap. It is gone. The per-variant matrices already
+    hold every one of those numbers, one metric per file, annotated -- the
+    comparison-level copy was the same table transposed, and having it meant every
+    metric cost two files.
     """
-    # Ranked by transfer: the whole point is which item survives leaving its
-    # corpus, not which scores highest at home.
-    # The noun reads as prose in the titles ("per feature set"), so it is only
-    # squashed where it has to be a filename.
-    slug = noun.replace(" ", "_")
-    key = spec.key
-    # barh draws the first row at the bottom, so ascending puts the best on top
-    # -- and "best" inverts for a realized FPR, where the smallest value wins.
+    # Ranked by transfer: the point is which item survives leaving its corpus,
+    # not which scores highest at home. y runs bottom-up, so ascending by
+    # transfer puts the best row on top -- and "best" inverts for a realized FPR,
+    # where the smallest value wins.
     order = sorted(
         rows,
-        key=lambda r: _num(r.get(f"transfer_{key}_mean")),
+        key=lambda r: _num(r.get(f"transfer_{spec.key}_mean")),
         reverse=not spec.higher_is_better,
     )
-    is_baseline = np.array([bool(r.get("baseline")) for r in order])
-    is_hybrid = np.array([bool(r.get("hybrid")) for r in order])
-    labels = [row_label(r) for r in order]
-    in_domain = _series(order, f"in_domain_{key}_mean")
-    transfer = _series(order, f"transfer_{key}_mean")
-    transfer_std = _series(order, f"transfer_{key}_std", default=0.0)
-    in_domain_std = _series(order, f"in_domain_{key}_std", default=0.0)
-    transfer_min = _series(order, f"transfer_{key}_worst")
-    worst_label = (
-        "worst transfer cell" if spec.higher_is_better else "worst (highest) transfer cell"
+    _plot_cd_ranked(
+        out_dir, order, alg_label, spec=spec, noun=noun,
+        # The noun reads as prose in the titles ("per feature set"), so it is
+        # only squashed where it has to be a filename.
+        slug=noun.replace(" ", "_"),
+        subtitle=subtitle, row_label=row_label,
     )
-
-    # Figure 1: ranked bars + the in-domain/transfer scatter.
-    height = max(5.0, 0.42 * len(order) + 2.4)
-    fig, axes = plt.subplots(1, 2, figsize=(15.0, height))
-
-    y = np.arange(len(order))
-    h = 0.38
-    b1 = axes[0].barh(y + h / 2, np.nan_to_num(in_domain), h, xerr=in_domain_std,
-                      capsize=2, color="steelblue", label="in-domain (diagonal)")
-    b2 = axes[0].barh(y - h / 2, np.nan_to_num(transfer), h, xerr=transfer_std,
-                      capsize=2, color="orange", label="transfer (off-diagonal)")
-    axes[0].bar_label(b1, fmt="%.3f", fontsize=7, padding=2)
-    axes[0].bar_label(b2, fmt="%.3f", fontsize=7, padding=2)
-    # Hatch the baseline's bars so it never reads as just another item, in its
-    # family's hatch pattern so the two baseline families are told apart at a
-    # glance. The stroke is translucent black rather than the family colour: the
-    # colour lives on the ★ and in the legend, and a faint hatch stays a
-    # background texture instead of swallowing the bar. Hybrids are marked by the
-    # ◆ on their row label and by their marker in the scatter, which is enough --
-    # hatching their bars as well drowns out the numbers.
-    for idx in np.nonzero(is_baseline)[0]:
-        style = _cd_baseline_style(order[idx])
-        for bar in (b1[idx], b2[idx]):
-            bar.set_hatch(style["hatch"])
-            bar.set_edgecolor(CD_HATCH_COLOR)
-            bar.set_linewidth(CD_HATCH_LINEWIDTH)
-    # Worst single transfer cell: a mean can hide one collapsed corpus pair.
-    axes[0].scatter(transfer_min, y - h / 2, marker="|", s=90, color="black",
-                    zorder=3, label=worst_label)
-    axes[0].axvline(spec.reference, linestyle="--", color="red", linewidth=1.2,
-                    label=f"reference ({spec.reference*100:g}%)")
-    axes[0].set_yticks(y)
-    # Only the ★ / ◆ is coloured -- the name itself stays black, so the colour on
-    # the row means "baseline family", not "this row is special in some way". A
-    # tick label is a single Text artist and cannot hold two colours, so each row
-    # label is drawn instead as a packed box (coloured mark + black name)
-    # right-aligned on the axis where the tick label would have been.
-    axes[0].set_yticklabels([""] * len(order))
-    for idx, row in enumerate(order):
-        prefix = _cd_row_mark(row)
-        mark = prefix.strip()
-        parts = [
-            TextArea(labels[idx][len(prefix):],
-                     textprops=dict(color="black", fontsize=8))
-        ]
-        if mark:
-            mark_color = (
-                _cd_baseline_style(row)["color"] if row.get("baseline")
-                else CD_HYBRID_COLOR
-            )
-            parts.insert(
-                0, TextArea(mark, textprops=dict(color=mark_color, fontsize=10))
-            )
-        axes[0].add_artist(
-            AnnotationBbox(
-                HPacker(children=parts, align="center", pad=0.0, sep=3.0),
-                (0.0, y[idx]),
-                xycoords=("axes fraction", "data"),
-                xybox=(-6.0, 0.0),
-                boxcoords="offset points",
-                box_alignment=(1.0, 0.5),
-                frameon=False,
-                pad=0.0,
-                annotation_clip=False,
-            )
-        )
-    axes[0].set_xlim(0.0, 1.18)
-    axes[0].set_xlabel(spec.label + ("" if spec.higher_is_better else "  (lower is better)"))
-    axes[0].set_title(f"Ranked by transfer — {spec.label}")
-    handles, _ = axes[0].get_legend_handles_labels()
-    # Star glyphs matching the ★ prefixes on the row labels: one entry per
-    # baseline family present, in that family's colour, so the legend says which
-    # baseline a starred row is rather than only that it is one.
-    from matplotlib.lines import Line2D
-
-    for style in _cd_baseline_legend_styles(order, is_baseline):
-        handles.append(
-            Line2D([], [], linestyle="none", marker="*", color=style["color"],
-                   markersize=11, label=style["label"])
-        )
-    if is_hybrid.any():
-        handles.append(
-            Line2D([], [], linestyle="none", marker="D", color=CD_HYBRID_COLOR,
-                   markersize=6, label="hybrid (extra features)")
-        )
-    # A merged row is named for what it is, not for the merge, so nothing on the
-    # bar says one happened; the legend is where that is stated, and the caption
-    # of the matrix figure names the rows behind it. Only when one is actually on
-    # the figure -- on accuracy and macro F1 the same run collapses nothing.
-    if any(int(r.get("collapsed_n", 1)) > 1 for r in order):
-        handles.append(
-            Line2D([], [], linestyle="none", marker="", color="none",
-                   label="rows identical under this metric are drawn once")
-        )
-    # Legend below the axes so it never sits over the bars / worst-cell marks.
-    axes[0].legend(
-        handles=handles, fontsize=8, loc="upper center",
-        bbox_to_anchor=(0.5, -0.12), ncol=min(len(handles), 3), frameon=False,
-    )
-
-    axes[1].plot([0, 1], [0, 1], linestyle=":", color="gray", linewidth=1.0,
-                 label="no loss under transfer")
-    axes[1].axhline(spec.reference, linestyle="--", color="red", linewidth=1.2,
-                    label=f"reference ({spec.reference*100:g}%)")
-    axes[1].axvline(spec.reference, linestyle="--", color="red", linewidth=1.2)
-    item_pts = ~is_baseline & ~is_hybrid
-    axes[1].scatter(in_domain[item_pts], transfer[item_pts], s=45,
-                    color=CD_ITEM_COLOR, zorder=3, label=noun)
-    hybrid_pts = is_hybrid & ~is_baseline
-    # Same green as the plain items: a hybrid is still a trained classifier, so it
-    # is set apart by the ◆ shape (and the ◆ on its row) rather than by hue.
-    if hybrid_pts.any():
-        axes[1].scatter(in_domain[hybrid_pts], transfer[hybrid_pts], s=85,
-                        marker="D", color=CD_HYBRID_COLOR, edgecolor="black",
-                        linewidth=0.6, zorder=4, label="hybrid (extra features)")
-    # One star series per baseline family, matching the left panel's colours and
-    # legend wording, so a star on the scatter and a starred row in the ranking
-    # are recognisably the same thing.
-    for style in _cd_baseline_legend_styles(order, is_baseline):
-        pts = np.array(
-            [
-                bool(b) and _cd_baseline_style(r)["label"] == style["label"]
-                for r, b in zip(order, is_baseline)
-            ]
-        )
-        if pts.any():
-            axes[1].scatter(in_domain[pts], transfer[pts], s=130,
-                            marker="*", color=style["color"], edgecolor="black",
-                            linewidth=0.6, zorder=4, label=style["label"])
-    for r, x_val, y_val in zip(order, in_domain, transfer):
-        axes[1].annotate(r["label"], (x_val, y_val), textcoords="offset points",
-                         xytext=(5, 4), fontsize=7.5)
-    # The floor follows the data and the metric's reference rather than sitting
-    # at 0.45: a TPR@1%FPR panel clipped to an accuracy-shaped window would put
-    # every point against the left edge.
-    finite = np.concatenate([transfer[np.isfinite(transfer)],
-                             in_domain[np.isfinite(in_domain)]])
-    lo = float(min(spec.reference, finite.min() if finite.size else 0.0)) - 0.05
-    axes[1].set_xlim(max(-0.03, lo), 1.02)
-    axes[1].set_ylim(max(-0.03, lo), 1.02)
-    axes[1].set_xlabel(f"In-domain (diagonal) — {spec.label}")
-    axes[1].set_ylabel(f"Transfer (off-diagonal) — {spec.label}")
-    axes[1].set_title("Does the in-domain score survive an unseen corpus?")
-    n_leg1 = len(axes[1].get_legend_handles_labels()[0])
-    axes[1].legend(
-        fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.12),
-        ncol=min(n_leg1, 3), frameon=False,
-    )
-
-    fig.suptitle(f"{alg_label} — {noun} comparison: {spec.label}\n{subtitle}")
-    # bbox_inches="tight" so the below-axes legends are included, not clipped.
-    fig.tight_layout(rect=(0, 0.02, 1, 1))
-    # The hatch stroke weight is an rcParam read at draw time, not an artist
-    # property, so it is set around this savefig only -- thin enough that the
-    # hatching marks a baseline without fighting the value printed on the bar --
-    # and restored so no other figure in the process inherits it.
-    prev_hatch_lw = plt.rcParams["hatch.linewidth"]
-    plt.rcParams["hatch.linewidth"] = CD_HATCH_LINEWIDTH
-    fig.savefig(out_dir / f"{slug}_comparison_{spec.filename}.png", dpi=150,
-                bbox_inches="tight")
-    plt.rcParams["hatch.linewidth"] = prev_hatch_lw
-    plt.close(fig)
-
-    # Figure 2: every cell of every item, best transfer at the top.
-    order_desc = list(reversed(order))
-    pairs = [(s, t) for s in names for t in names]
-    pair_labels = [
-        f"{label_of.get(s, s)}\n→ {label_of.get(t, t)}" for s, t in pairs
-    ]
-    mat = np.array(
-        [
-            [_cell_of(r, key, names.index(s), names.index(t)) for s, t in pairs]
-            for r in order_desc
-        ],
-        dtype=float,
-    )
-
-    fig, ax = plt.subplots(
-        figsize=(max(9.0, 1.25 * len(pairs) + 3.0), max(4.5, 0.36 * len(order) + 3.0))
-    )
-    im = ax.imshow(mat, aspect="auto", **_metric_imshow_kwargs(spec))
-    cbar = fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02)
-    cbar.set_label(f"{spec.label} (dashed = {spec.reference*100:g}%)")
-    cbar.ax.axhline(spec.reference, color="black", linewidth=1.2, linestyle="--")
-
-    ax.set_xticks(range(len(pairs)))
-    ax.set_xticklabels(pair_labels, fontsize=7.5, rotation=45, ha="right")
-    ax.set_yticks(range(len(order_desc)))
-    ax.set_yticklabels([row_label(r) for r in order_desc], fontsize=8)
-    ax.set_xlabel("TRAINED ON → TESTED ON", fontweight="bold", labelpad=8)
-    ax.set_title(
-        f"{alg_label} — every transfer cell, per {noun}: {spec.label}\n{subtitle}"
-    )
-
-    ax.set_xticks(np.arange(-0.5, len(pairs), 1), minor=True)
-    ax.set_yticks(np.arange(-0.5, len(order_desc), 1), minor=True)
-    ax.grid(which="minor", color="white", linewidth=2)
-    ax.tick_params(which="minor", length=0)
-
-    for i in range(mat.shape[0]):
-        for j in range(mat.shape[1]):
-            value = mat[i, j]
-            ax.text(j, i, "n/a" if not np.isfinite(value) else f"{value*100:.1f}",
-                    ha="center", va="center", fontsize=7,
-                    color=_metric_text_color(value, spec))
-    # Boxed columns are in-domain: they answer a different question from the rest.
-    for j, (s, t) in enumerate(pairs):
-        if s == t:
-            ax.add_patch(
-                plt.Rectangle((j - 0.5, -0.5), 1, mat.shape[0], fill=False,
-                              edgecolor="black", linewidth=2.0)
-            )
-
-    note = _wrap_note(
-        "Boxed columns = in-domain (held-out split of the same corpus); the rest "
-        f"are transfer to an unseen corpus. Rows are ordered by mean transfer "
-        f"{spec.label}, best first. ★ marks a zero-shot baseline (no "
-        "classifier trained)."
-        + (
-            " ◆ marks a hybrid: trained on extra features beyond the shared set, "
-            "so its row is not comparable on equal information."
-            if is_hybrid.any() else ""
-        ),
-        _collapse_note(order_desc),
-        spec.note,
-    )
-    fig.text(0.01, 0.01, note, fontsize=7.5, color="dimgray", va="bottom")
-    fig.tight_layout(rect=(0, _note_strip(note, fig), 1, 1))
-    fig.savefig(
-        (matrix_dir or out_dir) / f"{slug}_comparison_{spec.filename}_matrix.png",
-        dpi=150,
-    )
-    plt.close(fig)
-
-
-def _plot_cd_comparison_metrics(
-    out_dir: Path,
-    order_desc: list[dict],
-    alg_label: str,
-    *,
-    noun: str,
-    slug: str,
-    subtitle: str,
-    row_label,
-) -> None:
-    """Every variant under every metric, in-domain beside transfer.
-
-    The ranked bars answer "which variant transfers best on accuracy". This
-    answers the question that follows it: does the ranking hold under the metric
-    the run will actually be reported on? It frequently does not -- accuracy is
-    generous to a detector whose score merely separates on average, and TPR at a
-    1% FPR is not -- and a reader who only ever sees the accuracy ranking has no
-    way to find that out.
-
-    Two heatmaps side by side, rows already ordered by transfer accuracy. Every
-    column is a rate in [0, 1] so one shared scale is honest, but the columns do
-    NOT share a reference: each header carries its own, and a realized-FPR column
-    is marked as the one where up is bad.
-    """
-    specs = [
-        m
-        for m in cell_metric_specs()
-        if any(f"in_domain_{m.key}_mean" in r for r in order_desc)
-    ]
-    if not specs or not order_desc:
-        return
-
-    panels = (
-        ("in_domain", "In-domain (diagonal)"),
-        ("transfer", "Transfer (off-diagonal)"),
-    )
-    mats = [
-        np.array(
-            [
-                [float(r.get(f"{prefix}_{m.key}_mean", np.nan)) for m in specs]
-                for r in order_desc
-            ],
-            dtype=float,
-        )
-        for prefix, _ in panels
-    ]
-
-    col_labels = [
-        f"{m.short}\n({m.reference*100:g}%{'' if m.higher_is_better else ', ↓'})"
-        for m in specs
-    ]
-    row_labels = [row_label(r) for r in order_desc]
-
-    # Stacked, not side by side: with nine metric columns and a handful of
-    # variants each panel is a wide, short strip, and two of them abreast make a
-    # figure three times wider than it is tall. Sharing the x axis also puts one
-    # set of column headers under both panels, where the ↓ marks read once.
-    fig, axes = plt.subplots(
-        2, 1,
-        figsize=(
-            max(9.0, 1.05 * len(specs) + 4.5),
-            max(6.0, 2 * 0.42 * len(order_desc) + 4.2),
-        ),
-        sharex=True,
-    )
-    for ax, mat, (_, title) in zip(axes, mats, panels):
-        im = ax.imshow(mat, vmin=0.0, vmax=1.0, cmap=CD_SEQ_CMAP, aspect="auto")
-        ax.set_xticks(range(len(specs)))
-        ax.set_xticklabels(col_labels, fontsize=7.5, rotation=45, ha="right")
-        ax.set_yticks(range(len(order_desc)))
-        ax.set_yticklabels(row_labels, fontsize=8)
-        ax.set_title(title, fontsize=10)
-        ax.set_xticks(np.arange(-0.5, len(specs), 1), minor=True)
-        ax.set_yticks(np.arange(-0.5, len(order_desc), 1), minor=True)
-        ax.grid(which="minor", color="white", linewidth=2)
-        ax.tick_params(which="minor", length=0)
-        for i in range(mat.shape[0]):
-            for j in range(mat.shape[1]):
-                value = mat[i, j]
-                ax.text(
-                    j, i,
-                    "n/a" if not np.isfinite(value) else f"{value*100:.1f}",
-                    ha="center", va="center", fontsize=7,
-                    color=(
-                        "white" if np.isfinite(value) and value > 0.55 else "black"
-                    ),
-                )
-        fig.colorbar(im, ax=ax, fraction=0.04, pad=0.02).set_label("Value")
-
-    fig.suptitle(f"{alg_label} — every metric, per {noun}\n{subtitle}")
-    note = _wrap_note(
-        "Rows keep the transfer-accuracy order of the ranked figure, best first, so "
-        "a ranking that reorders under another metric is visible as a column that "
-        "does not descend.",
-        "Each column has its own reference, printed under its name; ↓ marks the "
-        "columns where a HIGHER value is worse (the FPR a transported threshold "
-        "actually cost).",
-        "tpr@X is (a), calibrated on the cell being tested. tprT@X / fprT@X are (b), "
-        "calibrated on the source's held-out split and carried over unchanged.",
-    )
-    fig.text(0.01, 0.01, note, fontsize=7.5, color="dimgray", va="bottom")
-    fig.tight_layout(rect=(0, _note_strip(note, fig), 1, 1))
-    fig.savefig(out_dir / f"{slug}_comparison_all.png", dpi=150)
-    plt.close(fig)
 
 
 def plot_clf_cd_comparison(exp_dir: Path, payload: dict) -> None:
@@ -2141,53 +2321,29 @@ def plot_clf_cd_comparison(exp_dir: Path, payload: dict) -> None:
     ``payload`` is the ``variant_comparison.json`` written by
     ``epai/ai_detection/train/run_clf_cross_domain.py``: one entry per variant --
     a feature set crossed with an algorithm, plus any zero-shot baselines -- each
-    holding its full source x target accuracy matrix and the in-domain /
-    transfer means taken from it.
+    holding its full source x target matrices and the in-domain / transfer means
+    taken from them.
 
-    Figures are named after whichever axis the run actually varied
-    (``payload["noun"]``: embedding, algorithm, or variant when both moved), and
-    the first two are drawn once per metric -- accuracy, macro F1, AUROC, and
-    each TPR@FPR operating point under both readings:
-
-      * ``<noun>_comparison_<metric>.png`` -- in-domain vs transfer per variant,
-        ranked, next to the same two numbers as a scatter. The scatter is what
-        separates "this variant is good" from "this variant is good *at this
-        corpus*": points near the diagonal keep their score off-domain, points
-        far below it have learned the corpus.
-      * ``<noun>_comparison_<metric>_matrix.png`` -- every source->target cell of
-        every variant in one heatmap, for the cases the means average away (one
-        corpus pair that collapses while the rest hold up).
-      * ``<noun>_comparison_all.png`` -- every metric on one grid, in-domain
-        beside transfer. The overview: it is where a ranking that holds on
-        accuracy and falls apart at a 1% FPR operating point becomes visible.
-
-    Only the headline metrics (:data:`CD_HEADLINE_METRICS`) are written into
-    ``exp_dir`` itself. Every other metric's pair, and the all-metric grid, goes
-    to ``exp_dir/other_figures/``: nothing is skipped, but a run directory that
-    opens on nineteen files opens on none of them in particular.
-
-    A payload written before the score metrics existed carries only the accuracy
-    and macro-F1 matrices, and draws exactly those two sets.
+    Writes ``<noun>_comparison_<metric>.png`` for each of
+    :data:`CD_PLOT_METRICS`, named after whichever axis the run actually varied
+    (``payload["noun"]``: embedding, algorithm, or variant when both moved). The
+    per-cell detail lives in the per-variant matrices beside them.
     """
     rows: list[dict] = payload.get("variants") or []
     if not rows:
         print(f"No results to compare in {exp_dir}")
         return
 
-    noun = payload.get("noun", "variant")
-    # The width is worth a column only when it varies: a pure algorithm sweep
-    # shares one feature set, so printing the same "(768d)" on every row would be
-    # noise where on an embedding sweep it is half the point.
-    dims = {r.get("feature_dim") for r in rows}
-    show_dim = len(dims) > 1
+    # The feature width is worth a column only when it varies: a pure algorithm
+    # sweep shares one feature set, so printing the same "(768d)" on every row
+    # would be noise where on an embedding sweep it is half the point.
+    show_dim = len({r.get("feature_dim") for r in rows}) > 1
 
     _draw_cd_comparison_set(
         exp_dir,
         rows,
-        payload["dataset_names"],
-        payload.get("dataset_labels", {}),
         payload.get("alg_label", payload.get("alg_id", exp_dir.name)),
-        noun=noun,
+        noun=payload.get("noun", "variant"),
         subtitle=payload.get("subtitle", ""),
         row_label=lambda r: (
             f"{_cd_row_mark(r)}{r['label']}"
@@ -2210,7 +2366,6 @@ def plot_clf_cd_emb_comparison(exp_dir: Path, payload: dict) -> None:
         return
 
     names: list[str] = payload["dataset_names"]
-    label_of: dict = payload.get("dataset_labels", {})
     cfg = payload["config"]
     alg_label = payload.get("alg_label", payload.get("alg_id", exp_dir.name))
     subtitle = (
@@ -2219,7 +2374,7 @@ def plot_clf_cd_emb_comparison(exp_dir: Path, payload: dict) -> None:
         f"{len(names)} corpora"
     )
     _draw_cd_comparison_set(
-        exp_dir, rows, names, label_of, alg_label,
+        exp_dir, rows, alg_label,
         noun="embedding", subtitle=subtitle,
         row_label=lambda r: (
             f"{_cd_row_mark(r)}{r['label']} ({r['feature_dim']}d)"
@@ -2241,7 +2396,6 @@ def plot_clf_cd_alg_comparison(exp_dir: Path, payload: dict) -> None:
         return
 
     names: list[str] = payload["dataset_names"]
-    label_of: dict = payload.get("dataset_labels", {})
     cfg = payload["config"]
     alg_label = payload.get("alg_label", payload.get("alg_id", exp_dir.name))
     feats = ", ".join(cfg.get("features", []))
@@ -2258,7 +2412,7 @@ def plot_clf_cd_alg_comparison(exp_dir: Path, payload: dict) -> None:
         f"{len(names)} corpora"
     )
     _draw_cd_comparison_set(
-        exp_dir, rows, names, label_of, alg_label,
+        exp_dir, rows, alg_label,
         noun="algorithm", subtitle=subtitle,
         row_label=lambda r: f"{_cd_row_mark(r)}{r['label']}",
     )
@@ -2282,10 +2436,10 @@ def plot_clf_cd_alg_comparison(exp_dir: Path, payload: dict) -> None:
 # in-domain mean and its transfer mean), and that pair is what every figure below
 # is built from.
 
-#: Ends of a dumbbell. The same two colours the ranked bars use, so a reader
-#: moving from a within-dataset figure to this one does not re-learn them.
-CD_IN_DOMAIN_COLOR = "steelblue"
-CD_TRANSFER_COLOR = "orange"
+#: The ends of a dumbbell are CD_IN_DOMAIN_COLOR / CD_TRANSFER_COLOR, defined
+#: once with the rest of the palette above: a reader moving from a
+#: within-dataset figure to this one must not re-learn them.
+#:
 #: The per-dataset connectors, and the mean's. The mean is the darker, heavier
 #: one: it is an aggregate of the others and should not read as a sixth dataset.
 CD_SUITE_LINE_COLOR = "0.72"
@@ -2300,26 +2454,13 @@ def plot_clf_cd_suite_comparison(exp_dir: Path, payload: dict) -> None:
     ``payload`` is the ``suite_comparison.json`` written by
     ``run_clf_cross_domain.py``: one entry per variant, each holding its
     per-dataset in-domain / transfer pair under ``per_suite`` and the unweighted
-    aggregates over them at the top level (see
-    :mod:`epai.utils.suite_utils`).
+    aggregates over them at the top level (see :mod:`epai.utils.suite_utils`).
 
-    Three figures per metric, mirroring the within-dataset set so the two can be
-    read together:
-
-      * ``suite_comparison_<metric>.png`` -- the dumbbells, one per (variant,
-        dataset), grouped by variant under a heavier one for the mean, next to
-        the in-domain/transfer scatter with each dataset as a faint satellite of
-        its variant's mean. The dumbbell's LENGTH is the generalisation gap, so a
-        variant whose datasets disagree shows up as a block of unequal lines
-        rather than as a number a reader has to difference themselves.
-      * ``suite_comparison_<metric>_matrix.png`` -- every (variant, dataset)
-        transfer number in one heatmap, with the mean as its own boxed column.
-      * ``suite_comparison_all.png`` -- every metric on one grid, in-domain
-        beside transfer, drawn by the same function the within-dataset figures
-        use because a cross-dataset row carries exactly the same aggregate keys.
-
-    Headline metrics (:data:`CD_HEADLINE_METRICS`) keep their ranked figure at
-    the top of the run directory; everything else goes to ``other_figures/``.
+    One figure per plotted metric (:data:`CD_PLOT_METRICS`), written flat into
+    ``exp_dir`` as ``suite_comparison_<metric>.png``: two panels sharing a y
+    axis, the datasets on the left and their mean on the right, each row a
+    dumbbell whose LENGTH is the generalisation gap. See
+    :func:`_plot_suite_dumbbells` for why the two are drawn apart.
     """
     rows: list[dict] = payload.get("variants") or []
     suite_names: list[str] = payload.get("suite_names") or []
@@ -2327,10 +2468,6 @@ def plot_clf_cd_suite_comparison(exp_dir: Path, payload: dict) -> None:
         print(f"No cross-dataset results to compare in {exp_dir}")
         return
 
-    labels_of: dict = payload.get("suite_labels", {})
-    noun = payload.get("noun", "variant")
-    alg_label = payload.get("alg_label", payload.get("alg_id", exp_dir.name))
-    subtitle = payload.get("subtitle", "")
     specs = _comparison_specs(rows)
     if not specs:
         print(f"No comparable metrics in {exp_dir}")
@@ -2346,35 +2483,27 @@ def plot_clf_cd_suite_comparison(exp_dir: Path, payload: dict) -> None:
 
     for spec in specs:
         _plot_suite_dumbbells(
-            _cd_figure_dir(exp_dir, spec.key, "ranked"),
-            rows, suite_names, labels_of, alg_label,
-            spec=spec, noun=noun, subtitle=subtitle, row_label=row_label,
+            exp_dir, rows, suite_names, payload.get("suite_labels", {}),
+            payload.get("alg_label", payload.get("alg_id", exp_dir.name)),
+            spec=spec, noun=payload.get("noun", "variant"),
+            subtitle=payload.get("subtitle", ""), row_label=row_label,
         )
-        _plot_suite_matrix(
-            _cd_figure_dir(exp_dir, spec.key, "matrix"),
-            rows, suite_names, labels_of, alg_label,
-            spec=spec, noun=noun, subtitle=subtitle, row_label=row_label,
-        )
-
-    order_desc = sorted(
-        rows, key=lambda r: _num(r.get("transfer_accuracy_mean")), reverse=True
-    )
-    _plot_cd_comparison_metrics(
-        _cd_figure_dir(exp_dir, None, "all"), order_desc, alg_label,
-        noun=f"{noun}, meaned over datasets", slug="suite",
-        subtitle=subtitle, row_label=row_label,
-    )
-    headline = [s.short for s in specs if s.key in CD_HEADLINE_METRICS]
     print(
-        f"Cross-dataset plots saved to: {exp_dir}"
-        + (f" ({', '.join(headline)}; the rest in {CD_OTHER_FIGURES_DIR}/)"
-           if headline else f" (all in {CD_OTHER_FIGURES_DIR}/)")
+        f"Cross-dataset plots saved to: {exp_dir} "
+        f"({', '.join(s.short for s in specs)})"
     )
 
 
-def _suite_cell(row: dict, suite: str, key: str) -> float:
-    """One aggregate of one variant on one dataset, NaN where it has none."""
-    return _num((row.get("per_suite") or {}).get(suite, {}).get(key))
+def _suite_seed_stats(row: dict, suite: str | None, stem: str) -> tuple:
+    """``(mean, sd, n)`` over seeds, for a dataset's line or for the mean line.
+
+    ``suite`` None means the variant's own row -- the aggregate over every
+    dataset, whose per-seed record was recombined across datasets when the
+    payload was written (``suite_utils.mean_by_seed_across``), so entry ``i`` is
+    still one seed and the bar means the same thing on both kinds of line.
+    """
+    source = row if suite is None else (row.get("per_suite") or {}).get(suite, {})
+    return _cd_seed_stats(source, stem)
 
 
 def _suite_row_order(rows: list[dict], spec: MetricSpec) -> list[dict]:
@@ -2386,13 +2515,20 @@ def _suite_row_order(rows: list[dict], spec: MetricSpec) -> list[dict]:
     )
 
 
-def _draw_cd_row_mark_label(ax, label: str, row: dict, y: float) -> None:
+def _draw_cd_row_mark_label(
+    ax, label: str, row: dict, y: float, *, x_offset: float = -6.0
+) -> None:
     """A row label whose ★ / ◆ is coloured and whose name is not.
 
     A tick label is a single Text artist and cannot hold two colours, so the
     label is drawn as a packed box right-aligned where the tick label would have
     been -- the same treatment the within-dataset ranked figure gives its rows,
     kept identical so the mark means the same thing in both.
+
+    ``x_offset`` is where the box sits, in points left of the axis. The default
+    puts it just outside; the cross-dataset figure pushes it further, past the
+    dataset tick labels, so the two make two clean columns instead of colliding
+    wherever a variant's name lands at the same height as a dataset's.
     """
     prefix = _cd_row_mark(row)
     mark = prefix.strip()
@@ -2411,7 +2547,7 @@ def _draw_cd_row_mark_label(ax, label: str, row: dict, y: float) -> None:
             HPacker(children=parts, align="center", pad=0.0, sep=3.0),
             (0.0, y),
             xycoords=("axes fraction", "data"),
-            xybox=(-6.0, 0.0),
+            xybox=(x_offset, 0.0),
             boxcoords="offset points",
             box_alignment=(1.0, 0.5),
             frameon=False,
@@ -2433,331 +2569,219 @@ def _plot_suite_dumbbells(
     subtitle: str,
     row_label,
 ) -> None:
-    """One metric: the dumbbells, and the scatter that summarises them.
+    """One metric, two panels: the datasets on the left, their mean on the right.
 
-    LEFT -- one line per (variant, dataset), running from the dataset's transfer
-    score (●) to its in-domain score (○), grouped under a heavier line for the
-    unweighted mean over datasets. Three things are readable at once and none of
-    them requires arithmetic: where a variant sits (position), what it loses
-    leaving its domain (length), and whether that loss is a property of the
-    variant or of the dataset (whether the block's lines agree).
+    A line is a dumbbell -- ``●`` transfer (off-diagonal), ``○`` in-domain
+    (diagonal), the gap between them the distance the variant falls leaving its
+    domain -- and each end carries ±1 SD over seeds.
 
-    RIGHT -- the in-domain/transfer scatter, with each variant's mean drawn full
-    size and its datasets as faint satellites tethered to it. The dotted diagonal
-    is "no loss under transfer"; a variant whose satellites scatter far along the
-    y axis has a transfer number that belongs to the dataset it was measured on.
+    The split is the point. Both panels used to be one, with each variant's mean
+    drawn as a heavier line at the top of its own block, and that asked the
+    reader to do two incompatible things on one axis: read four datasets spread
+    over the metric's whole range, and rank four variants whose means sit within
+    two hundredths of each other. On a shared scale only the first is legible,
+    which is how a figure meant to rank variants ended up unable to.
+
+      * **Left, per dataset.** Where each variant lands in each dataset, and
+        whether the datasets agree -- a block of parallel lines means the loss
+        belongs to the variant, a block of scattered ones means it belongs to
+        the dataset. This is the panel the outliers live on, so it takes the
+        wide axis.
+      * **Right, the mean.** The unweighted mean over datasets, one line per
+        variant, on an axis fitted to just those means. This is the ranking, and
+        it is readable because nothing else shares its scale.
+
+    The two panels share their y axis, so a variant's block on the left and its
+    summary line on the right sit at the same height, and the bold variant name
+    in the left margin labels both. They do NOT share x: the right panel is a
+    zoom, its own ticks say so, and its title repeats it.
+
+    The mean's bar is not the datasets' spread pooled: the seeds are recombined
+    across datasets first (``suite_utils.mean_by_seed_across``), so it is one
+    seed's whole-suite score varying. The datasets disagreeing is the left panel.
     """
     order = _suite_row_order(rows, spec)
     key = spec.key
     n_suites = len(suite_names)
 
-    # MEAN first in each block, so the block's heading line is its own summary
-    # and the datasets hang underneath it in config order.
-    block_gap = 1.0
-    mean_y: list[float] = []
+    # One block per variant: n_suites rows on the left, and on the right a single
+    # line at the block's centre, which is also where the variant's name goes.
+    block_gap = 1.2
     suite_y: list[list[float]] = []
+    centre_y: list[float] = []
     cursor = 0.0
     for _ in order:
-        mean_y.append(cursor)
-        cursor += 1.0
-        suite_y.append([cursor + i for i in range(n_suites)])
+        ys = [cursor + i for i in range(n_suites)]
+        suite_y.append(ys)
+        centre_y.append(sum(ys) / len(ys))
         cursor += n_suites + block_gap
 
-    height = max(5.5, 0.30 * (len(order) * (n_suites + 1)) + 3.2)
-    fig, axes = plt.subplots(1, 2, figsize=(16.0, height))
-    ax = axes[0]
-
-    for idx, row in enumerate(order):
-        if idx % 2 == 1:
-            ax.axhspan(
-                mean_y[idx] - 0.6, suite_y[idx][-1] + 0.6,
-                color=CD_SUITE_BAND_COLOR, zorder=0,
-            )
-        pairs = [
-            (
-                mean_y[idx],
-                _num(row.get(f"transfer_{key}_mean")),
-                _num(row.get(f"in_domain_{key}_mean")),
-                True,
-            )
-        ] + [
-            (
-                suite_y[idx][j],
-                _suite_cell(row, name, f"transfer_{key}_mean"),
-                _suite_cell(row, name, f"in_domain_{key}_mean"),
-                False,
-            )
-            for j, name in enumerate(suite_names)
-        ]
-        for y, transfer, in_domain, is_mean in pairs:
-            if not (np.isfinite(transfer) or np.isfinite(in_domain)):
-                continue
-            if np.isfinite(transfer) and np.isfinite(in_domain):
-                ax.plot(
-                    [transfer, in_domain], [y, y],
-                    color=CD_SUITE_MEAN_COLOR if is_mean else CD_SUITE_LINE_COLOR,
-                    linewidth=3.4 if is_mean else 1.8,
-                    solid_capstyle="round", zorder=2,
-                )
-            # Open circle for in-domain, filled for transfer: the filled end is
-            # the one the run is ranked on.
-            ax.plot(
-                in_domain, y, marker="o", markersize=7.0 if is_mean else 5.0,
-                markerfacecolor="white", markeredgecolor=CD_IN_DOMAIN_COLOR,
-                markeredgewidth=1.6 if is_mean else 1.2, zorder=3,
-            )
-            ax.plot(
-                transfer, y, marker="o", markersize=8.0 if is_mean else 5.6,
-                color=CD_TRANSFER_COLOR, markeredgecolor="black",
-                markeredgewidth=0.7 if is_mean else 0.0, zorder=4,
-            )
-            anchor = max(
-                [v for v in (transfer, in_domain) if np.isfinite(v)], default=0.0
-            )
-            ax.text(
-                anchor + 0.015, y,
-                (f"{transfer:.3f}" if np.isfinite(transfer) else "n/a")
-                + (f" / {in_domain:.3f}" if np.isfinite(in_domain) else ""),
-                va="center", fontsize=7.0 if not is_mean else 7.8,
-                fontweight="bold" if is_mean else "normal",
-                color="black" if is_mean else "dimgray",
-            )
-
-    ax.axvline(spec.reference, linestyle="--", color="red", linewidth=1.2,
-               label=f"reference ({spec.reference*100:g}%)")
-    ticks = [y for idx in range(len(order)) for y in [mean_y[idx]] + suite_y[idx]]
-    # The variant's own row is left blank here and drawn below instead, so its
-    # ★ / ◆ can be coloured while the name stays black. Its bold, larger type is
-    # what separates it from the dataset rows under it -- an indent would not,
-    # since y tick labels are flush RIGHT against the axis and leading spaces
-    # push the text away from it rather than in.
-    tick_labels = [
-        "" if name is None else str(labels_of.get(name, name))
-        for _ in range(len(order))
-        for name in [None] + list(suite_names)
-    ]
-    ax.set_yticks(ticks)
-    ax.set_yticklabels(tick_labels, fontsize=7.5)
-    for idx, row in enumerate(order):
-        _draw_cd_row_mark_label(ax, row_label(row), row, mean_y[idx])
-    ax.set_ylim(cursor - block_gap, -1.0)  # inverted: best variant on top
-
-    finite = np.array(
-        [
-            v
-            for row in order
-            for name in suite_names
-            for v in (
-                _suite_cell(row, name, f"transfer_{key}_mean"),
-                _suite_cell(row, name, f"in_domain_{key}_mean"),
-            )
-            if np.isfinite(v)
-        ]
-    )
-    lo = float(min(spec.reference, finite.min() if finite.size else 0.0)) - 0.06
-    ax.set_xlim(max(-0.05, lo), 1.20)
-    ax.set_xlabel(
-        spec.label + ("" if spec.higher_is_better else "  (lower is better)")
-    )
-    ax.set_title(f"Per dataset, and their mean — {spec.label}")
+    stats_of = {
+        (idx, suite, stem): _suite_seed_stats(row, suite, stem)
+        for idx, row in enumerate(order)
+        for suite in [None] + list(suite_names)
+        for stem in (f"in_domain_{key}", f"transfer_{key}")
+    }
+    n_seeds = max((s[2] for s in stats_of.values()), default=0)
 
     from matplotlib.lines import Line2D
 
-    handles = [
-        Line2D([], [], linestyle="none", marker="o", color=CD_TRANSFER_COLOR,
-               markeredgecolor="black", markeredgewidth=0.7, markersize=8,
-               label="transfer (off-diagonal)"),
-        Line2D([], [], linestyle="none", marker="o", markerfacecolor="white",
-               markeredgecolor=CD_IN_DOMAIN_COLOR, markeredgewidth=1.6,
-               markersize=7, label="in-domain (diagonal)"),
-        Line2D([], [], color=CD_SUITE_MEAN_COLOR, linewidth=3.4,
-               label=f"mean over {n_suites} datasets (unweighted)"),
-        Line2D([], [], color=CD_SUITE_LINE_COLOR, linewidth=1.8,
-               label="one dataset"),
+    handles = _cd_seed_legend(order, n_seeds) + [
+        Line2D([], [], linestyle=":", color=CD_SUITE_LINE_COLOR, linewidth=1.6,
+               label="gap: transfer → in-domain"),
         Line2D([], [], linestyle="--", color="red", linewidth=1.2,
                label=f"reference ({spec.reference*100:g}%)"),
     ]
-    ax.legend(handles=handles, fontsize=8, loc="upper center",
-              bbox_to_anchor=(0.5, -0.08), ncol=3, frameon=False)
+    note = _cd_seed_note(n_seeds)
 
-    # --- right panel: the same numbers as a scatter -----------------------
-    sc = axes[1]
-    sc.plot([0, 1], [0, 1], linestyle=":", color="gray", linewidth=1.0,
-            label="no loss under transfer")
-    sc.axhline(spec.reference, linestyle="--", color="red", linewidth=1.2,
-               label=f"reference ({spec.reference*100:g}%)")
-    sc.axvline(spec.reference, linestyle="--", color="red", linewidth=1.2)
-
-    for row in order:
-        mx = _num(row.get(f"in_domain_{key}_mean"))
-        my = _num(row.get(f"transfer_{key}_mean"))
-        color = (
-            _cd_baseline_style(row)["color"] if row.get("baseline") else CD_ITEM_COLOR
-        )
-        for name in suite_names:
-            x = _suite_cell(row, name, f"in_domain_{key}_mean")
-            y = _suite_cell(row, name, f"transfer_{key}_mean")
-            if not (np.isfinite(x) and np.isfinite(y)):
-                continue
-            if np.isfinite(mx) and np.isfinite(my):
-                sc.plot([mx, x], [my, y], color=color, alpha=0.30, linewidth=0.9,
-                        zorder=2)
-            sc.scatter(x, y, s=22, color=color, alpha=0.45, zorder=3,
-                       edgecolor="none")
-
-    is_baseline = np.array([bool(r.get("baseline")) for r in order])
-    is_hybrid = np.array([bool(r.get("hybrid")) for r in order])
-    in_domain = _series(order, f"in_domain_{key}_mean")
-    transfer = _series(order, f"transfer_{key}_mean")
-    plain = ~is_baseline & ~is_hybrid
-    sc.scatter(in_domain[plain], transfer[plain], s=55, color=CD_ITEM_COLOR,
-               edgecolor="black", linewidth=0.5, zorder=5, label=f"{noun} (mean)")
-    hybrid_pts = is_hybrid & ~is_baseline
-    if hybrid_pts.any():
-        sc.scatter(in_domain[hybrid_pts], transfer[hybrid_pts], s=95, marker="D",
-                   color=CD_HYBRID_COLOR, edgecolor="black", linewidth=0.6,
-                   zorder=5, label="hybrid (extra features)")
-    for style in _cd_baseline_legend_styles(order, is_baseline):
-        pts = np.array(
-            [
-                bool(b) and _cd_baseline_style(r)["label"] == style["label"]
-                for r, b in zip(order, is_baseline)
-            ]
-        )
-        if pts.any():
-            sc.scatter(in_domain[pts], transfer[pts], s=150, marker="*",
-                       color=style["color"], edgecolor="black", linewidth=0.6,
-                       zorder=5, label=style["label"])
-    for row, x_val, y_val in zip(order, in_domain, transfer):
-        sc.annotate(row["label"], (x_val, y_val), textcoords="offset points",
-                    xytext=(6, 4), fontsize=7.5)
-
-    both = np.concatenate(
-        [finite, transfer[np.isfinite(transfer)], in_domain[np.isfinite(in_domain)]]
+    # Two label columns in the left margin -- variant, then dataset -- so the
+    # bold name can sit at its block's centre without landing on top of the tick
+    # label of whichever dataset happens to be in the middle.
+    suite_label_in = 0.072 * max(
+        (len(str(labels_of.get(n, n))) for n in suite_names), default=0
     )
-    lo = float(min(spec.reference, both.min() if both.size else 0.0)) - 0.05
-    sc.set_xlim(max(-0.03, lo), 1.02)
-    sc.set_ylim(max(-0.03, lo), 1.02)
-    sc.set_xlabel(f"In-domain (diagonal) — {spec.label}")
-    sc.set_ylabel(f"Transfer (off-diagonal) — {spec.label}")
-    sc.set_title("Each dataset, tethered to its mean")
-    n_leg = len(sc.get_legend_handles_labels()[0])
-    sc.legend(fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.08),
-              ncol=min(n_leg, 3), frameon=False)
+    variant_label_in = 0.075 * max((len(row_label(r)) for r in order), default=0)
+    label_in = min(6.0, 0.30 + suite_label_in + variant_label_in)
+
+    plot_in = max(4.0, 0.26 * (len(order) * (n_suites + block_gap)) + 1.2)
+    # The two-line suptitle AND a row of panel titles under it.
+    xlabel_in, title_in = 0.52, 1.15
+    numbers_in = 1.00  # right margin holding the mean panel's printed values
+    legend_in = _legend_strip_in(len(handles), ncol_max=3)
+    note_in = _note_in(note)
+    fig_h = title_in + plot_in + xlabel_in + legend_in + note_in
+    fig_w = 13.5
+
+    fig, (ax_l, ax_r) = plt.subplots(
+        1, 2, figsize=(fig_w, fig_h), sharey=True,
+        gridspec_kw={"width_ratios": [2.5, 1.0], "wspace": 0.045},
+    )
+
+    for idx, row in enumerate(order):
+        transfer_color = _cd_transfer_color(row)
+        if idx % 2 == 1:
+            band = (suite_y[idx][0] - 0.6, suite_y[idx][-1] + 0.6)
+            for ax in (ax_l, ax_r):
+                ax.axhspan(*band, color=CD_SUITE_BAND_COLOR, zorder=0)
+
+        # Left: one line per dataset. Right: the mean, at the block's centre.
+        panels = [
+            (ax_l, y, name, 0.78, CD_SUITE_LINE_COLOR, 1.2)
+            for y, name in zip(suite_y[idx], suite_names)
+        ] + [(ax_r, centre_y[idx], None, 1.0, CD_SUITE_MEAN_COLOR, 2.0)]
+
+        for ax, y, suite, scale, line_color, line_w in panels:
+            in_stats = stats_of[(idx, suite, f"in_domain_{key}")]
+            tr_stats = stats_of[(idx, suite, f"transfer_{key}")]
+            transfer, in_domain = tr_stats[0], in_stats[0]
+            if not (np.isfinite(transfer) or np.isfinite(in_domain)):
+                continue
+            if np.isfinite(transfer) and np.isfinite(in_domain):
+                # Dotted: a solid bar of this weight reads as an error bar, and
+                # this is the opposite kind of thing -- a distance between two
+                # estimates, not the spread of one.
+                ax.plot([transfer, in_domain], [y, y], linestyle=":",
+                        color=line_color, linewidth=line_w, zorder=2)
+            _cd_draw_estimate(ax, y, in_stats, color=CD_IN_DOMAIN_COLOR,
+                              filled=False, scale=scale, zorder=5)
+            _cd_draw_estimate(ax, y, tr_stats, color=transfer_color,
+                              filled=True, scale=scale, zorder=7)
+
+        # Numbers on the mean only. Twenty rows of them was most of the ink on
+        # this figure and none of its argument; a dataset's value is read off
+        # its position, which is what the left panel is for.
+        tr_mean = stats_of[(idx, None, f"transfer_{key}")][0]
+        in_mean = stats_of[(idx, None, f"in_domain_{key}")][0]
+        # Outside the axes, in reserved margin, not in a gutter cut out of the
+        # scale: this panel is a zoom onto a couple of hundredths and cannot
+        # afford to spend a quarter of its width on text.
+        ax_r.text(
+            1.03, centre_y[idx],
+            (f"{tr_mean:.3f}" if np.isfinite(tr_mean) else "n/a")
+            + (f" / {in_mean:.3f}" if np.isfinite(in_mean) else ""),
+            transform=ax_r.get_yaxis_transform(), ha="left", va="center",
+            fontsize=7.6, fontfamily="monospace", fontweight="bold",
+            clip_on=False,
+        )
+
+    # Left panel holds every dataset value; right panel only the means, so it
+    # gets its own scale. Neither is padded out to reach the other.
+    def bounds(*, means: bool) -> list[float]:
+        """Every drawn extremity on one panel: the mean row's, or the datasets'."""
+        return [
+            b
+            for (_idx, suite, _stem), (mean, sd, _n) in stats_of.items()
+            if (suite is None) is means
+            for b in (mean, mean - sd, mean + sd)
+        ]
+
+    # A hair of room past the data so a marker sitting exactly on the ceiling is
+    # not sliced in half by the spine. Neither panel reserves a text gutter: the
+    # left carries no numbers and the right puts its own outside the axes.
+    _cd_gutter(
+        ax_l, np.array(bounds(means=False) + [spec.reference], dtype=float),
+        spec, gutter_frac=0.035,
+    )
+    _cd_gutter(ax_r, np.array(bounds(means=True), dtype=float), spec,
+               gutter_frac=0.05, nbins=4)
+    ax_r.text(1.03, 1.0, "transfer / in-dom.", transform=ax_r.transAxes,
+              ha="left", va="bottom", fontsize=7.0, color="dimgray",
+              fontfamily="monospace", clip_on=False)
+
+    # Only where it is on the panel: forcing the means' axis out to chance would
+    # undo the zoom the panel exists for.
+    for ax in (ax_l, ax_r):
+        left, right = ax.get_xlim()
+        if left <= spec.reference <= right:
+            ax.axvline(spec.reference, linestyle="--", color="red", linewidth=1.2,
+                       zorder=1)
+
+    ax_l.set_yticks([y for ys in suite_y for y in ys])
+    ax_l.set_yticklabels(
+        [str(labels_of.get(n, n)) for _ in order for n in suite_names], fontsize=7.5
+    )
+    for idx, row in enumerate(order):
+        _draw_cd_row_mark_label(
+            ax_l, row_label(row), row, centre_y[idx],
+            x_offset=-(suite_label_in * 72 + 12),
+        )
+    ax_l.set_ylim(cursor - block_gap, -1.0)  # inverted: best variant on top
+    ax_r.tick_params(left=False)
+
+    ax_l.set_title("per dataset", fontsize=9.5, pad=6)
+    ax_r.set_title(
+        f"mean over {n_suites} datasets, unweighted\n(axis fitted to the means)",
+        fontsize=9.5, pad=6,
+    )
 
     fig.suptitle(
-        f"{alg_label} — {noun} comparison across {n_suites} datasets: {spec.label}"
-        f"\n{subtitle}"
+        f"{alg_label} — {noun} across {n_suites} datasets, ranked by transfer: "
+        f"{spec.label}\n{subtitle}"
     )
-    note = _wrap_note(
-        "Each line is ONE dataset's own cross-domain matrix collapsed to two "
-        "numbers: ● its transfer (off-diagonal) mean, ○ its in-domain (diagonal) "
-        "mean. The heavier line is the unweighted mean over datasets — every "
-        "dataset counts once, whatever its size.",
-        "Lines are not compared BETWEEN datasets: `essay` and `sociology` are "
-        "different corpora, and nothing here trains on one and tests on the "
-        "other. What is compared is how far each variant falls inside each "
-        "dataset, and whether it falls by the same amount in all of them.",
-        spec.note,
+    fig.text(0.01, CD_NOTE_MARGIN_IN / fig_h, note, fontsize=7.5, color="dimgray",
+             va="bottom")
+    fig.subplots_adjust(
+        top=1.0 - title_in / fig_h,
+        bottom=(xlabel_in + legend_in + note_in) / fig_h,
+        left=label_in / fig_w,
+        right=1.0 - numbers_in / fig_w,
+        wspace=0.045,
     )
-    fig.text(0.01, 0.005, note, fontsize=7.5, color="dimgray", va="bottom")
-    fig.tight_layout(rect=(0, _note_strip(note, fig) + 0.02, 1, 1))
+    box = [ax.get_position() for ax in (ax_l, ax_r)]
+    centre = (box[0].x0 + box[-1].x1) / 2
+    fig.legend(
+        handles=handles, fontsize=7.5, loc="lower center",
+        bbox_to_anchor=(centre, note_in / fig_h), bbox_transform=fig.transFigure,
+        ncol=max(1, min(len(handles), 3)), frameon=False,
+    )
+    fig.text(
+        centre, (note_in + legend_in) / fig_h,
+        spec.label + ("" if spec.higher_is_better else "  (lower is better)")
+        + f"    ·    reference {spec.reference*100:g}%",
+        ha="center", va="bottom", fontsize=10,
+    )
     fig.savefig(out_dir / f"suite_comparison_{spec.filename}.png", dpi=150,
                 bbox_inches="tight")
-    plt.close(fig)
-
-
-def _plot_suite_matrix(
-    out_dir: Path,
-    rows: list[dict],
-    suite_names: list[str],
-    labels_of: dict,
-    alg_label: str,
-    *,
-    spec: MetricSpec,
-    noun: str,
-    subtitle: str,
-    row_label,
-) -> None:
-    """Every (variant, dataset) transfer number, with the mean as its own column.
-
-    The compact form of the dumbbells: it drops the in-domain end -- which is
-    near-perfect for every trained variant and says little -- to fit every
-    variant and every dataset on one screen, and it is where a ranking that
-    holds on three datasets and inverts on the fourth is found.
-
-    The MEAN column is boxed because it is not a dataset: it is the other columns
-    averaged, and a reader scanning left to right must not read it as a fifth
-    measurement.
-    """
-    order = _suite_row_order(rows, spec)
-    key = spec.key
-    cols = list(suite_names) + ["__mean__"]
-    col_labels = [labels_of.get(n, n) for n in suite_names] + [
-        f"MEAN\n({len(suite_names)} datasets)"
-    ]
-    mat = np.array(
-        [
-            [
-                _num(row.get(f"transfer_{key}_mean")) if name == "__mean__"
-                else _suite_cell(row, name, f"transfer_{key}_mean")
-                for name in cols
-            ]
-            for row in order
-        ],
-        dtype=float,
-    )
-
-    fig, ax = plt.subplots(
-        figsize=(max(8.0, 1.9 * len(cols) + 4.0), max(4.2, 0.44 * len(order) + 3.2))
-    )
-    im = ax.imshow(mat, aspect="auto", **_metric_imshow_kwargs(spec))
-    cbar = fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02)
-    cbar.set_label(f"Transfer {spec.label} (dashed = {spec.reference*100:g}%)")
-    cbar.ax.axhline(spec.reference, color="black", linewidth=1.2, linestyle="--")
-
-    ax.set_xticks(range(len(cols)))
-    ax.set_xticklabels(col_labels, fontsize=8, rotation=30, ha="right")
-    ax.set_yticks(range(len(order)))
-    ax.set_yticklabels([row_label(r) for r in order], fontsize=8.5)
-    ax.set_xlabel("DATASET", fontweight="bold", labelpad=8)
-    ax.set_title(
-        f"{alg_label} — transfer per dataset, per {noun}: {spec.label}\n{subtitle}"
-    )
-
-    ax.set_xticks(np.arange(-0.5, len(cols), 1), minor=True)
-    ax.set_yticks(np.arange(-0.5, len(order), 1), minor=True)
-    ax.grid(which="minor", color="white", linewidth=2)
-    ax.tick_params(which="minor", length=0)
-
-    for i in range(mat.shape[0]):
-        for j in range(mat.shape[1]):
-            value = mat[i, j]
-            ax.text(j, i, "n/a" if not np.isfinite(value) else f"{value*100:.1f}",
-                    ha="center", va="center", fontsize=8,
-                    fontweight="bold" if cols[j] == "__mean__" else "normal",
-                    color=_metric_text_color(value, spec))
-    ax.add_patch(
-        plt.Rectangle((len(cols) - 1.5, -0.5), 1, mat.shape[0], fill=False,
-                      edgecolor="black", linewidth=2.0)
-    )
-
-    note = _wrap_note(
-        "Every cell is one dataset's transfer (off-diagonal) mean — the model was "
-        "trained and tested inside that dataset, never across two of them. The "
-        "boxed column is those cells averaged, unweighted. Rows are ordered by "
-        "it, best first.",
-        "★ marks a zero-shot baseline (no classifier trained)."
-        + (
-            " ◆ marks a hybrid: trained on extra features beyond the shared set, "
-            "so its row is not comparable on equal information."
-            if any(r.get("hybrid") for r in order) else ""
-        ),
-        spec.note,
-    )
-    fig.text(0.01, 0.01, note, fontsize=7.5, color="dimgray", va="bottom")
-    fig.tight_layout(rect=(0, _note_strip(note, fig), 1, 1))
-    fig.savefig(out_dir / f"suite_comparison_{spec.filename}_matrix.png", dpi=150)
     plt.close(fig)
 
 
@@ -2925,25 +2949,26 @@ ID_TEST_COLOR = "#2a78d6"
 # Vertical space reserved below the axes, in INCHES -- the plotting area above
 # scales with the number of variants, so an axes-relative offset does not stay
 # clear of the x-label when it does. Sized to the content rather than to a worst
-# case: a one-row legend gets one row of space.
-ID_LEGEND_ROW_IN = 0.20  # one row of legend entries at fontsize 8
-ID_LEGEND_PAD_IN = 0.04
+# case: a one-row legend gets one row of space. The legend part is shared with
+# the cross-domain ranked figure, which composes its height the same way.
+FIG_LEGEND_ROW_IN = 0.20  # one row of legend entries at fontsize 8
+FIG_LEGEND_PAD_IN = 0.04
 ID_FOOTNOTE_LINE_IN = 7.5 * 1.2 / 72  # one line at fontsize 7.5, 1.2 line spacing
 ID_FOOTNOTE_LINES = 3
 ID_MARGIN_IN = 0.04  # canvas edge to the footnote
-ID_GAP_IN = 0.07  # between x-label / legend / footnote
+FIG_GAP_IN = 0.07  # between x-label / legend / footnote
 
 
 def _id_footnote_in() -> float:
     """Height of the footnote strip: the text, its bottom margin and one gap."""
-    return ID_MARGIN_IN + ID_FOOTNOTE_LINES * ID_FOOTNOTE_LINE_IN + ID_GAP_IN
+    return ID_MARGIN_IN + ID_FOOTNOTE_LINES * ID_FOOTNOTE_LINE_IN + FIG_GAP_IN
 
 
-def _id_legend_in(n_entries: int, ncol_max: int = 3) -> float:
+def _legend_strip_in(n_entries: int, ncol_max: int = 3) -> float:
     """Height of the legend strip, for the number of entries actually drawn."""
     ncol = max(1, min(n_entries, ncol_max))
     rows = -(-n_entries // ncol)  # ceil
-    return rows * ID_LEGEND_ROW_IN + ID_LEGEND_PAD_IN + ID_GAP_IN
+    return rows * FIG_LEGEND_ROW_IN + FIG_LEGEND_PAD_IN + FIG_GAP_IN
 
 
 def _plot_split_composition(ax, composition: dict) -> None:
@@ -3041,7 +3066,7 @@ def plot_clf_id_comparison(exp_dir: Path, payload: dict) -> None:
     n_legend = (2 if has_train else 1) + 1 + len(
         _cd_baseline_legend_styles(order, is_baseline)
     )
-    legend_in, footnote_in = _id_legend_in(n_legend), _id_footnote_in()
+    legend_in, footnote_in = _legend_strip_in(n_legend), _id_footnote_in()
     fig_h = plot_h + legend_in + footnote_in
 
     if composition:
@@ -3150,7 +3175,7 @@ def _plot_id_comparison_metrics(
 ) -> None:
     """Every in-domain variant under every metric, held-out rows only.
 
-    The in-domain counterpart of ``_plot_cd_comparison_metrics``, and the same
+    The in-domain counterpart of the cross-domain all-metric grid, and the same
     question: whether the accuracy ranking survives being asked at a low-FPR
     operating point. Only the held-out columns are drawn -- the train ones belong
     to the per-variant figure, where the pair is the point.

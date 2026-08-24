@@ -887,6 +887,12 @@ class MetricSpec:
     working detector look broken. For a realized FPR the reference is the
     nominal level the threshold was calibrated to and ``higher_is_better`` is
     False -- that cell is a miss in whichever direction it departs from it.
+
+    ``floor`` / ``ceiling`` are the values the metric cannot pass. Every metric
+    here is a rate or an AUROC, so both are the defaults -- but a figure that
+    does not know them pads its axis past 1.0 and ends up ticking values the
+    metric does not have, and never labels the ceiling the data is pressed
+    against. See ``visualization_utils._cd_gutter``.
     """
 
     key: str  # per-cell stem; the summary holds <key>_mean and <key>_std
@@ -896,6 +902,8 @@ class MetricSpec:
     higher_is_better: bool = True
     diverging: bool = True  # diverging colour map anchored at `reference`
     note: str = ""  # one line under the figure, where the metric needs one
+    floor: float = 0.0
+    ceiling: float = 1.0
 
     @property
     def filename(self) -> str:
@@ -999,15 +1007,173 @@ def split_diag(mat: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return np.diag(mat), mat[off_mask]
 
 
+#: Key holding one variant's per-seed in-domain / transfer aggregates, as
+#: ``<where>_<metric>_by_seed``: one float per seed, the mean over that seed's
+#: diagonal (or off-diagonal) cells. Stored raw rather than as a mean and a
+#: spread because the spread the figures draw -- an SD, a confidence interval at
+#: whatever level the caller asked for -- is a plotting choice, and because the
+#: cross-dataset rows have to recombine these across datasets before summarising.
+BY_SEED_SUFFIX = "_by_seed"
+
+
+#: Key holding the raw scores behind ONE seed's matrix, so the score
+#: distributions can be drawn. Every metric in this module is a summary of these
+#: numbers; the transported TPR in particular is a statement about where two
+#: score distributions sit relative to one fixed cut, and no aggregate can show
+#: that -- only the distributions can.
+#:
+#: Shape, under ``payload[SCORE_DIST_KEY]``::
+#:
+#:     {"seed": 0, "level": 0.01, "machine_is_high": true,
+#:      "thresholds": {source: float},              # the transported cut
+#:      "cells": {source: {target: {"scores": [...], "y": [0|1, ...]}}}}
+#:
+#: Scores are on the ORIENTED scale (high = machine) so the cut is always "at or
+#: above this is called machine", whatever direction the raw column ran in.
+#: ``thresholds[source]`` is fitted on the source's own held-out split -- the
+#: diagonal cell of that row -- and applied unchanged across the row.
+#:
+#: One seed, not all of them: pooling seeds would blur the very thing the figure
+#: is for (where one fixed cut fell), and the seed-to-seed movement is already
+#: the error bar on every other figure. Raw rather than pre-binned, following
+#: BY_SEED_SUFFIX above: the bin count is a plotting choice.
+SCORE_DIST_KEY = "score_dist"
+
+#: The operating point the stored distributions carry a cut for. One level, not
+#: every level in TPR_AT_FPR_LEVELS: the figure exists to show a single line and
+#: where it lands, and a second line on the same axes halves that.
+SCORE_DIST_LEVEL = 0.01
+
+#: Significant figures kept when a score vector is written to JSON. Six is well
+#: past what any histogram can resolve and roughly halves the file.
+SCORE_DIST_SIGFIGS = 6
+
+
+def score_dist_cell(scores: np.ndarray, y: np.ndarray) -> dict:
+    """One cell's oriented scores and binary labels, ready to serialise.
+
+    ``scores`` must already be oriented (high = machine); rows whose score is
+    not finite are dropped, with their labels, so the pair stays aligned.
+    """
+    scores = np.asarray(scores, dtype=float)
+    y = np.asarray(y)
+    keep = np.isfinite(scores)
+    return {
+        "scores": [
+            float(f"{v:.{SCORE_DIST_SIGFIGS}g}") for v in scores[keep].tolist()
+        ],
+        "y": [int(v) for v in y[keep].tolist()],
+    }
+
+
+def score_dist_payload(
+    cells: dict[str, dict[str, dict]],
+    thresholds: dict[str, float],
+    *,
+    seed: int,
+    level: float,
+    machine_is_high: bool = True,
+) -> dict:
+    """Assemble :data:`SCORE_DIST_KEY`. See that constant for the shape."""
+    return {
+        "seed": int(seed),
+        "level": float(level),
+        "machine_is_high": bool(machine_is_high),
+        "thresholds": {k: float(v) for k, v in thresholds.items()},
+        "cells": cells,
+    }
+
+
+def aggregates_by_seed(
+    per_seed: list[dict], names: list[str], key: str
+) -> tuple[list[float], list[float]]:
+    """``(in_domain, transfer)`` means of one metric, one entry per seed.
+
+    The distinction that matters: this averages the cells WITHIN each seed and
+    leaves the seeds apart, where :func:`summarise_variant`'s ``_std`` averages
+    the seeds within each cell and leaves the cells apart. Both are spreads of
+    the same numbers and they answer opposite questions -- "would another seed
+    have said this" against "do the corpora agree" -- and only the first is an
+    uncertainty on the mean the run is ranked by.
+
+    It cannot be recovered from the per-cell means and SDs alone: that would need
+    the covariance between cells across seeds, which the summary does not keep.
+    Hence computing it here, from ``per_seed``, while it is still available.
+    """
+    in_domain: list[float] = []
+    transfer: list[float] = []
+    for seed in per_seed:
+        diag, off = [], []
+        for source in names:
+            for target in names:
+                try:
+                    value = float(seed[source][target][key])
+                except (KeyError, TypeError, ValueError):
+                    value = float("nan")
+                (diag if source == target else off).append(value)
+        with np.errstate(invalid="ignore"):
+            in_domain.append(float(np.nanmean(diag)) if diag else float("nan"))
+            transfer.append(float(np.nanmean(off)) if off else float("nan"))
+    return in_domain, transfer
+
+
+def attach_by_seed(row: dict, variant_dir: Path) -> bool:
+    """Back-fill one comparison row's ``_by_seed`` lists from its own results.
+
+    A ``variant_comparison.json`` written before :func:`aggregates_by_seed`
+    existed has no per-seed record, and nothing in it can be made to yield one.
+    The record it was derived FROM is still on disk though -- ``per_seed`` in the
+    variant's own ``cross_domain.json``, one directory down -- so a replot can
+    recover the error bars for every run already finished, without retraining
+    anything.
+
+    Returns whether anything was added. A missing or unreadable file is not an
+    error: that variant simply plots without a bar, which is the same outcome a
+    single-seed run gets.
+    """
+    path = variant_dir / "cross_domain.json"
+    if not path.is_file():
+        return False
+    try:
+        with open(path) as f:
+            payload = json.load(f)
+        per_seed = payload.get("per_seed") or []
+        names = payload["dataset_names"]
+    except (OSError, ValueError, KeyError):
+        return False
+    if len(per_seed) < 2:
+        return False
+
+    added = False
+    # Every metric the variant itself measured, not only the ones the row already
+    # names: a pre-merge row carries the unqualified accuracy aliases and no
+    # per-metric aggregates at all, and gets those filled in later
+    # (``_ensure_row_aggregates``) from its matrix. Keying off the row here would
+    # therefore attach nothing to exactly the payloads that need the back-fill
+    # most. A ``_by_seed`` list for a metric the figures never draw costs
+    # nothing; it is simply not read.
+    for spec in present_metric_specs(payload.get("summary", {}), names):
+        by_seed_in, by_seed_off = aggregates_by_seed(per_seed, names, spec.key)
+        row[f"in_domain_{spec.key}{BY_SEED_SUFFIX}"] = by_seed_in
+        row[f"transfer_{spec.key}{BY_SEED_SUFFIX}"] = by_seed_off
+        added = True
+    return added
+
+
 def summarise_variant(payload: dict) -> dict:
     """Collapse one variant's matrix into the numbers the comparison ranks on.
 
-    Every metric the summary holds gets the same four aggregates -- its full
-    matrix, the in-domain (diagonal) mean, the transfer (off-diagonal) mean, and
-    the worst transfer cell -- under ``<metric>``, ``in_domain_<metric>_mean``,
+    Every metric the summary holds gets the same aggregates -- its full matrix,
+    the in-domain (diagonal) mean, the transfer (off-diagonal) mean, and the
+    worst transfer cell -- under ``<metric>``, ``in_domain_<metric>_mean``,
     ``transfer_<metric>_mean`` and ``transfer_<metric>_worst``. "Worst" follows
     the metric's direction, so it is the minimum for a TPR and the *maximum* for
     a realized FPR, which is the cell that would get someone falsely accused.
+
+    Where the payload has more than one seed it also gets
+    ``in_domain_<metric>_by_seed`` and ``transfer_<metric>_by_seed``: those two
+    means recomputed once per seed, which is what the figures put an error bar
+    on (see :func:`aggregates_by_seed`).
 
     The accuracy aggregates keep their historical unqualified names
     (``in_domain_mean``, ``transfer_mean``, ``transfer_min``, ``gap``) as well,
@@ -1017,6 +1183,10 @@ def summarise_variant(payload: dict) -> dict:
     names = payload["dataset_names"]
     summary = payload["summary"]
     specs = present_metric_specs(summary, names)
+    # A zero-shot baseline is deterministic and carries no seeds, and a payload
+    # written before this existed carries none either; both simply get no
+    # ``_by_seed`` keys and no error bar on the figures.
+    per_seed = payload.get("per_seed") or []
 
     row: dict = {
         "variant": payload.get("variant", payload.get("label", "")),
@@ -1052,6 +1222,13 @@ def summarise_variant(payload: dict) -> dict:
             float(np.nanstd(off)) if off.size else float("nan")
         )
         row[f"transfer_{spec.key}_worst"] = worst
+        # The seed spread of these two means, kept apart from the cell spread
+        # above. See :func:`aggregates_by_seed` for why one cannot be got from
+        # the other.
+        if len(per_seed) > 1:
+            by_seed_in, by_seed_off = aggregates_by_seed(per_seed, names, spec.key)
+            row[f"in_domain_{spec.key}{BY_SEED_SUFFIX}"] = by_seed_in
+            row[f"transfer_{spec.key}{BY_SEED_SUFFIX}"] = by_seed_off
         # In-domain minus transfer, in the metric's own direction: always "how
         # much was lost by leaving the corpus", never a sign that flips meaning.
         row[f"{spec.key}_gap"] = (
@@ -1376,8 +1553,14 @@ def run_score_baseline(cfg: dict, out_dir: Path, variant: dict) -> dict:
 
     # per_seed[i][source][target] -> metrics
     per_seed: list[dict] = []
+    # The first seed's raw scores, for the score-distribution figure. Oriented
+    # here so the stored cut always reads "at or above => machine", whichever
+    # way the raw column ran. See SCORE_DIST_KEY.
+    dist_cells: dict[str, dict[str, dict]] = {}
+    dist_thresholds: dict[str, float] = {}
 
     for i in tqdm(range(n_runs), desc="Seeds", leave=False):
+        keep_scores = i == 0
         seed = base_seed + i
         seed_res: dict[str, dict] = {}
 
@@ -1401,6 +1584,12 @@ def run_score_baseline(cfg: dict, out_dir: Path, variant: dict) -> dict:
                 y_s[test_idx], oriented_scores(s_s[test_idx], machine_is_high)
             )
 
+            if keep_scores:
+                dist_cells[source] = {}
+                dist_thresholds[source] = float(
+                    cal_thresholds[level_tag(SCORE_DIST_LEVEL)]
+                )
+
             seed_res[source] = {}
             for target in names:
                 if target == source:
@@ -1410,6 +1599,11 @@ def run_score_baseline(cfg: dict, out_dir: Path, variant: dict) -> dict:
                         cal_thresholds=cal_thresholds,
                     )
                     res["excluded"] = 0
+                    if keep_scores:
+                        dist_cells[source][target] = score_dist_cell(
+                            oriented_scores(s_s[test_idx], machine_is_high),
+                            y_s[test_idx],
+                        )
                 else:
                     df_t = data[target]
                     # Target rows whose group was seen while training would be
@@ -1423,6 +1617,11 @@ def run_score_baseline(cfg: dict, out_dir: Path, variant: dict) -> dict:
                         cal_thresholds=cal_thresholds,
                     )
                     res["excluded"] = int((~keep).sum())
+                    if keep_scores:
+                        dist_cells[source][target] = score_dist_cell(
+                            oriented_scores(scores_all[target][keep], machine_is_high),
+                            df_t.loc[keep, "y"].to_numpy(),
+                        )
                 res["train_n"] = int(len(train_idx))
                 res["threshold"] = float(threshold)
                 seed_res[source][target] = res
@@ -1461,6 +1660,12 @@ def run_score_baseline(cfg: dict, out_dir: Path, variant: dict) -> dict:
         "config": bx_cfg,
         "summary": summary,
         "per_seed": per_seed,
+        # machine_is_high True regardless of the column's own direction: the
+        # scores stored above were oriented on the way in.
+        SCORE_DIST_KEY: score_dist_payload(
+            dist_cells, dist_thresholds,
+            seed=base_seed, level=SCORE_DIST_LEVEL, machine_is_high=True,
+        ),
     }
     with open(out_dir / "cross_domain.json", "w") as f:
         json.dump(payload, f, indent=2)

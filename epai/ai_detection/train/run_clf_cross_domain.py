@@ -41,9 +41,19 @@ collapses, because the score distribution shifted even though the ordering
 survived -- which is invisible to accuracy, to AUROC and to (a) alike. On the
 diagonal (b) degenerates to (a) by construction; only the off-diagonal is new.
 
+The mechanism behind (b) is drawn rather than only reported. Each variant gets
+``cross_domain_score_hist_0.01.png``: a source x target grid of the human (blue)
+and machine (red) score distributions, with the transported cut placed on each
+row's diagonal panel and then drawn unmoved across the row. A detector whose
+distributions merely shift shows up there as red mass sliding across a
+stationary line -- which is what (b) measures and what accuracy, AUROC and (a)
+all miss. It is fed by the raw first-seed scores stored under ``score_dist``
+(see ``cd_core.SCORE_DIST_KEY``).
+
 None of this is recoverable from a matrix already on disk: a confusion matrix
-cannot be turned back into a ranking, so a run predating these metrics has to be
-re-run rather than replotted.
+cannot be turned back into a ranking, and per-document scores were not kept
+before ``score_dist`` existed, so a run predating either has to be re-run rather
+than replotted.
 
 SUITES: SEVERAL DATASETS IN ONE RUN
 -----------------------------------
@@ -138,13 +148,14 @@ and is scored on identical rows).
 
 BASELINES
 ---------
-Optional zero-shot score baselines, each one more matrix marked with a ★ in the
-comparison. Two families, configured by ``binoculars_baseline`` and
-``llm_judge_baseline``, each contributing exactly ONE variant: the ``threshold``
-its block names, fit to nothing at all and applied unchanged to every source and
-target. Nothing about a baseline is calibrated -- the headline metrics (AUROC,
-TPR at a fixed FPR) never read the declared cutoff, which enters only accuracy,
-macro F1 and the confusion matrix. Both families read their score the same way
+Optional zero-shot score baselines, each one more matrix, whose row on every
+comparison figure carries a ★ on its label and draws in the baseline colour. Two
+families, configured by ``binoculars_baseline`` and ``llm_judge_baseline``, each
+contributing exactly ONE variant: the ``threshold`` its block names, fit to
+nothing at all and applied unchanged to every source and target. Nothing about a
+baseline is calibrated -- the score metrics (AUROC, TPR at a fixed FPR) never
+read the declared cutoff, which enters only accuracy, macro F1 and the confusion
+matrix. Both families read their score the same way
 round -- *low* means machine for Binoculars by construction and for the LLM
 judge because it reports P(human).
 
@@ -205,6 +216,8 @@ from tqdm import tqdm
 from epai.algs import build_algorithm
 from epai.utils.cd_core import (
     BINARY_CLASSES,
+    SCORE_DIST_KEY,
+    SCORE_DIST_LEVEL,
     Prepared,
     aggregate_seeds,
     baseline_specs,
@@ -214,11 +227,14 @@ from epai.utils.cd_core import (
     check_splits,
     describe_variant,
     grouped_split,
+    level_tag,
     load_prepared,
     metrics_dict,
     print_matrix,
     print_ranking,
     run_score_baseline,
+    score_dist_cell,
+    score_dist_payload,
     summarise_baseline,
     summarise_variant,
 )
@@ -526,8 +542,13 @@ def run_variant(
 
     # per_seed[i][source][target] -> metrics
     per_seed: list[dict] = []
+    # The first seed's raw scores, kept for the score-distribution figure. One
+    # seed only; see cd_core.SCORE_DIST_KEY.
+    dist_cells: dict[str, dict[str, dict]] = {}
+    dist_thresholds: dict[str, float] = {}
 
     for i in tqdm(range(n_runs), desc="Seeds", leave=False):
+        keep_scores = i == 0
         seed = base_seed + i
         seed_model_dir = out_dir / str(i) / "model"
         if save_models:
@@ -578,6 +599,12 @@ def run_variant(
                 else None
             )
 
+            if keep_scores and cal_thresholds is not None:
+                dist_cells[source] = {}
+                dist_thresholds[source] = float(
+                    cal_thresholds[level_tag(SCORE_DIST_LEVEL)]
+                )
+
             seed_res[source] = {}
             for target in names:
                 if target == source:
@@ -593,6 +620,10 @@ def run_variant(
                         cal_thresholds=cal_thresholds,
                     )
                     res["excluded"] = 0
+                    if keep_scores and s_test is not None and source in dist_cells:
+                        dist_cells[source][target] = score_dist_cell(
+                            s_test, y_s[test_idx]
+                        )
                 else:
                     df_t = data[target]
                     # `essay` and `essay_gpt54mini` share their human documents
@@ -602,17 +633,22 @@ def run_variant(
                     Z_t = Z_all[target]
                     X_t = X_all[target][keep]
                     Z_keep = Z_t[keep] if Z_t is not None else None
+                    s_t = (
+                        score_alg(alg, X_t, Z_keep)
+                        if cal_thresholds is not None
+                        else None
+                    )
                     res = metrics_dict(
                         df_t.loc[keep, "y"].to_numpy(),
                         predict_alg(alg, X_t, Z_keep),
-                        scores=(
-                            score_alg(alg, X_t, Z_keep)
-                            if cal_thresholds is not None
-                            else None
-                        ),
+                        scores=s_t,
                         cal_thresholds=cal_thresholds,
                     )
                     res["excluded"] = int((~keep).sum())
+                    if keep_scores and s_t is not None and source in dist_cells:
+                        dist_cells[source][target] = score_dist_cell(
+                            s_t, df_t.loc[keep, "y"].to_numpy()
+                        )
                 res["train_n"] = int(len(train_idx))
                 seed_res[source][target] = res
 
@@ -661,6 +697,10 @@ def run_variant(
         "config": var_cfg,
         "summary": summary,
         "per_seed": per_seed,
+        SCORE_DIST_KEY: score_dist_payload(
+            dist_cells, dist_thresholds,
+            seed=base_seed, level=SCORE_DIST_LEVEL, machine_is_high=True,
+        ),
     }
     with open(out_dir / "cross_domain.json", "w") as f:
         json.dump(payload, f, indent=2)

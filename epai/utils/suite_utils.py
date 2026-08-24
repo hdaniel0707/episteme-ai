@@ -75,7 +75,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from epai.utils.cd_core import cell_metric_specs
+from epai.utils.cd_core import BY_SEED_SUFFIX, cell_metric_specs
 from epai.utils.corpus_utils import check_dataset_specs, check_where
 from epai.utils.preflight_utils import RULE
 
@@ -285,6 +285,32 @@ def _nan_stat(values: np.ndarray, fn) -> float:
     return float(fn(finite)) if finite.size else float("nan")
 
 
+def mean_by_seed_across(rows: list[dict | None], stem: str) -> list[float] | None:
+    """One ``<stem>_by_seed`` list averaged elementwise over several datasets.
+
+    A dataset's ``_by_seed`` entry ``i`` is seed ``i``'s aggregate, and the run
+    uses the same seed list for every dataset, so entry ``i`` means the same
+    thing in all of them and they can be averaged position by position. The
+    result is what seed ``i`` scored over the whole suite, which is the thing the
+    cross-dataset figure needs an error bar on -- as opposed to averaging each
+    dataset's spread, which would answer a different and much smaller question.
+
+    None when no dataset carries the key, or when they disagree on how many
+    seeds they ran: entry ``i`` would then not be one seed, and an error bar
+    drawn from it would be fiction.
+    """
+    lists = [
+        r[f"{stem}{BY_SEED_SUFFIX}"]
+        for r in rows
+        if r is not None and isinstance(r.get(f"{stem}{BY_SEED_SUFFIX}"), list)
+    ]
+    if not lists or len({len(v) for v in lists}) != 1:
+        return None
+    stacked = np.array(lists, dtype=float)
+    with np.errstate(invalid="ignore"):
+        return [float(v) for v in np.nanmean(stacked, axis=0)]
+
+
 def suite_comparison_rows(
     per_suite: dict[str, list[dict]], suite_names: list[str]
 ) -> list[dict]:
@@ -373,6 +399,12 @@ def suite_comparison_rows(
                         if src is not None and stem in src
                         else float("nan")
                     )
+                # Carried through unchanged so a dataset's own line on the
+                # cross-dataset figure gets the same error bar as anything else.
+                for stem in (f"in_domain_{key}", f"transfer_{key}"):
+                    values = (src or {}).get(f"{stem}{BY_SEED_SUFFIX}")
+                    if isinstance(values, list):
+                        cell[f"{stem}{BY_SEED_SUFFIX}"] = list(values)
             row["per_suite"][name] = cell
 
         for key in metric_keys:
@@ -407,6 +439,12 @@ def suite_comparison_rows(
             row[f"{key}_gap"] = (
                 in_mean - tr_mean if spec.higher_is_better else tr_mean - in_mean
             )
+            # The suite-level seed aggregate: seed i's score over every dataset,
+            # not the datasets' spreads pooled. See mean_by_seed_across.
+            for stem in (f"in_domain_{key}", f"transfer_{key}"):
+                merged = mean_by_seed_across(present, stem)
+                if merged is not None:
+                    row[f"{stem}{BY_SEED_SUFFIX}"] = merged
 
         # The unqualified accuracy aliases every existing reader still names.
         if "accuracy" in metric_keys:

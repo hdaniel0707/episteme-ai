@@ -128,24 +128,13 @@ algorithms:
 
   # The untuned MLP, kept as the control: it is the only honest reference for
   # what the sweep below actually bought.
-  - name: simple_mlp
-    label: "Simple MLP"
-    params:
-      hidden_dims: [256, 64]
-      dropout: 0.1
-      epochs: 100
-      batch_size: 64
-      lr: 0.001
-      weight_decay: 0.0001
-      patience: 10
-
   # Best trial of the luar_mlp_reg sweep. The sweep searched on the essay/reuter
   # cells of ONE dataset, so three of the four columns this config produces are
   # the first honest look it gets — expect them to be worse than the dev cells,
   # and treat what survives across all four as the result.
   - name: simple_mlp
-    id: simple_mlp_swept
-    label: "Simple MLP (swept)"
+    id: simple_mlp
+    label: "Simple MLP"
     params:
       hidden_dims: [256]
       normalize: "standard"
@@ -162,20 +151,20 @@ algorithms:
       epochs: 200
       patience: 15
 
-  - name: binox_mlp
-    id: binox_mlp_8
-    label: "MLP + Binoculars (upscale 8)"
-    binoculars: "binoculars_score"
-    params:
-      pre_dims: [256, 64]
-      post_dims: [16]
-      score_hidden: 8
-      dropout: 0.1
-      epochs: 100
-      batch_size: 64
-      lr: 0.001
-      weight_decay: 0.0001
-      patience: 10
+  # - name: binox_mlp
+  #   id: binox_mlp_8
+  #   label: "MLP + Binoculars (upscale 8)"
+  #   binoculars: "binoculars_score"
+  #   params:
+  #     pre_dims: [256, 64]
+  #     post_dims: [16]
+  #     score_hidden: 8
+  #     dropout: 0.1
+  #     epochs: 100
+  #     batch_size: 64
+  #     lr: 0.001
+  #     weight_decay: 0.0001
+  #     patience: 10
 
 model:
   n_runs: 3           # seeds; each dataset's matrix is the mean over them
