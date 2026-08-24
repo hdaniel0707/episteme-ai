@@ -10,6 +10,10 @@ with ``--no-plots``. It dispatches on the JSON filenames
     variant directory and each zero-shot baseline directory.
   * every ``variant_comparison.json`` -> the comparison figures, via
     ``plot_clf_cd_comparison``.
+  * every ``suite_comparison.json`` -> the cross-dataset figures of a run whose
+    config declared ``data.suites``, via ``plot_clf_cd_suite_comparison``. It
+    sits one level ABOVE the per-dataset directories, so pointing this at a run
+    directory redraws the datasets and the comparison across them in one pass.
 
 The two legacy comparison filenames are still recognised, so result trees
 written before the three runners merged (``results/clf_cd_emb/``,
@@ -42,6 +46,7 @@ from epai.utils.visualization_utils import (  # noqa: E402  (after backend set)
     plot_clf_cd_comparison,
     plot_clf_cd_emb_comparison,
     plot_clf_cd_result,
+    plot_clf_cd_suite_comparison,
 )
 
 CROSS_DOMAIN = "cross_domain.json"
@@ -52,6 +57,7 @@ CROSS_DOMAIN = "cross_domain.json"
 #: more rows, pointed at the legacy readers that understand their row key.
 COMPARISONS: tuple[tuple[str, str, object], ...] = (
     ("variant_comparison.json", "cmp", plot_clf_cd_comparison),
+    ("suite_comparison.json", "ds cmp", plot_clf_cd_suite_comparison),
     ("embedding_comparison.json", "emb cmp", plot_clf_cd_emb_comparison),
     ("algorithm_comparison.json", "alg cmp", plot_clf_cd_alg_comparison),
 )

@@ -1,0 +1,216 @@
+# Cross-DATASET comparison — every dataset in one run.
+#
+# The sibling configs in this folder each run ONE dataset: three domains, one
+# source x target matrix per variant, one ranking. This one runs all four in a
+# single config and adds the level above them — how the same algorithms fare
+# against each other on each dataset individually, and on average.
+#
+# WHAT IS SHARED AND WHAT IS NOT. `feature_sets`, `algorithms`, the baselines,
+# `model` and `seed` are declared once here and used unchanged for every dataset:
+# that is what makes the four transfer numbers a variant produces comparable at
+# all. What differs per dataset is only its parquet and the corpora cut out of
+# it, which is exactly what a suite entry holds.
+#
+# WHAT THIS RUN IS NOT. No model is ever trained on `essay` and tested on
+# `sociology`. Each dataset keeps its own in-domain/transfer split, computed
+# exactly as its single-dataset config computes it, and what crosses datasets is
+# only the pair of summary numbers each matrix produces. A pooled 12x12 matrix
+# over all twelve corpora would invent cells nobody trained for.
+#
+# THE TWO FACTORS. Read the results knowing that these four datasets do not vary
+# along one axis. ghostbuster_gpt35t / gpt54mini / gpt56luna are the SAME three
+# domains (essay, reuter, wp) built from the same human sources by three
+# different generators, so they are a controlled generator sweep. science_v3 is a
+# different corpus AND different domains, so it is a separate arm. A variant that
+# degrades monotonically across the three Ghostbuster columns is telling you
+# something about generators; one that only falls on science_v3 is telling you
+# something about the corpus.
+#
+# COST. 4 datasets x 6 variants x 3 seeds x 3 sources = 216 fits — the same work
+# as running the four sibling configs, under one preflight and one experiment id.
+#
+# Run:
+#   uv run python epai/ai_detection/train/run_clf_cross_domain.py \
+#       --cfg cfg/ai_detection/train/clf_cd/clf_cd_suites_all.yaml
+#   uv run python epai/ai_detection/train/run_clf_cross_domain.py \
+#       --cfg cfg/ai_detection/train/clf_cd/clf_cd_suites_all.yaml --dry-run
+#
+# Output:
+#   results/clf_cd/<experiment_id>/all_datasets/
+#       ghostbuster_gpt35t/          ← exactly what a single-dataset run writes
+#           logistic/ svm/ ... binoculars/
+#           variant_comparison.json, algorithm_comparison_*.png
+#       ghostbuster_gpt54mini/  ghostbuster_gpt56luna/  science_v3/
+#       suite_comparison.json        ← the new level
+#       suite_comparison_auroc.png
+#       suite_comparison_tpr_at_srcfpr_0.01.png
+#       other_figures/               ← every other metric, plus the all-metric grid
+
+alg_id: "all_datasets"
+alg_label: "all datasets — algorithm comparison"
+
+seed: 42
+
+data:
+  # Shared by every dataset: they describe the question, not the corpus. A suite
+  # that set them would be running a different experiment rather than the same
+  # one on different data, and its matrix would not belong in this comparison.
+  human_label: "human"
+  group_col: "id"
+
+  # Each entry is one DATASET: a parquet, and the corpora its own transfer matrix
+  # runs between. `parquet_path`, `where` and `drop_classes` may be set here, on
+  # a suite, or on a dataset — innermost wins, the same defaulting the datasets
+  # already had, one level out.
+  #
+  #   name      short key; names the output directory and the figure columns
+  #   label     optional, shown on the figures (defaults to `name`)
+  #   datasets  the corpora — unchanged in meaning from a single-dataset config
+  suites:
+    - name: "ghostbuster_gpt35t"
+      label: "Ghostbuster (gpt-3.5-turbo)"
+      parquet_path: "data/parquet/ghostbuster_gpt35t.parquet"
+      datasets:
+        - {name: "essay_gpt35t",  label: "essay",  where: {domain: "essay"}}
+        - {name: "reuter_gpt35t", label: "reuter", where: {domain: "reuter"}}
+        - {name: "wp_gpt35t",     label: "wp",     where: {domain: "wp"}}
+
+    - name: "ghostbuster_gpt54mini"
+      label: "Ghostbuster (gpt-5.4-mini)"
+      parquet_path: "data/parquet/ghostbuster_gpt54mini.parquet"
+      datasets:
+        - {name: "essay_gpt54mini",  label: "essay",  where: {domain: "essay"}}
+        - {name: "reuter_gpt54mini", label: "reuter", where: {domain: "reuter"}}
+        - {name: "wp_gpt54mini",     label: "wp",     where: {domain: "wp"}}
+
+    - name: "ghostbuster_gpt56luna"
+      label: "Ghostbuster (gpt-5.6-luna)"
+      parquet_path: "data/parquet/ghostbuster_gpt56luna.parquet"
+      datasets:
+        - {name: "essay_gpt56luna",  label: "essay",  where: {domain: "essay"}}
+        - {name: "reuter_gpt56luna", label: "reuter", where: {domain: "reuter"}}
+        - {name: "wp_gpt56luna",     label: "wp",     where: {domain: "wp"}}
+
+    - name: "science_v3"
+      label: "science_v3 (gpt-5.6-luna)"
+      parquet_path: "data/parquet/science_v3_gpt56luna_0811A.parquet"
+      datasets:
+        - {name: "computer_science", label: "comp. sci.", where: {domain: "computer_science"}}
+        - {name: "mathematics",      label: "maths",      where: {domain: "mathematics"}}
+        - {name: "sociology",        label: "sociology",  where: {domain: "sociology"}}
+
+# ---------------------------------------------------------------------------
+# The feature axis — one entry, so this run is an ALGORITHM comparison
+# ---------------------------------------------------------------------------
+
+# Held at one entry on purpose: with the representation fixed, every difference
+# in the cross-dataset ranking is the algorithm's. Adding entries here multiplies
+# the run by that many and makes the comparison two-dimensional, which is legal
+# but is a different question from the one this config asks.
+feature_sets:
+  - emb_luar_crud
+
+extra_features: []
+extra_binary_text: []
+
+# ---------------------------------------------------------------------------
+# The algorithm axis — identical across every dataset above
+# ---------------------------------------------------------------------------
+
+algorithms:
+  - name: logistic
+    label: "Logistic Regression"
+    params: {C: 1.0, max_iter: 1000}
+
+  - name: svm
+    label: "SVM (RBF)"
+    params: {C: 1.0, kernel: "rbf", gamma: "scale"}
+
+  # The untuned MLP, kept as the control: it is the only honest reference for
+  # what the sweep below actually bought.
+  - name: simple_mlp
+    label: "Simple MLP"
+    params:
+      hidden_dims: [256, 64]
+      dropout: 0.1
+      epochs: 100
+      batch_size: 64
+      lr: 0.001
+      weight_decay: 0.0001
+      patience: 10
+
+  # Best trial of the luar_mlp_reg sweep. The sweep searched on the essay/reuter
+  # cells of ONE dataset, so three of the four columns this config produces are
+  # the first honest look it gets — expect them to be worse than the dev cells,
+  # and treat what survives across all four as the result.
+  - name: simple_mlp
+    id: simple_mlp_swept
+    label: "Simple MLP (swept)"
+    params:
+      hidden_dims: [256]
+      normalize: "standard"
+      norm_layer: "layernorm"
+      val_frac: 0.0
+      val_metric: "loss"
+      dropout: 0.21662856624267898
+      input_dropout: 0.061218972697383835
+      weight_decay: 0.0054492461553935344
+      label_smoothing: 0.05
+      mixup_alpha: 0.4
+      lr: 0.00010208333947051273
+      batch_size: 128
+      epochs: 200
+      patience: 15
+
+  - name: binox_mlp
+    id: binox_mlp_8
+    label: "MLP + Binoculars (upscale 8)"
+    binoculars: "binoculars_score"
+    params:
+      pre_dims: [256, 64]
+      post_dims: [16]
+      score_hidden: 8
+      dropout: 0.1
+      epochs: 100
+      batch_size: 64
+      lr: 0.001
+      weight_decay: 0.0001
+      patience: 10
+
+model:
+  n_runs: 3           # seeds; each dataset's matrix is the mean over them
+  test_size: 0.30
+
+# ---------------------------------------------------------------------------
+# Optional zero-shot score baselines
+# ---------------------------------------------------------------------------
+
+# A baseline runs on every dataset or on none: its column must exist in all four
+# parquets, or the preflight refuses to start. That is deliberate — a ★ row whose
+# mean silently covered two of four datasets would sit in the same ranking as
+# rows that covered all four.
+#
+# This is also the row worth watching here. `binoculars_score` is a fixed cutoff
+# applied unchanged everywhere, so its four columns are a direct read of how the
+# detector holds up as the generator changes — and on this data it does not hold
+# up uniformly.
+binoculars_baseline:
+  enabled: true
+  column: "binoculars_score"
+  threshold: 0.9015310749276843
+
+# Off, and it has to be: `llm_judge_score_gpt54_mini` exists in the gpt35t and
+# gpt54mini parquets only. Enabling it here would abort the preflight naming the
+# two datasets that lack it. To run the judge, use a config whose `suites` are
+# the datasets that have been scored.
+llm_judge_baseline:
+  enabled: false
+  column: "llm_judge_score_gpt54_mini"
+  threshold: 0.5
+
+# ---------------------------------------------------------------------------
+# Preflight guards
+# ---------------------------------------------------------------------------
+
+min_rows: 50
+min_class_share: 0.10

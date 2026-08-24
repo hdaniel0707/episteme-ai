@@ -45,6 +45,48 @@ None of this is recoverable from a matrix already on disk: a confusion matrix
 cannot be turned back into a ranking, so a run predating these metrics has to be
 re-run rather than replotted.
 
+SUITES: SEVERAL DATASETS IN ONE RUN
+-----------------------------------
+The matrix above answers "does this survive leaving its domain" for ONE dataset.
+The question after it -- does the ranking it produced hold on a different corpus,
+or against a different generator -- needs several such matrices, and that is what
+``data.suites`` is::
+
+    data:
+      human_label: "human"
+      group_col: "id"
+      suites:
+        - name: "ghostbuster_gpt35t"
+          parquet_path: "data/parquet/ghostbuster_gpt35t.parquet"
+          datasets: [essay, reuter, wp]      # this suite's matrix axes
+        - name: "science_v3"
+          parquet_path: "data/parquet/science_v3_gpt56luna_0811A.parquet"
+          datasets: [computer_science, mathematics, sociology]
+
+Each suite is a dataset: a parquet, and the corpora cut out of it that become the
+axes of its own source x target matrix. Everything else -- ``feature_sets``,
+``algorithms``, the baselines, ``model``, the seeds -- is declared once and
+shared, which is what makes the resulting numbers comparable: the same variant,
+trained the same way, on each dataset in turn.
+
+Nothing about a suite changes what happens inside one. The run writes
+``<alg_id>/<suite>/`` with exactly the contents a flat config writes into
+``<alg_id>/``, and then adds one level above it: ``suite_comparison.json`` and
+the ``suite_comparison_*`` figures, ranking every variant by its transfer score
+meaned over the datasets, with each dataset still visible beside it. The mean is
+UNWEIGHTED -- each dataset counts once -- and it is never printed without the
+spread across datasets next to it, because a variant whose transfer swings by
+dataset has not been measured, it has been sampled.
+
+No cell ever crosses two datasets. ``essay`` and ``sociology`` are different
+corpora with different generators; a matrix pooling all of them would invent
+cells nobody trained for. What crosses datasets is the pair of summary numbers
+each matrix already produces.
+
+A config WITHOUT ``suites`` is unchanged, down to the directory layout: the two
+shapes are told apart by the key, and ``data.datasets`` takes the path it always
+did. Setting both is a preflight error.
+
 VARIANTS
 --------
 What this script varies is *what* goes through the matrix. A run is the cross
@@ -143,6 +185,10 @@ Run:
 
     uv run python epai/ai_detection/train/run_clf_cross_domain.py \
         --cfg cfg/ai_detection/train/clf_cd/clf_cd_ghostbuster_gpt56luna.yaml
+
+    # all four datasets in one run, with the comparison across them:
+    uv run python epai/ai_detection/train/run_clf_cross_domain.py \
+        --cfg cfg/ai_detection/train/clf_cd/clf_cd_suites_all.yaml
 """
 
 from __future__ import annotations
@@ -183,8 +229,16 @@ from epai.utils.config_utils import (
     rel,
     resolve_configs,
 )
-from epai.utils.corpus_utils import CorpusSpec, dataset_specs
+from epai.utils.corpus_utils import CorpusSpec, check_dataset_specs, dataset_specs
 from epai.utils.preflight_utils import RULE, Report, load_yaml, print_report
+from epai.utils.suite_utils import (
+    Suite,
+    check_suites,
+    has_suites,
+    print_suite_ranking,
+    suite_comparison_rows,
+    suite_configs,
+)
 from epai.utils.train_utils import stack_features
 from epai.utils.variant_utils import (
     Variant,
@@ -204,6 +258,7 @@ from epai.utils.variant_utils import (
 from epai.utils.visualization_utils import (
     plot_clf_cd_comparison,
     plot_clf_cd_result,
+    plot_clf_cd_suite_comparison,
 )
 
 BASE_DIR = Path(__file__).parent.parent.parent.parent
@@ -223,15 +278,39 @@ PLOTS_ENABLED = True
 
 
 
+def run_suites(cfg: dict) -> list[Suite]:
+    """The datasets this config runs, as one ordinary config each.
+
+    A flat config is one unnamed suite -- itself -- so everything downstream can
+    loop over datasets without asking which shape the config was written in. The
+    empty ``name`` is what tells the caller not to add a directory level or draw
+    a cross-dataset comparison for a run that has nothing to compare.
+    """
+    if has_suites(cfg):
+        return suite_configs(cfg)
+    return [Suite(name="", label="", cfg=cfg)]
+
+
 def preflight_config(cfg: dict, report: Report) -> None:
     """Everything that can be checked about one config before a model is fitted.
 
     Runs to the end and records all problems: a run this long should not be
     restarted once per typo.
+
+    The shared axes -- the feature sets, the algorithms, the model block, the
+    baselines -- are checked ONCE even when the config declares several datasets,
+    because they are declared once; the data is then checked once per dataset,
+    with every message tagged by the dataset it belongs to. A baseline column
+    missing from one dataset's parquet is an error here rather than a dropped
+    row later: a comparison whose ★ row silently covers two of four datasets is
+    worse than one that refuses to start.
     """
     print("\n[1/3] config")
     n_errors = len(report.errors)
-    check_config(cfg, report)
+    check_config(
+        cfg, report,
+        data_check=check_suites if has_suites(cfg) else check_dataset_specs,
+    )
     if len(report.errors) > n_errors:
         # The checks below index into the config; stop while it is still unsafe.
         print("  invalid — skipping the data checks for this config")
@@ -240,8 +319,9 @@ def preflight_config(cfg: dict, report: Report) -> None:
     fsets = build_feature_sets(cfg)
     variants = build_variants(cfg)
     baseline_variants = baseline_specs(cfg)
-    n_datasets = len(cfg["data"]["datasets"])
-    n_fits = (len(variants) + len(baseline_variants)) * cfg["model"]["n_runs"] * n_datasets
+    suites = run_suites(cfg)
+    n_corpora = sum(len(s.cfg["data"]["datasets"]) for s in suites)
+    n_fits = (len(variants) + len(baseline_variants)) * cfg["model"]["n_runs"] * n_corpora
     baseline_note = (
         " + score baselines "
         + ", ".join(f"{v['label']} ({v['column']})" for v in baseline_variants)
@@ -253,11 +333,20 @@ def preflight_config(cfg: dict, report: Report) -> None:
         if len(fsets) > 1
         else f"features={list(fsets[0].columns) if fsets else []}"
     )
+    scope = (
+        f"{len(suites)} datasets / {n_corpora} corpora"
+        if has_suites(cfg)
+        else f"{n_corpora} datasets"
+    )
     print(
-        f"  {n_datasets} datasets, {axis}, {len(algorithm_specs(cfg))} algorithms"
+        f"  {scope}, {axis}, {len(algorithm_specs(cfg))} algorithms"
         f"{baseline_note}, {cfg['model']['n_runs']} seeds  → "
         f"{len(variants)} variant(s), {n_fits} fits"
     )
+    if has_suites(cfg):
+        for suite in suites:
+            names = [d["name"] for d in suite.cfg["data"]["datasets"]]
+            print(f"    {suite.name:<26} {len(names)} corpora — {', '.join(names)}")
     hybrids = [v for v in variants if v.hybrid]
     if hybrids:
         # These see more than the feature set, so say so before anything runs.
@@ -270,6 +359,19 @@ def preflight_config(cfg: dict, report: Report) -> None:
             f"so they all train and score on the same rows"
         )
 
+    # Every dataset is checked, even after one of them fails: the point of a
+    # preflight this thorough is that one pass names every parquet to fix.
+    outer = report.context
+    for suite in suites:
+        if suite.name:
+            print(f"\n{'·' * RULE}\ndataset: {suite.name}\n{'·' * RULE}")
+            report.context = f"{outer} · {suite.name}" if outer else suite.name
+        preflight_data(suite.cfg, report)
+    report.context = outer
+
+
+def preflight_data(cfg: dict, report: Report) -> None:
+    """Stages 2 and 3 for ONE dataset: its parquets, its rows, its splits."""
     print("\n[2/3] parquet files")
     n_errors = len(report.errors)
     check_files(cfg, dataset_specs(cfg, BASE_DIR), report)
@@ -282,6 +384,7 @@ def preflight_config(cfg: dict, report: Report) -> None:
     group_col: str = cfg["data"]["group_col"]
     human_label: str = cfg["data"]["human_label"]
     specs = dataset_specs(cfg, BASE_DIR)
+    fsets = build_feature_sets(cfg)
 
     print(
         f"{'feature set':<22}{'dataset':<20}{'rows':>7}{'dropped':>9}"
@@ -591,12 +694,94 @@ def comparison_subtitle(cfg: dict, n_corpora: int) -> str:
     )
 
 
+def suite_subtitle(cfg: dict, suites: list[Suite]) -> str:
+    """The same line, for the figures that span every dataset of a run.
+
+    It says how many datasets and how many corpora in total, because the two are
+    different guarantees: the variants are identical across datasets (one
+    ``algorithms`` list), the corpora are not (each dataset cuts its own).
+    """
+    n_corpora = sum(len(s.cfg["data"]["datasets"]) for s in suites)
+    base = comparison_subtitle(cfg, n_corpora)
+    return base.replace(
+        f"{n_corpora} corpora",
+        f"{len(suites)} datasets / {n_corpora} corpora",
+    )
+
+
 def run_config(cfg_path: Path, cfg: dict, alg_dir: Path) -> None:
-    """Every variant of one config, plus its comparison figures."""
+    """One config: every dataset it names, and the comparison across them.
+
+    A flat config is one dataset and this is exactly what it always was -- the
+    variants, their matrices, their figures, the within-dataset ranking, all
+    written straight into ``alg_dir``.
+
+    A config with ``data.suites`` runs that whole thing once per dataset, one
+    directory deeper, and then adds the level the suites exist for: one row per
+    variant holding its per-dataset numbers, ranked by the unweighted mean over
+    datasets, written as ``suite_comparison.json`` beside the dataset
+    directories and drawn by ``plot_clf_cd_suite_comparison``.
+    """
     alg_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy(cfg_path, alg_dir / "config.yaml")
     with open(alg_dir / "config.json", "w") as f:
         json.dump(cfg, f, indent=2)
+
+    if not has_suites(cfg):
+        run_suite(cfg, alg_dir)
+        return
+
+    suites = suite_configs(cfg)
+    per_suite: dict[str, list[dict]] = {}
+    for suite in tqdm(suites, desc="Datasets", unit="ds"):
+        suite_dir = alg_dir / suite.name
+        suite_dir.mkdir(parents=True, exist_ok=True)
+        # The derived config, so a dataset directory says what produced it
+        # without anyone having to re-apply the suite defaults by hand.
+        with open(suite_dir / "config.json", "w") as f:
+            json.dump(suite.cfg, f, indent=2)
+        per_suite[suite.name] = run_suite(suite.cfg, suite_dir)["variants"]
+
+    names = [s.name for s in suites]
+    labels = {s.name: s.label for s in suites}
+    rows = suite_comparison_rows(per_suite, names)
+    comparison = {
+        "alg_id": cfg["alg_id"],
+        "alg_label": cfg["alg_label"],
+        "noun": comparison_noun(cfg),
+        "subtitle": suite_subtitle(cfg, suites),
+        "suite_names": names,
+        "suite_labels": labels,
+        # Which corpora each dataset's own matrix ran between. Nothing reads it
+        # to plot; it is what makes the JSON answer "what is behind this cell"
+        # without opening four other files.
+        "suite_datasets": {
+            s.name: [spec.name for spec in dataset_specs(s.cfg, BASE_DIR)]
+            for s in suites
+        },
+        "classes": BINARY_CLASSES,
+        "config": cfg,
+        "variants": rows,
+    }
+    with open(alg_dir / "suite_comparison.json", "w") as f:
+        json.dump(comparison, f, indent=2)
+
+    print_suite_ranking(
+        cfg["alg_label"], rows, names, labels, noun=comparison["noun"]
+    )
+    if PLOTS_ENABLED:
+        plot_clf_cd_suite_comparison(alg_dir, comparison)
+
+
+def run_suite(cfg: dict, alg_dir: Path) -> dict:
+    """Every variant of ONE dataset, plus its comparison figures.
+
+    Returns the ``variant_comparison`` payload it wrote, which is what the
+    cross-dataset layer above stacks. ``cfg`` is a flat cross-domain config
+    whether it was written as one or derived from a suite entry, so nothing
+    below this line knows the difference.
+    """
+    alg_dir.mkdir(parents=True, exist_ok=True)
 
     group_col: str = cfg["data"]["group_col"]
     human_label: str = cfg["data"]["human_label"]
@@ -719,6 +904,7 @@ def run_config(cfg_path: Path, cfg: dict, alg_dir: Path) -> None:
     print_ranking(cfg["alg_label"], rows, noun=noun)
     if PLOTS_ENABLED:
         plot_clf_cd_comparison(alg_dir, comparison)
+    return comparison
 
 
 # ---------------------------------------------------------------------------

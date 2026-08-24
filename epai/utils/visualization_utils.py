@@ -2264,6 +2264,503 @@ def plot_clf_cd_alg_comparison(exp_dir: Path, payload: dict) -> None:
     )
 
 
+
+########################################################################
+# TRAIN - CROSS-DATASET (SUITE) COMPARISON
+########################################################################
+
+# Written by epai/ai_detection/train/run_clf_cross_domain.py when its config
+# declares `data.suites`. One level above plot_clf_cd_comparison: that one ranks
+# the variants of ONE dataset by how well they leave their domain, this one puts
+# those rankings side by side across every dataset the run covered.
+#
+# Nothing here draws a source x target cell. A cell belongs to one dataset's
+# matrix and there is no meaningful transfer between, say, `essay` and
+# `sociology` -- they are different corpora with different generators, and a
+# pooled matrix over all twelve corpora would invent cells nobody trained for.
+# What crosses datasets is the PAIR of summary numbers each matrix produces (its
+# in-domain mean and its transfer mean), and that pair is what every figure below
+# is built from.
+
+#: Ends of a dumbbell. The same two colours the ranked bars use, so a reader
+#: moving from a within-dataset figure to this one does not re-learn them.
+CD_IN_DOMAIN_COLOR = "steelblue"
+CD_TRANSFER_COLOR = "orange"
+#: The per-dataset connectors, and the mean's. The mean is the darker, heavier
+#: one: it is an aggregate of the others and should not read as a sixth dataset.
+CD_SUITE_LINE_COLOR = "0.72"
+CD_SUITE_MEAN_COLOR = "0.35"
+#: Alternating background band, so a block of dumbbells reads as one variant.
+CD_SUITE_BAND_COLOR = "0.955"
+
+
+def plot_clf_cd_suite_comparison(exp_dir: Path, payload: dict) -> None:
+    """Compare the variants of a run across every dataset it covered.
+
+    ``payload`` is the ``suite_comparison.json`` written by
+    ``run_clf_cross_domain.py``: one entry per variant, each holding its
+    per-dataset in-domain / transfer pair under ``per_suite`` and the unweighted
+    aggregates over them at the top level (see
+    :mod:`epai.utils.suite_utils`).
+
+    Three figures per metric, mirroring the within-dataset set so the two can be
+    read together:
+
+      * ``suite_comparison_<metric>.png`` -- the dumbbells, one per (variant,
+        dataset), grouped by variant under a heavier one for the mean, next to
+        the in-domain/transfer scatter with each dataset as a faint satellite of
+        its variant's mean. The dumbbell's LENGTH is the generalisation gap, so a
+        variant whose datasets disagree shows up as a block of unequal lines
+        rather than as a number a reader has to difference themselves.
+      * ``suite_comparison_<metric>_matrix.png`` -- every (variant, dataset)
+        transfer number in one heatmap, with the mean as its own boxed column.
+      * ``suite_comparison_all.png`` -- every metric on one grid, in-domain
+        beside transfer, drawn by the same function the within-dataset figures
+        use because a cross-dataset row carries exactly the same aggregate keys.
+
+    Headline metrics (:data:`CD_HEADLINE_METRICS`) keep their ranked figure at
+    the top of the run directory; everything else goes to ``other_figures/``.
+    """
+    rows: list[dict] = payload.get("variants") or []
+    suite_names: list[str] = payload.get("suite_names") or []
+    if not rows or not suite_names:
+        print(f"No cross-dataset results to compare in {exp_dir}")
+        return
+
+    labels_of: dict = payload.get("suite_labels", {})
+    noun = payload.get("noun", "variant")
+    alg_label = payload.get("alg_label", payload.get("alg_id", exp_dir.name))
+    subtitle = payload.get("subtitle", "")
+    specs = _comparison_specs(rows)
+    if not specs:
+        print(f"No comparable metrics in {exp_dir}")
+        return
+
+    show_dim = len({r.get("feature_dim") for r in rows}) > 1
+
+    def row_label(r: dict) -> str:
+        return (
+            f"{_cd_row_mark(r)}{r['label']}"
+            + (f" ({r['feature_dim']}d)" if show_dim else "")
+        )
+
+    for spec in specs:
+        _plot_suite_dumbbells(
+            _cd_figure_dir(exp_dir, spec.key, "ranked"),
+            rows, suite_names, labels_of, alg_label,
+            spec=spec, noun=noun, subtitle=subtitle, row_label=row_label,
+        )
+        _plot_suite_matrix(
+            _cd_figure_dir(exp_dir, spec.key, "matrix"),
+            rows, suite_names, labels_of, alg_label,
+            spec=spec, noun=noun, subtitle=subtitle, row_label=row_label,
+        )
+
+    order_desc = sorted(
+        rows, key=lambda r: _num(r.get("transfer_accuracy_mean")), reverse=True
+    )
+    _plot_cd_comparison_metrics(
+        _cd_figure_dir(exp_dir, None, "all"), order_desc, alg_label,
+        noun=f"{noun}, meaned over datasets", slug="suite",
+        subtitle=subtitle, row_label=row_label,
+    )
+    headline = [s.short for s in specs if s.key in CD_HEADLINE_METRICS]
+    print(
+        f"Cross-dataset plots saved to: {exp_dir}"
+        + (f" ({', '.join(headline)}; the rest in {CD_OTHER_FIGURES_DIR}/)"
+           if headline else f" (all in {CD_OTHER_FIGURES_DIR}/)")
+    )
+
+
+def _suite_cell(row: dict, suite: str, key: str) -> float:
+    """One aggregate of one variant on one dataset, NaN where it has none."""
+    return _num((row.get("per_suite") or {}).get(suite, {}).get(key))
+
+
+def _suite_row_order(rows: list[dict], spec: MetricSpec) -> list[dict]:
+    """Variants best-transfer first, in the metric's own direction."""
+    return sorted(
+        rows,
+        key=lambda r: _num(r.get(f"transfer_{spec.key}_mean")),
+        reverse=spec.higher_is_better,
+    )
+
+
+def _draw_cd_row_mark_label(ax, label: str, row: dict, y: float) -> None:
+    """A row label whose ★ / ◆ is coloured and whose name is not.
+
+    A tick label is a single Text artist and cannot hold two colours, so the
+    label is drawn as a packed box right-aligned where the tick label would have
+    been -- the same treatment the within-dataset ranked figure gives its rows,
+    kept identical so the mark means the same thing in both.
+    """
+    prefix = _cd_row_mark(row)
+    mark = prefix.strip()
+    parts = [
+        TextArea(label[len(prefix):], textprops=dict(color="black", fontsize=8.5,
+                                                     fontweight="bold"))
+    ]
+    if mark:
+        mark_color = (
+            _cd_baseline_style(row)["color"] if row.get("baseline")
+            else CD_HYBRID_COLOR
+        )
+        parts.insert(0, TextArea(mark, textprops=dict(color=mark_color, fontsize=10)))
+    ax.add_artist(
+        AnnotationBbox(
+            HPacker(children=parts, align="center", pad=0.0, sep=3.0),
+            (0.0, y),
+            xycoords=("axes fraction", "data"),
+            xybox=(-6.0, 0.0),
+            boxcoords="offset points",
+            box_alignment=(1.0, 0.5),
+            frameon=False,
+            pad=0.0,
+            annotation_clip=False,
+        )
+    )
+
+
+def _plot_suite_dumbbells(
+    out_dir: Path,
+    rows: list[dict],
+    suite_names: list[str],
+    labels_of: dict,
+    alg_label: str,
+    *,
+    spec: MetricSpec,
+    noun: str,
+    subtitle: str,
+    row_label,
+) -> None:
+    """One metric: the dumbbells, and the scatter that summarises them.
+
+    LEFT -- one line per (variant, dataset), running from the dataset's transfer
+    score (●) to its in-domain score (○), grouped under a heavier line for the
+    unweighted mean over datasets. Three things are readable at once and none of
+    them requires arithmetic: where a variant sits (position), what it loses
+    leaving its domain (length), and whether that loss is a property of the
+    variant or of the dataset (whether the block's lines agree).
+
+    RIGHT -- the in-domain/transfer scatter, with each variant's mean drawn full
+    size and its datasets as faint satellites tethered to it. The dotted diagonal
+    is "no loss under transfer"; a variant whose satellites scatter far along the
+    y axis has a transfer number that belongs to the dataset it was measured on.
+    """
+    order = _suite_row_order(rows, spec)
+    key = spec.key
+    n_suites = len(suite_names)
+
+    # MEAN first in each block, so the block's heading line is its own summary
+    # and the datasets hang underneath it in config order.
+    block_gap = 1.0
+    mean_y: list[float] = []
+    suite_y: list[list[float]] = []
+    cursor = 0.0
+    for _ in order:
+        mean_y.append(cursor)
+        cursor += 1.0
+        suite_y.append([cursor + i for i in range(n_suites)])
+        cursor += n_suites + block_gap
+
+    height = max(5.5, 0.30 * (len(order) * (n_suites + 1)) + 3.2)
+    fig, axes = plt.subplots(1, 2, figsize=(16.0, height))
+    ax = axes[0]
+
+    for idx, row in enumerate(order):
+        if idx % 2 == 1:
+            ax.axhspan(
+                mean_y[idx] - 0.6, suite_y[idx][-1] + 0.6,
+                color=CD_SUITE_BAND_COLOR, zorder=0,
+            )
+        pairs = [
+            (
+                mean_y[idx],
+                _num(row.get(f"transfer_{key}_mean")),
+                _num(row.get(f"in_domain_{key}_mean")),
+                True,
+            )
+        ] + [
+            (
+                suite_y[idx][j],
+                _suite_cell(row, name, f"transfer_{key}_mean"),
+                _suite_cell(row, name, f"in_domain_{key}_mean"),
+                False,
+            )
+            for j, name in enumerate(suite_names)
+        ]
+        for y, transfer, in_domain, is_mean in pairs:
+            if not (np.isfinite(transfer) or np.isfinite(in_domain)):
+                continue
+            if np.isfinite(transfer) and np.isfinite(in_domain):
+                ax.plot(
+                    [transfer, in_domain], [y, y],
+                    color=CD_SUITE_MEAN_COLOR if is_mean else CD_SUITE_LINE_COLOR,
+                    linewidth=3.4 if is_mean else 1.8,
+                    solid_capstyle="round", zorder=2,
+                )
+            # Open circle for in-domain, filled for transfer: the filled end is
+            # the one the run is ranked on.
+            ax.plot(
+                in_domain, y, marker="o", markersize=7.0 if is_mean else 5.0,
+                markerfacecolor="white", markeredgecolor=CD_IN_DOMAIN_COLOR,
+                markeredgewidth=1.6 if is_mean else 1.2, zorder=3,
+            )
+            ax.plot(
+                transfer, y, marker="o", markersize=8.0 if is_mean else 5.6,
+                color=CD_TRANSFER_COLOR, markeredgecolor="black",
+                markeredgewidth=0.7 if is_mean else 0.0, zorder=4,
+            )
+            anchor = max(
+                [v for v in (transfer, in_domain) if np.isfinite(v)], default=0.0
+            )
+            ax.text(
+                anchor + 0.015, y,
+                (f"{transfer:.3f}" if np.isfinite(transfer) else "n/a")
+                + (f" / {in_domain:.3f}" if np.isfinite(in_domain) else ""),
+                va="center", fontsize=7.0 if not is_mean else 7.8,
+                fontweight="bold" if is_mean else "normal",
+                color="black" if is_mean else "dimgray",
+            )
+
+    ax.axvline(spec.reference, linestyle="--", color="red", linewidth=1.2,
+               label=f"reference ({spec.reference*100:g}%)")
+    ticks = [y for idx in range(len(order)) for y in [mean_y[idx]] + suite_y[idx]]
+    # The variant's own row is left blank here and drawn below instead, so its
+    # ★ / ◆ can be coloured while the name stays black. Its bold, larger type is
+    # what separates it from the dataset rows under it -- an indent would not,
+    # since y tick labels are flush RIGHT against the axis and leading spaces
+    # push the text away from it rather than in.
+    tick_labels = [
+        "" if name is None else str(labels_of.get(name, name))
+        for _ in range(len(order))
+        for name in [None] + list(suite_names)
+    ]
+    ax.set_yticks(ticks)
+    ax.set_yticklabels(tick_labels, fontsize=7.5)
+    for idx, row in enumerate(order):
+        _draw_cd_row_mark_label(ax, row_label(row), row, mean_y[idx])
+    ax.set_ylim(cursor - block_gap, -1.0)  # inverted: best variant on top
+
+    finite = np.array(
+        [
+            v
+            for row in order
+            for name in suite_names
+            for v in (
+                _suite_cell(row, name, f"transfer_{key}_mean"),
+                _suite_cell(row, name, f"in_domain_{key}_mean"),
+            )
+            if np.isfinite(v)
+        ]
+    )
+    lo = float(min(spec.reference, finite.min() if finite.size else 0.0)) - 0.06
+    ax.set_xlim(max(-0.05, lo), 1.20)
+    ax.set_xlabel(
+        spec.label + ("" if spec.higher_is_better else "  (lower is better)")
+    )
+    ax.set_title(f"Per dataset, and their mean — {spec.label}")
+
+    from matplotlib.lines import Line2D
+
+    handles = [
+        Line2D([], [], linestyle="none", marker="o", color=CD_TRANSFER_COLOR,
+               markeredgecolor="black", markeredgewidth=0.7, markersize=8,
+               label="transfer (off-diagonal)"),
+        Line2D([], [], linestyle="none", marker="o", markerfacecolor="white",
+               markeredgecolor=CD_IN_DOMAIN_COLOR, markeredgewidth=1.6,
+               markersize=7, label="in-domain (diagonal)"),
+        Line2D([], [], color=CD_SUITE_MEAN_COLOR, linewidth=3.4,
+               label=f"mean over {n_suites} datasets (unweighted)"),
+        Line2D([], [], color=CD_SUITE_LINE_COLOR, linewidth=1.8,
+               label="one dataset"),
+        Line2D([], [], linestyle="--", color="red", linewidth=1.2,
+               label=f"reference ({spec.reference*100:g}%)"),
+    ]
+    ax.legend(handles=handles, fontsize=8, loc="upper center",
+              bbox_to_anchor=(0.5, -0.08), ncol=3, frameon=False)
+
+    # --- right panel: the same numbers as a scatter -----------------------
+    sc = axes[1]
+    sc.plot([0, 1], [0, 1], linestyle=":", color="gray", linewidth=1.0,
+            label="no loss under transfer")
+    sc.axhline(spec.reference, linestyle="--", color="red", linewidth=1.2,
+               label=f"reference ({spec.reference*100:g}%)")
+    sc.axvline(spec.reference, linestyle="--", color="red", linewidth=1.2)
+
+    for row in order:
+        mx = _num(row.get(f"in_domain_{key}_mean"))
+        my = _num(row.get(f"transfer_{key}_mean"))
+        color = (
+            _cd_baseline_style(row)["color"] if row.get("baseline") else CD_ITEM_COLOR
+        )
+        for name in suite_names:
+            x = _suite_cell(row, name, f"in_domain_{key}_mean")
+            y = _suite_cell(row, name, f"transfer_{key}_mean")
+            if not (np.isfinite(x) and np.isfinite(y)):
+                continue
+            if np.isfinite(mx) and np.isfinite(my):
+                sc.plot([mx, x], [my, y], color=color, alpha=0.30, linewidth=0.9,
+                        zorder=2)
+            sc.scatter(x, y, s=22, color=color, alpha=0.45, zorder=3,
+                       edgecolor="none")
+
+    is_baseline = np.array([bool(r.get("baseline")) for r in order])
+    is_hybrid = np.array([bool(r.get("hybrid")) for r in order])
+    in_domain = _series(order, f"in_domain_{key}_mean")
+    transfer = _series(order, f"transfer_{key}_mean")
+    plain = ~is_baseline & ~is_hybrid
+    sc.scatter(in_domain[plain], transfer[plain], s=55, color=CD_ITEM_COLOR,
+               edgecolor="black", linewidth=0.5, zorder=5, label=f"{noun} (mean)")
+    hybrid_pts = is_hybrid & ~is_baseline
+    if hybrid_pts.any():
+        sc.scatter(in_domain[hybrid_pts], transfer[hybrid_pts], s=95, marker="D",
+                   color=CD_HYBRID_COLOR, edgecolor="black", linewidth=0.6,
+                   zorder=5, label="hybrid (extra features)")
+    for style in _cd_baseline_legend_styles(order, is_baseline):
+        pts = np.array(
+            [
+                bool(b) and _cd_baseline_style(r)["label"] == style["label"]
+                for r, b in zip(order, is_baseline)
+            ]
+        )
+        if pts.any():
+            sc.scatter(in_domain[pts], transfer[pts], s=150, marker="*",
+                       color=style["color"], edgecolor="black", linewidth=0.6,
+                       zorder=5, label=style["label"])
+    for row, x_val, y_val in zip(order, in_domain, transfer):
+        sc.annotate(row["label"], (x_val, y_val), textcoords="offset points",
+                    xytext=(6, 4), fontsize=7.5)
+
+    both = np.concatenate(
+        [finite, transfer[np.isfinite(transfer)], in_domain[np.isfinite(in_domain)]]
+    )
+    lo = float(min(spec.reference, both.min() if both.size else 0.0)) - 0.05
+    sc.set_xlim(max(-0.03, lo), 1.02)
+    sc.set_ylim(max(-0.03, lo), 1.02)
+    sc.set_xlabel(f"In-domain (diagonal) — {spec.label}")
+    sc.set_ylabel(f"Transfer (off-diagonal) — {spec.label}")
+    sc.set_title("Each dataset, tethered to its mean")
+    n_leg = len(sc.get_legend_handles_labels()[0])
+    sc.legend(fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.08),
+              ncol=min(n_leg, 3), frameon=False)
+
+    fig.suptitle(
+        f"{alg_label} — {noun} comparison across {n_suites} datasets: {spec.label}"
+        f"\n{subtitle}"
+    )
+    note = _wrap_note(
+        "Each line is ONE dataset's own cross-domain matrix collapsed to two "
+        "numbers: ● its transfer (off-diagonal) mean, ○ its in-domain (diagonal) "
+        "mean. The heavier line is the unweighted mean over datasets — every "
+        "dataset counts once, whatever its size.",
+        "Lines are not compared BETWEEN datasets: `essay` and `sociology` are "
+        "different corpora, and nothing here trains on one and tests on the "
+        "other. What is compared is how far each variant falls inside each "
+        "dataset, and whether it falls by the same amount in all of them.",
+        spec.note,
+    )
+    fig.text(0.01, 0.005, note, fontsize=7.5, color="dimgray", va="bottom")
+    fig.tight_layout(rect=(0, _note_strip(note, fig) + 0.02, 1, 1))
+    fig.savefig(out_dir / f"suite_comparison_{spec.filename}.png", dpi=150,
+                bbox_inches="tight")
+    plt.close(fig)
+
+
+def _plot_suite_matrix(
+    out_dir: Path,
+    rows: list[dict],
+    suite_names: list[str],
+    labels_of: dict,
+    alg_label: str,
+    *,
+    spec: MetricSpec,
+    noun: str,
+    subtitle: str,
+    row_label,
+) -> None:
+    """Every (variant, dataset) transfer number, with the mean as its own column.
+
+    The compact form of the dumbbells: it drops the in-domain end -- which is
+    near-perfect for every trained variant and says little -- to fit every
+    variant and every dataset on one screen, and it is where a ranking that
+    holds on three datasets and inverts on the fourth is found.
+
+    The MEAN column is boxed because it is not a dataset: it is the other columns
+    averaged, and a reader scanning left to right must not read it as a fifth
+    measurement.
+    """
+    order = _suite_row_order(rows, spec)
+    key = spec.key
+    cols = list(suite_names) + ["__mean__"]
+    col_labels = [labels_of.get(n, n) for n in suite_names] + [
+        f"MEAN\n({len(suite_names)} datasets)"
+    ]
+    mat = np.array(
+        [
+            [
+                _num(row.get(f"transfer_{key}_mean")) if name == "__mean__"
+                else _suite_cell(row, name, f"transfer_{key}_mean")
+                for name in cols
+            ]
+            for row in order
+        ],
+        dtype=float,
+    )
+
+    fig, ax = plt.subplots(
+        figsize=(max(8.0, 1.9 * len(cols) + 4.0), max(4.2, 0.44 * len(order) + 3.2))
+    )
+    im = ax.imshow(mat, aspect="auto", **_metric_imshow_kwargs(spec))
+    cbar = fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02)
+    cbar.set_label(f"Transfer {spec.label} (dashed = {spec.reference*100:g}%)")
+    cbar.ax.axhline(spec.reference, color="black", linewidth=1.2, linestyle="--")
+
+    ax.set_xticks(range(len(cols)))
+    ax.set_xticklabels(col_labels, fontsize=8, rotation=30, ha="right")
+    ax.set_yticks(range(len(order)))
+    ax.set_yticklabels([row_label(r) for r in order], fontsize=8.5)
+    ax.set_xlabel("DATASET", fontweight="bold", labelpad=8)
+    ax.set_title(
+        f"{alg_label} — transfer per dataset, per {noun}: {spec.label}\n{subtitle}"
+    )
+
+    ax.set_xticks(np.arange(-0.5, len(cols), 1), minor=True)
+    ax.set_yticks(np.arange(-0.5, len(order), 1), minor=True)
+    ax.grid(which="minor", color="white", linewidth=2)
+    ax.tick_params(which="minor", length=0)
+
+    for i in range(mat.shape[0]):
+        for j in range(mat.shape[1]):
+            value = mat[i, j]
+            ax.text(j, i, "n/a" if not np.isfinite(value) else f"{value*100:.1f}",
+                    ha="center", va="center", fontsize=8,
+                    fontweight="bold" if cols[j] == "__mean__" else "normal",
+                    color=_metric_text_color(value, spec))
+    ax.add_patch(
+        plt.Rectangle((len(cols) - 1.5, -0.5), 1, mat.shape[0], fill=False,
+                      edgecolor="black", linewidth=2.0)
+    )
+
+    note = _wrap_note(
+        "Every cell is one dataset's transfer (off-diagonal) mean — the model was "
+        "trained and tested inside that dataset, never across two of them. The "
+        "boxed column is those cells averaged, unweighted. Rows are ordered by "
+        "it, best first.",
+        "★ marks a zero-shot baseline (no classifier trained)."
+        + (
+            " ◆ marks a hybrid: trained on extra features beyond the shared set, "
+            "so its row is not comparable on equal information."
+            if any(r.get("hybrid") for r in order) else ""
+        ),
+        spec.note,
+    )
+    fig.text(0.01, 0.01, note, fontsize=7.5, color="dimgray", va="bottom")
+    fig.tight_layout(rect=(0, _note_strip(note, fig), 1, 1))
+    fig.savefig(out_dir / f"suite_comparison_{spec.filename}_matrix.png", dpi=150)
+    plt.close(fig)
+
+
 ########################################################################
 # TRAIN - IN-DOMAIN CLASSIFICATION (one corpus, held-out split)
 ########################################################################
