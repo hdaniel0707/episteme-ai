@@ -129,10 +129,16 @@ PAIRS_MODULE = BINOCULARS_PROJECT / "model_pairs.py"
 #                corpus and this does not, the cause is the pair's competence on
 #                scientific prose, not simply its age -- which is the question a
 #                domain-specific inversion actually poses.
+#   llama31-8b   a third strong family, different lab, tokenizer and data mix, so
+#                that "a modern pair fixes it" does not rest on Qwen alone. Gated
+#                on the Hub: needs HF_TOKEN and an accepted licence on BOTH the
+#                base and the instruct repo.
 #
-# meta-llama/Llama-3.1-8B was the original third pair and is gated behind a
-# review; swap it back in with --pairs once access comes through.
-DEFAULT_PAIRS = ("qwen25-7b", "falcon3-7b", "mistral-v03")
+# The last two answer different questions and neither replaces the other -- one
+# is a control that should NOT fix the science corpus, the other a second
+# positive that should. Narrow the set with --pairs when GPU time is short;
+# qwen25-7b and falcon3-7b are the two the writeup needs.
+DEFAULT_PAIRS = ("qwen25-7b", "falcon3-7b", "mistral-v03", "llama31-8b")
 
 
 @dataclass
