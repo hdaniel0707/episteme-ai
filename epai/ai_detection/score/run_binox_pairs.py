@@ -1,19 +1,19 @@
 r"""Score ONE corpus with several Binoculars model pairs, one pair after another.
 
     uv run python epai/ai_detection/score/run_binox_pairs.py \
-        data/parquet/ghostbuster_gpt35t.parquet --cpu-threads 16 --gpu 0
+        data/parquet/ghostbuster_gpt35t.parquet --allow-token-mismatch --cpu-threads 16 --gpu 0
     
     uv run python epai/ai_detection/score/run_binox_pairs.py \
-        data/parquet/ghostbuster_gpt35ts.parquet --cpu-threads 16 --gpu 0
+        data/parquet/ghostbuster_gpt35ts.parquet --allow-token-mismatch --cpu-threads 16 --gpu 0
 
     uv run python epai/ai_detection/score/run_binox_pairs.py \
-        data/parquet/ghostbuster_gpt54mini.parquet --cpu-threads 16 --gpu 0
+        data/parquet/ghostbuster_gpt54mini.parquet --allow-token-mismatch --cpu-threads 16 --gpu 0
 
     uv run python epai/ai_detection/score/run_binox_pairs.py \
-        data/parquet/ghostbuster_gpt56luna.parquet --cpu-threads 16 --gpu 0
+        data/parquet/ghostbuster_gpt56luna.parquet --allow-token-mismatch --cpu-threads 16 --gpu 0
     
     uv run python epai/ai_detection/score/run_binox_pairs.py \
-        data/parquet/science_v3_gpt56luna_0811A.parquet --cpu-threads 16 --gpu 0
+        data/parquet/science_v3_gpt56luna_0811A.parquet --allow-token-mismatch --cpu-threads 16 --gpu 0
 
 Each pair writes its own column -- ``binoculars_score_qwen25_7b``,
 ``binoculars_score_falcon3_7b``, ... -- alongside the Falcon-7B
