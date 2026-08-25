@@ -114,11 +114,25 @@ BINOCULARS_PROJECT = BASE_DIR / "external" / "Binoculars"
 BINOCULARS_SCRIPT = BINOCULARS_PROJECT / "score_parquets.py"
 PAIRS_MODULE = BINOCULARS_PROJECT / "model_pairs.py"
 
-# The three pairs the comparison is for: the strongest modern proxy, the same
-# family as the paper's pair one generation on (so the only thing that changed is
-# the age of the scoring models), and a third family as a check that the result
-# is not a quirk of one tokenizer or data mix.
-DEFAULT_PAIRS = ("qwen25-7b", "falcon3-7b", "llama31-8b")
+# The three pairs the comparison is for, and what each one is there to answer:
+#
+#   qwen25-7b    the strongest modern proxy, pretrained heavy on maths, code and
+#                scientific text -- can a competent-on-science pair separate the
+#                science corpus at all?
+#   falcon3-7b   the paper's own family one generation on, so the only thing
+#                that changed is the age of the scoring models. NOTE this pair's
+#                base and instruct tokenizers differ in one renamed unused slot,
+#                so it needs --allow-token-mismatch (check_pairs.py reports it as
+#                "extended"; nothing else in this set does).
+#   mistral-v03  the negative control: 2024 like the other two, but general-web
+#                pretrained rather than science-heavy. If Qwen fixes the science
+#                corpus and this does not, the cause is the pair's competence on
+#                scientific prose, not simply its age -- which is the question a
+#                domain-specific inversion actually poses.
+#
+# meta-llama/Llama-3.1-8B was the original third pair and is gated behind a
+# review; swap it back in with --pairs once access comes through.
+DEFAULT_PAIRS = ("qwen25-7b", "falcon3-7b", "mistral-v03")
 
 
 @dataclass
