@@ -378,6 +378,10 @@ def suite_comparison_rows(
         }
         if first.get("baseline_kind"):
             row["baseline_kind"] = first["baseline_kind"]
+        if first.get("column"):
+            # Which score a baseline row reads -- a family contributes one row
+            # per column, so this is what keeps two of them apart downstream.
+            row["column"] = first["column"]
         if first.get("hybrid"):
             row["hybrid"] = True
             row["aux_column"] = first.get("aux_column")

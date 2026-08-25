@@ -43,6 +43,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import json
+import re
 
 import numpy as np
 import pandas as pd
@@ -138,19 +139,31 @@ class BaselineKind:
     *machine*. Everything else (the grouped evaluation, the payload shape) is
     shared, so a third detector is one more entry here.
 
-    A family contributes exactly ONE variant, and its cutoff is always taken
-    from the config: nothing about a baseline is fitted. The headline metrics
-    are AUROC and TPR at a fixed FPR, and neither reads the declared cutoff --
-    an ROC sweeps every threshold. Calibrating one on the source (Youden's J,
-    as earlier versions did) therefore bought nothing but a second row that was
-    bit-identical under every metric the run is read on, so the cutoff now only
-    has to be a documented, fixed operating point for the label-derived numbers
-    (accuracy, macro F1, the confusion matrix) to mean something.
+    A family contributes one variant PER COLUMN it is given, and every cutoff is
+    taken from the config: nothing about a baseline is fitted. The headline
+    metrics are AUROC and TPR at a fixed FPR, and neither reads the declared
+    cutoff -- an ROC sweeps every threshold. Calibrating one on the source
+    (Youden's J, as earlier versions did) therefore bought nothing but a second
+    row that was bit-identical under every metric the run is read on, so the
+    cutoff now only has to be a documented, fixed operating point for the
+    label-derived numbers (accuracy, macro F1, the confusion matrix) to mean
+    something.
+
+    Several columns of one family is the normal case once a detector has been
+    run with more than one configuration -- Binoculars scored with two model
+    pairs, the judge with two judges. Those columns are the SAME detector read
+    off different machinery, so they share the family's direction, style and
+    colour, and differ only in which column they read and where they are
+    operated. They are one family with several rows, not several families.
     """
 
     key: str  # names the output folder and the comparison row
     cfg_key: str  # the config block that configures it
     default_col: str
+    # Shared stem of the family's columns, stripped to name the extra rows:
+    # 'binoculars_score_qwen25_7b' -> the row 'binoculars__qwen25_7b'. Only ever
+    # used for naming, never to find a column -- configs name those literally.
+    column_prefix: str
     machine_is_high: bool  # True when a *high* score means machine-written
     label: str  # human-readable, for preflight messages
 
@@ -167,6 +180,7 @@ BASELINE_KINDS: tuple[BaselineKind, ...] = (
         key="binoculars",
         cfg_key="binoculars_baseline",
         default_col=DEFAULT_BINOX_COL,
+        column_prefix=DEFAULT_BINOX_COL,  # ..._qwen25_7b, ..._falcon3_7b, ...
         machine_is_high=False,  # Binoculars: a LOW score means machine
         label="Binoculars",
     ),
@@ -174,31 +188,132 @@ BASELINE_KINDS: tuple[BaselineKind, ...] = (
         key="llm_judge",
         cfg_key="llm_judge_baseline",
         default_col=DEFAULT_JUDGE_COL,
+        column_prefix="llm_judge_score",  # ..._gpt54_mini, one per judge model
         machine_is_high=False,  # the judge reports P(human), so LOW means machine
         label="LLM judge",
     ),
 )
 
 
-def baseline_col(cfg: dict, kind: BaselineKind) -> str | None:
-    """The score column for one baseline family, or None if it is off.
+def baseline_block(cfg: dict, kind: BaselineKind) -> dict | None:
+    """One family's config block, when it is present and switched on.
 
     Every baseline is opt-in: a config asks for it with its ``cfg_key`` mapping
-    (``enabled`` defaults to True when the key is present, ``column`` to the
-    kind's default). Malformed values are caught by ``check_score_baselines``;
-    here an off / absent / malformed baseline simply reads as None.
+    (``enabled`` defaults to True when the key is present). Malformed values are
+    caught by ``check_score_baselines``; here an off / absent / malformed
+    baseline simply reads as None.
     """
     spec = cfg.get(kind.cfg_key)
     if not isinstance(spec, dict) or not spec.get("enabled", True):
         return None
-    col = spec.get("column", kind.default_col)
-    return col if isinstance(col, str) and col.strip() else None
+    return spec
+
+
+def baseline_slug(kind: BaselineKind, column: str) -> str:
+    """Directory- and id-safe name for one column's baseline row.
+
+    The family's default column keeps the bare family name, so a config that
+    names one column writes exactly the paths and ids it always did; any other
+    column is suffixed with what distinguishes it, which for the columns
+    ``score_parquets.py`` writes is the scoring pair -- ``binoculars__qwen25_7b``.
+    """
+    if column == kind.default_col:
+        return kind.key
+    stem = column.removeprefix(kind.column_prefix).strip("_")
+    stem = re.sub(r"[^0-9A-Za-z_.-]+", "_", stem).strip("_")
+    return f"{kind.key}__{stem}" if stem else kind.key
+
+
+def _as_threshold(value) -> float | None:
+    """A cutoff read from the config, or None if it is not a plain number."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _declared_columns(block: dict, kind: BaselineKind) -> list:
+    """The block's column entries in declaration order, before validation.
+
+    Two spellings, because one column is by far the common case and should not
+    have to be written as a list: ``column:`` (a single name) or ``columns:``
+    (a list of names, or of ``{column, threshold, label}`` mappings). Neither is
+    normalised here -- whatever the config holds is passed through for
+    ``baseline_entries`` to accept and ``check_baseline_block`` to complain
+    about, so the two never disagree on what is malformed.
+    """
+    if "columns" in block:
+        declared = block["columns"]
+        return list(declared) if isinstance(declared, list) else [declared]
+    return [block.get("column", kind.default_col)]
+
+
+def baseline_entries(cfg: dict, kind: BaselineKind) -> list[dict]:
+    """One normalised variant per column of a family, in declaration order.
+
+    Each entry carries its own ``threshold``, falling back to a block-level one:
+    a cutoff belongs to the *column*, since two Binoculars pairs put the score on
+    different scales and a threshold refit for one says nothing about the other.
+    The shared fallback exists for the single-column case and for a deliberate
+    "same cutoff everywhere" comparison, not as an invitation to reuse Falcon's
+    constants on a pair they were never calibrated for.
+
+    Entries that are malformed, or that name no usable cutoff, are dropped here
+    and reported by ``check_score_baselines``.
+    """
+    block = baseline_block(cfg, kind)
+    if block is None:
+        return []
+
+    shared_threshold = _as_threshold(block.get("threshold"))
+    entries: list[dict] = []
+    for declared in _declared_columns(block, kind):
+        if isinstance(declared, str):
+            column, threshold, label = declared, shared_threshold, None
+        elif isinstance(declared, dict):
+            column = declared.get("column")
+            threshold = _as_threshold(declared.get("threshold"))
+            threshold = shared_threshold if threshold is None else threshold
+            label = declared.get("label")
+        else:
+            continue
+
+        if not isinstance(column, str) or not column.strip() or threshold is None:
+            continue
+        column = column.strip()
+        name = baseline_slug(kind, column)
+        if not isinstance(label, str) or not label.strip():
+            # 'binoculars' for the family's own column, 'binoculars qwen25_7b'
+            # for the rest -- the family name still leads, which is what the
+            # figure styling falls back on when a payload predates baseline_kind.
+            label = name.replace("__", " ")
+        entries.append(
+            {
+                "kind": kind.key,
+                "column": column,
+                "machine_is_high": kind.machine_is_high,
+                "threshold": threshold,
+                "name": name,
+                "label": label.strip(),
+            }
+        )
+
+    # Two entries sharing a name would write into one another's output
+    # directory. The duplicate is an error (check_baseline_block says so); here
+    # the first one wins so the run still produces something readable.
+    seen: set[str] = set()
+    unique: list[dict] = []
+    for entry in entries:
+        if entry["name"] in seen:
+            continue
+        seen.add(entry["name"])
+        unique.append(entry)
+    return unique
 
 
 def baseline_columns(cfg: dict) -> list[str]:
     """Every score column any enabled baseline reads, deduplicated."""
-    cols = [baseline_col(cfg, k) for k in BASELINE_KINDS]
-    return list(dict.fromkeys(c for c in cols if c))
+    cols = [e["column"] for k in BASELINE_KINDS for e in baseline_entries(cfg, k)]
+    return list(dict.fromkeys(cols))
 
 
 def format_threshold(value: float) -> str:
@@ -206,53 +321,17 @@ def format_threshold(value: float) -> str:
     return f"{float(value):g}"
 
 
-def baseline_threshold(cfg: dict, kind: BaselineKind) -> float | None:
-    """The fixed cutoff one baseline family asks for, from its ``threshold``.
+def baseline_specs(cfg: dict) -> list[dict]:
+    """Every baseline variant a config asks for, across all families, in order.
 
-    A single number, and there is no default: a cutoff is a claim about where
-    this detector is operated, so it is named in the config or the family does
-    not run. Malformed or missing values read as None here and are reported by
-    ``check_score_baselines`` instead.
-    """
-    spec = cfg.get(kind.cfg_key)
-    if not isinstance(spec, dict):
-        return None
-    value = spec.get("threshold")
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    return float(value)
-
-
-def baseline_kind_specs(cfg: dict, kind: BaselineKind) -> list[dict]:
-    """The ONE variant of a baseline family, or [] when that family is off.
-
-    The cutoff comes straight from the config and is applied unchanged to every
+    A cutoff comes straight from the config and is applied unchanged to every
     source and target -- fit to nothing, the genuinely zero-shot reference the
-    trained variants are measured against. A family with no usable ``threshold``
+    trained variants are measured against. A column with no usable ``threshold``
     contributes nothing (``check_score_baselines`` says why).
     """
-    col = baseline_col(cfg, kind)
-    threshold = baseline_threshold(cfg, kind)
-    if not col or threshold is None:
-        return []
-
-    return [
-        {
-            "kind": kind.key,
-            "column": col,
-            "machine_is_high": kind.machine_is_high,
-            "threshold": threshold,
-            "name": kind.key,
-            "label": kind.key,
-        }
-    ]
-
-
-def baseline_specs(cfg: dict) -> list[dict]:
-    """Every baseline variant a config asks for, across all families, in order."""
     specs: list[dict] = []
     for kind in BASELINE_KINDS:
-        specs.extend(baseline_kind_specs(cfg, kind))
+        specs.extend(baseline_entries(cfg, kind))
     return specs
 
 
@@ -286,10 +365,6 @@ def check_baseline_block(cfg: dict, kind: BaselineKind, report: Report) -> None:
     if "enabled" in bx and not isinstance(bx["enabled"], bool):
         report.error(f"'{kind.cfg_key}.enabled' must be a boolean")
 
-    col = bx.get("column", kind.default_col)
-    if not isinstance(col, str) or not col.strip():
-        report.error(f"'{kind.cfg_key}.column' must be a non-empty string")
-
     if "vanilla_threshold" in bx:
         # The fitted/vanilla split is gone: a baseline is one fixed cutoff now.
         report.error(
@@ -298,17 +373,70 @@ def check_baseline_block(cfg: dict, kind: BaselineKind, report: Report) -> None:
             f"'{kind.cfg_key}.threshold' with one number"
         )
 
+    if "column" in bx and "columns" in bx:
+        # Which one wins would be invisible in the output: both spellings
+        # produce rows named after the family.
+        report.error(
+            f"'{kind.cfg_key}' names both 'column' and 'columns' -- use one. "
+            f"'column' is a single name, 'columns' a list of names or of "
+            f"{{column, threshold, label}} mappings."
+        )
+
+    if "columns" in bx and not isinstance(bx["columns"], list):
+        report.error(f"'{kind.cfg_key}.columns' must be a list")
+
     if not bx.get("enabled", True):
         return
 
-    thr = bx.get("threshold")
-    if thr is None:
-        report.error(
-            f"'{kind.cfg_key}.threshold' is required when the baseline is "
-            f"enabled: the cutoff is never fitted, so it has to be named here"
-        )
-    elif isinstance(thr, bool) or not isinstance(thr, (int, float)):
+    shared_threshold = _as_threshold(bx.get("threshold"))
+    if "threshold" in bx and shared_threshold is None:
         report.error(f"'{kind.cfg_key}.threshold' must be a single number")
+
+    seen: dict[str, str] = {}
+    for i, declared in enumerate(_declared_columns(bx, kind)):
+        where = f"{kind.cfg_key}.columns[{i}]" if "columns" in bx else f"{kind.cfg_key}.column"
+
+        if isinstance(declared, str):
+            col, threshold, label = declared, shared_threshold, None
+        elif isinstance(declared, dict):
+            col = declared.get("column")
+            threshold = _as_threshold(declared.get("threshold"))
+            if "threshold" in declared and threshold is None:
+                report.error(f"'{where}.threshold' must be a single number")
+            threshold = shared_threshold if threshold is None else threshold
+            label = declared.get("label")
+            if label is not None and not isinstance(label, str):
+                report.error(f"'{where}.label' must be a string")
+        else:
+            report.error(
+                f"'{where}' must be a column name or a {{column, threshold, label}} mapping"
+            )
+            continue
+
+        if not isinstance(col, str) or not col.strip():
+            report.error(f"'{where}' must name a non-empty column")
+            continue
+        col = col.strip()
+
+        if threshold is None:
+            # Every column is a different detector reading, so every one needs
+            # its own operating point -- or one shared cutoff declared on the
+            # block, which is only honest when the columns are on one scale.
+            report.error(
+                f"'{where}': no threshold for {col!r}. A cutoff is never fitted, so "
+                f"it has to be named -- on the entry, or as "
+                f"'{kind.cfg_key}.threshold' for every column of the block."
+            )
+
+        name = baseline_slug(kind, col)
+        if name in seen:
+            report.error(
+                f"'{where}': {col!r} and {seen[name]!r} both name the baseline row "
+                f"{name!r} and would overwrite each other's output. Give one of "
+                f"them a distinct column name."
+            )
+        else:
+            seen[name] = col
 
 
 def check_score_baselines(cfg: dict, report: Report) -> None:
@@ -1255,11 +1383,15 @@ def summarise_baseline(payload: dict) -> dict:
     """A baseline's comparison row: a variant row, relabelled and flagged.
 
     The label is the family's (``binoculars`` / ``llm_judge``), so two baselines
-    never collapse into one indistinguishable "baseline" row in the ranking.
+    never collapse into one indistinguishable "baseline" row in the ranking. The
+    score column rides along because a family can now contribute several rows --
+    one per column -- and the column is what tells them apart when two of them
+    happen to draw identically.
     """
     row = summarise_variant(payload)
     row["baseline"] = True
     row["baseline_kind"] = payload.get("baseline_kind", BASELINE_KINDS[0].key)
+    row["column"] = payload.get("column")
     return row
 
 

@@ -1694,17 +1694,21 @@ def _collapsed_label(rows: list[dict]) -> str:
     """Row label for a merged group.
 
     A score baseline family collapses to the family's own name -- ``binoculars``,
-    not a list of the rows that merged. The row *is* the Binoculars score, which
-    is the whole content of these metrics; what was configured on top of it is a
-    fact about the config and belongs in the caption, not in the name of a row it
-    does not distinguish.
+    not a list of the rows that merged -- but only when every merged row reads the
+    same score column. The row *is* the Binoculars score, which is the whole
+    content of these metrics; what was configured on top of it is a fact about
+    the config and belongs in the caption, not in the name of a row it does not
+    distinguish.
 
-    Anything else that merged keeps every member's name, joined, since there is
-    no family name to fall back on and picking one member's would be a lie.
+    Two *different* columns of one family are a different matter: Binoculars run
+    with two scoring pairs is two detectors, and them coming out bit-identical is
+    a finding, not a duplicate to be tidied away under the family name. Those keep
+    every member's label, as anything else that merges does.
     """
     kinds = {r.get("baseline_kind") for r in rows}
+    columns = {r.get("column") for r in rows}
     kind = kinds.pop() if len(kinds) == 1 else None
-    if kind:
+    if kind and len(columns) == 1:
         return str(kind)
     return " = ".join(str(r.get("label", "")) for r in rows)
 
@@ -1719,8 +1723,9 @@ def _collapse_identical_rows(rows: list[dict], spec: MetricSpec) -> list[dict]:
     transported TPR/FPR reads it off the source split's ROC at the nominal level.
     None of the three ever sees a declared cutoff, so any two rows over one score
     column come out bit-identical there, and drawing them twice reads as two
-    references agreeing where there is only one. (Score baselines are one row per
-    family now, so this mostly catches an algorithm entered twice under two ids.)
+    references agreeing where there is only one. (A baseline family is one row per
+    score column, so this catches an algorithm entered twice under two ids -- and
+    two columns that really do hold the same score.)
 
     Equality is exact and taken from what the figure actually draws
     (:func:`_row_metric_signature`), not from the rows being baselines, so this

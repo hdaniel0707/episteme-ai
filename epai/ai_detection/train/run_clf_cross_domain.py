@@ -151,8 +151,11 @@ BASELINES
 Optional zero-shot score baselines, each one more matrix, whose row on every
 comparison figure carries a ★ on its label and draws in the baseline colour. Two
 families, configured by ``binoculars_baseline`` and ``llm_judge_baseline``, each
-contributing exactly ONE variant: the ``threshold`` its block names, fit to
-nothing at all and applied unchanged to every source and target. Nothing about a
+contributing one variant per score column it is given -- ``column:`` for one,
+``columns:`` for several -- at the ``threshold`` that column names, fit to
+nothing at all and applied unchanged to every source and target. Several columns
+of one family is the same detector read off different machinery: Binoculars
+scored with a second model pair, the judge with a second judge model. Nothing about a
 baseline is calibrated -- the score metrics (AUROC, TPR at a fixed FPR) never
 read the declared cutoff, which enters only accuracy, macro F1 and the confusion
 matrix. Both families read their score the same way
@@ -909,8 +912,8 @@ def run_suite(cfg: dict, alg_dir: Path) -> dict:
 
         del data, X_all
 
-    # Optional zero-shot score baselines: one row per enabled family, at the
-    # fixed cutoff its block names. Binoculars and the LLM judge both read low ⇒
+    # Optional zero-shot score baselines: one row per score column of every
+    # enabled family, at the fixed cutoff that column names. Binoculars and the LLM judge both read low ⇒
     # machine; the variant carries its own direction, so both are run by the same
     # loop. Run after the variants so they show up as extra rows in the
     # comparison.

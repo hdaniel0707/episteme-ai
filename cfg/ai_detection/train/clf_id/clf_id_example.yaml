@@ -187,10 +187,30 @@ report_by: [domain, generated_by]
 # Optional zero-shot score baselines
 # ---------------------------------------------------------------------------
 
-# No classifier is trained by either family; each becomes exactly ONE more ★ row
-# in the comparison -- `binoculars` / `llm_judge` -- the fixed reference the
-# trained variants are measured against. Same split and seeds as the trained
-# variants. Drop the key or set enabled: false to skip a family.
+# No classifier is trained by either family; each becomes one more ★ row in the
+# comparison per score column it is given -- `binoculars` / `llm_judge` -- the
+# fixed reference the trained variants are measured against. Same split and
+# seeds as the trained variants. Drop the key or set enabled: false to skip a
+# family.
+#
+# One column is `column:`. Several are `columns:`, as plain names or as
+# {column, threshold, label} mappings -- the case once a detector has been run in
+# more than one configuration: Binoculars scored with a second model pair
+# (external/Binoculars/score_parquets.py --pair writes binoculars_score_<pair>
+# alongside the original binoculars_score), the judge with a second judge model.
+# The extra rows keep the family's colour and are named after what distinguishes
+# them -- `binoculars__qwen25_7b`:
+#
+#   binoculars_baseline:
+#     enabled: true
+#     columns:
+#       - {column: binoculars_score, threshold: 0.9015310749276843, label: "binoculars falcon-7b"}
+#       - {column: binoculars_score_qwen25_7b, threshold: 0.95}
+#
+# A threshold belongs to a COLUMN, not to a family: two Binoculars pairs put the
+# score on different scales. A block-level `threshold:` is the fallback for every
+# entry that names none. Until a pair's threshold has been refit on a held-out
+# split, read only its AUROC and TPR@FPR and not its accuracy / macro F1.
 #
 # Nothing here is fitted: `threshold` is taken straight from this file, applied
 # to the held-out half, and is required whenever the family is enabled. The run

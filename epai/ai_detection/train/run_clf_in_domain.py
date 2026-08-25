@@ -386,6 +386,11 @@ def summarise(payload: dict) -> dict:
         "baseline": bool(payload.get("baseline")),
         "baseline_kind": payload.get("baseline_kind"),
     }
+    if payload.get("column"):
+        # Only baselines carry one. A family contributes one row per score
+        # column, and the column is what distinguishes two rows of the same
+        # family when the figures merge rows that draw identically.
+        row["column"] = payload["column"]
     for key in score_metric_keys():
         for name in (f"{key}_mean", f"{key}_std", f"train_{key}_mean",
                      f"train_{key}_std"):
