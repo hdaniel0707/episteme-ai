@@ -1,7 +1,19 @@
 r"""Score ONE corpus with several Binoculars model pairs, one pair after another.
 
-    uv run python -m epai.ai_detection.score.run_binox_pairs \
-        data/parquet/science_v3_gpt56luna_0811A.parquet --gpu 0 --cpu-threads 16
+    uv run python epai/ai_detection/score/run_binox_pairs.py \
+        data/parquet/ghostbuster_gpt35t.parquet --cpu-threads 16 --gpu 0
+    
+    uv run python epai/ai_detection/score/run_binox_pairs.py \
+        data/parquet/ghostbuster_gpt35ts.parquet --cpu-threads 16 --gpu 0
+
+    uv run python epai/ai_detection/score/run_binox_pairs.py \
+        data/parquet/ghostbuster_gpt54mini.parquet --cpu-threads 16 --gpu 0
+
+    uv run python epai/ai_detection/score/run_binox_pairs.py \
+        data/parquet/ghostbuster_gpt56luna.parquet --cpu-threads 16 --gpu 0
+    
+    uv run python epai/ai_detection/score/run_binox_pairs.py \
+        data/parquet/science_v3_gpt56luna_0811A.parquet --cpu-threads 16 --gpu 0
 
 Each pair writes its own column -- ``binoculars_score_qwen25_7b``,
 ``binoculars_score_falcon3_7b``, ... -- alongside the Falcon-7B
@@ -22,9 +34,9 @@ sequential *per file*.
 Different files are independent, so the way to use the GPUs is one process per
 corpus, each pinned to its own card:
 
-    uv run python -m epai.ai_detection.score.run_binox_pairs \
+    uv run python epai/ai_detection/score/run_binox_pairs.py \
         data/parquet/science_v3_gpt56luna_0811A.parquet --gpu 0 --cpu-threads 16 &
-    uv run python -m epai.ai_detection.score.run_binox_pairs \
+    uv run python epai/ai_detection/score/run_binox_pairs.py \
         data/parquet/ghostbuster_gpt56luna.parquet --gpu 1 --cpu-threads 16 &
 
 WHAT IT DOES PER PAIR
@@ -322,7 +334,7 @@ def print_summary(results: list[Result], total_seconds: float) -> None:
     else:
         print(f"{GREEN}Every pair scored and verified.{RESET}")
         print(f"  {DIM}Next: one analysis run per column, e.g.\n"
-              f"    uv run python -m epai.ai_detection.analyse.analyse_score_human_vs_ai \\\n"
+              f"    uv run python epai/ai_detection/analyse/analyse_score_human_vs_ai.py \\\n"
               f"        <parquet>:<generator> --score-cols {results[0].column}{RESET}")
 
 
