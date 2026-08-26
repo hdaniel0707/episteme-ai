@@ -244,8 +244,8 @@ binoculars_baseline:
 # the column; score them all with
 # epai/ai_detection/score/add_llm_judge_scores.py first.
 llm_judge_baseline:
-  enabled: false
-  column: "llm_judge_score_gpt56luna_v2"
+  enabled: true
+  column: "llm_judge_score_gpt56luna_v3"
   threshold: 0.5
 
 # ---------------------------------------------------------------------------

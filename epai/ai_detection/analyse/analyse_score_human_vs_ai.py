@@ -107,7 +107,15 @@ Usage:
     # one domain, LLM-judge scores instead of Binoculars
     uv run python epai/ai_detection/analyse/analyse_score_human_vs_ai.py \
         data/parquet/ghostbuster_gpt35t.parquet:gpt35t:0000A --domains wp \
-        --metric llm_judge --score-cols llm_judge_score_gpt56luna_v2
+        --metric llm_judge --score-cols llm_judge_score_gpt56luna_v3
+    
+    uv run python epai/ai_detection/analyse/analyse_score_human_vs_ai.py \
+        data/parquet/ghostbuster_gpt54mini.parquet:gpt54mini:0701A --domains wp \
+        --metric llm_judge --score-cols llm_judge_score_gpt56luna_v3
+
+    uv run python epai/ai_detection/analyse/analyse_score_human_vs_ai.py \
+        data/parquet/ghostbuster_gpt56luna.parquet:gpt56luna:0701A --domains wp \
+        --metric llm_judge --score-cols llm_judge_score_gpt56luna_v3
 """
 
 from __future__ import annotations

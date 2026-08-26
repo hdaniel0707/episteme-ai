@@ -548,7 +548,8 @@ EDA on NAIP-enriched datasets. Produces score distributions per `generated_by` g
 [prepare_{reuter,wp,essay,denario}.py]   ← Stage A: raw text → Parquet (one per corpus)
    ↓  data/parquet/<corpus>.parquet
 [add_embeddings.py]                      ← Stage B: add emb_* columns
-[add_llm_judge_scores.py]                ←          add llm_judge_score_<model>_<prompt>
+[add_llm_judge_scores.py]                ←          add llm_judge_score_<model>_<prompt> (API or local GPU)
+[add_llm_judge_reasons.py]               ←          add llm_judge_reason_/cues_* on a sample of rows
    ↓  data/parquet/<corpus>_binox*.parquet
 [combine_domains.py]                     ← Stage C: the per-corpus files → ONE file
    ↓  data/parquet/ghostbuster_<generator>.parquet   (uid, id, domain, text, …)
@@ -665,9 +666,37 @@ list applies. Supported embedders:
 The Parquet is written after every embedder finishes — a crash does not throw away completed embeddings.
 
 ```bash
-# LLM-as-judge P(human) per row -> llm_judge_score_<model>_<prompt>
+# LLM-as-judge P(human) per row -> llm_judge_score_<model>_<prompt>[_lp]
 uv run python epai/ai_detection/score/add_llm_judge_scores.py data/parquet/ghostbuster_gpt56luna.parquet
+
+# the same run with an open-weights judge on the local GPU
+uv run python epai/ai_detection/score/add_llm_judge_scores.py \
+    data/parquet/ghostbuster_gpt56luna.parquet --model qwen3-14b
 ```
+
+```bash
+# why did it decide that? blind rationales + countable cues on a SAMPLE of rows
+# -> llm_judge_reason_*, llm_judge_cues_human_*, llm_judge_cues_machine_*
+uv run python epai/ai_detection/score/add_llm_judge_reasons.py \
+    data/parquet/ghostbuster_gpt56luna.parquet
+```
+
+`add_llm_judge_reasons.py` never writes a score column. It reads one only to
+pick rows — `--select wrong uncertain confident` draws the most confidently
+wrong rows, the ones nearest the fence, and a correct-and-confident control —
+then asks the same model, under the same prompt version's evidence half, which
+cues it can point at. The cues come from a closed vocabulary (one entry per
+bullet of that prompt's evidence lists), so they aggregate into a frequency
+table per class, saved under `results/llm_judge_reasons/`. The model is not
+shown its own score: a model handed a number justifies that number.
+
+`--model` takes a registry alias or any Hugging Face repo id; `--list-models`
+prints the table. A local judge defaults to `--mode logprob`, which reads the
+score off the distribution over a one-word answer instead of parsing a number
+the model wrote — one forward pass per row, and no ties for ROC-AUC to throw
+away. The mode is part of the column name (`_lp`), because the two are not on
+one scale; every judge adds a column and none replaces one, so a local run can
+be compared against the API baseline in the same file.
 
 ---
 

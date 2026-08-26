@@ -7,6 +7,11 @@ file is touched, so this sits next to ``binoculars_score`` as a second
 zero-training baseline and can be compared with it on the same threshold
 sweeps.
 
+The judge is whatever ``--model`` names: an API model (the default), or a
+Hugging Face model held on this machine's GPU. Everything else about the run --
+which rows, which prompt, the resume behaviour, the summary -- is the same
+either way.
+
 **1.0 means human, 0.0 means machine.** That is the same direction as
 ``binoculars_score`` (low => machine), so both baselines read the same way and a
 threshold rule is ``score <= thr => machine`` for either.
@@ -31,9 +36,77 @@ A/B (below) safe to run against the real corpus.
 ``--model`` picks the judge from ``MODELS`` (default ``gpt56luna``); the alias,
 not the raw API id, names the column, because ``gpt-5.6-luna`` would not survive
 as an identifier and the alias is the name the rest of the pipeline already uses
-for that model. ``--prompt`` picks the system prompt from ``PROMPTS`` (default
-``v3``); see the note above ``PROMPTS`` for what changed between the versions
-and why.
+for that model. It also takes a Hugging Face repo id directly -- ``--model
+Qwen/Qwen3-14B`` -- for a model that has no registry entry; ``--column-name``
+overrides what that is called on disk. ``--list-models`` prints the table.
+``--prompt`` picks the system prompt from ``PROMPTS`` (default ``v3``); see the
+note above ``PROMPTS`` for what changed between the versions and why.
+
+A LOCAL JUDGE, AND WHY IT SCORES DIFFERENTLY
+--------------------------------------------
+``--model qwen3-14b`` (or any other local entry) loads the model with
+transformers and scores on the GPU. Nothing else changes: same corpus, same
+prompt, same column convention, same resume-and-checkpoint behaviour. Rows are
+batched (``--batch-size``) instead of being sent concurrently (``--workers``),
+and a batch that runs out of memory is retried one row at a time rather than
+lost.
+
+Running locally also unlocks a better score, which is the real reason to do it.
+``--mode``:
+
+``parsed``
+    The model writes the probability and it is parsed out of the answer. The
+    only thing an API can do, and what every ``llm_judge_score_*`` column
+    already in the corpora holds. Available locally too -- that is the honest
+    like-for-like comparison against the API columns.
+
+``logprob`` (the default for a local judge)
+    The prompt asks for one word, ``human`` or ``machine``, and the score is
+    read off that position's distribution:
+    ``P(human) / (P(human) + P(machine))``. One forward pass, nothing sampled,
+    deterministic. It is not a cheaper version of ``parsed`` but a better one:
+    a written probability piles onto 0.2/0.5/0.8 however firmly the prompt asks
+    it not to, and ROC-AUC reads only the ranking, so every tie is discarded
+    information. A distribution has no ties.
+
+The mode is part of the column name (``_lp``), because a logprob score and a
+parsed score are not on one scale. So is the reason the two prompts differ: in
+``logprob`` mode the evidence half of the prompt version is used verbatim and
+its answer-format half is replaced, since there is no written answer to format
+(see LOGPROB_ANSWER_BLOCK).
+
+WHAT A LOCAL JUDGE IS EXPECTED TO DO, AND WHAT TO WATCH
+-------------------------------------------------------
+The Binoculars work already found the shape of the risk: a scorer that is much
+weaker than the generator stops separating the classes and can invert outright
+(``external/Binoculars/model_pairs.py``). A 14-32B judge reading text from a
+frontier model is the same axis, so expect it to hold up on
+``ghostbuster_gpt35t`` and to drift toward chance on ``ghostbuster_gpt56luna``
+and the science corpora. That is a result, not a bug -- but it is only readable
+if the API columns stay in the file, so a local run adds a column and never
+replaces one.
+
+Two things in the summary say whether the judge is doing what it was asked:
+``distinct values`` (a logprob run should have essentially one per row) and the
+``answer mass`` line (how much of the distribution sat on the two answer words;
+low means the model answered some third thing and the ratio is noise).
+
+    # smallest useful check: does the wiring work at all
+    uv run python epai/ai_detection/score/add_llm_judge_scores.py \
+        data/parquet/ghostbuster_gpt56luna.parquet \
+        --model qwen3-8b --limit 20 -o /tmp/judge_smoke.parquet --yes
+
+    # the comparison worth running before any full pass: one easy corpus, one
+    # hard one, against the API column already in the file
+    uv run python epai/ai_detection/score/add_llm_judge_scores.py \
+        data/parquet/ghostbuster_gpt35t.parquet --model qwen3-14b --limit 400 --yes
+    uv run python epai/ai_detection/score/add_llm_judge_scores.py \
+        data/parquet/ghostbuster_gpt56luna.parquet --model qwen3-14b --limit 400 --yes
+
+    # the strongest judge that fits a 40GB card
+    # (needs: pip install compressed-tensors)
+    uv run python epai/ai_detection/score/add_llm_judge_scores.py \
+        data/parquet/ghostbuster_gpt56luna.parquet --model qwen3-32b-w4a16 --limit 400 --yes
 
 WHICH ROWS ARE JUDGED
 ---------------------
@@ -69,10 +142,12 @@ Run -- the full corpus set:
     uv run python epai/ai_detection/score/add_llm_judge_scores.py \
         data/parquet/x_science_v1_gpt56luna_0811A.parquet
 
-Unlike run_binox_pairs.py these are API calls, not GPU work, so several corpora
-can run at once -- but never two processes on the SAME file: adding a column is
-a read-modify-write of the whole Parquet and the second writer would silently
-drop the first one's column.
+With an API judge these are calls rather than GPU work, so several corpora can
+run at once. With a local judge they cannot: one process owns the card, and the
+corpora queue up behind each other exactly as in run_binox_pairs.py. Either way,
+never two processes on the SAME file -- adding a column is a read-modify-write
+of the whole Parquet and the second writer would silently drop the first one's
+column.
 
 IS THE PROMPT ANY GOOD? -- A/B IT BEFORE THE FULL RUN
 -----------------------------------------------------
@@ -105,13 +180,15 @@ them was riding on punctuation.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 import random
 import re
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -124,19 +201,172 @@ from epai.utils.parquet_utils import load_parquet, save_parquet
 
 load_dotenv()
 
+LOCAL_PROVIDER = "local"
+
+_GIB = 1024**3
+
+
+@dataclass(frozen=True)
+class JudgeModel:
+    """One judge model, and the column stem its scores belong in.
+
+    Modelled on ``external/Binoculars/model_pairs.py``: the registry entry, not
+    the call site, decides what a run is called and where its numbers land, so
+    two judges can never write into one column. ``column`` is the identifier-safe
+    stem -- ``gpt56luna``, ``qwen3_14b`` -- that :func:`score_column` combines
+    with the prompt version and the scoring mode.
+
+    ``params`` and ``quant`` exist only to print a weights estimate before a
+    multi-GB download starts; they are ignored for the API providers, which have
+    no local footprint.
+    """
+
+    key: str  # --model value
+    provider: str  # "openai" | "anthropic" | "gemini" | "local"
+    model: str  # API model id, or Hugging Face repo id when local
+    column: str  # score column stem, so two judges never overwrite each other
+    params: float | None = None  # parameters in billions (local only)
+    quant: str | None = None  # None => bf16 weights, else the checkpoint's format
+    resident_gib: float | None = None  # measured size, when it is known
+    note: str = ""
+
+    @property
+    def is_local(self) -> bool:
+        return self.provider == LOCAL_PROVIDER
+
+    @property
+    def weights_gib(self) -> float | None:
+        """Resident weights, or None for a model that never lands on this box.
+
+        `params x bytes-per-param` is only an estimate, and for a quantised
+        checkpoint a bad one: the scales, the zero points and whatever layers
+        the quantiser skipped (lm_head, usually) are all still full precision,
+        which on a 32B model is another few GiB. `resident_gib` carries the
+        real figure where it has been checked, because the number's whole job
+        is answering "does this fit the card".
+        """
+        if self.resident_gib is not None:
+            return self.resident_gib
+        if self.params is None:
+            return None
+        bytes_per_param = 0.5 if self.quant else 2.0
+        return self.params * 1e9 * bytes_per_param / _GIB
+
+
 # Judge models, keyed by the short alias used everywhere else in the pipeline.
 # The alias also names the output column, so it has to stay identifier-safe --
 # hence `gpt56luna` rather than the API id `gpt-5.6-luna`, matching the slug the
 # generation side already writes into filenames and `generated_by` labels.
-MODELS: dict[str, dict[str, str]] = {
-    "gpt56luna": {"provider": "openai", "model": "gpt-5.6-luna"},
-    "gpt54mini": {"provider": "openai", "model": "gpt-5.4-mini"},
-    "haiku45": {"provider": "anthropic", "model": "claude-haiku-4-5-20251001"},
+#
+# The local entries are sized for one 40GB A100 with room left for activations.
+# `--model` also takes a raw Hugging Face repo id for anything not listed, so
+# this is a shortlist of the ones worth reporting, not a limit on what can run:
+# see resolve_model.
+MODELS: dict[str, JudgeModel] = {
+    "gpt56luna": JudgeModel(
+        key="gpt56luna",
+        provider="openai",
+        model="gpt-5.6-luna",
+        column="gpt56luna",
+        note="The API baseline every existing llm_judge_score_* column came "
+             "from. Keep it as the control: it is what a local judge is "
+             "measured against.",
+    ),
+    "gpt54mini": JudgeModel(
+        key="gpt54mini",
+        provider="openai",
+        model="gpt-5.4-mini",
+        column="gpt54mini",
+    ),
+    "haiku45": JudgeModel(
+        key="haiku45",
+        provider="anthropic",
+        model="claude-haiku-4-5-20251001",
+        column="haiku45",
+    ),
+    "qwen3-8b": JudgeModel(
+        key="qwen3-8b",
+        provider=LOCAL_PROVIDER,
+        model="Qwen/Qwen3-8B",
+        column="qwen3_8b",
+        params=8.2,
+        note="Smoke test: small enough to load in a couple of minutes, so the "
+             "wiring can be checked before a 32B download is started.",
+    ),
+    "qwen3-14b": JudgeModel(
+        key="qwen3-14b",
+        provider=LOCAL_PROVIDER,
+        model="Qwen/Qwen3-14B",
+        column="qwen3_14b",
+        params=14.8,
+        note="Default local judge: bf16 weights fit a 40GB card with room to "
+             "spare and need no quantisation kernels, so plain transformers "
+             "runs it.",
+    ),
+    "qwen3-32b-w4a16": JudgeModel(
+        key="qwen3-32b-w4a16",
+        provider=LOCAL_PROVIDER,
+        model="RedHatAI/Qwen3-32B-quantized.w4a16",
+        column="qwen3_32b_w4a16",
+        params=32.8,
+        quant="compressed-tensors",
+        resident_gib=19.2,
+        note="Strongest judge that fits 40GB: Qwen3-32B at int4 (group 128, "
+             "symmetric, lm_head left in fp16), ~19 GiB resident, leaving ~20 "
+             "for activations. Needs `pip install compressed-tensors`. Not the "
+             "Qwen AWQ build of the same model: AutoAWQ was deprecated in 2025 "
+             "and its last tested stack (torch 2.6, transformers 4.51) is far "
+             "behind this project's, while compressed-tensors is the format "
+             "the same maintainers moved to and is current.",
+    ),
+    "gemma3-12b": JudgeModel(
+        key="gemma3-12b",
+        provider=LOCAL_PROVIDER,
+        model="google/gemma-3-12b-it",
+        column="gemma3_12b",
+        params=12.2,
+        note="A second family, for when a result needs to be shown not to be "
+             "an artefact of one model lineage. Gated: needs HF_TOKEN with the "
+             "licence accepted.",
+    ),
 }
 
 DEFAULT_MODEL = "gpt56luna"
 DEFAULT_TEXT_COL = "text"
 COL_PREFIX = "llm_judge_score_"
+
+# How the score is obtained, which is a third axis of comparability beside the
+# model and the prompt -- hence part of the column name (see score_column).
+#
+#   parsed   the model writes the probability and it is parsed out of the
+#            answer. The only option through an API, and what every existing
+#            column holds.
+#   logprob  the model answers with one word and the score is read off the token
+#            distribution at that position: P(human) / (P(human) + P(machine)).
+#            Local only, because it needs the logits. One forward pass per row,
+#            no generation, and the score is continuous -- which matters more
+#            than it sounds: ROC-AUC reads only the ranking, and a written
+#            probability piles onto 0.2/0.5/0.8 no matter how firmly the prompt
+#            asks it not to. Every tie is AUC thrown away.
+MODE_PARSED = "parsed"
+MODE_LOGPROB = "logprob"
+MODES = (MODE_PARSED, MODE_LOGPROB)
+
+# Appended to the column name, so two modes on one model never collide. Parsed
+# gets no suffix: it is what the API columns already written are, and renaming
+# them would orphan every score in the corpora.
+MODE_SUFFIX = {MODE_PARSED: "", MODE_LOGPROB: "_lp"}
+
+# Local judges default to logprob (it is why running locally is worth doing);
+# API judges have no other option.
+DEFAULT_MODE = {LOCAL_PROVIDER: MODE_LOGPROB}
+
+# Local run defaults. The batch is small because the documents are long and the
+# weights already own most of the card; --batch-size raises it.
+DEFAULT_DEVICE = "cuda"
+DEFAULT_DTYPE = "bfloat16"
+DEFAULT_BATCH_SIZE = 8
+DEFAULT_MAX_DOC_TOKENS = 4096
 
 # Which rows are judged. Default: every row with a non-empty text, human and
 # machine alike -- the machine rows are labelled `<model_slug>:<prompt_id>`
@@ -167,6 +397,27 @@ BACKOFF_BASE = 2.0
 # Anthropic wants an explicit cap; the answer is a single number, so this is
 # only there to bound a pathological response.
 MAX_TOKENS = 256
+
+# Tokens generated by a local judge in `parsed` mode. Enough for "0.37" in any
+# tokenisation, plus a short prefix ("Probability: 0.37") that parse_probability
+# will still read. Nothing longer is wanted: a model that starts explaining
+# itself should be cut off rather than waited for, and the generation stops at
+# the end-of-turn token anyway.
+LOCAL_MAX_NEW_TOKENS = 16
+
+# The two answers a logprob-mode judge chooses between, with the casings and
+# leading-space variants a tokeniser might produce. Only the FIRST token of each
+# string is used -- that is the position whose distribution is read -- and the
+# two sets must stay disjoint, which LocalJudge asserts at load time.
+HUMAN_WORDS = ("human", " human", "Human", " Human", "HUMAN")
+MACHINE_WORDS = ("machine", " machine", "Machine", " Machine", "MACHINE")
+
+# Below this, the two answer words hold so little of the distribution that the
+# model is answering some third thing and the ratio is noise. Not an error --
+# the score is still written -- but counted and reported, because a judge that
+# ignores the answer format is the one failure mode a plausible-looking AUC can
+# hide.
+MIN_ANSWER_MASS = 0.10
 
 # System prompts, keyed by version. The version names the output column together
 # with the model alias, so both are kept here rather than edited in place: a
@@ -302,6 +553,65 @@ Reply with the probability only."""
 
 DEFAULT_PROMPT = "v3"
 
+# Everything above the calibration heading is the judge's evidence: what counts
+# as a human cue, what counts as a machine cue, what is not evidence at all.
+# Below it is only how to phrase the answer. A logprob run does not phrase an
+# answer -- it is read off the distribution over one token -- so the evidence
+# half of the prompt is used verbatim and this replaces the half that would
+# otherwise be asking for two decimal places that nothing will ever parse.
+#
+# That substitution is exactly why the mode is in the column name: `v3` and
+# `v3_lp` share their evidence and differ in their answer, which makes them
+# comparable as judges but not interchangeable as scores.
+LOGPROB_ANSWER_BLOCK = """ANSWER
+Answer with exactly one word, and nothing else: `human` if the document was more likely written by a human, `machine` if it was more likely generated by a large language model. No probability, no explanation, no punctuation.
+Judge each document on its own. Do not assume any particular mix of human and machine documents, and do not try to balance your answers across documents."""
+
+# The heading each prompt version uses for its answer-format section. v1 wrote
+# it in sentence case; v2 and v3 shout it.
+_CALIBRATION_HEADINGS = ("CALIBRATION", "Calibration rules:")
+
+
+def evidence_head(prompt_id: str) -> str:
+    """A prompt version with its answer-format section cut off.
+
+    What remains is what makes the version a judge -- the genre framing, both
+    evidence lists, what is ruled out as evidence -- and none of how to phrase
+    an answer. Two callers want exactly that: the logprob mode below, and
+    add_llm_judge_reasons.py, which asks the same model what it sees in a
+    document without asking it for a score. Sharing this is what keeps the cues
+    a rationale reports and the cues a score was formed from the same list.
+    """
+    body = PROMPTS[prompt_id]
+    for heading in _CALIBRATION_HEADINGS:
+        marker = f"\n{heading}"
+        if marker in body:
+            return body[: body.index(marker)].rstrip()
+    raise ValueError(
+        f"Prompt {prompt_id!r} has no answer-format section "
+        f"({' / '.join(_CALIBRATION_HEADINGS)}), so its evidence half cannot be "
+        "separated from its answer half. Add one of those headings."
+    )
+
+
+def system_prompt_for(prompt_id: str, mode: str) -> str:
+    """The system prompt for one (prompt version, scoring mode) pair.
+
+    In `parsed` mode this is the stored prompt, unchanged. In `logprob` mode the
+    answer-format section is swapped for LOGPROB_ANSWER_BLOCK; see the note
+    there for why that is a substitution rather than an edit to the prompt.
+    """
+    if mode == MODE_PARSED:
+        return PROMPTS[prompt_id]
+    try:
+        return evidence_head(prompt_id) + "\n\n" + LOGPROB_ANSWER_BLOCK
+    except ValueError as exc:
+        raise ValueError(
+            f"{exc} The logprob variant cannot be derived from it; run this "
+            f"prompt with --mode {MODE_PARSED}."
+        ) from exc
+
+
 USER_TEMPLATE = "<document>\n{text}\n</document>"
 
 
@@ -325,8 +635,19 @@ class JudgeVerdict(BaseModel):
 
 
 def parse_args() -> argparse.Namespace:
+    # Answered before parsing: --list-models is a question about the registry,
+    # not about a file, and requiring a Parquet to ask it would be silly.
+    if "--list-models" in sys.argv:
+        print_models()
+        raise SystemExit(0)
+
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("parquet", type=Path, help="Parquet to add judge scores to.")
+    ap.add_argument(
+        "--list-models",
+        action="store_true",
+        help="Print the judge registry (aliases, providers, weight sizes) and exit.",
+    )
     ap.add_argument(
         "-o",
         "--out",
@@ -337,8 +658,60 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument(
         "--model",
         default=DEFAULT_MODEL,
-        choices=sorted(MODELS),
-        help=f"Judge model alias (default: {DEFAULT_MODEL}).",
+        metavar="ALIAS|REPO_ID",
+        help=f"Judge model (default: {DEFAULT_MODEL}). Either a registry alias "
+        f"({', '.join(sorted(MODELS))}) or a Hugging Face repo id such as "
+        "Qwen/Qwen3-14B, which is loaded onto the GPU and run locally. "
+        "--list-models prints the table.",
+    )
+    ap.add_argument(
+        "--column-name",
+        default=None,
+        help="Override the column stem this judge writes under. Only needed "
+        "for a repo id whose derived name collides with another judge's, or to "
+        "keep two configurations of one model apart.",
+    )
+    ap.add_argument(
+        "--mode",
+        default=None,
+        choices=MODES,
+        help=f"How the score is obtained. {MODE_PARSED!r}: the model writes the "
+        f"probability and it is parsed (the only option through an API, and "
+        f"what the existing columns hold). {MODE_LOGPROB!r}: the model answers "
+        "with one word and the score is read off that token's distribution — "
+        "local only, one forward pass per row, no ties. Default: "
+        f"{MODE_LOGPROB} locally, {MODE_PARSED} through an API.",
+    )
+    ap.add_argument(
+        "--device",
+        default=DEFAULT_DEVICE,
+        help=f"Device for a local judge (default: {DEFAULT_DEVICE}). "
+        "'cuda:1' picks a second card; 'cpu' works but is not worth the wait.",
+    )
+    ap.add_argument(
+        "--dtype",
+        default=DEFAULT_DTYPE,
+        help=f"torch dtype for a local judge's weights (default: {DEFAULT_DTYPE}). "
+        "An AWQ checkpoint is loaded in float16 instead, which its kernels "
+        "require, unless this says otherwise.",
+    )
+    ap.add_argument(
+        "--batch-size",
+        type=int,
+        default=DEFAULT_BATCH_SIZE,
+        help=f"Rows per forward pass for a local judge (default: "
+        f"{DEFAULT_BATCH_SIZE}). Raise it until the card complains; a failed "
+        "batch is retried row by row, so an over-large value costs time rather "
+        "than scores. Ignored by the API judges, which use --workers.",
+    )
+    ap.add_argument(
+        "--max-doc-tokens",
+        type=int,
+        default=DEFAULT_MAX_DOC_TOKENS,
+        help=f"Cut each document to this many of the local model's tokens "
+        f"(default: {DEFAULT_MAX_DOC_TOKENS}); 0 sends it whole. The prompt is "
+        "never cut, only the document. Applies to local judges; --max-chars is "
+        "the provider-agnostic equivalent.",
     )
     ap.add_argument(
         "--prompt",
@@ -359,7 +732,8 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=4,
         help="Rows judged in parallel (default: 4). Lower it if the API "
-        "rate-limits; 1 makes the run strictly sequential.",
+        "rate-limits; 1 makes the run strictly sequential. A local judge "
+        "ignores this and batches instead — see --batch-size.",
     )
     ap.add_argument(
         "--max-chars",
@@ -414,15 +788,104 @@ def parse_args() -> argparse.Namespace:
     return ap.parse_args()
 
 
-def score_column(model_alias: str, prompt_id: str) -> str:
-    """Output column for one judge, e.g. ``llm_judge_score_gpt56luna_v2``.
+def _identifier(text: str) -> str:
+    """Squash anything into a lowercase identifier fragment."""
+    return re.sub(r"[^0-9a-zA-Z]+", "_", text).strip("_").lower()
 
-    Both parts are in the name deliberately: scores from two models, or from two
-    prompts, are not on the same scale, and a shared column would mix them with
-    nothing downstream able to tell which row came from which.
+
+def score_column(spec: JudgeModel, prompt_id: str, mode: str) -> str:
+    """Output column for one judge, e.g. ``llm_judge_score_qwen3_14b_v3_lp``.
+
+    All three parts are in the name deliberately: scores from two models, from
+    two prompts, or from two scoring modes are not on the same scale, and a
+    shared column would mix them with nothing downstream able to tell which row
+    came from which. The prefix is what ``analyse_score_human_vs_ai.py --metric
+    llm_judge`` collects, so a new judge shows up there without being registered
+    anywhere else.
+
+    `parsed` contributes no suffix, which keeps the columns already in the
+    corpora (``llm_judge_score_gpt56luna_v3``) spelled the way they are.
     """
-    safe = re.sub(r"[^0-9a-zA-Z]+", "_", f"{model_alias}_{prompt_id}").strip("_").lower()
-    return f"{COL_PREFIX}{safe}"
+    stem = _identifier(f"{spec.column}_{prompt_id}")
+    return f"{COL_PREFIX}{stem}{MODE_SUFFIX[mode]}"
+
+
+def resolve_model(requested: str, column_name: str | None) -> JudgeModel:
+    """Turn a ``--model`` value into a JudgeModel.
+
+    A registry key is looked up. Anything containing a slash is taken as a
+    Hugging Face repo id and run locally, so a judge that is not worth a
+    permanent entry can still be scored without editing this file -- its column
+    stem is derived from the repo name (``Qwen/Qwen3-14B`` -> ``qwen3_14b``)
+    unless ``--column-name`` overrides it.
+
+    A repo id whose derived stem collides with a registry entry is refused
+    rather than silently appended to that entry's column: the two are not the
+    same judge, and mixing them is unrecoverable once written.
+    """
+    if requested in MODELS:
+        if column_name:
+            return replace(MODELS[requested], column=_identifier(column_name))
+        return MODELS[requested]
+
+    # A repo id that a registry entry already covers is that entry, not a new
+    # judge: same weights, same column, and the entry's note and size estimate
+    # are worth keeping.
+    listed = next((m for m in MODELS.values() if m.model == requested), None)
+    if listed is not None:
+        return replace(listed, column=_identifier(column_name)) if column_name else listed
+
+    if "/" not in requested:
+        raise SystemExit(
+            f"Unknown judge {requested!r}. Known aliases: "
+            f"{', '.join(sorted(MODELS))}. A Hugging Face repo id (with a '/') "
+            "is also accepted and runs locally; --list-models prints the table."
+        )
+
+    stem = _identifier(column_name or requested.split("/")[-1])
+    clash = next((m for m in MODELS.values() if m.column == stem), None)
+    if clash is not None:
+        raise SystemExit(
+            f"{requested} would write the column stem {stem!r}, which already "
+            f"belongs to the judge {clash.key!r} ({clash.model}). Pass "
+            "--column-name to give this one its own column."
+        )
+    return JudgeModel(
+        key=requested, provider=LOCAL_PROVIDER, model=requested, column=stem,
+        note="Not a registry entry: run from a Hugging Face repo id.",
+    )
+
+
+def resolve_mode(spec: JudgeModel, requested: str | None) -> str:
+    """The scoring mode for this judge, defaulting by provider."""
+    mode = requested or DEFAULT_MODE.get(spec.provider, MODE_PARSED)
+    if mode == MODE_LOGPROB and not spec.is_local:
+        raise SystemExit(
+            f"--mode {MODE_LOGPROB} needs the token distribution, which the "
+            f"{spec.provider} API does not return here. Run {spec.key!r} with "
+            f"--mode {MODE_PARSED}, or pick a local judge (--list-models)."
+        )
+    return mode
+
+
+def print_models() -> None:
+    """The registry, with what each local judge costs to hold in memory."""
+    print(f"{'alias':<16}{'provider':<10}{'model':<38}{'column stem':<18}{'weights':>9}")
+    print("-" * 91)
+    for spec in MODELS.values():
+        weights = spec.weights_gib
+        size = f"{weights:.1f} GiB" if weights else "-"
+        print(
+            f"{spec.key:<16}{spec.provider:<10}{spec.model:<38}"
+            f"{spec.column:<18}{size:>9}"
+        )
+    print()
+    for spec in MODELS.values():
+        if spec.note:
+            print(f"  {spec.key}: {spec.note}")
+    print()
+    print("Any Hugging Face repo id (containing '/') also works and runs locally.")
+    print("Weights are the resident model only: leave a few GiB for activations.")
 
 
 def _is_empty_text(value) -> bool:
@@ -450,21 +913,75 @@ def _as_score(value) -> float | None:
     return score if 0.0 <= score <= 1.0 else None
 
 
+def parse_probability(text: str) -> float:
+    """The first probability in a free-text answer, or ValueError.
+
+    Only used by a local judge in `parsed` mode -- the APIs return a
+    schema-checked number and never come through here. Small models do prefix
+    the answer ("Probability: 0.37"), which is worth accepting; anything without
+    a number in [0, 1] is a failed row, not a 0.
+    """
+    for match in re.finditer(r"(?<![\w.])(?:[01](?:\.\d+)?|\.\d+)", text):
+        value = float(match.group())
+        if 0.0 <= value <= 1.0:
+            return value
+    raise ValueError(f"no probability in answer: {text.strip()[:80]!r}")
+
+
 class Judge:
-    """One judge model under one system prompt, callable per row.
+    """One judge model under one system prompt and one scoring mode.
+
+    Subclasses differ in where the model runs, not in what a score means: both
+    return P(human-written) in [0, 1] for a single document, and both are called
+    the same way by the runner.
+    """
+
+    # True when the judge wants whole batches (a GPU) rather than many
+    # concurrent single calls (an API). It is what main() dispatches on.
+    batched = False
+
+    def __init__(self, spec: JudgeModel, prompt_id: str = DEFAULT_PROMPT,
+                 mode: str = MODE_PARSED, system_prompt: str | None = None) -> None:
+        self.spec = spec
+        self.alias = spec.key
+        self.provider = spec.provider
+        self.model_id = spec.model
+        self.prompt_id = prompt_id
+        self.mode = mode
+        # Overridable so a subclass can ask this model something other than for
+        # a score (add_llm_judge_reasons.py) without reimplementing the client
+        # setup, the chat templating and the batching underneath.
+        self.system_prompt = system_prompt or system_prompt_for(prompt_id, mode)
+
+    def __call__(self, text: str) -> float:
+        """P(human-written) for one document. Raises on a failed call."""
+        raise NotImplementedError
+
+    def score_batch(self, texts: list[str]) -> list[float]:
+        """P(human-written) for several documents. Raises if any one fails."""
+        return [self(text) for text in texts]
+
+    def diagnostics(self) -> list[str]:
+        """Anything the run learned about itself, printed in the summary."""
+        return []
+
+    def backoff(self, attempt: int) -> float:
+        """Seconds to wait before retry `attempt`. Jittered so that parallel
+        workers do not all come back at once after a shared rate limit."""
+        return BACKOFF_BASE**attempt * (1.0 + random.random())
+
+
+class ApiJudge(Judge):
+    """A judge reached over an API: one call per row, many rows in flight.
 
     Holds the provider client (thread-safe in all three SDKs, so the same
     instance serves every worker) and turns whatever the provider returns into a
     plain float.
     """
 
-    def __init__(self, alias: str, prompt_id: str = DEFAULT_PROMPT) -> None:
-        spec = MODELS[alias]
-        self.alias = alias
-        self.provider = spec["provider"]
-        self.model = spec["model"]
-        self.prompt_id = prompt_id
-        self.system_prompt = PROMPTS[prompt_id]
+    def __init__(self, spec: JudgeModel, prompt_id: str = DEFAULT_PROMPT,
+                 mode: str = MODE_PARSED, system_prompt: str | None = None) -> None:
+        super().__init__(spec, prompt_id, mode, system_prompt)
         self._client = self._build_client()
 
     def _build_client(self):
@@ -485,7 +1002,6 @@ class Judge:
         raise ValueError(f"Unsupported provider: {self.provider}")
 
     def __call__(self, text: str) -> float:
-        """P(human-written) for one document. Raises on a failed call."""
         if self.provider == "openai":
             return self._score_openai(text)
         if self.provider == "anthropic":
@@ -496,7 +1012,7 @@ class Judge:
         # No temperature: the reasoning-capable models reject anything but the
         # default, and the schema already pins the output shape.
         response = self._client.chat.completions.parse(
-            model=self.model,
+            model=self.model_id,
             messages=[
                 {"role": "system", "content": self.system_prompt},
                 {"role": "user", "content": USER_TEMPLATE.format(text=text)},
@@ -512,7 +1028,7 @@ class Judge:
         # Same forced-tool trick as epai/utils/genai_utils.py: it is the way to
         # get a schema-checked answer out of the Messages API.
         response = self._client.messages.create(
-            model=self.model,
+            model=self.model_id,
             max_tokens=MAX_TOKENS,
             system=self.system_prompt,
             tools=[
@@ -547,7 +1063,7 @@ class Judge:
         from google.genai import types
 
         response = self._client.models.generate_content(
-            model=self.model,
+            model=self.model_id,
             contents=USER_TEMPLATE.format(text=text),
             config=types.GenerateContentConfig(
                 system_instruction=self.system_prompt,
@@ -559,6 +1075,292 @@ class Judge:
         if parsed is None:
             raise ValueError("model returned no parsable verdict")
         return float(parsed.human_probability)
+
+
+class LocalJudge(Judge):
+    """A judge held on this machine's GPU, scored a batch at a time.
+
+    In `logprob` mode -- the reason to run locally at all -- a row costs one
+    forward pass and no generation: the prompt asks for a single word, and the
+    score is that position's distribution, ``P(human) / (P(human) + P(machine))``,
+    over the token ids in HUMAN_WORDS and MACHINE_WORDS. Nothing is sampled, so
+    the run is deterministic and the score is continuous rather than piled onto
+    whichever round numbers the model likes to write.
+
+    In `parsed` mode it generates the probability and parses it, which is the
+    only way to compare a local model against the API columns on equal terms:
+    same prompt, same answer format, only the model changed.
+
+    Loading is deferred to __init__ rather than done at import, and torch is
+    imported here rather than at module level, so the API providers still run on
+    a machine with no CUDA and no torch build worth speaking of.
+    """
+
+    batched = True
+
+    def __init__(
+        self,
+        spec: JudgeModel,
+        prompt_id: str = DEFAULT_PROMPT,
+        mode: str = MODE_LOGPROB,
+        device: str = DEFAULT_DEVICE,
+        dtype: str = DEFAULT_DTYPE,
+        max_doc_tokens: int = DEFAULT_MAX_DOC_TOKENS,
+        system_prompt: str | None = None,
+    ) -> None:
+        super().__init__(spec, prompt_id, mode, system_prompt)
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        self._torch = torch
+        self.device = device
+        self.dtype = dtype
+        self.max_doc_tokens = max_doc_tokens
+        self.n_truncated = 0
+        self.answer_mass: list[float] = []
+
+        print(f"Loading {spec.model} on {device} ({dtype}) …")
+        self.tokenizer = AutoTokenizer.from_pretrained(spec.model)
+        # Left padding, because these are decoder-only models scored at their
+        # LAST position: right padding would put the answer slot behind a run of
+        # pad tokens and read the distribution off padding.
+        self.tokenizer.padding_side = "left"
+        if self.tokenizer.pad_token_id is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
+        load_kwargs = {"dtype": getattr(torch, dtype)}
+        if importlib.util.find_spec("accelerate") is not None:
+            # accelerate streams the shards straight onto the card.
+            load_kwargs["device_map"] = device
+        elif device != "cpu":
+            # Without it the weights are built in CPU RAM and moved afterwards,
+            # which works but needs that much free RAM and one extra copy of a
+            # multi-GB model. Said out loud because the symptom is a load that
+            # sits there for minutes, which reads like a hang.
+            size = f"~{spec.weights_gib:.0f} GiB " if spec.weights_gib else ""
+            print(
+                f"NOTE  accelerate is not installed, so the {size}weights are "
+                f"staged through CPU RAM before moving to {device}. Loading is "
+                "slower; nothing else differs."
+            )
+        self.model = AutoModelForCausalLM.from_pretrained(spec.model, **load_kwargs)
+        if "device_map" not in load_kwargs:
+            self.model.to(device)
+        self.model.eval()
+
+        self._supports_system = self._probe_system_role()
+        self._human_ids, self._machine_ids = self._answer_token_ids()
+
+    # -- setup helpers ----------------------------------------------------
+
+    def _probe_system_role(self) -> bool:
+        """Whether this chat template accepts a system turn (Gemma does not)."""
+        try:
+            self.tokenizer.apply_chat_template(
+                [{"role": "system", "content": "x"}, {"role": "user", "content": "y"}],
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            return True
+        except Exception:
+            return False
+
+    def _answer_token_ids(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        """First-token ids for the two answers, checked to be usable.
+
+        Only meaningful in logprob mode, and only correct if the two sets are
+        disjoint: a tokeniser that opened both words with one shared token would
+        make the ratio read the same number twice.
+        """
+        if self.mode != MODE_LOGPROB:
+            return (), ()
+
+        def first_ids(words: tuple[str, ...]) -> tuple[int, ...]:
+            ids = []
+            for word in words:
+                encoded = self.tokenizer(word, add_special_tokens=False)["input_ids"]
+                if encoded:
+                    ids.append(int(encoded[0]))
+            return tuple(dict.fromkeys(ids))
+
+        human, machine = first_ids(HUMAN_WORDS), first_ids(MACHINE_WORDS)
+        if not human or not machine:
+            raise RuntimeError(
+                f"{self.model_id}: could not tokenise the answer words, so "
+                f"--mode {MODE_LOGPROB} has nothing to read. Use --mode "
+                f"{MODE_PARSED}."
+            )
+        shared = set(human) & set(machine)
+        if shared:
+            raise RuntimeError(
+                f"{self.model_id}: 'human' and 'machine' share the opening "
+                f"token(s) {sorted(shared)}, so their probabilities cannot be "
+                f"told apart. Use --mode {MODE_PARSED}."
+            )
+        return human, machine
+
+    # -- prompt assembly --------------------------------------------------
+
+    def _truncate(self, text: str) -> str:
+        """Cut the document to the token budget, counting the model's tokens."""
+        if not self.max_doc_tokens:
+            return text
+        ids = self.tokenizer(text, add_special_tokens=False)["input_ids"]
+        if len(ids) <= self.max_doc_tokens:
+            return text
+        self.n_truncated += 1
+        return self.tokenizer.decode(ids[: self.max_doc_tokens], skip_special_tokens=True)
+
+    def _render(self, text: str) -> str:
+        """The full chat string for one document, generation prompt included."""
+        user = USER_TEMPLATE.format(text=self._truncate(text))
+        if self._supports_system:
+            messages = [
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": user},
+            ]
+        else:
+            # No system turn: the instructions ride in front of the document,
+            # which is what the models without one expect anyway.
+            messages = [{"role": "user", "content": f"{self.system_prompt}\n\n{user}"}]
+
+        kwargs = {"tokenize": False, "add_generation_prompt": True}
+        try:
+            # Qwen3 and friends: keep the reasoning block empty. A judge that
+            # thinks first costs 10-20x the tokens for one scalar, and in
+            # logprob mode the answer slot would hold `<think>` instead of the
+            # answer.
+            return self.tokenizer.apply_chat_template(
+                messages, enable_thinking=False, **kwargs
+            )
+        except TypeError:
+            return self.tokenizer.apply_chat_template(messages, **kwargs)
+
+    def _encode(self, texts: list[str]):
+        prompts = [self._render(text) for text in texts]
+        # add_special_tokens=False: the chat template already wrote whatever BOS
+        # the model wants, and a second one shifts every position.
+        encoded = self.tokenizer(
+            prompts, return_tensors="pt", padding=True, add_special_tokens=False
+        )
+        # Only the two fields every causal LM takes: a tokeniser that also
+        # returns token_type_ids would make forward() raise on a model whose
+        # signature has no such argument, and the batch would be written off as
+        # an error rather than a mismatch.
+        return {
+            key: encoded[key].to(self.model.device)
+            for key in ("input_ids", "attention_mask")
+            if key in encoded
+        }
+
+    # -- scoring ----------------------------------------------------------
+
+    def __call__(self, text: str) -> float:
+        return self.score_batch([text])[0]
+
+    def score_batch(self, texts: list[str]) -> list[float]:
+        encoded = self._encode(texts)
+        if self.mode == MODE_LOGPROB:
+            return self._score_logprob(encoded)
+        return self._score_generated(encoded)
+
+    def _score_logprob(self, encoded: dict) -> list[float]:
+        torch = self._torch
+        with torch.inference_mode():
+            try:
+                # Only the last position is ever read, and materialising logits
+                # for every position of a 4k-token batch is gigabytes of vocab-
+                # wide tensor for nothing.
+                out = self.model(**encoded, use_cache=False, logits_to_keep=1)
+            except TypeError:
+                out = self.model(**encoded, use_cache=False)
+
+        # float() before the softmax: the ratio of two small probabilities is
+        # exactly where bf16's 8-bit mantissa shows up.
+        logits = out.logits[:, -1, :].float()
+        probs = torch.softmax(logits, dim=-1)
+        human = probs[:, list(self._human_ids)].sum(dim=-1)
+        machine = probs[:, list(self._machine_ids)].sum(dim=-1)
+        mass = human + machine
+        scores = (human / mass.clamp_min(1e-12)).tolist()
+        self.answer_mass.extend(mass.tolist())
+        return [float(s) for s in scores]
+
+    def _score_generated(self, encoded: dict) -> list[float]:
+        torch = self._torch
+        with torch.inference_mode():
+            out = self.model.generate(
+                **encoded,
+                max_new_tokens=LOCAL_MAX_NEW_TOKENS,
+                do_sample=False,
+                pad_token_id=self.tokenizer.pad_token_id,
+            )
+        answers = self.tokenizer.batch_decode(
+            out[:, encoded["input_ids"].shape[1] :], skip_special_tokens=True
+        )
+        return [parse_probability(answer) for answer in answers]
+
+    # -- reporting --------------------------------------------------------
+
+    def backoff(self, attempt: int) -> float:
+        """No wait. A forward pass is deterministic: a row that failed to parse
+        will fail again identically, and an out-of-memory error is answered by
+        the smaller batch the caller already fell back to, not by waiting."""
+        return 0.0
+
+    def diagnostics(self) -> list[str]:
+        out = []
+        if self.n_truncated:
+            out.append(
+                f"  {self.n_truncated} document(s) cut to {self.max_doc_tokens} "
+                "tokens before judging"
+            )
+        if self.mode == MODE_LOGPROB and self.answer_mass:
+            mass = np.array(self.answer_mass, dtype=float)
+            weak = int((mass < MIN_ANSWER_MASS).sum())
+            out.append(
+                f"  answer mass: mean {mass.mean():.3f}, min {mass.min():.3f} "
+                f"(share of the distribution on 'human'/'machine')"
+            )
+            if weak:
+                out.append(
+                    f"  WARNING  {weak} row(s) below {MIN_ANSWER_MASS:.2f} — the "
+                    "model answered something other than the two words there, "
+                    "and those scores are a ratio of two near-zero numbers."
+                )
+        return out
+
+
+def dtype_for(spec: JudgeModel, requested: str) -> str:
+    """The weight dtype to load with, corrected for what a checkpoint wants.
+
+    The default here is bf16 because everything unquantised prefers it, but the
+    int4 kernels are written around fp16: AWQ refuses anything else, and
+    transformers' compressed-tensors path says outright that fp16 is the
+    efficient one. So a quantised entry flips the default. An explicit --dtype
+    is left alone -- overriding what was actually typed would be worse than
+    whatever it causes.
+
+    Called by the findings block as well as by the loader, so it stays silent
+    and the substitution is shown on the device line instead.
+    """
+    if spec.quant and requested == DEFAULT_DTYPE:
+        return "float16"
+    return requested
+
+
+def build_judge(spec: JudgeModel, prompt_id: str, mode: str, args) -> Judge:
+    """The judge for this run: local models load here, APIs just connect."""
+    if spec.is_local:
+        return LocalJudge(
+            spec,
+            prompt_id=prompt_id,
+            mode=mode,
+            device=args.device,
+            dtype=dtype_for(spec, args.dtype),
+            max_doc_tokens=args.max_doc_tokens,
+        )
+    return ApiJudge(spec, prompt_id=prompt_id, mode=mode)
 
 
 @dataclass
@@ -589,10 +1391,42 @@ def judge_row(
             last_error = f"{type(exc).__name__}: {exc}"
             if attempt == retries:
                 break
-            # Jittered so parallel workers do not retry in lockstep after a
-            # shared rate limit.
-            time.sleep(BACKOFF_BASE**attempt * (1.0 + random.random()))
+            delay = judge.backoff(attempt)
+            if delay:
+                time.sleep(delay)
     return RowResult(position=position, score=None, error=last_error)
+
+
+def judge_batch(
+    judge: Judge, positions: list[int], texts: dict[int, str], retries: int
+) -> list[RowResult]:
+    """Score a batch of rows in one forward pass.
+
+    A batch is all-or-nothing -- an out-of-memory error or a single unparsable
+    answer takes the whole thing down -- so a failure is retried one row at a
+    time. That costs a pass over the batch but isolates the row actually
+    responsible instead of writing off eight good ones with it.
+    """
+    try:
+        scores = judge.score_batch([texts[pos] for pos in positions])
+        return [
+            RowResult(position=pos, score=float(np.clip(score, 0.0, 1.0)))
+            for pos, score in zip(positions, scores)
+        ]
+    except Exception as exc:
+        tqdm.write(
+            f"  batch of {len(positions)} failed ({type(exc).__name__}: {exc}); "
+            "retrying those rows one at a time"
+        )
+        release_memory(judge)
+        return [judge_row(judge, pos, texts[pos], retries) for pos in positions]
+
+
+def release_memory(judge: Judge) -> None:
+    """Hand the allocator's cached blocks back, after an out-of-memory error."""
+    torch = getattr(judge, "_torch", None)
+    if torch is not None and torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 def check_parquet(df: pd.DataFrame, text_col: str, path: Path) -> np.ndarray:
@@ -712,11 +1546,42 @@ def apply_limit(
     return limited
 
 
-def blocking_reason(provider: str) -> str | None:
-    """Why this provider cannot run here, or None if it can."""
-    env_var = _REQUIRED_ENV[provider]
-    if not os.environ.get(env_var):
-        return f"needs {env_var}"
+# Extra packages a quantised checkpoint needs on top of transformers, and the
+# pip name to suggest. Checked up front: the alternative is a multi-GB download
+# that fails on the last line of from_pretrained.
+_QUANT_PACKAGES = {
+    "compressed-tensors": (("compressed_tensors",), "compressed-tensors"),
+    "gptq": (("gptqmodel", "auto_gptq"), "gptqmodel"),
+    # Kept so an AWQ checkpoint still fails with a sentence rather than a
+    # traceback, but there is no registry entry for one on purpose: AutoAWQ is
+    # deprecated and untested against this project's torch and transformers.
+    "awq": (("awq",), "autoawq (deprecated — prefer a compressed-tensors build)"),
+}
+
+
+def blocking_reason(spec: JudgeModel, device: str = DEFAULT_DEVICE) -> str | None:
+    """Why this judge cannot run here, or None if it can."""
+    if not spec.is_local:
+        env_var = _REQUIRED_ENV[spec.provider]
+        return None if os.environ.get(env_var) else f"needs {env_var}"
+
+    for package in ("torch", "transformers"):
+        if importlib.util.find_spec(package) is None:
+            return f"needs {package}, which is not importable here"
+
+    if spec.quant:
+        modules, pip_name = _QUANT_PACKAGES[spec.quant]
+        if all(importlib.util.find_spec(m) is None for m in modules):
+            return (
+                f"{spec.quant.upper()} weights need kernels that are not "
+                f"installed (pip install {pip_name})"
+            )
+
+    if device.startswith("cuda"):
+        import torch
+
+        if not torch.cuda.is_available():
+            return "no CUDA device visible (pass --device cpu to run anyway)"
     return None
 
 
@@ -752,17 +1617,42 @@ def confirm_recompute(n_scored: int) -> bool:
     return answer in {"y", "yes"}
 
 
+def plan_details(spec: JudgeModel, args) -> list[tuple[str, str]]:
+    """The judge-specific lines of the findings block.
+
+    Derived from the spec and the arguments rather than from a live judge: the
+    plan is printed before anything is loaded, which is the whole point of
+    printing it -- a 30GB download should not start ahead of the question of
+    whether this is even the right file.
+    """
+    if not spec.is_local:
+        return [("workers", f"{args.workers} row(s) in flight")]
+
+    weights = spec.weights_gib
+    lines = [
+        ("device", args.device + f" ({dtype_for(spec, args.dtype)}"
+         + (f", {spec.quant}" if spec.quant else "") + ")"),
+        ("batch size", str(args.batch_size)),
+        ("doc budget", f"{args.max_doc_tokens} tokens"
+         if args.max_doc_tokens else "whole document"),
+    ]
+    if weights:
+        lines.append(("weights", f"~{weights:.1f} GiB resident"))
+    return lines
+
+
 def print_findings(
     path: Path,
     df: pd.DataFrame,
     text_col: str,
     col: str,
-    alias: str,
-    judge_model: str,
+    spec: JudgeModel,
     prompt_id: str,
+    mode: str,
     judgeable: np.ndarray,
     positions: np.ndarray,
     allowed: list[str] | None,
+    details: list[tuple[str, str]],
 ) -> None:
     n_empty = int(df[text_col].apply(_is_empty_text).sum())
     n_scored = count_scored(df, col, judgeable)
@@ -788,9 +1678,15 @@ def print_findings(
             print(f"    {name:<18}: {n}")
     print(f"  eligible      : {int(judgeable.sum())}")
     print("Judge")
-    print(f"  alias         : {alias}")
-    print(f"  api model     : {judge_model}")
+    print(f"  alias         : {spec.key}")
+    print(f"  provider      : {spec.provider}")
+    print(f"  model         : {spec.model}")
     print(f"  prompt        : {prompt_id}")
+    print(f"  mode          : {mode}"
+          + ("  (score read off the answer token's distribution)"
+             if mode == MODE_LOGPROB else "  (probability written by the model)"))
+    for label, value in details:
+        print(f"  {label:<14}: {value}")
     print("  score         : P(human)  —  1.0 ⇒ human, 0.0 ⇒ machine")
     print(f"  column        : {col}  ({'exists' if col in df.columns else 'new'})")
     print(f"  already scored: {n_scored}")
@@ -852,6 +1748,7 @@ def print_summary(
     failures: list[tuple[int, str]],
     seconds: float,
     df: pd.DataFrame,
+    judge: Judge | None = None,
 ) -> None:
     print()
     print("=" * 78)
@@ -872,21 +1769,86 @@ def print_summary(
         for message, count in sorted(by_message.items(), key=lambda kv: -kv[1]):
             print(f"    {count:>5}x  {message[:100]}")
 
+    diagnostics = judge.diagnostics() if judge is not None else []
+    if diagnostics:
+        print("  judge:")
+        for line in diagnostics:
+            print(line)
+
     evaluate(df, col)
     print()
+
+
+def run_threaded(
+    judge: Judge,
+    positions: np.ndarray,
+    texts: dict[int, str],
+    workers: int,
+    retries: int,
+    record,
+) -> None:
+    """Score an API judge: many single-row calls in flight at once."""
+    # The executor is managed by hand rather than with a `with` block: on Ctrl-C
+    # the block's exit would wait for every queued row to be judged, which on a
+    # 2000-row file is exactly the wait the interrupt was meant to avoid.
+    pool = ThreadPoolExecutor(max_workers=max(1, workers))
+    try:
+        futures = {
+            pool.submit(judge_row, judge, pos, texts[pos], retries): pos
+            for pos in positions
+        }
+        for future in tqdm(
+            as_completed(futures),
+            total=len(futures),
+            desc=f"Judging ({judge.alias})",
+            unit="row",
+        ):
+            record(future.result())
+    except KeyboardInterrupt:
+        print("\nInterrupted — writing the scores obtained so far.")
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+def run_batched(
+    judge: Judge,
+    positions: np.ndarray,
+    texts: dict[int, str],
+    batch_size: int,
+    retries: int,
+    record,
+) -> None:
+    """Score a local judge: one forward pass per batch, batches in order.
+
+    Sequential on purpose. The GPU is the bottleneck and threads would only
+    interleave batches onto one device, turning a predictable memory ceiling
+    into a race for it.
+    """
+    order = list(positions)
+    batches = [
+        order[i : i + max(1, batch_size)] for i in range(0, len(order), max(1, batch_size))
+    ]
+    try:
+        with tqdm(total=len(order), desc=f"Judging ({judge.alias})", unit="row") as bar:
+            for batch in batches:
+                for result in judge_batch(judge, batch, texts, retries):
+                    record(result)
+                bar.update(len(batch))
+    except KeyboardInterrupt:
+        print("\nInterrupted — writing the scores obtained so far.")
 
 
 def main() -> None:
     args = parse_args()
     out_path = args.out or args.parquet
-    alias = args.model
+    spec = resolve_model(args.model, args.column_name)
     prompt_id = args.prompt
-    spec = MODELS[alias]
-    col = score_column(alias, prompt_id)
+    mode = resolve_mode(spec, args.mode)
+    col = score_column(spec, prompt_id, mode)
 
-    blocked = blocking_reason(spec["provider"])
+    blocked = blocking_reason(spec, args.device)
     if blocked:
-        raise SystemExit(f"Cannot run judge {alias!r}: {blocked}.")
+        raise SystemExit(f"Cannot run judge {spec.key!r}: {blocked}.")
 
     allowed = resolve_generated_by(args.generated_by)
 
@@ -905,12 +1867,13 @@ def main() -> None:
         df,
         args.text_col,
         col,
-        alias,
-        spec["model"],
+        spec,
         prompt_id,
+        mode,
         judgeable,
         positions,
         allowed,
+        plan_details(spec, args),
     )
     if args.limit is not None:
         print(
@@ -938,14 +1901,23 @@ def main() -> None:
         return
 
     print()
-    print(f"NOTE  this is a billed API call: {len(positions)} row(s) will be sent.")
+    if spec.is_local:
+        print(
+            f"NOTE  {len(positions)} row(s) will be scored on {args.device}. No "
+            "API cost, but the weights are downloaded on first use and the run "
+            "holds the card until it finishes."
+        )
+    else:
+        print(f"NOTE  this is a billed API call: {len(positions)} row(s) will be sent.")
     if not args.yes:
         answer = input(f"Proceed and write to {out_path}? Type 'yes': ").strip().lower()
         if answer != "yes":
             print("Aborted — no changes made.")
             return
 
-    judge = Judge(alias, prompt_id)
+    # Built after the confirmation, not before: for a local judge this is where
+    # tens of GB are downloaded and moved onto the card.
+    judge = build_judge(spec, prompt_id, mode, args)
 
     # Existing values are carried over untouched; only `positions` are replaced.
     values: list[float | None] = (
@@ -964,7 +1936,7 @@ def main() -> None:
     }
 
     failures: list[tuple[int, str]] = []
-    n_done = 0
+    counters = {"done": 0}
     save_lock = threading.Lock()
     started = time.perf_counter()
 
@@ -973,41 +1945,34 @@ def main() -> None:
         df[col] = pd.Series(values, index=df.index, dtype="float64")
         save_parquet(df, out_path)
 
-    # The executor is managed by hand rather than with a `with` block: on Ctrl-C
-    # the block's exit would wait for every queued row to be judged, which on a
-    # 2000-row file is exactly the wait the interrupt was meant to avoid.
-    pool = ThreadPoolExecutor(max_workers=max(1, args.workers))
-    try:
-        futures = {
-            pool.submit(judge_row, judge, pos, texts[pos], args.retries): pos
-            for pos in positions
-        }
-        for future in tqdm(
-            as_completed(futures),
-            total=len(futures),
-            desc=f"Judging ({alias})",
-            unit="row",
-        ):
-            result = future.result()
-            values[result.position] = result.score
-            if result.error is not None:
-                failures.append((result.position, result.error))
-                tqdm.write(f"  row {result.position} failed: {result.error}")
-            n_done += 1
+    def record(result: RowResult) -> None:
+        """Take one row's outcome, and checkpoint the file every --save-every."""
+        values[result.position] = result.score
+        if result.error is not None:
+            failures.append((result.position, result.error))
+            tqdm.write(f"  row {result.position} failed: {result.error}")
+        counters["done"] += 1
 
-            # Save periodically so an interrupt or a crash does not throw away
-            # calls that have already been paid for.
-            with save_lock:
-                if n_done % args.save_every == 0:
-                    write_out()
-    except KeyboardInterrupt:
-        print("\nInterrupted — writing the scores obtained so far.")
-    finally:
-        pool.shutdown(wait=False, cancel_futures=True)
+        # Save periodically so an interrupt or a crash does not throw away work
+        # that has already been paid for -- in money or in GPU time.
+        with save_lock:
+            if counters["done"] % args.save_every == 0:
+                write_out()
+
+    if judge.batched:
+        run_batched(judge, positions, texts, args.batch_size, args.retries, record)
+    else:
+        run_threaded(judge, positions, texts, args.workers, args.retries, record)
 
     write_out()
     print_summary(
-        out_path, col, n_done - len(failures), failures, time.perf_counter() - started, df
+        out_path,
+        col,
+        counters["done"] - len(failures),
+        failures,
+        time.perf_counter() - started,
+        df,
+        judge,
     )
 
 

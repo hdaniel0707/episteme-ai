@@ -1,0 +1,1107 @@
+"""Ask the judge what it saw: rationales and countable cues, no scores touched.
+
+``add_llm_judge_scores.py`` produces one number per document and nothing else --
+deliberately, because a rationale would double the output tokens on every row of
+a 6000-row corpus. This script is the other half: it goes back over a *sample* of
+rows and asks the same model, under the same prompt version, what evidence the
+document actually carries. It never writes a score column and never reads one
+except to choose which rows are worth asking about, so the numbers already in the
+corpora cannot be disturbed by running it.
+
+WHAT COMES BACK, AND WHY IT IS NOT PROSE ALONE
+----------------------------------------------
+Two things per row:
+
+``llm_judge_cues_human_*`` / ``llm_judge_cues_machine_*``
+    Lists drawn from a closed vocabulary (HUMAN_CUES / MACHINE_CUES below).
+    That vocabulary is not invented here: it is one entry per bullet of the
+    prompt version's own evidence lists, which is what makes a count
+    interpretable -- ``even_rhythm`` cited on 78% of machine rows and 12% of
+    human rows is a statement about the same cue the score was formed from.
+    6000 free-text rationales is something you read twenty of; 6000 cue labels
+    is a table.
+
+``llm_judge_reason_*``
+    One or two sentences naming the strongest single piece of evidence. This is
+    the part a person reads while looking at the document beside it.
+
+THE MODEL IS NOT SHOWN ITS OWN SCORE
+------------------------------------
+The obvious design -- "you rated this 0.08, why?" -- measures compliance, not
+evidence: a model handed a number will justify that number. So the call here is
+blind. It sees the document and the evidence half of the prompt version, and is
+asked what is present; it is told explicitly not to give a verdict or a
+probability. The stored score is then something to compare the cues *against*
+rather than something the cues were derived from.
+
+Which also means: a rationale is a plausible account produced about a document,
+not a trace of the computation that produced the score. Use it to form
+hypotheses ("it leans on hedging"), and test those hypotheses with the counts.
+
+WHICH ROWS -- THE BANDS
+-----------------------
+Explaining all 6000 rows would cost more than the scoring run did and answer
+nothing that 300 rows do not. ``--select`` picks bands off the existing score
+column, deduplicated in the order below and capped per band by ``--per-band``:
+
+``wrong``
+    The judge's verdict disagrees with ``generated_by``, most confidently wrong
+    first. On ghostbuster_gpt56luna that is the ~126 rows behind the 52 false
+    positives and 74 false negatives -- where the failure modes live.
+``uncertain``
+    Score within ``--uncertain-band`` of 0.5, closest first: the documents that
+    carried no usable evidence either way.
+``confident``
+    Verdict correct and at least ``--confident-band`` from 0.5, most confident
+    first. The control -- without it you read only failures and conclude the
+    judge is bad.
+``all``
+    Every eligible row, file order. For a small corpus, or with --per-band.
+
+Within a band, rows are drawn round-robin across ``generated_by`` values so both
+classes are represented, and in a deterministic order, so the same command twice
+selects the same documents.
+
+Run:
+    uv run python epai/ai_detection/score/add_llm_judge_reasons.py \
+        data/parquet/ghostbuster_gpt56luna.parquet
+
+    # the same, explained by the local 32B instead of the API model that scored
+    uv run python epai/ai_detection/score/add_llm_judge_reasons.py \
+        data/parquet/ghostbuster_gpt56luna.parquet \
+        --model qwen3-32b-w4a16 --score-col llm_judge_score_gpt56luna_v3
+
+    # only the failures, more of them
+    uv run python epai/ai_detection/score/add_llm_judge_reasons.py \
+        data/parquet/ghostbuster_gpt56luna.parquet --select wrong --per-band 200
+
+The cue frequency table is printed and saved under
+``results/llm_judge_reasons/<parquet>+<judge>/``. Rows already carrying a
+rationale are skipped unless ``--recompute``, and the Parquet is checkpointed
+every ``--save-every`` rows, so an interrupted run resumes.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Literal, get_args
+
+import numpy as np
+import pandas as pd
+from dotenv import load_dotenv
+from pydantic import BaseModel, Field
+from tqdm import tqdm
+
+from epai.ai_detection.score.add_llm_judge_scores import (
+    ALL_GENERATORS,
+    DEFAULT_BATCH_SIZE,
+    DEFAULT_DEVICE,
+    DEFAULT_DTYPE,
+    DEFAULT_MAX_DOC_TOKENS,
+    DEFAULT_MODEL,
+    DEFAULT_PROMPT,
+    DEFAULT_TEXT_COL,
+    GENERATED_BY_COL,
+    MODE_PARSED,
+    RETRIES,
+    SAVE_EVERY,
+    USER_TEMPLATE,
+    ApiJudge,
+    JudgeModel,
+    LocalJudge,
+    _as_score,
+    _identifier,
+    apply_generated_by,
+    blocking_reason,
+    check_parquet,
+    dtype_for,
+    evidence_head,
+    print_models,
+    resolve_generated_by,
+    resolve_model,
+    score_column,
+)
+from epai.utils.parquet_utils import load_parquet, save_parquet
+
+load_dotenv()
+
+# The cue vocabulary: one entry per bullet of a prompt version's evidence lists,
+# named so the name alone is readable in a table. Keep these in step with
+# PROMPTS[...] in add_llm_judge_scores.py -- if a prompt version grows a new
+# bullet, a cue belongs here too, or the model will have evidence it cannot
+# report and the counts will quietly under-report it.
+HUMAN_CUES: dict[str, str] = {
+    "specifics": "particular names, numbers, dates, places, results or quoted "
+                 "words, load-bearing rather than decorative",
+    "commitment": "a definite claim, an unbalanced opinion, an argument that "
+                  "goes somewhere instead of hedging back to neutral",
+    "asymmetry": "uneven emphasis, a paragraph that runs long, a point raised "
+                 "and dropped, a sentence that changes direction mid-way",
+    "idiom": "slang, humour, irony, in-group shorthand, the habits of a field "
+             "used the way a practitioner uses them",
+    "errors": "a misspelling, a wrong-word substitution, an agreement or tense "
+              "slip, a missing word, a run-on or fragmentary sentence",
+}
+
+MACHINE_CUES: dict[str, str] = {
+    "generic_vocabulary": "fluent but generic wording; an abstraction where a "
+                          "specific would have been natural",
+    "even_rhythm": "uniform sentence and paragraph lengths, repetitive clause "
+                   "structure, predictable pacing",
+    "scaffolding": "symmetrical structure, explicit enumeration, a closing "
+                   "sentence that restates what came before",
+    "hedging": "balanced framing that declines to commit: every side "
+               "acknowledged, none pressed",
+    "coverage": "each obvious aspect given a proportionate share, nothing "
+                "pursued further than the rest",
+    "assistant_register": "the connectives, intensifiers and stock transitions "
+                          "of assistant prose",
+}
+
+# The schema's version of the same two lists. Literal rather than str: it is
+# what makes the provider enforce the vocabulary instead of the parser having to
+# repair it afterwards.
+HumanCue = Literal[
+    "specifics", "commitment", "asymmetry", "idiom", "errors"
+]
+MachineCue = Literal[
+    "generic_vocabulary", "even_rhythm", "scaffolding", "hedging", "coverage",
+    "assistant_register",
+]
+
+# Two spellings of one vocabulary is one spelling too many; this is the check
+# that they have not drifted apart.
+assert set(get_args(HumanCue)) == set(HUMAN_CUES), "HumanCue != HUMAN_CUES"
+assert set(get_args(MachineCue)) == set(MACHINE_CUES), "MachineCue != MACHINE_CUES"
+
+# Columns. Deliberately NOT under `llm_judge_score_`, which is the prefix
+# analyse_score_human_vs_ai.py collects as scores: a rationale is not a score and
+# must not turn up in a threshold sweep. `llm_judge` is still in the name, so
+# truncate_text.py drops these along with the scores when a corpus is re-cut --
+# which is right, they are judgements of the untruncated text.
+REASON_PREFIX = "llm_judge_reason_"
+HUMAN_CUES_PREFIX = "llm_judge_cues_human_"
+MACHINE_CUES_PREFIX = "llm_judge_cues_machine_"
+
+# Bands, in the order they are filled. A row taken by an earlier band is not
+# offered to a later one.
+BAND_WRONG = "wrong"
+BAND_UNCERTAIN = "uncertain"
+BAND_CONFIDENT = "confident"
+BAND_ALL = "all"
+BANDS = (BAND_WRONG, BAND_UNCERTAIN, BAND_CONFIDENT, BAND_ALL)
+DEFAULT_BANDS = (BAND_WRONG, BAND_UNCERTAIN, BAND_CONFIDENT)
+
+DEFAULT_PER_BAND = 100
+DEFAULT_THRESHOLD = 0.5
+DEFAULT_UNCERTAIN_BAND = 0.10
+DEFAULT_CONFIDENT_BAND = 0.40
+
+# An explanation is short by construction; these bound a model that decides
+# otherwise. The API cap is generous because a truncated JSON object is a lost
+# row, while the local generator stops at the end-of-turn token anyway.
+MAX_TOKENS = 700
+LOCAL_MAX_NEW_TOKENS = 400
+
+# Rationale length asked for and enforced. Long enough for the evidence, short
+# enough to read a hundred of them.
+MAX_RATIONALE_CHARS = 400
+
+REPORT_DIR = Path("results") / "llm_judge_reasons"
+
+
+def _cue_listing() -> str:
+    """The vocabulary as the model sees it, generated from the same dicts."""
+    lines = ["human_cues -- evidence of a human author:"]
+    lines += [f"  {name}: {desc}" for name, desc in HUMAN_CUES.items()]
+    lines.append("")
+    lines.append("machine_cues -- evidence of a language model:")
+    lines += [f"  {name}: {desc}" for name, desc in MACHINE_CUES.items()]
+    return "\n".join(lines)
+
+
+EXPLAIN_BLOCK = """WHAT TO REPORT
+
+You are NOT scoring this document. Do not give a verdict, a probability, or any
+number. Do not say which way the document leans overall. Report only what is
+present in it, using the vocabulary below.
+
+{cues}
+
+Report, for this document:
+- human_cues: every cue from the human list that is genuinely present. Cite a
+  cue only if you could point at the words that carry it. An empty list is a
+  correct answer for a document that carries none.
+- machine_cues: the same, from the machine list.
+- rationale: one or two sentences naming the strongest single piece of evidence
+  you found, and where in the document it is. Quote a few words of it if that is
+  the clearest way to say it. No verdict, no probability.
+
+A document may carry cues from both lists. Report both; it is not a
+contradiction, and resolving it is not your job here."""
+
+
+def explain_prompt(prompt_id: str) -> str:
+    """The system prompt: a prompt version's evidence half, then what to report.
+
+    The evidence half is shared verbatim with the scoring run (see
+    ``evidence_head``) -- same genre framing, same two lists, same rules about
+    what is never evidence. Only the closing instruction differs, because this
+    call asks what is there rather than for a number. That sharing is the whole
+    basis for reading the cue counts as being about the score.
+    """
+    return evidence_head(prompt_id) + "\n\n" + EXPLAIN_BLOCK.format(cues=_cue_listing())
+
+
+class Explanation(BaseModel):
+    """One blind read of a document: what is present, and the strongest of it.
+
+    Cues before rationale on purpose: the countable fields are generated first,
+    so they are not written to agree with a sentence of prose the model has
+    already committed to.
+    """
+
+    human_cues: list[HumanCue] = Field(
+        description="Cues of human authorship that are genuinely present. May be empty."
+    )
+    machine_cues: list[MachineCue] = Field(
+        description="Cues of machine authorship that are genuinely present. May be empty."
+    )
+    rationale: str = Field(
+        description="One or two sentences naming the strongest single piece of "
+                    "evidence in the document and where it is. No verdict, no "
+                    "probability."
+    )
+
+
+def clean_explanation(raw: Explanation) -> Explanation:
+    """Deduplicate the cue lists and bound the rationale.
+
+    Providers do repeat a list entry, and a duplicate would count twice in the
+    frequency table -- a silent, plausible-looking inflation of exactly the
+    number this script exists to produce.
+    """
+    return Explanation(
+        human_cues=list(dict.fromkeys(raw.human_cues)),
+        machine_cues=list(dict.fromkeys(raw.machine_cues)),
+        rationale=" ".join(raw.rationale.split())[:MAX_RATIONALE_CHARS],
+    )
+
+
+def coerce_cues(values, vocabulary: dict[str, str], unknown: dict[str, int]) -> list[str]:
+    """Keep the cues that are in the vocabulary; count the ones that are not.
+
+    A model that answers ``"Even rhythm"`` or invents ``"no_typos"`` has not
+    failed the row -- the rationale is still worth having -- but the label
+    cannot go in a frequency table under a name nothing else uses. Repaired
+    silently would be worse: the count would look complete while quietly
+    dropping evidence, so the summary reports what was discarded.
+    """
+    kept: list[str] = []
+    for value in values or []:
+        key = re.sub(r"[^a-z0-9]+", "_", str(value).strip().lower()).strip("_")
+        if key in vocabulary:
+            kept.append(key)
+        else:
+            label = str(value)[:40]
+            unknown[label] = unknown.get(label, 0) + 1
+    return kept
+
+
+def explanation_from_payload(payload: dict, unknown: dict[str, int]) -> Explanation:
+    """Build an Explanation from a raw dict (a tool call, or parsed JSON)."""
+    if not isinstance(payload, dict):
+        raise ValueError(f"expected an object, got {type(payload).__name__}")
+    rationale = payload.get("rationale")
+    if not isinstance(rationale, str) or not rationale.strip():
+        raise ValueError("no rationale in the answer")
+    return clean_explanation(
+        Explanation(
+            human_cues=coerce_cues(payload.get("human_cues"), HUMAN_CUES, unknown),
+            machine_cues=coerce_cues(payload.get("machine_cues"), MACHINE_CUES, unknown),
+            rationale=rationale,
+        )
+    )
+
+
+def parse_json_object(text: str) -> dict:
+    """The first JSON object in a free-text answer.
+
+    Local models fence their JSON, prefix it, or add a closing remark. The
+    braces are found rather than the string trusted, and a fenced block is
+    unwrapped first so a `````json`` line cannot be mistaken for content.
+    """
+    body = re.sub(r"^\s*```(?:json)?|```\s*$", "", text.strip(), flags=re.MULTILINE)
+    start = body.find("{")
+    end = body.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError(f"no JSON object in answer: {body.strip()[:120]!r}")
+    return json.loads(body[start : end + 1])
+
+
+class ApiExplainer(ApiJudge):
+    """The explaining call over an API: one request per row, many in flight.
+
+    Subclasses the judge only to inherit its client construction and its
+    provider dispatch; the system prompt and the response schema are this
+    script's, and no method here can write a score.
+    """
+
+    def __init__(self, spec: JudgeModel, prompt_id: str = DEFAULT_PROMPT) -> None:
+        super().__init__(
+            spec, prompt_id, MODE_PARSED, system_prompt=explain_prompt(prompt_id)
+        )
+        self.unknown_cues: dict[str, int] = {}
+
+    def __call__(self, text: str) -> Explanation:  # type: ignore[override]
+        if self.provider == "openai":
+            return self._explain_openai(text)
+        if self.provider == "anthropic":
+            return self._explain_anthropic(text)
+        return self._explain_gemini(text)
+
+    def _explain_openai(self, text: str) -> Explanation:
+        response = self._client.chat.completions.parse(
+            model=self.model_id,
+            messages=[
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": USER_TEMPLATE.format(text=text)},
+            ],
+            response_format=Explanation,
+        )
+        parsed = response.choices[0].message.parsed
+        if parsed is None:
+            raise ValueError("model returned no parsable explanation")
+        return clean_explanation(parsed)
+
+    def _explain_anthropic(self, text: str) -> Explanation:
+        # Same forced-tool trick as the scoring path; the schema is generated
+        # from the pydantic model so the enums cannot drift from HUMAN_CUES.
+        schema = Explanation.model_json_schema()
+        response = self._client.messages.create(
+            model=self.model_id,
+            max_tokens=MAX_TOKENS,
+            system=self.system_prompt,
+            tools=[
+                {
+                    "name": "report_evidence",
+                    "description": "Report the cues present in the document.",
+                    "input_schema": schema,
+                }
+            ],
+            tool_choice={"type": "tool", "name": "report_evidence"},
+            messages=[{"role": "user", "content": USER_TEMPLATE.format(text=text)}],
+        )
+        block = next((b for b in response.content if b.type == "tool_use"), None)
+        if block is None:
+            raise ValueError("model returned no parsable explanation")
+        return explanation_from_payload(dict(block.input), self.unknown_cues)
+
+    def _explain_gemini(self, text: str) -> Explanation:
+        from google.genai import types
+
+        response = self._client.models.generate_content(
+            model=self.model_id,
+            contents=USER_TEMPLATE.format(text=text),
+            config=types.GenerateContentConfig(
+                system_instruction=self.system_prompt,
+                response_mime_type="application/json",
+                response_schema=Explanation,
+            ),
+        )
+        parsed = response.parsed
+        if parsed is None:
+            raise ValueError("model returned no parsable explanation")
+        return clean_explanation(parsed)
+
+
+# Local models have no schema to be held to, so the shape is asked for in words.
+# Appended to the system prompt rather than folded into EXPLAIN_BLOCK: the API
+# providers enforce the schema themselves and telling them about JSON as well
+# invites them to describe it instead of filling it in.
+LOCAL_JSON_INSTRUCTION = """OUTPUT FORMAT
+Reply with one JSON object and nothing else -- no markdown fence, no commentary
+before or after it:
+{"human_cues": ["..."], "machine_cues": ["..."], "rationale": "..."}
+Use only the cue names listed above. Either list may be empty."""
+
+
+class LocalExplainer(LocalJudge):
+    """The explaining call on the GPU, a batch at a time.
+
+    Inherits the loading, the chat templating, the document truncation and the
+    left-padded batching from LocalJudge, and replaces only what is asked and
+    how the answer is read. Generation is required here -- there is no single
+    token to read a distribution off -- so this is the one local path that
+    decodes, and it is why the run is a sample rather than a whole corpus.
+    """
+
+    def __init__(
+        self,
+        spec: JudgeModel,
+        prompt_id: str = DEFAULT_PROMPT,
+        device: str = DEFAULT_DEVICE,
+        dtype: str = DEFAULT_DTYPE,
+        max_doc_tokens: int = DEFAULT_MAX_DOC_TOKENS,
+    ) -> None:
+        super().__init__(
+            spec,
+            prompt_id=prompt_id,
+            mode=MODE_PARSED,
+            device=device,
+            dtype=dtype,
+            max_doc_tokens=max_doc_tokens,
+            system_prompt=explain_prompt(prompt_id) + "\n\n" + LOCAL_JSON_INSTRUCTION,
+        )
+        self.unknown_cues: dict[str, int] = {}
+
+    def __call__(self, text: str) -> Explanation:  # type: ignore[override]
+        return self.explain_batch([text])[0]
+
+    def explain_batch(self, texts: list[str]) -> list[Explanation]:
+        torch = self._torch
+        encoded = self._encode(texts)
+        with torch.inference_mode():
+            out = self.model.generate(
+                **encoded,
+                max_new_tokens=LOCAL_MAX_NEW_TOKENS,
+                do_sample=False,
+                pad_token_id=self.tokenizer.pad_token_id,
+            )
+        answers = self.tokenizer.batch_decode(
+            out[:, encoded["input_ids"].shape[1] :], skip_special_tokens=True
+        )
+        return [
+            explanation_from_payload(parse_json_object(answer), self.unknown_cues)
+            for answer in answers
+        ]
+
+
+def build_explainer(spec: JudgeModel, prompt_id: str, args):
+    """The explainer for this run: local models load here, APIs just connect."""
+    if spec.is_local:
+        return LocalExplainer(
+            spec,
+            prompt_id=prompt_id,
+            device=args.device,
+            dtype=dtype_for(spec, args.dtype),
+            max_doc_tokens=args.max_doc_tokens,
+        )
+    return ApiExplainer(spec, prompt_id=prompt_id)
+
+
+@dataclass
+class RowExplanation:
+    """Outcome for one row: an explanation, or the error that stopped it."""
+
+    position: int
+    explanation: Explanation | None
+    error: str | None = None
+
+
+def explain_row(explainer, position: int, text: str, retries: int) -> RowExplanation:
+    """Explain one row, retrying transient failures with backoff."""
+    last_error = "unknown error"
+    for attempt in range(retries + 1):
+        try:
+            return RowExplanation(position=position, explanation=explainer(text))
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+            if attempt == retries:
+                break
+            delay = explainer.backoff(attempt)
+            if delay:
+                time.sleep(delay)
+    return RowExplanation(position=position, explanation=None, error=last_error)
+
+
+def explain_batch(
+    explainer, positions: list[int], texts: dict[int, str], retries: int
+) -> list[RowExplanation]:
+    """Explain a batch in one generate call, falling back to row-at-a-time.
+
+    More likely to be needed than in the scoring run: one row whose JSON does
+    not parse takes the batch with it, and the fallback is what isolates it.
+    """
+    try:
+        results = explainer.explain_batch([texts[pos] for pos in positions])
+        return [
+            RowExplanation(position=pos, explanation=item)
+            for pos, item in zip(positions, results)
+        ]
+    except Exception as exc:
+        tqdm.write(
+            f"  batch of {len(positions)} failed ({type(exc).__name__}: {exc}); "
+            "retrying those rows one at a time"
+        )
+        return [explain_row(explainer, pos, texts[pos], retries) for pos in positions]
+
+
+class Tee:
+    """Collect printed lines so they can be echoed to stdout and a log file."""
+
+    def __init__(self) -> None:
+        self._lines: list[str] = []
+
+    def print(self, line: str = "") -> None:
+        print(line)
+        self._lines.append(line)
+
+    def save(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(self._lines) + "\n")
+
+
+# ---------------------------------------------------------------------------
+# Which rows get explained
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Selection:
+    """The chosen rows, and which band each one came from."""
+
+    positions: np.ndarray
+    band_of: dict[int, str]
+
+    def counts(self) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for band in self.band_of.values():
+            out[band] = out.get(band, 0) + 1
+        return out
+
+
+def _round_robin(positions: list[int], generators: np.ndarray, cap: int) -> list[int]:
+    """Take up to `cap` positions, alternating between generator values.
+
+    The corpora are stored one generator after another, so a band taken in order
+    would be all human or all machine and the cue table would have nothing to
+    contrast. Order within a generator is preserved, so the choice is stable.
+    """
+    buckets: dict[str, list[int]] = {}
+    for pos in positions:
+        buckets.setdefault(str(generators[pos]), []).append(pos)
+    chosen: list[int] = []
+    depth = 0
+    while len(chosen) < cap and any(len(b) > depth for b in buckets.values()):
+        for name in sorted(buckets):
+            if len(buckets[name]) > depth:
+                chosen.append(buckets[name][depth])
+                if len(chosen) == cap:
+                    break
+        depth += 1
+    return chosen
+
+
+def select_rows(
+    df: pd.DataFrame,
+    eligible: np.ndarray,
+    scores: np.ndarray,
+    bands: list[str],
+    per_band: int,
+    threshold: float,
+    uncertain_band: float,
+    confident_band: float,
+) -> Selection:
+    """Pick the rows worth asking about, band by band.
+
+    Bands are filled in the order given and a row already taken is not offered
+    again, so `wrong` keeps its most interesting rows rather than losing them to
+    `confident`. Within a band the order is by how extreme the row is -- most
+    confidently wrong, closest to the fence, most confidently right -- which is
+    what makes a small --per-band the *interesting* rows rather than the first
+    ones in the file.
+    """
+    has_score = ~np.isnan(scores)
+    has_truth = GENERATED_BY_COL in df.columns
+    generators = (
+        df[GENERATED_BY_COL].astype(str).to_numpy()
+        if has_truth
+        else np.array(["all"] * len(df))
+    )
+    is_human = generators == "human"
+    # NaN compares False, so an unscored row is never in a score-based band.
+    predicted_human = scores >= threshold
+    distance = np.abs(scores - 0.5)
+
+    definitions = {
+        BAND_WRONG: (
+            eligible & has_score & (predicted_human != is_human),
+            lambda pos: -abs(scores[pos] - threshold),
+        ),
+        BAND_UNCERTAIN: (
+            eligible & has_score & (distance <= uncertain_band),
+            lambda pos: distance[pos],
+        ),
+        BAND_CONFIDENT: (
+            eligible & has_score & (predicted_human == is_human)
+            & (distance >= confident_band),
+            lambda pos: -distance[pos],
+        ),
+        BAND_ALL: (eligible, lambda pos: pos),
+    }
+
+    if not has_truth and (BAND_WRONG in bands or BAND_CONFIDENT in bands):
+        raise KeyError(
+            f"The file has no {GENERATED_BY_COL!r} column, so 'wrong' and "
+            "'confident' have nothing to be right or wrong about. Use --select "
+            f"{BAND_UNCERTAIN} or --select {BAND_ALL}."
+        )
+
+    taken: set[int] = set()
+    band_of: dict[int, str] = {}
+    for band in bands:
+        mask, key = definitions[band]
+        candidates = [int(p) for p in np.flatnonzero(mask) if int(p) not in taken]
+        candidates.sort(key=key)
+        for pos in _round_robin(candidates, generators, per_band):
+            taken.add(pos)
+            band_of[pos] = band
+
+    positions = np.array(sorted(taken), dtype=int)
+    return Selection(positions=positions, band_of=band_of)
+
+
+# ---------------------------------------------------------------------------
+# What the cues add up to
+# ---------------------------------------------------------------------------
+
+
+def _as_cue_list(value) -> list[str] | None:
+    """A stored cell back as a list of cue names, or None if it holds none."""
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple, np.ndarray)):
+        return [str(v) for v in value]
+    return None
+
+
+def _as_reason(value) -> str | None:
+    """A stored cell back as a rationale, or None if it holds none."""
+    if value is None or not isinstance(value, str) or not value.strip():
+        return None
+    return value
+
+
+def cue_report(
+    df: pd.DataFrame,
+    columns: tuple[str, str, str],
+    band_of: dict[int, str],
+    out: Tee,
+    examples: int = 2,
+) -> list[dict]:
+    """Print, and return, how often each cue was cited for each class.
+
+    This is the point of the closed vocabulary: one line per cue, human rows
+    against machine rows. A cue whose two percentages are close is one the judge
+    sees everywhere and cannot be separating on, however much of the prompt is
+    devoted to it -- which is as informative as a cue that splits cleanly.
+    """
+    reason_col, human_col, machine_col = columns
+    reasons = [_as_reason(v) for v in df[reason_col]]
+    explained = np.array([r is not None for r in reasons])
+    rows: list[dict] = []
+
+    if not explained.any():
+        out.print("No explanations in the file yet — nothing to summarise.")
+        return rows
+
+    generators = (
+        df[GENERATED_BY_COL].astype(str).to_numpy()
+        if GENERATED_BY_COL in df.columns
+        else np.array(["all"] * len(df))
+    )
+    is_human = explained & (generators == "human")
+    is_machine = explained & (generators != "human")
+    n_human, n_machine = int(is_human.sum()), int(is_machine.sum())
+
+    out.print("=" * 78)
+    out.print("Cue frequencies")
+    out.print(f"  explained rows : {int(explained.sum())}  "
+              f"(human {n_human}, machine {n_machine})")
+    if band_of:
+        tally: dict[str, int] = {}
+        for band in band_of.values():
+            tally[band] = tally.get(band, 0) + 1
+        out.print("  bands          : "
+                  + ", ".join(f"{b}={n}" for b, n in sorted(tally.items())))
+    else:
+        # Re-summarising a file explained by an earlier run: the rows are there,
+        # the record of which band each came from is not.
+        out.print("  bands          : (not recorded — summarising a previous run)")
+    out.print("-" * 78)
+    out.print(f"{'cue':<22}{'side':<9}{'human':>14}{'machine':>14}{'lift':>10}")
+    out.print("-" * 78)
+
+    for side, vocabulary, column in (
+        ("human", HUMAN_CUES, human_col),
+        ("machine", MACHINE_CUES, machine_col),
+    ):
+        cited = [_as_cue_list(v) or [] for v in df[column]]
+        for cue in vocabulary:
+            flags = np.array([cue in c for c in cited])
+            h = int((flags & is_human).sum())
+            m = int((flags & is_machine).sum())
+            h_pct = 100.0 * h / n_human if n_human else float("nan")
+            m_pct = 100.0 * m / n_machine if n_machine else float("nan")
+            # Machine minus human: positive means the cue marks machine rows,
+            # negative that it marks human rows. Sign, not magnitude, is what
+            # says whether the judge is using the cue the way the prompt says.
+            lift = m_pct - h_pct
+            out.print(
+                f"{cue:<22}{side:<9}{h:>6} ({h_pct:>4.0f}%){m:>6} ({m_pct:>4.0f}%)"
+                f"{lift:>+9.0f}%"
+            )
+            rows.append({
+                "cue": cue, "side": side,
+                "human_n": h, "human_pct": round(h_pct, 2),
+                "machine_n": m, "machine_pct": round(m_pct, 2),
+                "lift_pct": round(lift, 2),
+            })
+
+    # A row with no cues at all is the judge declining to name evidence, which
+    # is worth seeing separately from a row it had plenty to say about.
+    for label, mask, total in (("human", is_human, n_human), ("machine", is_machine, n_machine)):
+        if not total:
+            continue
+        empty = sum(
+            1 for i in np.flatnonzero(mask)
+            if not (_as_cue_list(df[human_col].iloc[i]) or [])
+            and not (_as_cue_list(df[machine_col].iloc[i]) or [])
+        )
+        out.print(f"  no cues at all, {label:<8}: {empty} of {total}")
+
+    if examples:
+        out.print()
+        out.print("Example rationales")
+        shown: dict[str, int] = {}
+        for pos in sorted(band_of, key=lambda p: (band_of[p], p)):
+            band = band_of[pos]
+            if shown.get(band, 0) >= examples or reasons[pos] is None:
+                continue
+            shown[band] = shown.get(band, 0) + 1
+            cues = (_as_cue_list(df[human_col].iloc[pos]) or []) + \
+                   (_as_cue_list(df[machine_col].iloc[pos]) or [])
+            out.print(f"  [{band}] row {pos}  {generators[pos]}  cues: "
+                      f"{', '.join(cues) if cues else '(none)'}")
+            out.print(f"      {reasons[pos]}")
+    out.print("=" * 78)
+    return rows
+
+
+def save_report(rows: list[dict], out: Tee, report_dir: Path, stem: str) -> Path:
+    """Write the log and the cue table where the analyse scripts put theirs."""
+    directory = report_dir / stem
+    directory.mkdir(parents=True, exist_ok=True)
+    out.save(directory / "cue_summary.log")
+    if rows:
+        pd.DataFrame(rows).to_csv(directory / "cue_frequencies.csv", index=False)
+    return directory
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def reason_columns(spec: JudgeModel, prompt_id: str) -> tuple[str, str, str]:
+    """The three columns one explaining judge writes: reason, then the two cue lists."""
+    stem = _identifier(f"{spec.column}_{prompt_id}")
+    return (
+        f"{REASON_PREFIX}{stem}",
+        f"{HUMAN_CUES_PREFIX}{stem}",
+        f"{MACHINE_CUES_PREFIX}{stem}",
+    )
+
+
+def parse_args() -> argparse.Namespace:
+    if "--list-models" in sys.argv:
+        print_models()
+        raise SystemExit(0)
+
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("parquet", type=Path, help="Parquet to add rationales to.")
+    ap.add_argument("--list-models", action="store_true",
+                    help="Print the judge registry and exit.")
+    ap.add_argument("-o", "--out", type=Path, default=None,
+                    help="Output path (default: overwrite the input in place).")
+    ap.add_argument("--model", default=DEFAULT_MODEL, metavar="ALIAS|REPO_ID",
+                    help=f"Model that does the explaining (default: {DEFAULT_MODEL}). "
+                         "Same registry and repo-id support as the scoring script.")
+    ap.add_argument("--column-name", default=None,
+                    help="Override the column stem the rationales are written under.")
+    ap.add_argument("--prompt", default=DEFAULT_PROMPT,
+                    help=f"Prompt version whose evidence half is used (default: "
+                         f"{DEFAULT_PROMPT}). Use the one the scores came from: "
+                         "the cue vocabulary is that version's own evidence list.")
+    ap.add_argument("--score-col", default=None,
+                    help="Score column the bands are read off. Default: the column "
+                         "this model and prompt would have written. Set it when the "
+                         "explaining model is not the model that scored, e.g. "
+                         "--model qwen3-32b-w4a16 --score-col llm_judge_score_gpt56luna_v3.")
+    ap.add_argument("--select", nargs="+", default=list(DEFAULT_BANDS), choices=BANDS,
+                    metavar="BAND",
+                    help=f"Bands to draw from, in order (default: "
+                         f"{' '.join(DEFAULT_BANDS)}). Choices: {', '.join(BANDS)}.")
+    ap.add_argument("--per-band", type=int, default=DEFAULT_PER_BAND,
+                    help=f"Rows per band (default: {DEFAULT_PER_BAND}).")
+    ap.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD,
+                    help=f"score >= this counts as a 'human' verdict when deciding "
+                         f"which rows are wrong (default: {DEFAULT_THRESHOLD}). Use the "
+                         "operating point the analyse script reported, if you have one.")
+    ap.add_argument("--uncertain-band", type=float, default=DEFAULT_UNCERTAIN_BAND,
+                    help=f"Half-width around 0.5 for the 'uncertain' band "
+                         f"(default: {DEFAULT_UNCERTAIN_BAND}).")
+    ap.add_argument("--confident-band", type=float, default=DEFAULT_CONFIDENT_BAND,
+                    help=f"Minimum distance from 0.5 for the 'confident' band "
+                         f"(default: {DEFAULT_CONFIDENT_BAND}).")
+    ap.add_argument("--text-col", default=DEFAULT_TEXT_COL,
+                    help=f"Column holding the text (default: {DEFAULT_TEXT_COL!r}). "
+                         "It is the only column the model ever sees.")
+    ap.add_argument("--generated-by", nargs="+", default=None, metavar="VALUE",
+                    help="Restrict to these generators before the bands are formed. "
+                         f"Pass {ALL_GENERATORS!r} for the default (all of them).")
+    ap.add_argument("--max-chars", type=int, default=None,
+                    help="Truncate each text to this many characters before sending it.")
+    ap.add_argument("--workers", type=int, default=4,
+                    help="Rows in flight for an API model (default: 4).")
+    ap.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE,
+                    help=f"Rows per generate call for a local model (default: "
+                         f"{DEFAULT_BATCH_SIZE}).")
+    ap.add_argument("--device", default=DEFAULT_DEVICE,
+                    help=f"Device for a local model (default: {DEFAULT_DEVICE}).")
+    ap.add_argument("--dtype", default=DEFAULT_DTYPE,
+                    help=f"Weight dtype for a local model (default: {DEFAULT_DTYPE}).")
+    ap.add_argument("--max-doc-tokens", type=int, default=DEFAULT_MAX_DOC_TOKENS,
+                    help=f"Document token budget for a local model (default: "
+                         f"{DEFAULT_MAX_DOC_TOKENS}); 0 sends it whole.")
+    ap.add_argument("--retries", type=int, default=RETRIES,
+                    help=f"Retries per row before it is given up on (default: {RETRIES}).")
+    ap.add_argument("--save-every", type=int, default=SAVE_EVERY,
+                    help=f"Write the Parquet every N explained rows (default: {SAVE_EVERY}).")
+    ap.add_argument("--report-dir", type=Path, default=REPORT_DIR,
+                    help=f"Where the cue summary is written (default: {REPORT_DIR}).")
+    ap.add_argument("--recompute", action="store_true",
+                    help="Re-explain rows that already have a rationale.")
+    ap.add_argument("--summary-only", action="store_true",
+                    help="Do not call any model: just re-print and re-save the cue "
+                         "table from the rationales already in the file.")
+    ap.add_argument("--yes", action="store_true",
+                    help="Skip the confirmation prompt.")
+    return ap.parse_args()
+
+
+def print_findings(
+    path: Path, df: pd.DataFrame, spec: JudgeModel, prompt_id: str, score_col: str,
+    columns: tuple[str, str, str], selection: Selection, positions: np.ndarray,
+    args,
+) -> None:
+    reason_col = columns[0]
+    scored = int(sum(_as_score(v) is not None for v in df[score_col])) \
+        if score_col in df.columns else 0
+    print("=" * 78)
+    print("Parquet")
+    print(f"  file           : {path}")
+    print(f"  rows           : {len(df)}")
+    print(f"  score column   : {score_col}  ({scored} scored)")
+    print("Explainer")
+    print(f"  model          : {spec.key}  ({spec.model})")
+    print(f"  prompt         : {prompt_id}  (evidence half; no score is asked for)")
+    if spec.is_local:
+        print(f"  device         : {args.device} ({dtype_for(spec, args.dtype)})"
+              f", batch {args.batch_size}")
+    print(f"  columns        : {', '.join(columns)}")
+    print("Selection")
+    for band, count in sorted(selection.counts().items()):
+        print(f"    {band:<12}: {count}")
+    print(f"  selected       : {len(selection.positions)}")
+    print(f"  already done   : {len(selection.positions) - len(positions)}")
+    print(f"  to explain now : {len(positions)}")
+    print("=" * 78)
+
+
+def main() -> None:
+    args = parse_args()
+    out_path = args.out or args.parquet
+    spec = resolve_model(args.model, args.column_name)
+    prompt_id = args.prompt
+    columns = reason_columns(spec, prompt_id)
+    reason_col, human_col, machine_col = columns
+    score_col = args.score_col or score_column(spec, prompt_id, MODE_PARSED)
+    stem = f"{args.parquet.stem}+{_identifier(f'{spec.column}_{prompt_id}')}"
+
+    df = load_parquet(args.parquet)
+
+    if args.summary_only:
+        # Nothing is called and nothing is written to the Parquet; this only
+        # re-reads what previous runs stored.
+        out = Tee()
+        rows = cue_report(df, columns, {}, out)
+        print(f"\nReport → {save_report(rows, out, args.report_dir, stem)}")
+        return
+
+    blocked = blocking_reason(spec, args.device)
+    if blocked:
+        raise SystemExit(f"Cannot run explainer {spec.key!r}: {blocked}.")
+
+    eligible = check_parquet(df, args.text_col, args.parquet)
+    allowed = resolve_generated_by(args.generated_by)
+    eligible = apply_generated_by(
+        df, eligible, allowed, args.generated_by is not None, args.parquet
+    )
+
+    if score_col not in df.columns and set(args.select) - {BAND_ALL}:
+        raise KeyError(
+            f"{args.parquet} has no score column {score_col!r}, so the bands "
+            "have nothing to select on. Score the file first, pass --score-col, "
+            f"or use --select {BAND_ALL}."
+        )
+    # NaN for "no score here", which is what keeps an unscored row out of every
+    # band that is defined by a score without needing a second mask.
+    stored = (
+        [_as_score(v) for v in df[score_col]] if score_col in df.columns
+        else [None] * len(df)
+    )
+    scores = np.array([np.nan if s is None else float(s) for s in stored], dtype=float)
+
+    selection = select_rows(
+        df, eligible, scores, args.select, args.per_band, args.threshold,
+        args.uncertain_band, args.confident_band,
+    )
+    if len(selection.positions) == 0:
+        print("No rows matched the selected bands — nothing to do.")
+        return
+
+    done = (
+        np.array([_as_reason(v) is not None for v in df[reason_col]])
+        if reason_col in df.columns
+        else np.zeros(len(df), dtype=bool)
+    )
+    positions = (
+        selection.positions if args.recompute
+        else np.array([p for p in selection.positions if not done[p]], dtype=int)
+    )
+
+    print_findings(args.parquet, df, spec, prompt_id, score_col, columns,
+                   selection, positions, args)
+
+    if len(positions) == 0:
+        print("Every selected row already has a rationale — nothing to do.")
+        print("(Pass --recompute to ask again, or --summary-only for the table.)")
+        return
+
+    print()
+    if spec.is_local:
+        print(f"NOTE  {len(positions)} row(s) will be explained on {args.device}.")
+    else:
+        print(f"NOTE  this is a billed API call: {len(positions)} row(s) will be sent.")
+    if not args.yes:
+        answer = input(f"Proceed and write to {out_path}? Type 'yes': ").strip().lower()
+        if answer != "yes":
+            print("Aborted — no changes made.")
+            return
+
+    explainer = build_explainer(spec, prompt_id, args)
+
+    reasons: list = list(df[reason_col]) if reason_col in df.columns else [None] * len(df)
+    human_cues: list = list(df[human_col]) if human_col in df.columns else [None] * len(df)
+    machine_cues: list = list(df[machine_col]) if machine_col in df.columns else [None] * len(df)
+
+    texts = {
+        int(pos): (
+            str(df.iloc[pos][args.text_col])[: args.max_chars]
+            if args.max_chars else str(df.iloc[pos][args.text_col])
+        )
+        for pos in positions
+    }
+
+    failures: list[tuple[int, str]] = []
+    counters = {"done": 0}
+    save_lock = threading.Lock()
+    started = time.perf_counter()
+
+    def write_out() -> None:
+        df[reason_col] = pd.Series(reasons, index=df.index, dtype="object")
+        df[human_col] = pd.Series(human_cues, index=df.index, dtype="object")
+        df[machine_col] = pd.Series(machine_cues, index=df.index, dtype="object")
+        save_parquet(df, out_path)
+
+    def record(result: RowExplanation) -> None:
+        if result.explanation is not None:
+            reasons[result.position] = result.explanation.rationale
+            human_cues[result.position] = list(result.explanation.human_cues)
+            machine_cues[result.position] = list(result.explanation.machine_cues)
+        if result.error is not None:
+            failures.append((result.position, result.error))
+            tqdm.write(f"  row {result.position} failed: {result.error}")
+        counters["done"] += 1
+        with save_lock:
+            if counters["done"] % args.save_every == 0:
+                write_out()
+
+    order = [int(p) for p in positions]
+    try:
+        if spec.is_local:
+            batches = [
+                order[i : i + max(1, args.batch_size)]
+                for i in range(0, len(order), max(1, args.batch_size))
+            ]
+            with tqdm(total=len(order), desc=f"Explaining ({spec.key})", unit="row") as bar:
+                for batch in batches:
+                    for result in explain_batch(explainer, batch, texts, args.retries):
+                        record(result)
+                    bar.update(len(batch))
+        else:
+            pool = ThreadPoolExecutor(max_workers=max(1, args.workers))
+            try:
+                futures = [
+                    pool.submit(explain_row, explainer, pos, texts[pos], args.retries)
+                    for pos in order
+                ]
+                for future in tqdm(as_completed(futures), total=len(futures),
+                                   desc=f"Explaining ({spec.key})", unit="row"):
+                    record(future.result())
+            finally:
+                pool.shutdown(wait=False, cancel_futures=True)
+    except KeyboardInterrupt:
+        print("\nInterrupted — writing the rationales obtained so far.")
+
+    write_out()
+
+    seconds = time.perf_counter() - started
+    print()
+    print("=" * 78)
+    print("Rationales written")
+    print(f"  output  : {out_path}")
+    print(f"  columns : {', '.join(columns)}")
+    print(f"  done    : {counters['done'] - len(failures)} rows in {seconds:.1f}s")
+    print(f"  failed  : {len(failures)}")
+    if failures:
+        by_message: dict[str, int] = {}
+        for _, message in failures:
+            by_message[message] = by_message.get(message, 0) + 1
+        for message, count in sorted(by_message.items(), key=lambda kv: -kv[1]):
+            print(f"    {count:>5}x  {message[:100]}")
+    unknown = getattr(explainer, "unknown_cues", {})
+    if unknown:
+        print("  cue labels outside the vocabulary, dropped from the counts:")
+        for label, count in sorted(unknown.items(), key=lambda kv: -kv[1])[:10]:
+            print(f"    {count:>5}x  {label!r}")
+    print("=" * 78)
+    print()
+
+    out = Tee()
+    rows = cue_report(df, columns, selection.band_of, out)
+    print(f"\nReport → {save_report(rows, out, args.report_dir, stem)}")
+
+
+if __name__ == "__main__":
+    main()
