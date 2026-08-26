@@ -67,7 +67,8 @@ episteme-ai/
 │   │   │                          #   combine_domains.py, normalize_text.py,
 │   │   │                          #   truncate_text.py
 │   │   ├── embed/add_embeddings.py#   Add multiple embedding columns to a Parquet
-│   │   ├── llm_judge/             #   LLM-as-judge scores
+│   │   ├── score/                 #   run_binox_pairs.py (Binoculars pairs),
+│   │   │                          #   add_llm_judge_scores.py (LLM-as-judge)
 │   │   ├── analyse/               #   PCA/geometry, surface artifacts, score EDA
 │   │   └── train/                 #   run_clf_cross_domain.py + replot_cross_domain.py,
 │   │                              #   run_clf_in_domain.py    + replot_in_domain.py,
@@ -547,7 +548,7 @@ EDA on NAIP-enriched datasets. Produces score distributions per `generated_by` g
 [prepare_{reuter,wp,essay,denario}.py]   ← Stage A: raw text → Parquet (one per corpus)
    ↓  data/parquet/<corpus>.parquet
 [add_embeddings.py]                      ← Stage B: add emb_* columns
-[add_llm_judge_scores.py]                ←          add llm_judge_score_* columns
+[add_llm_judge_scores.py]                ←          add llm_judge_score_<model>_<prompt>
    ↓  data/parquet/<corpus>_binox*.parquet
 [combine_domains.py]                     ← Stage C: the per-corpus files → ONE file
    ↓  data/parquet/ghostbuster_<generator>.parquet   (uid, id, domain, text, …)
@@ -664,8 +665,8 @@ list applies. Supported embedders:
 The Parquet is written after every embedder finishes — a crash does not throw away completed embeddings.
 
 ```bash
-# LLM-as-judge P(human) per row
-uv run python epai/ai_detection/llm_judge/add_llm_judge_scores.py data/parquet/reuter_binox0.parquet
+# LLM-as-judge P(human) per row -> llm_judge_score_<model>_<prompt>
+uv run python epai/ai_detection/score/add_llm_judge_scores.py data/parquet/ghostbuster_gpt56luna.parquet
 ```
 
 ---

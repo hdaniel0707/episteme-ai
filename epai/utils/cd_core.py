@@ -87,7 +87,7 @@ DEFAULT_BINOX_COL = "binoculars_score"
 
 # The LLM judge writes P(human) per row -- 1.0 => human, 0.0 => machine -- so a
 # LOW score means machine, the same direction as Binoculars.
-DEFAULT_JUDGE_COL = "llm_judge_score_gpt54_mini"
+DEFAULT_JUDGE_COL = "llm_judge_score_gpt56luna_v2"
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +188,7 @@ BASELINE_KINDS: tuple[BaselineKind, ...] = (
         key="llm_judge",
         cfg_key="llm_judge_baseline",
         default_col=DEFAULT_JUDGE_COL,
-        column_prefix="llm_judge_score",  # ..._gpt54_mini, one per judge model
+        column_prefix="llm_judge_score",  # ..._<model>_<prompt>, one per judge
         machine_is_high=False,  # the judge reports P(human), so LOW means machine
         label="LLM judge",
     ),

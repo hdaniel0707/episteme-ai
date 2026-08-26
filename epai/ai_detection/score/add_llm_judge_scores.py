@@ -2,17 +2,14 @@
 
 Reads a Parquet, walks its rows, and for each one sends *only* the ``text``
 column to a judge model that returns P(human-written) in [0, 1]. The score
-lands in a new ``llm_judge_score_{model}`` column; nothing else in the file is
-touched, so this sits next to ``binoculars_score`` as a second zero-training
-baseline and can be compared with it on the same threshold sweeps.
+lands in a new ``llm_judge_score_{model}_{prompt}`` column; nothing else in the
+file is touched, so this sits next to ``binoculars_score`` as a second
+zero-training baseline and can be compared with it on the same threshold
+sweeps.
 
 **1.0 means human, 0.0 means machine.** That is the same direction as
-``binoculars_score`` (low ⇒ machine), so both baselines read the same way and a
-threshold rule is ``score <= thr ⇒ machine`` for either. Scores written by an
-earlier version of this script are P(machine) -- the opposite -- and the column
-name does not distinguish the two, so a file scored before the flip has to be
-re-judged: drop the stale column with
-``epai/scripts/delete_parquet_columns.py`` and run this script again.
+``binoculars_score`` (low => machine), so both baselines read the same way and a
+threshold rule is ``score <= thr => machine`` for either.
 
 The judge sees the document and nothing else -- no label, no ``generated_by``,
 no domain, no neighbouring rows -- which is the point: the score has to be
@@ -21,10 +18,29 @@ against. It is a probability rather than a verdict, so ROC-AUC is available and
 the operating point stays tunable after the fact (a hard verdict is just
 ``score <= 0.5``).
 
-Only rows whose ``generated_by`` is in ``DEFAULT_GENERATED_BY`` are judged
-(``--generated-by`` overrides the list, ``--generated-by all`` judges every
-generator); the rest keep a Null score, so a file can be scored for the
-generators a comparison needs without paying for the ones it does not.
+MODEL AND PROMPT BOTH NAME THE COLUMN
+-------------------------------------
+A judge score only means something within one (model, prompt) pair: change
+either and the numbers are no longer on the same scale, but a column called
+``llm_judge_score`` would happily hold both and nothing downstream could tell
+them apart. So both go in the name -- ``--model gpt56luna --prompt v2`` writes
+``llm_judge_score_gpt56luna_v2`` -- and re-running with a different model or
+prompt adds a column instead of overwriting one. That is what makes a prompt
+A/B (below) safe to run against the real corpus.
+
+``--model`` picks the judge from ``MODELS`` (default ``gpt56luna``); the alias,
+not the raw API id, names the column, because ``gpt-5.6-luna`` would not survive
+as an identifier and the alias is the name the rest of the pipeline already uses
+for that model. ``--prompt`` picks the system prompt from ``PROMPTS`` (default
+``v2``); see the note above ``PROMPTS`` for what changed between the versions
+and why.
+
+WHICH ROWS ARE JUDGED
+---------------------
+Every row with a non-empty text, by default. ``--generated-by`` narrows that to
+named generators, which in these corpora are ``human`` and a
+``<model_slug>:<prompt_id>`` label such as ``gpt56luna:0701A``. The judge never
+sees the column; it only decides which rows are worth paying for.
 
 Rows whose text is empty (None/NaN/blank) are never sent to a model and keep a
 Null score. Rows that already hold a score are skipped: the run asks whether to
@@ -37,27 +53,46 @@ An API error on one row costs that row (Null score, counted in the summary) and
 nothing else; the run keeps going. Each call is retried ``--retries`` times with
 exponential backoff first, so a transient rate limit is not a lost row.
 
-``--model`` picks the judge from ``MODELS`` below (default ``gpt54_mini``). The
-alias, not the raw API id, is what the column is named after -- ``gpt-5.4-mini``
-would not survive as an identifier, and the alias is the name the rest of the
-pipeline already uses for that model.
+Run -- the full corpus set:
+    uv run python epai/ai_detection/score/add_llm_judge_scores.py \
+        data/parquet/ghostbuster_gpt35t.parquet
+    uv run python epai/ai_detection/score/add_llm_judge_scores.py \
+        data/parquet/ghostbuster_gpt35ts.parquet
+    uv run python epai/ai_detection/score/add_llm_judge_scores.py \
+        data/parquet/ghostbuster_gpt54mini.parquet
+    uv run python epai/ai_detection/score/add_llm_judge_scores.py \
+        data/parquet/ghostbuster_gpt56luna.parquet
+    uv run python epai/ai_detection/score/add_llm_judge_scores.py \
+        data/parquet/science_v1_gpt56luna_0807A.parquet
+    uv run python epai/ai_detection/score/add_llm_judge_scores.py \
+        data/parquet/science_v3_gpt56luna_0811A.parquet
+    uv run python epai/ai_detection/score/add_llm_judge_scores.py \
+        data/parquet/x_science_v1_gpt56luna_0811A.parquet
 
-Run:
-    uv run python epai/ai_detection/llm_judge/add_llm_judge_scores.py data/parquet/essay_gpt54mini_binox0.parquet
-    uv run python epai/ai_detection/llm_judge/add_llm_judge_scores.py data/parquet/reuter_binox0.parquet --model haiku45 --workers 8
+Unlike run_binox_pairs.py these are API calls, not GPU work, so several corpora
+can run at once -- but never two processes on the SAME file: adding a column is
+a read-modify-write of the whole Parquet and the second writer would silently
+drop the first one's column.
 
-    # every generator in the file, not just the default three
-    uv run python epai/ai_detection/llm_judge/add_llm_judge_scores.py data/parquet/reuter_binox0.parquet --generated-by all
+IS THE PROMPT ANY GOOD? -- A/B IT BEFORE THE FULL RUN
+-----------------------------------------------------
+``--limit N`` judges N eligible rows drawn round-robin across the generators, so
+a corpus stored human-block-then-machine-block still yields both classes and the
+summary's mean-per-group / accuracy / ROC-AUC lines are meaningful. Two cheap
+runs on the same file put the prompts side by side in two columns:
 
-    uv run python epai/ai_detection/llm_judge/add_llm_judge_scores.py data/parquet/wp_binox0.parquet
-    uv run python epai/ai_detection/llm_judge/add_llm_judge_scores.py data/parquet/essay_binox0.parquet
-    uv run python epai/ai_detection/llm_judge/add_llm_judge_scores.py data/parquet/reuter_binox0.parquet
-    uv run python epai/ai_detection/llm_judge/add_llm_judge_scores.py data/parquet/wp_gpt54mini_binox0.parquet
-    uv run python epai/ai_detection/llm_judge/add_llm_judge_scores.py data/parquet/essay_gpt54mini_binox0.parquet
-    uv run python epai/ai_detection/llm_judge/add_llm_judge_scores.py data/parquet/reuter_gpt54mini_binox0.parquet
+    uv run python epai/ai_detection/score/add_llm_judge_scores.py \
+        data/parquet/ghostbuster_gpt56luna.parquet --prompt v1 --limit 200 --yes
+    uv run python epai/ai_detection/score/add_llm_judge_scores.py \
+        data/parquet/ghostbuster_gpt56luna.parquet --prompt v2 --limit 200 --yes
 
-    # debug: 20 rows only, into a scratch copy
-    uv run python epai/ai_detection/llm_judge/add_llm_judge_scores.py data/parquet/wp_binox0.parquet --limit 5
+Compare the two ROC-AUCs, and the per-generator means: a prompt that separates
+the classes well but puts BOTH means on one side of 0.5 is mis-calibrated rather
+than blind, and is fixed by moving the threshold, not the prompt.
+
+    # smoke test into a scratch copy, leaving the corpus untouched
+    uv run python epai/ai_detection/score/add_llm_judge_scores.py \
+        data/parquet/ghostbuster_gpt56luna.parquet --limit 20 -o /tmp/judge_smoke.parquet
 """
 
 from __future__ import annotations
@@ -83,22 +118,27 @@ from epai.utils.parquet_utils import load_parquet, save_parquet
 load_dotenv()
 
 # Judge models, keyed by the short alias used everywhere else in the pipeline.
-# The alias also names the output column, so it has to stay identifier-safe.
+# The alias also names the output column, so it has to stay identifier-safe --
+# hence `gpt56luna` rather than the API id `gpt-5.6-luna`, matching the slug the
+# generation side already writes into filenames and `generated_by` labels.
 MODELS: dict[str, dict[str, str]] = {
-    "gpt54_mini": {"provider": "openai", "model": "gpt-5.4-mini"},
+    "gpt56luna": {"provider": "openai", "model": "gpt-5.6-luna"},
+    "gpt54mini": {"provider": "openai", "model": "gpt-5.4-mini"},
     "haiku45": {"provider": "anthropic", "model": "claude-haiku-4-5-20251001"},
 }
 
-DEFAULT_MODEL = "gpt54_mini"
+DEFAULT_MODEL = "gpt56luna"
 DEFAULT_TEXT_COL = "text"
 COL_PREFIX = "llm_judge_score_"
 
-# Only rows with one of these `generated_by` values are judged. The judge never
-# sees the column -- it only decides which rows are worth paying for.
-# `--generated-by` overrides the list; `--generated-by all` turns it off.
+# Which rows are judged. Default: every row with a non-empty text, human and
+# machine alike -- the machine rows are labelled `<model_slug>:<prompt_id>`
+# (`gpt56luna:0701A`), so there is no fixed list of generator names that would
+# hold across corpora, and a stale one silently judges nothing. `--generated-by`
+# names them explicitly when only part of a file is wanted. The judge never sees
+# the column; it only decides which rows are worth paying for.
 GENERATED_BY_COL = "generated_by"
-#DEFAULT_GENERATED_BY = ["human"]
-DEFAULT_GENERATED_BY = ["human", "gpt", "gpt_plain"]
+DEFAULT_GENERATED_BY: list[str] | None = None
 ALL_GENERATORS = "all"
 
 # Environment variable each provider needs, checked up front so a long run does
@@ -121,7 +161,37 @@ BACKOFF_BASE = 2.0
 # only there to bound a pathological response.
 MAX_TOKENS = 256
 
-SYSTEM_PROMPT = """You are a forensic linguist specialising in the detection of machine-generated text.
+# System prompts, keyed by version. The version names the output column together
+# with the model alias, so both are kept here rather than edited in place: a
+# score is only comparable to another score from the same (model, prompt) pair,
+# and editing a prompt under a fixed name is exactly how two incomparable sets of
+# numbers end up in one column.
+#
+# v1 -> v2, and why:
+#
+#   * v1 told the judge that typos, ragged formatting and inconsistent
+#     punctuation indicate a human, and that their absence indicates a machine --
+#     then, three lines later, to ignore formatting artefacts. On this corpus the
+#     first instruction is not just contradictory but wrong: `prepare/` normalises
+#     and standardises every document before it is stored, so surface noise has
+#     been rewritten out of the human rows and the machine rows alike. A judge
+#     following v1 reads "no typos" off a normalised human essay and marks it
+#     machine. v2 states the pipeline explicitly and rules the whole surface layer
+#     out of evidence.
+#
+#   * v1's human cues -- digressions, personal voice, lived detail -- describe an
+#     essay or a forum post. Half these corpora are wire reports and scientific
+#     abstracts, where a human author has none of those by convention, so the cues
+#     drag exactly the human rows of those domains toward `machine`. v2 makes the
+#     comparison genre-relative: unusual *for this kind of document*, not unusual
+#     in general.
+#
+#   * v1 asked for a probability but nothing discouraged round numbers, and judges
+#     pile answers onto 0.2/0.5/0.8. Ties are free AUC lost -- the metric only
+#     reads the ranking. v2 asks for two decimals and says why.
+PROMPTS: dict[str, str] = {}
+
+PROMPTS["v1"] = """You are a forensic linguist specialising in the detection of machine-generated text.
 
 You will be shown one document and nothing else: no title, no author, no source, no metadata, no context. Judge the text on its own evidence.
 
@@ -149,6 +219,45 @@ Calibration rules:
 - Formatting artefacts (truncation, stray whitespace, encoding damage) come from the corpus, not from the author. Ignore them.
 
 Reply with the probability only."""
+
+PROMPTS["v2"] = """You are a forensic linguist estimating whether a document was written by a human or generated by a large language model.
+
+You will be shown one document and nothing else: no title, no author, no source, no metadata, no context. Judge it on its own evidence.
+
+JUDGE RELATIVE TO THE GENRE
+The document may be a student essay, a news report, a piece of short fiction, a scientific abstract, or something else entirely. Work out what kind of document it is trying to be, then ask whether it reads like a competent human working in that genre or like a model imitating one. A wire report carries no personal voice and an abstract carries no digressions; in those genres that is the convention, not evidence of a machine. The question is always "unusual for this kind of document?", never "unusual in general?".
+
+EVIDENCE THAT TENDS TO INDICATE HUMAN AUTHORSHIP
+- Specifics a model could not reconstruct from general knowledge: particular names, numbers, dates, places, results, quoted words -- and load-bearing rather than decorative, so that removing one would damage the text.
+- Commitment: a definite claim, an unbalanced opinion, an argument that goes somewhere instead of hedging back to neutral.
+- Asymmetry: uneven emphasis, a paragraph that runs long because the writer cared about it, a point raised and dropped, a sentence that changes direction mid-way.
+- Idiom, slang, humour, irony, in-group shorthand; the habits of a field used the way a practitioner uses them rather than the way they would be explained.
+
+EVIDENCE THAT TENDS TO INDICATE MACHINE AUTHORSHIP
+- Fluent but generic vocabulary; an abstraction where a specific would have been natural.
+- Even, predictable rhythm: uniform sentence and paragraph lengths, repetitive clause structure.
+- Tidy scaffolding: symmetrical structure, explicit enumeration, a closing sentence that restates what came before and adds nothing.
+- Hedged, balanced framing that declines to commit: every side acknowledged, none pressed.
+- Coverage in place of depth: each obvious aspect of the topic given a proportionate share, nothing pursued further than the rest.
+
+EVIDENCE THAT IS NOT AVAILABLE HERE -- DO NOT USE IT
+These documents were normalised and truncated by a preprocessing pipeline before you saw them. Therefore:
+- Punctuation and typography (quotation marks, dashes, apostrophes, ellipses, spacing, capitalisation) were rewritten by that pipeline. They tell you about the pipeline, not about the author.
+- The absence of typos and misspellings is NOT evidence of machine authorship here, and their presence is at most weak evidence of human authorship.
+- A document may stop mid-sentence, or lack an ending, because it was cut to a length budget. Never read truncation as a choice the author made.
+- Any other formatting damage -- stray whitespace, broken encoding, lost markup, a stranded fragment -- comes from the corpus.
+- Length is not evidence. A short document is harder to judge, not more likely to be machine-written.
+- Polish is not evidence. Careful, edited human writing is fluent and correct.
+
+CALIBRATION
+- Return a probability that the document is HUMAN-written. 1.0 means certainly human, 0.0 means certainly machine, 0.5 means the text carries no usable evidence either way.
+- Use the whole range, and give two decimal places. Do not settle on round values such as 0.20, 0.50 or 0.80: if your belief falls between two of them, say so (0.37, 0.62). These scores are ranked against each other, so every tie is information thrown away.
+- Reserve values below 0.10 and above 0.90 for documents where the evidence is genuinely strong.
+- Do not assume any particular mix of human and machine documents, and do not try to balance your answers across documents. Judge each one on its own.
+
+Reply with the probability only."""
+
+DEFAULT_PROMPT = "v2"
 
 USER_TEMPLATE = "<document>\n{text}\n</document>"
 
@@ -189,6 +298,14 @@ def parse_args() -> argparse.Namespace:
         help=f"Judge model alias (default: {DEFAULT_MODEL}).",
     )
     ap.add_argument(
+        "--prompt",
+        default=DEFAULT_PROMPT,
+        choices=sorted(PROMPTS),
+        help=f"System prompt version (default: {DEFAULT_PROMPT}). It names the "
+        "output column together with the model, so two versions can be scored "
+        "side by side on the same file and compared.",
+    )
+    ap.add_argument(
         "--text-col",
         default=DEFAULT_TEXT_COL,
         help=f"Column holding the text to judge (default: {DEFAULT_TEXT_COL!r}). "
@@ -214,17 +331,18 @@ def parse_args() -> argparse.Namespace:
         default=None,
         metavar="VALUE",
         help="Only judge rows whose "
-        f"{GENERATED_BY_COL!r} is one of these values (default: "
-        f"{' '.join(DEFAULT_GENERATED_BY)}). Pass {ALL_GENERATORS!r} to judge "
-        "every row whatever its generator.",
+        f"{GENERATED_BY_COL!r} is one of these values, e.g. --generated-by "
+        "human gpt56luna:0701A. Default: judge every generator. "
+        f"Pass {ALL_GENERATORS!r} for the default explicitly.",
     )
     ap.add_argument(
         "--limit",
         type=int,
         default=None,
-        help="Debug option: only judge the first N eligible rows (after the "
-        "empty-text and --generated-by filters). The rest keep whatever they "
-        "already have, they are not dropped from the output.",
+        help="Only judge N eligible rows, drawn round-robin across the "
+        f"{GENERATED_BY_COL!r} values so both classes are represented (see "
+        "apply_limit). For smoke tests and prompt comparisons. The rest keep "
+        "whatever they already have, they are not dropped from the output.",
     )
     ap.add_argument(
         "--retries",
@@ -253,9 +371,14 @@ def parse_args() -> argparse.Namespace:
     return ap.parse_args()
 
 
-def score_column(model_alias: str) -> str:
-    """Output column for one judge, e.g. ``llm_judge_score_gpt54_mini``."""
-    safe = re.sub(r"[^0-9a-zA-Z]+", "_", model_alias).strip("_").lower()
+def score_column(model_alias: str, prompt_id: str) -> str:
+    """Output column for one judge, e.g. ``llm_judge_score_gpt56luna_v2``.
+
+    Both parts are in the name deliberately: scores from two models, or from two
+    prompts, are not on the same scale, and a shared column would mix them with
+    nothing downstream able to tell which row came from which.
+    """
+    safe = re.sub(r"[^0-9a-zA-Z]+", "_", f"{model_alias}_{prompt_id}").strip("_").lower()
     return f"{COL_PREFIX}{safe}"
 
 
@@ -285,18 +408,20 @@ def _as_score(value) -> float | None:
 
 
 class Judge:
-    """One judge model, callable per row.
+    """One judge model under one system prompt, callable per row.
 
     Holds the provider client (thread-safe in all three SDKs, so the same
     instance serves every worker) and turns whatever the provider returns into a
     plain float.
     """
 
-    def __init__(self, alias: str) -> None:
+    def __init__(self, alias: str, prompt_id: str = DEFAULT_PROMPT) -> None:
         spec = MODELS[alias]
         self.alias = alias
         self.provider = spec["provider"]
         self.model = spec["model"]
+        self.prompt_id = prompt_id
+        self.system_prompt = PROMPTS[prompt_id]
         self._client = self._build_client()
 
     def _build_client(self):
@@ -330,7 +455,7 @@ class Judge:
         response = self._client.chat.completions.parse(
             model=self.model,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": self.system_prompt},
                 {"role": "user", "content": USER_TEMPLATE.format(text=text)},
             ],
             response_format=JudgeVerdict,
@@ -346,7 +471,7 @@ class Judge:
         response = self._client.messages.create(
             model=self.model,
             max_tokens=MAX_TOKENS,
-            system=SYSTEM_PROMPT,
+            system=self.system_prompt,
             tools=[
                 {
                     "name": "report_probability",
@@ -382,7 +507,7 @@ class Judge:
             model=self.model,
             contents=USER_TEMPLATE.format(text=text),
             config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT,
+                system_instruction=self.system_prompt,
                 response_mime_type="application/json",
                 response_schema=JudgeVerdict,
             ),
@@ -445,7 +570,9 @@ def check_parquet(df: pd.DataFrame, text_col: str, path: Path) -> np.ndarray:
 
 def resolve_generated_by(requested: list[str] | None) -> list[str] | None:
     """The effective generator filter; None means 'judge every generator'."""
-    values = list(DEFAULT_GENERATED_BY) if requested is None else list(requested)
+    if requested is None:
+        return list(DEFAULT_GENERATED_BY) if DEFAULT_GENERATED_BY else None
+    values = list(requested)
     if any(v.strip().lower() == ALL_GENERATORS for v in values):
         return None
     return values
@@ -497,19 +624,48 @@ def apply_generated_by(
     return filtered
 
 
-def apply_limit(judgeable: np.ndarray, limit: int | None) -> np.ndarray:
-    """Restrict the judgeable mask to the first ``limit`` eligible rows.
+def apply_limit(
+    df: pd.DataFrame, judgeable: np.ndarray, limit: int | None
+) -> np.ndarray:
+    """Restrict the judgeable mask to ``limit`` eligible rows, spread evenly.
 
-    Counted over eligible rows rather than file positions: with a generator
-    filter the first N rows of the file can easily hold no eligible row at all,
-    which would make the debug flag useless on a grouped Parquet.
+    Counted over eligible rows rather than file positions, and drawn round-robin
+    across the ``generated_by`` values rather than in file order. These corpora
+    are stored one generator after another -- every human row, then every machine
+    row -- so taking the first N would hand back one class only, and the summary's
+    accuracy and ROC-AUC lines (which is the whole point of a small run) would
+    have nothing to separate.
+
+    Within a generator the rows are still taken in file order, so the same
+    ``--limit N`` on the same file always selects the same rows: two prompt
+    versions are then compared on identical documents rather than on two samples.
     """
     if limit is None:
         return judgeable
     if limit < 1:
         raise ValueError(f"--limit must be >= 1, got {limit}")
+
+    eligible = np.flatnonzero(judgeable)
+    if GENERATED_BY_COL in df.columns:
+        generators = df[GENERATED_BY_COL].astype(str).to_numpy()
+        buckets: dict[str, list[int]] = {}
+        for pos in eligible:
+            buckets.setdefault(generators[pos], []).append(int(pos))
+        chosen: list[int] = []
+        depth = 0
+        while len(chosen) < limit and any(len(b) > depth for b in buckets.values()):
+            for name in sorted(buckets):
+                if len(buckets[name]) > depth:
+                    chosen.append(buckets[name][depth])
+                    if len(chosen) == limit:
+                        break
+            depth += 1
+        picked = np.array(chosen, dtype=int)
+    else:
+        picked = eligible[:limit]
+
     limited = np.zeros_like(judgeable)
-    limited[np.flatnonzero(judgeable)[:limit]] = True
+    limited[picked] = True
     return limited
 
 
@@ -542,15 +698,10 @@ def count_scored(df: pd.DataFrame, col: str, judgeable: np.ndarray) -> int:
 def confirm_recompute(n_scored: int) -> bool:
     """Ask whether to re-judge rows that already have a score. Default: no.
 
-    Worth a second thought on a file scored before this script switched to
-    P(human): those values are P(machine), the column name is the same either
-    way, and keeping them mixes both conventions in one column.
+    Keeping them is nearly always right -- the column is named after this exact
+    (model, prompt) pair, so whatever is in it was produced by this same judge --
+    and re-judging means paying for those rows a second time.
     """
-    print(
-        "NOTE  scores written before this script switched to P(human) are "
-        "P(machine) — the opposite direction — and are indistinguishable from "
-        "new ones. Re-judge (or drop the column) if this file predates the flip."
-    )
     answer = input(
         f"{n_scored} judgeable row(s) already have a score for this judge. "
         "Re-judge them? [y/N]: "
@@ -565,6 +716,7 @@ def print_findings(
     col: str,
     alias: str,
     judge_model: str,
+    prompt_id: str,
     judgeable: np.ndarray,
     positions: np.ndarray,
     allowed: list[str] | None,
@@ -578,17 +730,24 @@ def print_findings(
     print(f"  rows          : {len(df)}")
     print(f"  text column   : {text_col!r}  (the only column sent to the model)")
     print(f"  empty text    : {n_empty}  (never judged, score stays Null)")
-    if allowed is None or GENERATED_BY_COL not in df.columns:
-        print("  generated_by  : all generators")
+    if GENERATED_BY_COL not in df.columns:
+        print("  generated_by  : column absent — every row is eligible")
     else:
-        print(f"  generated_by  : {', '.join(allowed)}")
+        print(
+            "  generated_by  : "
+            + ("all generators" if allowed is None else ", ".join(allowed))
+        )
+        # Per generator, always: with a filter it shows the filter worked, and
+        # without one it is the check that a --limit run has both classes in it.
         generators = df[GENERATED_BY_COL].astype(str).to_numpy()
-        for name in allowed:
-            print(f"    {name:<12}: {int((judgeable & (generators == name)).sum())}")
+        for name in sorted(set(generators)):
+            n = int((judgeable & (generators == name)).sum())
+            print(f"    {name:<18}: {n}")
     print(f"  eligible      : {int(judgeable.sum())}")
     print("Judge")
     print(f"  alias         : {alias}")
     print(f"  api model     : {judge_model}")
+    print(f"  prompt        : {prompt_id}")
     print("  score         : P(human)  —  1.0 ⇒ human, 0.0 ⇒ machine")
     print(f"  column        : {col}  ({'exists' if col in df.columns else 'new'})")
     print(f"  already scored: {n_scored}")
@@ -625,13 +784,22 @@ def evaluate(df: pd.DataFrame, col: str) -> None:
     print("  score is P(human): 1.0 ⇒ human, 0.0 ⇒ machine")
     for name in sorted(set(truth[known])):
         group = y_score[truth[known] == name]
-        print(f"  mean score, {name:<12}: {group.mean():.3f}  (n={len(group)})")
-    print(f"  accuracy @ 0.5{'':<10}: {((y_score >= 0.5).astype(int) == y_true).mean():.3f}")
+        print(f"  mean score, {name:<18}: {group.mean():.3f}  (n={len(group)})")
+    accuracy = ((y_score >= 0.5).astype(int) == y_true).mean()
+    print(f"  accuracy @ 0.5{'':<16}: {accuracy:.3f}")
+
+    # How much of the ranking the judge threw away by answering in round numbers.
+    # ROC-AUC only reads the order, so tied scores are the one failure mode a
+    # good mean separation can hide -- and the thing the v2 prompt asks against.
+    n_distinct = len(set(y_score.tolist()))
+    print(
+        f"  distinct values{'':<15}: {n_distinct} over {len(y_score)} scored rows"
+    )
 
     if len(set(y_true)) == 2:
         from sklearn.metrics import roc_auc_score
 
-        print(f"  ROC-AUC{'':<17}: {roc_auc_score(y_true, y_score):.3f}")
+        print(f"  ROC-AUC{'':<23}: {roc_auc_score(y_true, y_score):.3f}")
 
 
 def print_summary(
@@ -669,8 +837,9 @@ def main() -> None:
     args = parse_args()
     out_path = args.out or args.parquet
     alias = args.model
+    prompt_id = args.prompt
     spec = MODELS[alias]
-    col = score_column(alias)
+    col = score_column(alias, prompt_id)
 
     blocked = blocking_reason(spec["provider"])
     if blocked:
@@ -684,7 +853,7 @@ def main() -> None:
         df, judgeable, allowed, args.generated_by is not None, args.parquet
     )
     n_eligible = int(judgeable.sum())
-    judgeable = apply_limit(judgeable, args.limit)
+    judgeable = apply_limit(df, judgeable, args.limit)
 
     recompute = args.recompute
     positions = positions_to_judge(df, col, judgeable, recompute)
@@ -695,15 +864,16 @@ def main() -> None:
         col,
         alias,
         spec["model"],
+        prompt_id,
         judgeable,
         positions,
         allowed,
     )
     if args.limit is not None:
         print(
-            f"NOTE  --limit {args.limit}: only the first {int(judgeable.sum())} "
-            f"of {n_eligible} eligible row(s) are considered; the counts above "
-            "are within that window."
+            f"NOTE  --limit {args.limit}: {int(judgeable.sum())} of "
+            f"{n_eligible} eligible row(s) are considered, drawn round-robin "
+            "across the generators; the counts above are within that window."
         )
 
     # Existing scores are kept unless the run is told otherwise. --recompute
@@ -732,7 +902,7 @@ def main() -> None:
             print("Aborted — no changes made.")
             return
 
-    judge = Judge(alias)
+    judge = Judge(alias, prompt_id)
 
     # Existing values are carried over untouched; only `positions` are replaced.
     values: list[float | None] = (

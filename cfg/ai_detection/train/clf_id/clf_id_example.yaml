@@ -230,7 +230,7 @@ binoculars_baseline:
 # scored/unscored row counts and errors out if what is left is single-class.
 llm_judge_baseline:
   enabled: false
-  column: "llm_judge_score_gpt54_mini"
+  column: "llm_judge_score_gpt56luna_v2"
   threshold: 0.5
 
 # ---------------------------------------------------------------------------

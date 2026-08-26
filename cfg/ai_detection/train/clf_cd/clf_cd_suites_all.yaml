@@ -26,8 +26,11 @@
 # something about generators; one that only falls on science_v3 is telling you
 # something about the corpus.
 #
-# COST. 4 datasets x 6 variants x 3 seeds x 3 sources = 216 fits — the same work
-# as running the four sibling configs, under one preflight and one experiment id.
+# COST. 4 datasets x 3 sources x 3 seeds x 8 rows = 288 fits, where the 8 rows
+# are the 3 trained algorithms plus the 5 Binoculars versions listed under
+# `binoculars_baseline` at the bottom. The baseline rows are cheap — no model is
+# fitted, each is a fixed cutoff on a column already in the parquet — so the
+# training cost is still the 3 algorithms' 108 fits.
 #
 # Run:
 #   uv run python epai/ai_detection/train/run_clf_cross_domain.py \
@@ -38,11 +41,16 @@
 # Output:
 #   results/clf_cd/<experiment_id>/all_datasets/
 #       ghostbuster_gpt35t/          ← exactly what a single-dataset run writes
-#           logistic/ svm/ ... binoculars/
+#           logistic/ svm/ simple_mlp/          ← the trained algorithms
+#           binoculars/                         ← ★ falcon-7b (the paper's pair)
+#           binoculars__qwen25_7b/              ← ★ one directory per version
+#           binoculars__falcon3_7b/               listed in `binoculars_baseline`
+#           binoculars__mistral_v03/
+#           binoculars__llama31_8b/
 #           variant_comparison.json, algorithm_comparison_*.png
 #       ghostbuster_gpt54mini/  ghostbuster_gpt56luna/  science_v3/
 #       suite_comparison.json        ← the new level
-#       suite_comparison_auroc.png
+#       suite_comparison_auroc.png   ← the one to read the Binoculars rows on
 #       suite_comparison_tpr_at_srcfpr_0.01.png
 #       other_figures/               ← every other metric, plus the all-metric grid
 
@@ -179,22 +187,65 @@ model:
 # mean silently covered two of four datasets would sit in the same ranking as
 # rows that covered all four.
 #
-# This is also the row worth watching here. `binoculars_score` is a fixed cutoff
-# applied unchanged everywhere, so its four columns are a direct read of how the
-# detector holds up as the generator changes — and on this data it does not hold
-# up uniformly.
+# These are the rows worth watching here. Each cutoff is applied unchanged to
+# every source and every target, so a row's four dataset columns are a direct
+# read of how that detector holds up as the generator changes — and on this data
+# it does not hold up uniformly.
+#
+# WHICH BINOCULARS VERSIONS ARE PLOTTED — this list, and nothing else.
+# ------------------------------------------------------------------
+# `columns` is the switch. Every entry becomes one more ★ row in the ranking and
+# one more row on every comparison figure, with its own source x target matrix
+# under all_datasets/<dataset>/binoculars__<pair>/. Comment an entry out to drop
+# it from the run; add one to bring a new pair in. The rows are the SAME detector
+# read off different model pairs, so they keep the family's colour and hatch and
+# are told apart by the label below.
+#
+# `binoculars_score` is Falcon-7B (the pair the paper shipped and the column
+# score_parquets.py wrote first); every other pair writes its own
+# binoculars_score_<pair> column beside it — see
+# epai/ai_detection/score/run_binox_pairs.py. All five columns below are present
+# and filled in all four parquets of this suite (6 of 6000 rows are Null in
+# ghostbuster_gpt56luna, the same 6 rows in every column, so all five rows still
+# stand on identical evidence).
+#
+# READ THESE ROWS ON AUROC, NOT ON ACCURACY.
+# ------------------------------------------
+# A threshold belongs to a COLUMN, not to the family: the five pairs put the
+# score on five different scales, so the paper's constant says nothing about a
+# pair it was never calibrated on. Only `binoculars_score` carries a real cutoff
+# here (0.9015310749276843, the paper's accuracy mode; the low-FPR mode is
+# 0.8536432310785527). The other four carry a PLACEHOLDER 0.95 — a declared
+# operating point so the run is reproducible, not a calibrated one.
+#
+# So for the four placeholder rows read `suite_comparison_auroc.png` and
+# `suite_comparison_tpr_at_srcfpr_0.01.png`, neither of which ever looks at the
+# declared cutoff (an ROC sweeps every threshold). Do NOT read their accuracy,
+# macro F1 or confusion matrix — those are the only numbers the cutoff moves, and
+# on an uncalibrated scale they say more about 0.95 than about the detector.
+# Refit a pair's threshold on a held-out split before quoting its accuracy, then
+# replace the 0.95 on that entry.
 binoculars_baseline:
   enabled: true
-  column: "binoculars_score"
-  threshold: 0.9015310749276843
+  columns:
+    # Calibrated — every metric on this row is readable.
+    - {column: "binoculars_score", threshold: 0.9015310749276843, label: "binoculars falcon-7b"}
+    # Uncalibrated placeholders — read AUROC / TPR@FPR only, see above.
+    - {column: "binoculars_score_qwen25_7b",   threshold: 0.95, label: "binoculars qwen2.5-7b"}
+    - {column: "binoculars_score_falcon3_7b",  threshold: 0.95, label: "binoculars falcon3-7b"}
+    - {column: "binoculars_score_mistral_v03", threshold: 0.95, label: "binoculars mistral-v0.3"}
+    - {column: "binoculars_score_llama31_8b",  threshold: 0.95, label: "binoculars llama3.1-8b"}
 
-# Off, and it has to be: `llm_judge_score_gpt54_mini` exists in the gpt35t and
-# gpt54mini parquets only. Enabling it here would abort the preflight naming the
-# two datasets that lack it. To run the judge, use a config whose `suites` are
-# the datasets that have been scored.
+# Off until every dataset in `suites` has been judged. The column is named after
+# the judge AND its system prompt (`<model>_<prompt>`), because scores from two
+# models, or from two prompt versions, are not on the same scale -- so switching
+# judges means changing this line, not re-running under the same name. Enabling
+# it before a dataset is scored aborts the preflight naming the ones that lack
+# the column; score them all with
+# epai/ai_detection/score/add_llm_judge_scores.py first.
 llm_judge_baseline:
   enabled: false
-  column: "llm_judge_score_gpt54_mini"
+  column: "llm_judge_score_gpt56luna_v2"
   threshold: 0.5
 
 # ---------------------------------------------------------------------------

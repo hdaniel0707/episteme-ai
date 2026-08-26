@@ -2,7 +2,7 @@
 
 Works off any per-row detector score in the parquet: ``--metric binox`` reads the
 ``binoculars_*`` columns, ``--metric llm_judge`` the ``llm_judge_score_*`` columns
-written by ``epai/ai_detection/llm_judge/add_llm_judge_scores.py``. The two differ
+written by ``epai/ai_detection/score/add_llm_judge_scores.py``. The two differ
 only in which columns are read: both are *low* for machine text (Binoculars by
 construction, the judge because it reports P(human), 1.0 ⇒ human). Everything
 below — pairing, violins, histograms, ROC/PR, confusion — is the same either way,
@@ -107,7 +107,7 @@ Usage:
     # one domain, LLM-judge scores instead of Binoculars
     uv run python epai/ai_detection/analyse/analyse_score_human_vs_ai.py \
         data/parquet/ghostbuster_gpt35t.parquet:gpt35t:0000A --domains wp \
-        --metric llm_judge --score-cols llm_judge_score_gpt54_mini
+        --metric llm_judge --score-cols llm_judge_score_gpt56luna_v2
 """
 
 from __future__ import annotations

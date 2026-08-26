@@ -1,13 +1,12 @@
 """Delete columns from Parquet files, after showing exactly what would go.
 
 A general parquet tool, next to ``rename_column_values.py`` — but DEFAULTED for
-``epai/ai_detection/llm_judge/add_llm_judge_scores.py``: with no column
+``epai/ai_detection/score/add_llm_judge_scores.py``: with no column
 names given it targets that script's default judge column
-(``llm_judge_score_gpt54_mini``), which is the column to drop when a file was
-scored under the *old* convention where 1.0 meant AI. The judge now writes
-P(human) -- 1.0 ⇒ human, 0.0 ⇒ machine -- into a column of the same name, so
-stale values cannot be told apart from fresh ones and re-judging means clearing
-the column first.
+(``llm_judge_score_gpt56luna_v2`` -- judge model and prompt version both name
+it). That is the column to clear before re-judging the same file with the same
+model and prompt, and the column to drop when a file still holds scores from the
+*old* convention where 1.0 meant AI rather than human.
 
 Nothing is written until the plan is printed and confirmed. The plan lists, per
 targeted column, its dtype, how many values it holds, its range, and -- when the
@@ -22,7 +21,7 @@ THREE WAYS TO NAME THE COLUMNS
 ------------------------------
 ``--columns`` takes literal names, glob patterns, or both::
 
-    --columns llm_judge_score_gpt54_mini      # this column
+    --columns llm_judge_score_gpt56luna_v2    # this column
     --columns 'emb_openai_*' 'emb_qwen3'      # a pattern and a name
     --columns 'llm_judge_score*'              # every judge column
 
@@ -70,7 +69,7 @@ Run:
 
     # specific columns, and patterns
     uv run python epai/scripts/delete_parquet_columns.py data/parquet/wp_binox0.parquet \
-        -c llm_judge_score_gpt54_mini 'emb_openai_*'
+        -c llm_judge_score_gpt56luna_v2 'emb_openai_*'
 
     # make a suite comparable: drop every emb_*/score column they do not all share
     uv run python epai/scripts/delete_parquet_columns.py \
@@ -81,7 +80,7 @@ Run:
 
     # into a copy, leaving the input untouched
     uv run python epai/scripts/delete_parquet_columns.py data/parquet/wp_binox0.parquet \
-        -c llm_judge_score_gpt54_mini -o data/parquet/wp_binox0_nojudge.parquet
+        -c llm_judge_score_gpt56luna_v2 -o data/parquet/wp_nojudge.parquet
 """
 
 from __future__ import annotations
@@ -94,9 +93,10 @@ from pathlib import Path
 import pandas as pd
 from pandas.api.types import is_numeric_dtype
 
-from epai.ai_detection.llm_judge.add_llm_judge_scores import (
+from epai.ai_detection.score.add_llm_judge_scores import (
     COL_PREFIX,
     DEFAULT_MODEL,
+    DEFAULT_PROMPT,
     GENERATED_BY_COL,
     score_column,
 )
@@ -106,7 +106,7 @@ from epai.utils.parquet_utils import load_parquet, save_parquet
 # With no columns on the command line, the target is the column
 # add_llm_judge_scores.py writes by default -- the one that has to be cleared
 # before a file scored under the old P(AI) convention can be re-judged.
-DEFAULT_COLUMNS = [score_column(DEFAULT_MODEL)]
+DEFAULT_COLUMNS = [score_column(DEFAULT_MODEL, DEFAULT_PROMPT)]
 
 # What --intersect considers a FEATURE column, and therefore safe to align by
 # deleting. Deliberately not "every column": see the module docstring. Imported
@@ -445,7 +445,7 @@ def main() -> None:
     if missing_files:
         # This script used to take `<parquet> <column> <column>`, so a stale
         # command lands here with column names where files should be. Say so:
-        # "Not found: llm_judge_score_gpt54_mini" is a true statement and a
+        # "Not found: llm_judge_score_gpt56luna_v2" is a true statement and a
         # useless one.
         looks_like_columns = [str(p) for p in missing_files
                               if p.suffix != ".parquet" and len(p.parts) == 1]

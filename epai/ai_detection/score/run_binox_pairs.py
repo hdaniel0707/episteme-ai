@@ -4,7 +4,7 @@ r"""Score ONE corpus with several Binoculars model pairs, one pair after another
         data/parquet/ghostbuster_gpt35t.parquet --allow-token-mismatch --cpu-threads 16 --gpu 0
     
     uv run python epai/ai_detection/score/run_binox_pairs.py \
-        data/parquet/ghostbuster_gpt35ts.parquet --allow-token-mismatch --cpu-threads 16 --gpu 0
+        data/parquet/ghostbuster_gpt35ts.parquet --allow-token-mismatch --cpu-threads 16 --gpu 4
 
     uv run python epai/ai_detection/score/run_binox_pairs.py \
         data/parquet/ghostbuster_gpt54mini.parquet --allow-token-mismatch --cpu-threads 16 --gpu 0
