@@ -101,8 +101,17 @@ RAW_SUFFIX = "_raw"
 # Columns whose values describe the OLD text. Standardising with any of these
 # already populated leaves numbers that silently refer to a document that is no
 # longer in the file.
-STALE_PREFIXES = ("emb_",)
-STALE_EXACT = ("binoculars_score",)
+#
+# Prefixes, not exact names, because the score columns multiplied after this
+# guard was written: `binoculars_score` gained a per-scoring-pair family
+# (`binoculars_score_falcon3_7b`, ...) and `add_llm_judge_scores.py` writes one
+# column per (model, prompt) pair (`llm_judge_score_gpt56luna_v3`). An exact-name
+# list catches the first of each family and waves the rest through, which is the
+# quiet version of the failure: the file standardises, the guard says nothing,
+# and every score but one now describes text the parquet no longer contains.
+# `normalize_text.py` and `truncate_text.py` already match these by prefix.
+STALE_PREFIXES = ("emb_", "binoculars_score", "llm_judge_score_")
+STALE_EXACT: tuple[str, ...] = ()
 
 
 def stale_columns(df: pd.DataFrame) -> list[str]:
