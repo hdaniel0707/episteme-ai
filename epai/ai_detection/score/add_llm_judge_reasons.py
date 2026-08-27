@@ -71,10 +71,13 @@ Run:
     uv run python epai/ai_detection/score/add_llm_judge_reasons.py \
         data/parquet/ghostbuster_gpt56luna.parquet
 
-    # the same, explained by the local 32B instead of the API model that scored
+    # the same, explained by the local 32B instead of the API model that scored.
+    # --gpu and --cpu-threads mean what they mean in add_llm_judge_scores.py and
+    # add_embeddings.py: pin this run to one card and cap the CPU pools.
     uv run python epai/ai_detection/score/add_llm_judge_reasons.py \
         data/parquet/ghostbuster_gpt56luna.parquet \
-        --model qwen3-32b-w4a16 --score-col llm_judge_score_gpt56luna_v3
+        --model qwen3-32b-w4a16 --score-col llm_judge_score_gpt56luna_v3 \
+        --gpu 0 --cpu-threads 16
 
     # only the failures, more of them
     uv run python epai/ai_detection/score/add_llm_judge_reasons.py \
@@ -125,6 +128,7 @@ from epai.ai_detection.score.add_llm_judge_scores import (
     _as_score,
     _identifier,
     apply_generated_by,
+    apply_runtime_limits,
     blocking_reason,
     check_parquet,
     dtype_for,
@@ -458,6 +462,7 @@ class LocalExplainer(LocalJudge):
         device: str = DEFAULT_DEVICE,
         dtype: str = DEFAULT_DTYPE,
         max_doc_tokens: int = DEFAULT_MAX_DOC_TOKENS,
+        cpu_threads: int | None = None,
     ) -> None:
         super().__init__(
             spec,
@@ -467,6 +472,7 @@ class LocalExplainer(LocalJudge):
             dtype=dtype,
             max_doc_tokens=max_doc_tokens,
             system_prompt=explain_prompt(prompt_id) + "\n\n" + LOCAL_JSON_INSTRUCTION,
+            cpu_threads=cpu_threads,
         )
         self.unknown_cues: dict[str, int] = {}
 
@@ -501,6 +507,7 @@ def build_explainer(spec: JudgeModel, prompt_id: str, args):
             device=args.device,
             dtype=dtype_for(spec, args.dtype),
             max_doc_tokens=args.max_doc_tokens,
+            cpu_threads=args.cpu_threads,
         )
     return ApiExplainer(spec, prompt_id=prompt_id)
 
@@ -872,7 +879,16 @@ def parse_args() -> argparse.Namespace:
                     help=f"Rows per generate call for a local model (default: "
                          f"{DEFAULT_BATCH_SIZE}).")
     ap.add_argument("--device", default=DEFAULT_DEVICE,
-                    help=f"Device for a local model (default: {DEFAULT_DEVICE}).")
+                    help=f"Device for a local model (default: {DEFAULT_DEVICE}). "
+                         "Say 'cpu' here; to choose a card use --gpu.")
+    ap.add_argument("--gpu", default=None,
+                    help="Value for CUDA_VISIBLE_DEVICES (which GPU(s) to use, "
+                         "e.g. '0' or '0,1'). Default: leave unset so all visible "
+                         "GPUs are used.")
+    ap.add_argument("--cpu-threads", type=int, default=None,
+                    help="Limit CPU threads used for inference (sets "
+                         "OMP_NUM_THREADS / MKL_NUM_THREADS and torch's intra-op "
+                         "pool). Default: leave unset.")
     ap.add_argument("--dtype", default=DEFAULT_DTYPE,
                     help=f"Weight dtype for a local model (default: {DEFAULT_DTYPE}).")
     ap.add_argument("--max-doc-tokens", type=int, default=DEFAULT_MAX_DOC_TOKENS,
@@ -913,6 +929,10 @@ def print_findings(
     if spec.is_local:
         print(f"  device         : {args.device} ({dtype_for(spec, args.dtype)})"
               f", batch {args.batch_size}")
+        print(f"  gpu            : "
+              f"{args.gpu if args.gpu is not None else 'all visible (unset)'}"
+              f"   cpu threads: "
+              f"{args.cpu_threads if args.cpu_threads is not None else 'unset'}")
     print(f"  columns        : {', '.join(columns)}")
     print("Selection")
     for band, count in sorted(selection.counts().items()):
@@ -925,6 +945,8 @@ def print_findings(
 
 def main() -> None:
     args = parse_args()
+    # Before blocking_reason, which imports torch to ask about CUDA.
+    apply_runtime_limits(args)
     out_path = args.out or args.parquet
     spec = resolve_model(args.model, args.column_name)
     prompt_id = args.prompt
