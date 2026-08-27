@@ -71,12 +71,13 @@ Run:
     uv run python epai/ai_detection/score/add_llm_judge_reasons.py \
         data/parquet/ghostbuster_gpt56luna.parquet
 
-    # the same, explained by the local 32B instead of the API model that scored.
-    # --gpu and --cpu-threads mean what they mean in add_llm_judge_scores.py and
-    # add_embeddings.py: pin this run to one card and cap the CPU pools.
+    # the same, explained by the local model instead of the API model that
+    # scored. --gpu and --cpu-threads mean what they mean in
+    # add_llm_judge_scores.py and add_embeddings.py: pin this run to one card
+    # and cap the CPU pools.
     uv run python epai/ai_detection/score/add_llm_judge_reasons.py \
         data/parquet/ghostbuster_gpt56luna.parquet \
-        --model qwen3-32b-w4a16 --score-col llm_judge_score_gpt56luna_v3 \
+        --model qwen3-14b --score-col llm_judge_score_gpt56luna_v3 \
         --gpu 0 --cpu-threads 16
 
     # only the failures, more of them
@@ -846,7 +847,7 @@ def parse_args() -> argparse.Namespace:
                     help="Score column the bands are read off. Default: the column "
                          "this model and prompt would have written. Set it when the "
                          "explaining model is not the model that scored, e.g. "
-                         "--model qwen3-32b-w4a16 --score-col llm_judge_score_gpt56luna_v3.")
+                         "--model qwen3-14b --score-col llm_judge_score_gpt56luna_v3.")
     ap.add_argument("--select", nargs="+", default=list(DEFAULT_BANDS), choices=BANDS,
                     metavar="BAND",
                     help=f"Bands to draw from, in order (default: "

@@ -114,11 +114,9 @@ low means the model answered some third thing and the ratio is noise).
         data/parquet/ghostbuster_gpt56luna.parquet --model qwen3-14b --limit 400 \
         --gpu 0 --cpu-threads 16 --yes
 
-    # the strongest judge that fits a 40GB card
-    # (needs: pip install compressed-tensors accelerate)
-    uv run python epai/ai_detection/score/add_llm_judge_scores.py \
-        data/parquet/ghostbuster_gpt56luna.parquet --model qwen3-32b-w4a16 \
-        --limit 400 --gpu 0 --cpu-threads 16 --yes
+    # (there is no 32B line: qwen3-32b-w4a16 cannot run under transformers --
+    # see the note on its registry entry. qwen3-14b is the largest local judge
+    # that fits a 40GB card.)
 
 WHICH ROWS ARE JUDGED
 ---------------------
@@ -341,14 +339,22 @@ MODELS: dict[str, JudgeModel] = {
         params=32.8,
         quant="compressed-tensors",
         resident_gib=19.2,
-        note="Strongest judge that fits 40GB: Qwen3-32B at int4 (group 128, "
-             "symmetric, lm_head left in fp16), ~19 GiB resident, leaving ~20 "
-             "for activations. Needs `pip install compressed-tensors "
-             "accelerate`. Not the "
-             "Qwen AWQ build of the same model: AutoAWQ was deprecated in 2025 "
+        note="DOES NOT RUN under transformers -- kept as the record of why, and "
+             "as the entry to point a vLLM server at. ~19 GiB of int4 on disk "
+             "(group 128, symmetric, lm_head left in fp16), but transformers "
+             "has no int4 kernel for this format: compressed-tensors 0.18 "
+             "dropped CompressedLinear, made `run_compressed` a no-op, and now "
+             "registers a forward pre-hook that decompresses the whole model to "
+             "fp16 on the first forward pass (model_compressor.add_decompress_hook). "
+             "For 32.8B that is ~65 GiB on a 40 GiB card, so the format buys "
+             "download size and nothing else here. Observed 2026-08-27 on "
+             "transformers 4.57.6 / compressed-tensors 0.18.0: the hook itself "
+             "raised KeyError('weight_packed') on every row. Use qwen3-14b for "
+             "a local judge, or serve this checkpoint with vLLM, which has the "
+             "marlin/machete kernels the format was built for. Not the Qwen AWQ "
+             "build of the same model either: AutoAWQ was deprecated in 2025 "
              "and its last tested stack (torch 2.6, transformers 4.51) is far "
-             "behind this project's, while compressed-tensors is the format "
-             "the same maintainers moved to and is current.",
+             "behind this project's.",
     ),
     "gemma3-12b": JudgeModel(
         key="gemma3-12b",
@@ -1691,6 +1697,17 @@ def blocking_reason(spec: JudgeModel, device: str = DEFAULT_DEVICE) -> str | Non
             return f"needs {package}, which is not importable here"
 
     if spec.quant:
+        if spec.quant == "compressed-tensors":
+            # Not a missing package: there is no int4 inference path to install.
+            # See the note on the qwen3-32b-w4a16 entry -- transformers expands
+            # these weights to fp16 on the first forward pass, so the checkpoint
+            # is smaller than the model it becomes.
+            return (
+                "compressed-tensors weights have no int4 kernel in transformers "
+                "-- the first forward pass decompresses them to fp16, which for "
+                "a 32B model is ~65 GiB. Use --model qwen3-14b, or serve this "
+                "checkpoint with vLLM"
+            )
         modules, pip_name = _QUANT_PACKAGES[spec.quant]
         if all(importlib.util.find_spec(m) is None for m in modules):
             return (
