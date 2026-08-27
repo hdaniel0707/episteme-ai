@@ -10,7 +10,7 @@ corpora cannot be disturbed by running it.
 
 WHAT COMES BACK, AND WHY IT IS NOT PROSE ALONE
 ----------------------------------------------
-Two things per row:
+Three things per row:
 
 ``llm_judge_cues_human_*`` / ``llm_judge_cues_machine_*``
     Lists drawn from a closed vocabulary (HUMAN_CUES / MACHINE_CUES below).
@@ -24,6 +24,22 @@ Two things per row:
 ``llm_judge_reason_*``
     One or two sentences naming the strongest single piece of evidence. This is
     the part a person reads while looking at the document beside it.
+
+``llm_judge_other_*``
+    The escape hatch, and the only field that can surprise you. The cue lists
+    are closed -- on the API paths they are enum-constrained by the response
+    schema, so the model *cannot* return a label that is not in them. That is
+    what makes the counts trustworthy and it is also a blindfold: if the judge
+    is really separating these corpora on something no bullet of the prompt
+    mentions, a table built only from the vocabulary will come back tidy,
+    complete-looking, and silent about it. This project has already been bitten
+    by exactly that shape of thing once -- an unnormalised-punctuation artefact
+    whose label polarity flipped between corpora, which no cue name here
+    covers. So the model is asked, separately and in free text, for evidence it
+    found that none of the cue names fits. Usually empty. Read the ones that
+    are not: they are dumped verbatim to ``other_evidence.csv`` beside the cue
+    table, because a recurring phrase there is a candidate cue for the next
+    prompt version.
 
 THE MODEL IS NOT SHOWN ITS OWN SCORE
 ------------------------------------
@@ -57,6 +73,16 @@ column, deduplicated in the order below and capped per band by ``--per-band``:
     Verdict correct and at least ``--confident-band`` from 0.5, most confident
     first. The control -- without it you read only failures and conclude the
     judge is bad.
+``disagree``
+    Needs ``--vs-cols``. Rows where this judge's verdict and another judge's
+    verdict differ, widest score gap first. ``wrong`` conflates two things a
+    corpus of three judges can tell apart: a row every judge gets wrong is a
+    hard document, and says something about the corpus; a row this judge gets
+    wrong while the others get it right is this judge's own quirk, and says
+    something about the judge. Only the second is a lead. A row needs a score
+    in every column named -- primary and ``--vs-cols`` alike -- to be eligible,
+    so a partially-scored file yields a smaller band rather than a band whose
+    rows are not comparable.
 ``all``
     Every eligible row, file order. For a small corpus, or with --per-band.
 
@@ -83,6 +109,13 @@ Run:
     # only the failures, more of them
     uv run python epai/ai_detection/score/add_llm_judge_reasons.py \
         data/parquet/ghostbuster_gpt56luna.parquet --select wrong --per-band 200
+
+    # the rows this judge reads differently from the other two: what gpt56luna
+    # sees that sonnet5 and qwen3-14b do not, on the same document.
+    uv run python epai/ai_detection/score/add_llm_judge_reasons.py \
+        data/parquet/ghostbuster_gpt56luna.parquet \
+        --select disagree --per-band 150 \
+        --vs-cols llm_judge_score_sonnet5_v3 llm_judge_score_qwen3_14b_v3
 
 The cue frequency table is printed and saved under
 ``results/llm_judge_reasons/<parquet>+<judge>/``. Rows already carrying a
@@ -118,6 +151,7 @@ from epai.ai_detection.score.add_llm_judge_scores import (
     DEFAULT_MODEL,
     DEFAULT_PROMPT,
     DEFAULT_TEXT_COL,
+    DOMAIN_COL,
     GENERATED_BY_COL,
     MODE_PARSED,
     RETRIES,
@@ -202,14 +236,16 @@ assert set(get_args(MachineCue)) == set(MACHINE_CUES), "MachineCue != MACHINE_CU
 REASON_PREFIX = "llm_judge_reason_"
 HUMAN_CUES_PREFIX = "llm_judge_cues_human_"
 MACHINE_CUES_PREFIX = "llm_judge_cues_machine_"
+OTHER_PREFIX = "llm_judge_other_"
 
 # Bands, in the order they are filled. A row taken by an earlier band is not
 # offered to a later one.
 BAND_WRONG = "wrong"
 BAND_UNCERTAIN = "uncertain"
 BAND_CONFIDENT = "confident"
+BAND_DISAGREE = "disagree"
 BAND_ALL = "all"
-BANDS = (BAND_WRONG, BAND_UNCERTAIN, BAND_CONFIDENT, BAND_ALL)
+BANDS = (BAND_WRONG, BAND_UNCERTAIN, BAND_CONFIDENT, BAND_DISAGREE, BAND_ALL)
 DEFAULT_BANDS = (BAND_WRONG, BAND_UNCERTAIN, BAND_CONFIDENT)
 
 DEFAULT_PER_BAND = 100
@@ -226,6 +262,11 @@ LOCAL_MAX_NEW_TOKENS = 400
 # Rationale length asked for and enforced. Long enough for the evidence, short
 # enough to read a hundred of them.
 MAX_RATIONALE_CHARS = 400
+
+# The free-text escape hatch is bounded harder. It exists to name one thing the
+# vocabulary has no word for, and a model given room to write a paragraph there
+# writes a second rationale instead -- which is not what the column is read for.
+MAX_OTHER_CHARS = 300
 
 REPORT_DIR = Path("results") / "llm_judge_reasons"
 
@@ -253,6 +294,14 @@ Report, for this document:
   cue only if you could point at the words that carry it. An empty list is a
   correct answer for a document that carries none.
 - machine_cues: the same, from the machine list.
+- other_evidence: anything you noticed that is genuinely evidence about who
+  wrote this document but that NONE of the cue names above covers -- a habit of
+  punctuation or spacing, a formatting or encoding trace, a typographic
+  convention, a metadata remnant, a quirk of how the text is laid out, anything
+  else. Name it in a short phrase and quote the few characters or words that
+  carry it. Leave it empty -- an empty string -- if the cue names above covered
+  everything you found, which is the ordinary case. Do not restate a cue you
+  already listed in different words, and do not put a verdict here.
 - rationale: one or two sentences naming the strongest single piece of evidence
   you found, and where in the document it is. Quote a few words of it if that is
   the clearest way to say it. No verdict, no probability.
@@ -278,7 +327,10 @@ class Explanation(BaseModel):
 
     Cues before rationale on purpose: the countable fields are generated first,
     so they are not written to agree with a sentence of prose the model has
-    already committed to.
+    already committed to. ``other_evidence`` sits between them for the same
+    reason in reverse -- it is asked only after the model has tried and failed
+    to say the thing in the closed vocabulary, so it holds what the vocabulary
+    could not express rather than a paraphrase of what it could.
     """
 
     human_cues: list[HumanCue] = Field(
@@ -286,6 +338,19 @@ class Explanation(BaseModel):
     )
     machine_cues: list[MachineCue] = Field(
         description="Cues of machine authorship that are genuinely present. May be empty."
+    )
+    # Required, with no default, deliberately. This schema is sent verbatim to
+    # the providers, and OpenAI's strict structured-output mode wants every
+    # property in `required` and is unforgiving about extra keywords such as
+    # `default`. The model is told in EXPLAIN_BLOCK to send "" when it has
+    # nothing to add, and the two non-schema paths coerce a missing key to ""
+    # in explanation_from_payload, so nothing here relies on a default.
+    other_evidence: str = Field(
+        description="Evidence about authorship that none of the cue names "
+                    "covers -- punctuation or spacing habits, formatting or "
+                    "encoding traces, typographic conventions, layout quirks. "
+                    "A short phrase plus the few characters that carry it. "
+                    "Empty string if the cue names covered everything.",
     )
     rationale: str = Field(
         description="One or two sentences naming the strongest single piece of "
@@ -304,6 +369,7 @@ def clean_explanation(raw: Explanation) -> Explanation:
     return Explanation(
         human_cues=list(dict.fromkeys(raw.human_cues)),
         machine_cues=list(dict.fromkeys(raw.machine_cues)),
+        other_evidence=" ".join((raw.other_evidence or "").split())[:MAX_OTHER_CHARS],
         rationale=" ".join(raw.rationale.split())[:MAX_RATIONALE_CHARS],
     )
 
@@ -335,10 +401,15 @@ def explanation_from_payload(payload: dict, unknown: dict[str, int]) -> Explanat
     rationale = payload.get("rationale")
     if not isinstance(rationale, str) or not rationale.strip():
         raise ValueError("no rationale in the answer")
+    other = payload.get("other_evidence")
     return clean_explanation(
         Explanation(
             human_cues=coerce_cues(payload.get("human_cues"), HUMAN_CUES, unknown),
             machine_cues=coerce_cues(payload.get("machine_cues"), MACHINE_CUES, unknown),
+            # A model that has nothing to add here answers "", None, "none" or
+            # omits the key; all four mean the same thing and none of them is
+            # worth a row in other_evidence.csv.
+            other_evidence=other if isinstance(other, str) else "",
             rationale=rationale,
         )
     )
@@ -442,8 +513,10 @@ class ApiExplainer(ApiJudge):
 LOCAL_JSON_INSTRUCTION = """OUTPUT FORMAT
 Reply with one JSON object and nothing else -- no markdown fence, no commentary
 before or after it:
-{"human_cues": ["..."], "machine_cues": ["..."], "rationale": "..."}
-Use only the cue names listed above. Either list may be empty."""
+{"human_cues": ["..."], "machine_cues": ["..."], "other_evidence": "", "rationale": "..."}
+Use only the cue names listed above. Either list may be empty, and
+"other_evidence" is an empty string unless you found something the cue names do
+not cover."""
 
 
 class LocalExplainer(LocalJudge):
@@ -603,6 +676,7 @@ def select_rows(
     threshold: float,
     uncertain_band: float,
     confident_band: float,
+    vs_scores: dict[str, np.ndarray] | None = None,
 ) -> Selection:
     """Pick the rows worth asking about, band by band.
 
@@ -619,6 +693,9 @@ def select_rows(
     not spread evenly -- nearly every `wrong` row of a Ghostbuster corpus is a
     human `essay` -- so an unstratified `wrong` band would be essays only and
     the cue table would have nothing to say about why `reuter` never fails.
+
+    `vs_scores` maps a column name to that judge's scores and is what the
+    `disagree` band is formed from; it is ignored by every other band.
     """
     has_score = ~np.isnan(scores)
     has_truth = GENERATED_BY_COL in df.columns
@@ -631,6 +708,25 @@ def select_rows(
     # NaN compares False, so an unscored row is never in a score-based band.
     predicted_human = scores >= threshold
     distance = np.abs(scores - 0.5)
+
+    # The disagree band. Every judge named must have scored the row, or the
+    # comparison is between a verdict and an absence: `all_scored` is the guard,
+    # and it is why a half-scored file gives a short band rather than a
+    # misleading one. `spread` orders it -- the widest gap between any two
+    # judges on the same document first, which is where the reading is most
+    # likely to differ for a reason rather than by rounding.
+    panel = np.vstack([scores] + [vs_scores[col] for col in sorted(vs_scores or {})])
+    all_scored = ~np.isnan(panel).any(axis=0)
+    verdicts = panel >= threshold
+    split = verdicts.any(axis=0) & ~verdicts.all(axis=0)
+    # +/-inf rather than nanmax/nanmin: an all-NaN column would warn, and the
+    # result is masked by all_scored anyway.
+    spread = np.where(
+        all_scored,
+        np.where(np.isnan(panel), -np.inf, panel).max(axis=0)
+        - np.where(np.isnan(panel), np.inf, panel).min(axis=0),
+        0.0,
+    )
 
     definitions = {
         BAND_WRONG: (
@@ -646,9 +742,20 @@ def select_rows(
             & (distance >= confident_band),
             lambda pos: -distance[pos],
         ),
+        BAND_DISAGREE: (
+            eligible & all_scored & split,
+            lambda pos: -spread[pos],
+        ),
         BAND_ALL: (eligible, lambda pos: pos),
     }
 
+    if BAND_DISAGREE in bands and not vs_scores:
+        raise KeyError(
+            f"--select {BAND_DISAGREE} needs at least one other judge to "
+            "disagree with. Pass --vs-cols with the score columns of the other "
+            "judges, e.g. --vs-cols llm_judge_score_sonnet5_v3 "
+            "llm_judge_score_qwen3_14b_v3."
+        )
     if not has_truth and (BAND_WRONG in bands or BAND_CONFIDENT in bands):
         raise KeyError(
             f"The file has no {GENERATED_BY_COL!r} column, so 'wrong' and "
@@ -692,9 +799,28 @@ def _as_reason(value) -> str | None:
     return value
 
 
+# What a model writes when it means "nothing to add here". The schema asks for
+# an empty string and most of them comply, but enough answer in words that not
+# filtering these would fill other_evidence.csv with rows saying "none".
+_EMPTY_OTHER = {
+    "", "-", "--", "n/a", "na", "none", "none.", "nothing", "nothing.",
+    "no other evidence", "no other evidence.", "not applicable", "null",
+}
+
+
+def _as_other(value) -> str | None:
+    """A stored cell back as free-text evidence, or None if it holds none."""
+    if value is None or not isinstance(value, str):
+        return None
+    text = " ".join(value.split())
+    if not text or text.lower().strip(".") in {e.strip(".") for e in _EMPTY_OTHER}:
+        return None
+    return text
+
+
 def cue_report(
     df: pd.DataFrame,
-    columns: tuple[str, str, str],
+    columns: tuple[str, str, str, str],
     band_of: dict[int, str],
     out: Tee,
     examples: int = 2,
@@ -706,7 +832,7 @@ def cue_report(
     sees everywhere and cannot be separating on, however much of the prompt is
     devoted to it -- which is as informative as a cue that splits cleanly.
     """
-    reason_col, human_col, machine_col = columns
+    reason_col, human_col, machine_col, _other_col = columns
     reasons = [_as_reason(v) for v in df[reason_col]]
     explained = np.array([r is not None for r in reasons])
     rows: list[dict] = []
@@ -798,13 +924,103 @@ def cue_report(
     return rows
 
 
-def save_report(rows: list[dict], out: Tee, report_dir: Path, stem: str) -> Path:
+def other_report(
+    df: pd.DataFrame,
+    columns: tuple[str, str, str, str],
+    band_of: dict[int, str],
+    out: Tee,
+    examples: int = 8,
+) -> list[dict]:
+    """Print how often the vocabulary fell short, and return every instance.
+
+    The cue table can only ever report the eleven things the prompt already
+    thought of. This is the other half of the answer: how often the judge said
+    it saw something the vocabulary has no name for, split by class, and what
+    it said. A rate near zero means the vocabulary covers the evidence. A rate
+    that is high, or high on one class only, means the counts above are
+    describing a fraction of what the judge is actually reading -- and the rows
+    returned here, dumped to other_evidence.csv, are where the missing cue is.
+
+    Nothing is aggregated into percentages beyond the two rates: these are free
+    text, so the reading is done by eye, and the CSV is the artefact.
+    """
+    reason_col, _human_col, _machine_col, other_col = columns
+    if other_col not in df.columns:
+        out.print()
+        out.print("Other evidence: column not in the file (explained by an "
+                  "earlier run, before it existed).")
+        return []
+
+    others = [_as_other(v) for v in df[other_col]]
+    explained = np.array([_as_reason(v) is not None for v in df[reason_col]])
+    generators = (
+        df[GENERATED_BY_COL].astype(str).to_numpy()
+        if GENERATED_BY_COL in df.columns
+        else np.array(["all"] * len(df))
+    )
+    domains = (
+        df[DOMAIN_COL].astype(str).to_numpy()
+        if DOMAIN_COL in df.columns
+        else np.array(["all"] * len(df))
+    )
+    has_other = np.array([o is not None for o in others]) & explained
+
+    out.print()
+    out.print("=" * 78)
+    out.print("Other evidence — what the cue vocabulary had no name for")
+    for label, mask in (
+        ("human", explained & (generators == "human")),
+        ("machine", explained & (generators != "human")),
+    ):
+        total = int(mask.sum())
+        if not total:
+            continue
+        hit = int((mask & has_other).sum())
+        out.print(f"  {label:<8}: {hit} of {total} rows "
+                  f"({100.0 * hit / total:.0f}%)")
+
+    rows = [
+        {
+            "row": int(pos),
+            "band": band_of.get(int(pos), ""),
+            "domain": domains[pos],
+            "generated_by": generators[pos],
+            "other_evidence": others[pos],
+            "rationale": _as_reason(df[reason_col].iloc[pos]) or "",
+        }
+        for pos in np.flatnonzero(has_other)
+    ]
+
+    if rows and examples:
+        out.print("-" * 78)
+        for row in rows[:examples]:
+            out.print(f"  row {row['row']}  {row['domain']} / "
+                      f"{row['generated_by']}  [{row['band'] or '?'}]")
+            out.print(f"      {row['other_evidence']}")
+        if len(rows) > examples:
+            out.print(f"  ... and {len(rows) - examples} more, in "
+                      "other_evidence.csv")
+    elif not rows:
+        out.print("  nothing reported — the vocabulary covered every explained row.")
+    out.print("=" * 78)
+    return rows
+
+
+def save_report(
+    rows: list[dict],
+    out: Tee,
+    report_dir: Path,
+    stem: str,
+    other_rows: list[dict] | None = None,
+) -> Path:
     """Write the log and the cue table where the analyse scripts put theirs."""
     directory = report_dir / stem
     directory.mkdir(parents=True, exist_ok=True)
     out.save(directory / "cue_summary.log")
     if rows:
         pd.DataFrame(rows).to_csv(directory / "cue_frequencies.csv", index=False)
+    if other_rows:
+        pd.DataFrame(other_rows).to_csv(directory / "other_evidence.csv", index=False)
     return directory
 
 
@@ -813,13 +1029,18 @@ def save_report(rows: list[dict], out: Tee, report_dir: Path, stem: str) -> Path
 # ---------------------------------------------------------------------------
 
 
-def reason_columns(spec: JudgeModel, prompt_id: str) -> tuple[str, str, str]:
-    """The three columns one explaining judge writes: reason, then the two cue lists."""
+def reason_columns(spec: JudgeModel, prompt_id: str) -> tuple[str, str, str, str]:
+    """The four columns one explaining judge writes.
+
+    In the order they are unpacked everywhere below: the rationale, the two cue
+    lists, and the free-text evidence the vocabulary had no name for.
+    """
     stem = _identifier(f"{spec.column}_{prompt_id}")
     return (
         f"{REASON_PREFIX}{stem}",
         f"{HUMAN_CUES_PREFIX}{stem}",
         f"{MACHINE_CUES_PREFIX}{stem}",
+        f"{OTHER_PREFIX}{stem}",
     )
 
 
@@ -851,7 +1072,15 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--select", nargs="+", default=list(DEFAULT_BANDS), choices=BANDS,
                     metavar="BAND",
                     help=f"Bands to draw from, in order (default: "
-                         f"{' '.join(DEFAULT_BANDS)}). Choices: {', '.join(BANDS)}.")
+                         f"{' '.join(DEFAULT_BANDS)}). Choices: {', '.join(BANDS)}. "
+                         f"'{BAND_DISAGREE}' needs --vs-cols.")
+    ap.add_argument("--vs-cols", nargs="+", default=None, metavar="COLUMN",
+                    help="Score columns of the OTHER judges, for the "
+                         f"'{BAND_DISAGREE}' band: a row is in that band when "
+                         "this judge's verdict and one of theirs differ, widest "
+                         "score gap first. e.g. --vs-cols "
+                         "llm_judge_score_sonnet5_v3 llm_judge_score_qwen3_14b_v3. "
+                         "Only rows scored in every column named are eligible.")
     ap.add_argument("--per-band", type=int, default=DEFAULT_PER_BAND,
                     help=f"Rows per band (default: {DEFAULT_PER_BAND}), drawn "
                          "round-robin across domain x generated_by so every "
@@ -913,8 +1142,8 @@ def parse_args() -> argparse.Namespace:
 
 def print_findings(
     path: Path, df: pd.DataFrame, spec: JudgeModel, prompt_id: str, score_col: str,
-    columns: tuple[str, str, str], selection: Selection, positions: np.ndarray,
-    args,
+    columns: tuple[str, str, str, str], selection: Selection, positions: np.ndarray,
+    args, vs_cols: list[str] | None = None,
 ) -> None:
     reason_col = columns[0]
     scored = int(sum(_as_score(v) is not None for v in df[score_col])) \
@@ -924,6 +1153,9 @@ def print_findings(
     print(f"  file           : {path}")
     print(f"  rows           : {len(df)}")
     print(f"  score column   : {score_col}  ({scored} scored)")
+    for column in vs_cols or []:
+        n = int(sum(_as_score(v) is not None for v in df[column]))
+        print(f"  compared with  : {column}  ({n} scored)")
     print("Explainer")
     print(f"  model          : {spec.key}  ({spec.model})")
     print(f"  prompt         : {prompt_id}  (evidence half; no score is asked for)")
@@ -952,7 +1184,7 @@ def main() -> None:
     spec = resolve_model(args.model, args.column_name)
     prompt_id = args.prompt
     columns = reason_columns(spec, prompt_id)
-    reason_col, human_col, machine_col = columns
+    reason_col, human_col, machine_col, other_col = columns
     score_col = args.score_col or score_column(spec, prompt_id, MODE_PARSED)
     stem = f"{args.parquet.stem}+{_identifier(f'{spec.column}_{prompt_id}')}"
 
@@ -963,7 +1195,9 @@ def main() -> None:
         # re-reads what previous runs stored.
         out = Tee()
         rows = cue_report(df, columns, {}, out)
-        print(f"\nReport → {save_report(rows, out, args.report_dir, stem)}")
+        other_rows = other_report(df, columns, {}, out)
+        directory = save_report(rows, out, args.report_dir, stem, other_rows)
+        print(f"\nReport → {directory}")
         return
 
     blocked = blocking_reason(spec, args.device)
@@ -990,9 +1224,30 @@ def main() -> None:
     )
     scores = np.array([np.nan if s is None else float(s) for s in stored], dtype=float)
 
+    # The other judges' columns, read the same way, for the `disagree` band. A
+    # named column that is not in the file is a typo or an unscored corpus, and
+    # either way silently comparing against nothing would produce an empty band
+    # that looks like agreement.
+    vs_cols = list(args.vs_cols or [])
+    missing = [c for c in vs_cols if c not in df.columns]
+    if missing:
+        available = sorted(c for c in df.columns if c.startswith("llm_judge_score_"))
+        raise KeyError(
+            f"{args.parquet} has no score column(s) {', '.join(missing)}. "
+            f"Score columns present: {', '.join(available) or '(none)'}."
+        )
+    vs_scores = {
+        column: np.array(
+            [np.nan if _as_score(v) is None else float(_as_score(v))
+             for v in df[column]],
+            dtype=float,
+        )
+        for column in vs_cols
+    }
+
     selection = select_rows(
         df, eligible, scores, args.select, args.per_band, args.threshold,
-        args.uncertain_band, args.confident_band,
+        args.uncertain_band, args.confident_band, vs_scores,
     )
     if len(selection.positions) == 0:
         print("No rows matched the selected bands — nothing to do.")
@@ -1009,7 +1264,7 @@ def main() -> None:
     )
 
     print_findings(args.parquet, df, spec, prompt_id, score_col, columns,
-                   selection, positions, args)
+                   selection, positions, args, vs_cols)
 
     if len(positions) == 0:
         print("Every selected row already has a rationale — nothing to do.")
@@ -1032,6 +1287,7 @@ def main() -> None:
     reasons: list = list(df[reason_col]) if reason_col in df.columns else [None] * len(df)
     human_cues: list = list(df[human_col]) if human_col in df.columns else [None] * len(df)
     machine_cues: list = list(df[machine_col]) if machine_col in df.columns else [None] * len(df)
+    others: list = list(df[other_col]) if other_col in df.columns else [None] * len(df)
 
     texts = {
         int(pos): (
@@ -1050,6 +1306,7 @@ def main() -> None:
         df[reason_col] = pd.Series(reasons, index=df.index, dtype="object")
         df[human_col] = pd.Series(human_cues, index=df.index, dtype="object")
         df[machine_col] = pd.Series(machine_cues, index=df.index, dtype="object")
+        df[other_col] = pd.Series(others, index=df.index, dtype="object")
         save_parquet(df, out_path)
 
     def record(result: RowExplanation) -> None:
@@ -1057,6 +1314,7 @@ def main() -> None:
             reasons[result.position] = result.explanation.rationale
             human_cues[result.position] = list(result.explanation.human_cues)
             machine_cues[result.position] = list(result.explanation.machine_cues)
+            others[result.position] = result.explanation.other_evidence
         if result.error is not None:
             failures.append((result.position, result.error))
             tqdm.write(f"  row {result.position} failed: {result.error}")
@@ -1118,7 +1376,9 @@ def main() -> None:
 
     out = Tee()
     rows = cue_report(df, columns, selection.band_of, out)
-    print(f"\nReport → {save_report(rows, out, args.report_dir, stem)}")
+    other_rows = other_report(df, columns, selection.band_of, out)
+    directory = save_report(rows, out, args.report_dir, stem, other_rows)
+    print(f"\nReport → {directory}")
 
 
 if __name__ == "__main__":

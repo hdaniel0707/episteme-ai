@@ -26,11 +26,12 @@
 # something about generators; one that only falls on science_v3 is telling you
 # something about the corpus.
 #
-# COST. 4 datasets x 3 sources x 3 seeds x 8 rows = 288 fits, where the 8 rows
-# are the 3 trained algorithms plus the 5 Binoculars versions listed under
-# `binoculars_baseline` at the bottom. The baseline rows are cheap — no model is
-# fitted, each is a fixed cutoff on a column already in the parquet — so the
-# training cost is still the 3 algorithms' 108 fits.
+# COST. 4 datasets x 3 sources x 3 seeds x 10 rows = 360 fits, where the 10 rows
+# are the 3 trained algorithms plus the 5 Binoculars versions under
+# `binoculars_baseline` and the 2 LLM judges under `llm_judge_baseline` at the
+# bottom. The baseline rows are cheap — no model is fitted, each is a fixed
+# cutoff on a column already in the parquet — so the training cost is still the
+# 3 algorithms' 108 fits.
 #
 # Run:
 #   uv run python epai/ai_detection/train/run_clf_cross_domain.py \
@@ -47,6 +48,8 @@
 #           binoculars__falcon3_7b/               listed in `binoculars_baseline`
 #           binoculars__mistral_v03/
 #           binoculars__llama31_8b/
+#           llm_judge__gpt56luna_v3/            ← ★ one directory per judge
+#           llm_judge__qwen3_14b_v3/              listed in `llm_judge_baseline`
 #           variant_comparison.json, algorithm_comparison_*.png
 #       ghostbuster_gpt54mini/  ghostbuster_gpt56luna/  science_v3/
 #       suite_comparison.json        ← the new level
@@ -236,17 +239,41 @@ binoculars_baseline:
     - {column: "binoculars_score_mistral_v03", threshold: 0.95, label: "binoculars mistral-v0.3"}
     - {column: "binoculars_score_llama31_8b",  threshold: 0.95, label: "binoculars llama3.1-8b"}
 
-# Off until every dataset in `suites` has been judged. The column is named after
-# the judge AND its system prompt (`<model>_<prompt>`), because scores from two
-# models, or from two prompt versions, are not on the same scale -- so switching
-# judges means changing this line, not re-running under the same name. Enabling
-# it before a dataset is scored aborts the preflight naming the ones that lack
-# the column; score them all with
-# epai/ai_detection/score/add_llm_judge_scores.py first.
+# The judge rows work exactly like the Binoculars rows above: `columns` is the
+# switch, each entry becomes one ★ row in the ranking and one source x target
+# matrix under all_datasets/<dataset>/llm_judge__<judge>/. They are the SAME
+# detector read off different judges, so they keep the family's colour and hatch
+# and are told apart by the label.
+#
+# A column is named after the judge AND its system prompt (`<model>_<prompt>`),
+# because scores from two models, or from two prompt versions, are not on the
+# same scale -- so a new judge is a new entry here, never a rename of an existing
+# one. Both columns below are P(human) from the same v3 prompt in `parsed` mode
+# (epai/ai_detection/score/add_llm_judge_scores.py), which is what makes them
+# directly comparable.
+#
+# UNLIKE THE PLACEHOLDER BINOCULARS ROWS, EVERY METRIC HERE IS READABLE. 0.5 is
+# the judge's own neutral point, not a stand-in cutoff, and it means the same
+# thing to both judges — so accuracy, macro F1 and the confusion matrix are as
+# legitimate on these rows as AUROC.
+#
+# WHAT TO WATCH. gpt56luna is the API control. qwen3-14b is the local judge
+# (`--model qwen3-14b`, bf16 on the A100) and it sits on the capability axis the
+# Binoculars pairs already showed moves these scores: expect it to hold up on
+# gpt35t and to drift toward chance on gpt56luna and science_v3. That is a
+# result, not a bug — it is only readable because the API column stayed in the
+# file beside it.
+#
+# Enabling a column before every dataset in `suites` carries it aborts the
+# preflight naming the ones that lack it; score those with
+# add_llm_judge_scores.py first.
 llm_judge_baseline:
   enabled: true
-  column: "llm_judge_score_gpt56luna_v3"
   threshold: 0.5
+  columns:
+    - {column: "llm_judge_score_gpt56luna_v3", label: "llm judge gpt-5.6-luna"}
+    - {column: "llm_judge_score_qwen3_14b_v3", label: "llm judge qwen3-14b"}
+    - {column: "llm_judge_score_sonnet5_v3", label: "llm judge sonnet-5"}
 
 # ---------------------------------------------------------------------------
 # Preflight guards

@@ -149,8 +149,6 @@ Run -- the full corpus set:
         data/parquet/science_v1_gpt56luna_0807A.parquet
     uv run python epai/ai_detection/score/add_llm_judge_scores.py \
         data/parquet/science_v3_gpt56luna_0811A.parquet
-    uv run python epai/ai_detection/score/add_llm_judge_scores.py \
-        data/parquet/x_science_v1_gpt56luna_0811A.parquet
 
 With an API judge these are calls rather than GPU work, so several corpora can
 run at once. With a local judge they cannot: one process owns the card, and the
@@ -188,6 +186,44 @@ them was riding on punctuation.
     # smoke test into a scratch copy, leaving the corpus untouched
     uv run python epai/ai_detection/score/add_llm_judge_scores.py \
         data/parquet/ghostbuster_gpt56luna.parquet --limit 20 -o /tmp/judge_smoke.parquet
+
+    uv run python epai/ai_detection/score/add_llm_judge_scores.py \
+      data/parquet/ghostbuster_gpt35t.parquet \
+      --model qwen3-14b --cpu-threads 16 --yes --gpu 1
+
+    uv run python epai/ai_detection/score/add_llm_judge_scores.py \
+      data/parquet/ghostbuster_gpt54mini.parquet \
+      --model qwen3-14b --cpu-threads 16 --yes --gpu 2
+
+    uv run python epai/ai_detection/score/add_llm_judge_scores.py \
+      data/parquet/ghostbuster_gpt56luna.parquet \
+      --model qwen3-14b --cpu-threads 16 --yes --gpu 3
+    
+    uv run python epai/ai_detection/score/add_llm_judge_scores.py \
+        data/parquet/science_v3_gpt56luna_0811A.parquet\
+      --model qwen3-14b --cpu-threads 16 --yes --gpu 4
+
+    ------------------------------------------------------------------------
+
+    uv run python epai/ai_detection/score/add_llm_judge_scores.py \
+      data/parquet/ghostbuster_gpt35t.parquet \
+      --model sonnet5 --yes
+  
+    uv run python epai/ai_detection/score/add_llm_judge_scores.py \
+        data/parquet/ghostbuster_gpt35ts.parquet \
+        --model sonnet5--yes
+    
+    uv run python epai/ai_detection/score/add_llm_judge_scores.py \
+        data/parquet/ghostbuster_gpt54mini.parquet \
+        --model sonnet5 --yes
+
+    uv run python epai/ai_detection/score/add_llm_judge_scores.py \
+        data/parquet/ghostbuster_gpt56luna.parquet \
+        --model sonnet5 --yes
+
+    uv run python epai/ai_detection/score/add_llm_judge_scores.py \
+        data/parquet/science_v3_gpt56luna_0811A.parquet \
+        --model sonnet5 --yes
 """
 
 from __future__ import annotations
