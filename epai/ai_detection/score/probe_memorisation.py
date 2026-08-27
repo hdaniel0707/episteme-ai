@@ -99,6 +99,41 @@ source of a document. It is cheap and it is suggestive, but it is self-report,
 and a model will happily name a plausible source for text it has never seen. If
 you want it, keep it in its own script and its own report -- do not let a
 self-report number stand beside these measured ones.
+
+Examples:
+
+    uv run python epai/ai_detection/score/probe_memorisation.py \
+      data/parquet/ghostbuster_gpt35t.parquet \
+      --guided-name "the Ghostbuster AI-generated-text detection benchmark (Verma et al., 2023), built from IvyPanda student essays, Reuters 
+        newswire articles and reddit WritingPrompts stories" \
+      --sample 180 --yes \
+      > results/_logs/memprobe_ghostbuster_gpt35t.log 2>&1 &
+    
+    uv run python epai/ai_detection/score/probe_memorisation.py \
+      data/parquet/ghostbuster_gpt54mini.parquet \
+      --guided-name "the Ghostbuster AI-generated-text detection benchmark (Verma et al., 2023), built from IvyPanda student essays, Reuters 
+        newswire articles and reddit WritingPrompts stories" \
+      --sample 180 --yes \
+      > results/_logs/memprobe_ghostbuster_gpt54mini.log 2>&1 &
+
+    uv run python epai/ai_detection/score/probe_memorisation.py \
+      data/parquet/ghostbuster_gpt56luna.parquet \
+      --guided-name "the Ghostbuster AI-generated-text detection benchmark (Verma et al., 2023), built from IvyPanda student essays, Reuters 
+        newswire articles and reddit WritingPrompts stories" \
+      --sample 180 --yes \
+      > results/_logs/memprobe_ghostbuster_gpt56luna.log 2>&1 &
+    
+    uv run python epai/ai_detection/score/probe_memorisation.py \
+      data/parquet/science_v3_gpt56luna_0811A.parquet \
+      --guided-name "abstracts of published scientific papers in computer science, mathematics and sociology, as indexed by OpenAlex" \
+      --prefix-words 50 --continuation-words 80 --min-continuation 80 \
+      --sample 180 --yes \
+      > results/_logs/memprobe_science_v3.log 2>&1 &
+
+
+      
+
+
 """
 
 from __future__ import annotations
