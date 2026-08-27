@@ -95,9 +95,11 @@ from pandas.api.types import is_numeric_dtype
 
 from epai.ai_detection.score.add_llm_judge_scores import (
     COL_PREFIX,
+    DEFAULT_MODE,
     DEFAULT_MODEL,
     DEFAULT_PROMPT,
     GENERATED_BY_COL,
+    MODELS,
     score_column,
 )
 from epai.ai_detection.prepare.combine_domains import EMB_PREFIX, SCORE_PREFIXES
@@ -106,7 +108,9 @@ from epai.utils.parquet_utils import load_parquet, save_parquet
 # With no columns on the command line, the target is the column
 # add_llm_judge_scores.py writes by default -- the one that has to be cleared
 # before a file scored under the old P(AI) convention can be re-judged.
-DEFAULT_COLUMNS = [score_column(DEFAULT_MODEL, DEFAULT_PROMPT)]
+DEFAULT_COLUMNS = [
+    score_column(MODELS[DEFAULT_MODEL], DEFAULT_PROMPT, DEFAULT_MODE)
+]
 
 # What --intersect considers a FEATURE column, and therefore safe to align by
 # deleting. Deliberately not "every column": see the module docstring. Imported

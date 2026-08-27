@@ -46,8 +46,10 @@ column, deduplicated in the order below and capped per band by ``--per-band``:
 
 ``wrong``
     The judge's verdict disagrees with ``generated_by``, most confidently wrong
-    first. On ghostbuster_gpt56luna that is the ~126 rows behind the 52 false
-    positives and 74 false negatives -- where the failure modes live.
+    first -- where the failure modes live. They are not spread evenly: on
+    ghostbuster_gpt56luna the judge calls ~49% of human ``essay`` rows machine,
+    ~5% of human ``wp`` rows, and 0% of human ``reuter`` rows, so this band is
+    mostly essays unless it is drawn per domain, which it is (below).
 ``uncertain``
     Score within ``--uncertain-band`` of 0.5, closest first: the documents that
     carried no usable evidence either way.
@@ -58,9 +60,12 @@ column, deduplicated in the order below and capped per band by ``--per-band``:
 ``all``
     Every eligible row, file order. For a small corpus, or with --per-band.
 
-Within a band, rows are drawn round-robin across ``generated_by`` values so both
-classes are represented, and in a deterministic order, so the same command twice
-selects the same documents.
+Within a band, rows are drawn round-robin across ``domain`` x ``generated_by``
+-- so every domain and both classes are represented, in the proportions the file
+allows -- and in a deterministic order, so the same command twice selects the
+same documents. ``--per-band 400`` on a three-domain corpus is therefore about
+66 rows from each (domain, class) cell of that band, and the three default bands
+come to ~1200 rows explained.
 
 Run:
     uv run python epai/ai_detection/score/add_llm_judge_reasons.py \
@@ -128,6 +133,8 @@ from epai.ai_detection.score.add_llm_judge_scores import (
     resolve_generated_by,
     resolve_model,
     score_column,
+    strata,
+    take_round_robin,
 )
 from epai.utils.parquet_utils import load_parquet, save_parquet
 
@@ -579,28 +586,6 @@ class Selection:
         return out
 
 
-def _round_robin(positions: list[int], generators: np.ndarray, cap: int) -> list[int]:
-    """Take up to `cap` positions, alternating between generator values.
-
-    The corpora are stored one generator after another, so a band taken in order
-    would be all human or all machine and the cue table would have nothing to
-    contrast. Order within a generator is preserved, so the choice is stable.
-    """
-    buckets: dict[str, list[int]] = {}
-    for pos in positions:
-        buckets.setdefault(str(generators[pos]), []).append(pos)
-    chosen: list[int] = []
-    depth = 0
-    while len(chosen) < cap and any(len(b) > depth for b in buckets.values()):
-        for name in sorted(buckets):
-            if len(buckets[name]) > depth:
-                chosen.append(buckets[name][depth])
-                if len(chosen) == cap:
-                    break
-        depth += 1
-    return chosen
-
-
 def select_rows(
     df: pd.DataFrame,
     eligible: np.ndarray,
@@ -619,6 +604,13 @@ def select_rows(
     confidently wrong, closest to the fence, most confidently right -- which is
     what makes a small --per-band the *interesting* rows rather than the first
     ones in the file.
+
+    That order is then drawn round-robin across `domain` x `generated_by` (the
+    same strata a limited scoring run uses), so a band is not spent on one
+    domain. It matters more here than it does there: the judge's failures are
+    not spread evenly -- nearly every `wrong` row of a Ghostbuster corpus is a
+    human `essay` -- so an unstratified `wrong` band would be essays only and
+    the cue table would have nothing to say about why `reuter` never fails.
     """
     has_score = ~np.isnan(scores)
     has_truth = GENERATED_BY_COL in df.columns
@@ -656,13 +648,14 @@ def select_rows(
             f"{BAND_UNCERTAIN} or --select {BAND_ALL}."
         )
 
+    labels = strata(df)
     taken: set[int] = set()
     band_of: dict[int, str] = {}
     for band in bands:
         mask, key = definitions[band]
         candidates = [int(p) for p in np.flatnonzero(mask) if int(p) not in taken]
         candidates.sort(key=key)
-        for pos in _round_robin(candidates, generators, per_band):
+        for pos in take_round_robin(candidates, labels, per_band):
             taken.add(pos)
             band_of[pos] = band
 
@@ -852,7 +845,9 @@ def parse_args() -> argparse.Namespace:
                     help=f"Bands to draw from, in order (default: "
                          f"{' '.join(DEFAULT_BANDS)}). Choices: {', '.join(BANDS)}.")
     ap.add_argument("--per-band", type=int, default=DEFAULT_PER_BAND,
-                    help=f"Rows per band (default: {DEFAULT_PER_BAND}).")
+                    help=f"Rows per band (default: {DEFAULT_PER_BAND}), drawn "
+                         "round-robin across domain x generated_by so every "
+                         "domain and both classes are represented.")
     ap.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD,
                     help=f"score >= this counts as a 'human' verdict when deciding "
                          f"which rows are wrong (default: {DEFAULT_THRESHOLD}). Use the "

@@ -51,16 +51,17 @@ batched (``--batch-size``) instead of being sent concurrently (``--workers``),
 and a batch that runs out of memory is retried one row at a time rather than
 lost.
 
-Running locally also unlocks a better score, which is the real reason to do it.
-``--mode``:
+``--mode`` picks how the score is obtained:
 
-``parsed``
+``parsed`` (the default, local and API alike)
     The model writes the probability and it is parsed out of the answer. The
     only thing an API can do, and what every ``llm_judge_score_*`` column
-    already in the corpora holds. Available locally too -- that is the honest
-    like-for-like comparison against the API columns.
+    already in the corpora holds -- which is why it is also the default
+    locally. A local judge is run first to answer "does a different model see
+    the same thing", and that question is only answered by a score on the same
+    scale as the one it is being compared against.
 
-``logprob`` (the default for a local judge)
+``logprob`` (local only, ``--mode logprob``)
     The prompt asks for one word, ``human`` or ``machine``, and the score is
     read off that position's distribution:
     ``P(human) / (P(human) + P(machine))``. One forward pass, nothing sampled,
@@ -151,10 +152,13 @@ column.
 
 IS THE PROMPT ANY GOOD? -- A/B IT BEFORE THE FULL RUN
 -----------------------------------------------------
-``--limit N`` judges N eligible rows drawn round-robin across the generators, so
-a corpus stored human-block-then-machine-block still yields both classes and the
-summary's mean-per-group / accuracy / ROC-AUC lines are meaningful. Two cheap
-runs on the same file put the prompts side by side in two columns:
+Without ``--limit`` every eligible row in the file is judged -- all domains, both
+classes. ``--limit N`` cuts that to N rows drawn round-robin across ``domain`` x
+``generated_by``, so a corpus stored human-block-then-machine-block still yields
+both classes, a three-domain corpus yields a third of the sample from each
+domain, and the summary's mean-per-group / accuracy / ROC-AUC lines describe the
+file rather than whichever domain it happens to start with. Two cheap runs on the
+same file put the prompts side by side in two columns:
 
     uv run python epai/ai_detection/score/add_llm_judge_scores.py \
         data/parquet/ghostbuster_gpt56luna.parquet --prompt v2 --limit 200 --yes
@@ -357,9 +361,14 @@ MODES = (MODE_PARSED, MODE_LOGPROB)
 # them would orphan every score in the corpora.
 MODE_SUFFIX = {MODE_PARSED: "", MODE_LOGPROB: "_lp"}
 
-# Local judges default to logprob (it is why running locally is worth doing);
-# API judges have no other option.
-DEFAULT_MODE = {LOCAL_PROVIDER: MODE_LOGPROB}
+# `parsed` everywhere, local judges included. A logprob score is the better
+# score, but it is a different score: it has no suffix-free column, it cannot be
+# put beside the API columns already in the corpora, and it answers "human" or
+# "machine" rather than the two decimals every existing number came from. The
+# first thing a local judge is for is the like-for-like comparison against
+# `llm_judge_score_gpt56luna_v3`, so that is what it does unless asked otherwise
+# (`--mode logprob`, local only).
+DEFAULT_MODE = MODE_PARSED
 
 # Local run defaults. The batch is small because the documents are long and the
 # weights already own most of the card; --batch-size raises it.
@@ -377,6 +386,13 @@ DEFAULT_MAX_DOC_TOKENS = 4096
 GENERATED_BY_COL = "generated_by"
 DEFAULT_GENERATED_BY: list[str] | None = None
 ALL_GENERATORS = "all"
+
+# The other axis a sample has to be balanced on. A combined corpus holds several
+# domains in one file (`essay`/`reuter`/`wp`, or the science fields) and the
+# judge does not behave alike across them, so a limited run that drew from one
+# domain would report a number about that domain under the file's name. Not
+# every corpus has the column; see `strata`.
+DOMAIN_COL = "domain"
 
 # Environment variable each provider needs, checked up front so a long run does
 # not die on the first call.
@@ -679,8 +695,9 @@ def parse_args() -> argparse.Namespace:
         f"probability and it is parsed (the only option through an API, and "
         f"what the existing columns hold). {MODE_LOGPROB!r}: the model answers "
         "with one word and the score is read off that token's distribution — "
-        "local only, one forward pass per row, no ties. Default: "
-        f"{MODE_LOGPROB} locally, {MODE_PARSED} through an API.",
+        f"local only, one forward pass per row, no ties. Default: {DEFAULT_MODE} "
+        "everywhere, so a local run is comparable with the API columns already "
+        "in the file.",
     )
     ap.add_argument(
         "--device",
@@ -756,10 +773,12 @@ def parse_args() -> argparse.Namespace:
         "--limit",
         type=int,
         default=None,
-        help="Only judge N eligible rows, drawn round-robin across the "
-        f"{GENERATED_BY_COL!r} values so both classes are represented (see "
-        "apply_limit). For smoke tests and prompt comparisons. The rest keep "
-        "whatever they already have, they are not dropped from the output.",
+        help="Only judge N eligible rows, drawn round-robin across "
+        f"{DOMAIN_COL!r} x {GENERATED_BY_COL!r} so every domain and both "
+        "classes are represented equally (see apply_limit). Default: every "
+        "eligible row in the file. For smoke tests and prompt comparisons. The "
+        "rest keep whatever they already have, they are not dropped from the "
+        "output.",
     )
     ap.add_argument(
         "--retries",
@@ -857,8 +876,8 @@ def resolve_model(requested: str, column_name: str | None) -> JudgeModel:
 
 
 def resolve_mode(spec: JudgeModel, requested: str | None) -> str:
-    """The scoring mode for this judge, defaulting by provider."""
-    mode = requested or DEFAULT_MODE.get(spec.provider, MODE_PARSED)
+    """The scoring mode for this judge: what was asked for, or `parsed`."""
+    mode = requested or DEFAULT_MODE
     if mode == MODE_LOGPROB and not spec.is_local:
         raise SystemExit(
             f"--mode {MODE_LOGPROB} needs the token distribution, which the "
@@ -1501,45 +1520,84 @@ def apply_generated_by(
     return filtered
 
 
+def strata(df: pd.DataFrame) -> np.ndarray:
+    """One stratum label per row: ``domain | generated_by``, as available.
+
+    What a limited run has to keep balanced. Both axes matter and for different
+    reasons:
+
+    ``generated_by``
+        These corpora are stored one generator after another -- every human row,
+        then every machine row -- so a sample taken in file order is one class,
+        and the summary's accuracy and ROC-AUC lines (the whole point of a small
+        run) have nothing to separate.
+
+    ``domain``
+        The judge does not score the domains alike -- on ghostbuster_gpt56luna
+        it is perfect on ``reuter`` and calls half the human ``essay`` rows
+        machine -- so a sample drawn from one domain says nothing about the
+        file, and a number from it cannot be compared with a number from a
+        differently-drawn sample of the same file.
+
+    A file missing either column contributes nothing to the label, and one
+    missing both leaves a single stratum, which is the old file-order behaviour.
+    """
+    parts = [
+        df[col].astype(str).to_numpy()
+        for col in (DOMAIN_COL, GENERATED_BY_COL)
+        if col in df.columns
+    ]
+    if not parts:
+        return np.full(len(df), "all", dtype=object)
+    return np.array([" | ".join(vals) for vals in zip(*parts)], dtype=object)
+
+
+def take_round_robin(positions: list[int], labels: np.ndarray, cap: int) -> list[int]:
+    """Up to ``cap`` positions, one per stratum per pass, strata in name order.
+
+    Order within a stratum is the order it was given in, so the same call on the
+    same file always returns the same rows: two prompt versions, or two judges,
+    are then compared on identical documents rather than on two samples. A
+    stratum that runs out drops out of the rotation and the rest keep going, so
+    ``cap`` is always filled if there are that many rows to fill it with -- an
+    exhausted domain costs the sample its balance, not its size.
+    """
+    buckets: dict[str, list[int]] = {}
+    for pos in positions:
+        buckets.setdefault(str(labels[pos]), []).append(int(pos))
+    chosen: list[int] = []
+    depth = 0
+    while len(chosen) < cap and any(len(b) > depth for b in buckets.values()):
+        for name in sorted(buckets):
+            if len(buckets[name]) > depth:
+                chosen.append(buckets[name][depth])
+                if len(chosen) == cap:
+                    break
+        depth += 1
+    return chosen
+
+
 def apply_limit(
     df: pd.DataFrame, judgeable: np.ndarray, limit: int | None
 ) -> np.ndarray:
     """Restrict the judgeable mask to ``limit`` eligible rows, spread evenly.
 
-    Counted over eligible rows rather than file positions, and drawn round-robin
-    across the ``generated_by`` values rather than in file order. These corpora
-    are stored one generator after another -- every human row, then every machine
-    row -- so taking the first N would hand back one class only, and the summary's
-    accuracy and ROC-AUC lines (which is the whole point of a small run) would
-    have nothing to separate.
-
-    Within a generator the rows are still taken in file order, so the same
-    ``--limit N`` on the same file always selects the same rows: two prompt
-    versions are then compared on identical documents rather than on two samples.
+    ``limit is None`` -- the default -- judges every eligible row in the file.
+    A number counts eligible rows rather than file positions, and draws them
+    round-robin across ``domain`` x ``generated_by`` (see :func:`strata`), so
+    ``--limit 600`` on a three-domain Ghostbuster corpus is 100 human and 100
+    machine rows from each of essay, reuter and wp rather than 600 rows of
+    whatever the file happens to start with.
     """
     if limit is None:
         return judgeable
     if limit < 1:
         raise ValueError(f"--limit must be >= 1, got {limit}")
 
-    eligible = np.flatnonzero(judgeable)
-    if GENERATED_BY_COL in df.columns:
-        generators = df[GENERATED_BY_COL].astype(str).to_numpy()
-        buckets: dict[str, list[int]] = {}
-        for pos in eligible:
-            buckets.setdefault(generators[pos], []).append(int(pos))
-        chosen: list[int] = []
-        depth = 0
-        while len(chosen) < limit and any(len(b) > depth for b in buckets.values()):
-            for name in sorted(buckets):
-                if len(buckets[name]) > depth:
-                    chosen.append(buckets[name][depth])
-                    if len(chosen) == limit:
-                        break
-            depth += 1
-        picked = np.array(chosen, dtype=int)
-    else:
-        picked = eligible[:limit]
+    eligible = [int(pos) for pos in np.flatnonzero(judgeable)]
+    picked = np.array(
+        take_round_robin(eligible, strata(df), limit), dtype=int
+    )
 
     limited = np.zeros_like(judgeable)
     limited[picked] = True
