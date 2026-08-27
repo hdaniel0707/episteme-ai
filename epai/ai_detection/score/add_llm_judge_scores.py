@@ -105,7 +105,7 @@ low means the model answered some third thing and the ratio is noise).
         data/parquet/ghostbuster_gpt56luna.parquet --model qwen3-14b --limit 400 --yes
 
     # the strongest judge that fits a 40GB card
-    # (needs: pip install compressed-tensors)
+    # (needs: pip install compressed-tensors accelerate)
     uv run python epai/ai_detection/score/add_llm_judge_scores.py \
         data/parquet/ghostbuster_gpt56luna.parquet --model qwen3-32b-w4a16 --limit 400 --yes
 
@@ -282,11 +282,26 @@ MODELS: dict[str, JudgeModel] = {
         model="gpt-5.4-mini",
         column="gpt54mini",
     ),
+    "sonnet5": JudgeModel(
+        key="sonnet5",
+        provider="anthropic",
+        model="claude-sonnet-5",
+        column="sonnet5",
+        note="The cross-vendor control. Frontier-tier and from a third vendor, "
+             "so the only thing that changes against the gpt56luna column is "
+             "who is reading the document. Deliberately not haiku45 for this "
+             "job: a smaller, cheaper judge confounds vendor with capability, "
+             "and capability is the axis the Binoculars work already showed "
+             "moves these scores (external/Binoculars/model_pairs.py).",
+    ),
     "haiku45": JudgeModel(
         key="haiku45",
         provider="anthropic",
         model="claude-haiku-4-5-20251001",
         column="haiku45",
+        note="Not the vendor control -- see sonnet5. Useful as a point on the "
+             "capability axis instead: the cheap API judge to set beside the "
+             "local 8B/14B/32B ladder.",
     ),
     "qwen3-8b": JudgeModel(
         key="qwen3-8b",
@@ -317,7 +332,8 @@ MODELS: dict[str, JudgeModel] = {
         resident_gib=19.2,
         note="Strongest judge that fits 40GB: Qwen3-32B at int4 (group 128, "
              "symmetric, lm_head left in fp16), ~19 GiB resident, leaving ~20 "
-             "for activations. Needs `pip install compressed-tensors`. Not the "
+             "for activations. Needs `pip install compressed-tensors "
+             "accelerate`. Not the "
              "Qwen AWQ build of the same model: AutoAWQ was deprecated in 2025 "
              "and its last tested stack (torch 2.6, transformers 4.51) is far "
              "behind this project's, while compressed-tensors is the format "
@@ -1148,14 +1164,27 @@ class LocalJudge(Judge):
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
         load_kwargs = {"dtype": getattr(torch, dtype)}
-        if importlib.util.find_spec("accelerate") is not None:
+        has_accelerate = importlib.util.find_spec("accelerate") is not None
+        if spec.quant and not has_accelerate:
+            # For a quantised checkpoint accelerate is not an optimisation:
+            # transformers rebuilds the linear layers through
+            # `accelerate.init_empty_weights`, so the CPU-RAM path below does
+            # not exist and the load dies inside the quantizer. Raised before
+            # the weights are fetched rather than after several GiB of them.
+            raise RuntimeError(
+                f"{spec.key} is a {spec.quant} checkpoint and transformers "
+                "cannot build a quantised model without accelerate. Either "
+                "`pip install accelerate`, or run an unquantised judge "
+                "(--model qwen3-14b) instead."
+            )
+        if has_accelerate:
             # accelerate streams the shards straight onto the card.
             load_kwargs["device_map"] = device
         elif device != "cpu":
-            # Without it the weights are built in CPU RAM and moved afterwards,
-            # which works but needs that much free RAM and one extra copy of a
-            # multi-GB model. Said out loud because the symptom is a load that
-            # sits there for minutes, which reads like a hang.
+            # Without it an unquantised model is built in CPU RAM and moved
+            # afterwards, which works but needs that much free RAM and one
+            # extra copy of a multi-GB model. Said out loud because the symptom
+            # is a load that sits there for minutes, which reads like a hang.
             size = f"~{spec.weights_gib:.0f} GiB " if spec.weights_gib else ""
             print(
                 f"NOTE  accelerate is not installed, so the {size}weights are "
@@ -1633,6 +1662,14 @@ def blocking_reason(spec: JudgeModel, device: str = DEFAULT_DEVICE) -> str | Non
             return (
                 f"{spec.quant.upper()} weights need kernels that are not "
                 f"installed (pip install {pip_name})"
+            )
+        if importlib.util.find_spec("accelerate") is None:
+            # Unquantised weights load without accelerate, just slowly, through
+            # CPU RAM. Quantised ones do not load at all: transformers swaps
+            # the linear layers under `accelerate.init_empty_weights`.
+            return (
+                "quantised weights need accelerate, which is not installed "
+                "(pip install accelerate)"
             )
 
     if device.startswith("cuda"):
