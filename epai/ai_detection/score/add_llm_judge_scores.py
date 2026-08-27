@@ -51,6 +51,13 @@ batched (``--batch-size``) instead of being sent concurrently (``--workers``),
 and a batch that runs out of memory is retried one row at a time rather than
 lost.
 
+``--gpu`` and ``--cpu-threads`` mean what they mean in add_embeddings.py and
+run_binox_pairs.py: which card this run is pinned to, and a cap on the CPU
+pools, so a judge run and an embedding run can share a multi-GPU box without
+fighting over it. Both are applied before torch is imported. ``--gpu`` hides
+the other cards, so the one it names is ``cuda:0`` inside the process and
+``--device`` stays at its default; ``--device`` is only there to say ``cpu``.
+
 ``--mode`` picks how the score is obtained:
 
 ``parsed`` (the default, local and API alike)
@@ -95,19 +102,23 @@ low means the model answered some third thing and the ratio is noise).
     # smallest useful check: does the wiring work at all
     uv run python epai/ai_detection/score/add_llm_judge_scores.py \
         data/parquet/ghostbuster_gpt56luna.parquet \
-        --model qwen3-8b --limit 20 -o /tmp/judge_smoke.parquet --yes
+        --model qwen3-8b --limit 20 --gpu 0 --cpu-threads 16 \
+        -o /tmp/judge_smoke.parquet --yes
 
     # the comparison worth running before any full pass: one easy corpus, one
     # hard one, against the API column already in the file
     uv run python epai/ai_detection/score/add_llm_judge_scores.py \
-        data/parquet/ghostbuster_gpt35t.parquet --model qwen3-14b --limit 400 --yes
+        data/parquet/ghostbuster_gpt35t.parquet --model qwen3-14b --limit 400 \
+        --gpu 0 --cpu-threads 16 --yes
     uv run python epai/ai_detection/score/add_llm_judge_scores.py \
-        data/parquet/ghostbuster_gpt56luna.parquet --model qwen3-14b --limit 400 --yes
+        data/parquet/ghostbuster_gpt56luna.parquet --model qwen3-14b --limit 400 \
+        --gpu 0 --cpu-threads 16 --yes
 
     # the strongest judge that fits a 40GB card
     # (needs: pip install compressed-tensors accelerate)
     uv run python epai/ai_detection/score/add_llm_judge_scores.py \
-        data/parquet/ghostbuster_gpt56luna.parquet --model qwen3-32b-w4a16 --limit 400 --yes
+        data/parquet/ghostbuster_gpt56luna.parquet --model qwen3-32b-w4a16 \
+        --limit 400 --gpu 0 --cpu-threads 16 --yes
 
 WHICH ROWS ARE JUDGED
 ---------------------
@@ -719,7 +730,21 @@ def parse_args() -> argparse.Namespace:
         "--device",
         default=DEFAULT_DEVICE,
         help=f"Device for a local judge (default: {DEFAULT_DEVICE}). "
-        "'cuda:1' picks a second card; 'cpu' works but is not worth the wait.",
+        "'cpu' works but is not worth the wait. To choose a card use --gpu, "
+        "which is what the other scripts in this repo take.",
+    )
+    ap.add_argument(
+        "--gpu",
+        default=None,
+        help="Value for CUDA_VISIBLE_DEVICES (which GPU(s) to use, e.g. '0' or "
+        "'0,1'). Default: leave unset so all visible GPUs are used.",
+    )
+    ap.add_argument(
+        "--cpu-threads",
+        type=int,
+        default=None,
+        help="Limit CPU threads used for inference (sets OMP_NUM_THREADS / "
+        "MKL_NUM_THREADS and torch's intra-op pool). Default: leave unset.",
     )
     ap.add_argument(
         "--dtype",
@@ -1142,10 +1167,18 @@ class LocalJudge(Judge):
         dtype: str = DEFAULT_DTYPE,
         max_doc_tokens: int = DEFAULT_MAX_DOC_TOKENS,
         system_prompt: str | None = None,
+        cpu_threads: int | None = None,
     ) -> None:
         super().__init__(spec, prompt_id, mode, system_prompt)
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        if cpu_threads is not None:
+            # The env vars apply_runtime_limits set cover the OpenMP/MKL pools;
+            # this covers torch's own intra-op pool, which does not always
+            # follow them. It has to come after torch is imported, which is why
+            # it is here and not beside them.
+            torch.set_num_threads(cpu_threads)
 
         self._torch = torch
         self.device = device
@@ -1407,6 +1440,7 @@ def build_judge(spec: JudgeModel, prompt_id: str, mode: str, args) -> Judge:
             device=args.device,
             dtype=dtype_for(spec, args.dtype),
             max_doc_tokens=args.max_doc_tokens,
+            cpu_threads=args.cpu_threads,
         )
     return ApiJudge(spec, prompt_id=prompt_id, mode=mode)
 
@@ -1727,6 +1761,9 @@ def plan_details(spec: JudgeModel, args) -> list[tuple[str, str]]:
     lines = [
         ("device", args.device + f" ({dtype_for(spec, args.dtype)}"
          + (f", {spec.quant}" if spec.quant else "") + ")"),
+        ("gpu", args.gpu if args.gpu is not None else "all visible (unset)"),
+        ("cpu threads",
+         str(args.cpu_threads) if args.cpu_threads is not None else "unset"),
         ("batch size", str(args.batch_size)),
         ("doc budget", f"{args.max_doc_tokens} tokens"
          if args.max_doc_tokens else "whole document"),
@@ -1933,8 +1970,41 @@ def run_batched(
         print("\nInterrupted — writing the scores obtained so far.")
 
 
+def apply_runtime_limits(args) -> None:
+    """Pin the run to one GPU and cap the CPU pools, as the other scripts do.
+
+    CUDA_VISIBLE_DEVICES is read when the CUDA driver initialises and the thread
+    limits when the OpenMP runtime loads, both of which happen inside torch. This
+    module imports torch lazily -- inside LocalJudge and inside blocking_reason --
+    precisely so this can run first; call it before either of them.
+
+    ``--gpu`` renumbers the cards it leaves visible, so the first one named is
+    always ``cuda:0``. That makes ``--device cuda:N`` alongside it a way to point
+    at a card that is no longer there, and it is refused rather than half-honoured.
+    """
+    if args.gpu is not None:
+        if not args.device.startswith("cuda"):
+            raise SystemExit(
+                f"--gpu {args.gpu} with --device {args.device}: pick one. --gpu "
+                "chooses which card to run on, --device cpu says not to use one."
+            )
+        if ":" in args.device:
+            raise SystemExit(
+                f"--gpu {args.gpu} with --device {args.device}: --gpu hides the "
+                "other cards and renumbers what is left, so the card it selects "
+                f"is cuda:0 inside this process. Drop --device, or drop --gpu and "
+                f"use --device cuda:{args.gpu.split(',')[0]} alone."
+            )
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
+    if args.cpu_threads is not None:
+        os.environ["OMP_NUM_THREADS"] = str(args.cpu_threads)
+        os.environ["MKL_NUM_THREADS"] = str(args.cpu_threads)
+
+
 def main() -> None:
     args = parse_args()
+    # Before blocking_reason, which imports torch to ask about CUDA.
+    apply_runtime_limits(args)
     out_path = args.out or args.parquet
     spec = resolve_model(args.model, args.column_name)
     prompt_id = args.prompt
