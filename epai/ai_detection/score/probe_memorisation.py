@@ -106,33 +106,25 @@ Examples:
       data/parquet/ghostbuster_gpt35t.parquet \
       --guided-name "the Ghostbuster AI-generated-text detection benchmark (Verma et al., 2023), built from IvyPanda student essays, Reuters 
         newswire articles and reddit WritingPrompts stories" \
-      --sample 180 --yes \
-      > results/_logs/memprobe_ghostbuster_gpt35t.log 2>&1 &
+      --sample 180 --yes 
     
     uv run python epai/ai_detection/score/probe_memorisation.py \
       data/parquet/ghostbuster_gpt54mini.parquet \
       --guided-name "the Ghostbuster AI-generated-text detection benchmark (Verma et al., 2023), built from IvyPanda student essays, Reuters 
         newswire articles and reddit WritingPrompts stories" \
-      --sample 180 --yes \
-      > results/_logs/memprobe_ghostbuster_gpt54mini.log 2>&1 &
+      --sample 180 --yes 
 
     uv run python epai/ai_detection/score/probe_memorisation.py \
       data/parquet/ghostbuster_gpt56luna.parquet \
       --guided-name "the Ghostbuster AI-generated-text detection benchmark (Verma et al., 2023), built from IvyPanda student essays, Reuters 
         newswire articles and reddit WritingPrompts stories" \
-      --sample 180 --yes \
-      > results/_logs/memprobe_ghostbuster_gpt56luna.log 2>&1 &
+      --sample 180 --yes 
     
     uv run python epai/ai_detection/score/probe_memorisation.py \
       data/parquet/science_v3_gpt56luna_0811A.parquet \
       --guided-name "abstracts of published scientific papers in computer science, mathematics and sociology, as indexed by OpenAlex" \
       --prefix-words 50 --continuation-words 80 --min-continuation 80 \
-      --sample 180 --yes \
-      > results/_logs/memprobe_science_v3.log 2>&1 &
-
-
-      
-
+      --sample 180 --yes
 
 """
 
@@ -784,7 +776,21 @@ def summarise(frame: pd.DataFrame, out: Tee, verbatim_run: int) -> pd.DataFrame:
                 index="row", columns="probe",
                 values=["lcs_f1", "longest_run"], aggfunc="mean",
             ).dropna()
+            # The check above is on the whole frame; this one is on this class.
+            # An arm that lost every row of one class to API failures leaves a
+            # pivot with no column for it, and the two classes fail
+            # independently -- so a run can pass the outer check and still have
+            # nothing to subtract here.
+            absent = [arm for arm in PROBES if ("lcs_f1", arm) not in wide.columns]
+            if absent:
+                out.print(f"  guided minus unguided, {klass} rows: skipped — no "
+                          f"{klass} row came back under "
+                          f"{' or '.join(absent)}. The completions are saved; "
+                          "the failure breakdown above says which cell emptied.")
+                continue
             if wide.empty:
+                out.print(f"  guided minus unguided, {klass} rows: skipped — no "
+                          "document of this class came back under both arms.")
                 continue
             d_f1 = (wide[("lcs_f1", PROBE_GUIDED)]
                     - wide[("lcs_f1", PROBE_UNGUIDED)])
@@ -809,14 +815,28 @@ def summarise(frame: pd.DataFrame, out: Tee, verbatim_run: int) -> pd.DataFrame:
     return pd.DataFrame(records)
 
 
-def save_report(
-    out: Tee, report_dir: Path, stem: str, frame: pd.DataFrame, summary: pd.DataFrame
-) -> Path:
+def save_completions(report_dir: Path, stem: str, frame: pd.DataFrame) -> Path:
+    """The completions, written before anything is summarised.
+
+    Deliberately its own step, ahead of ``summarise``. Everything in this file
+    up to this point costs money and an hour; everything after it is
+    arithmetic on a DataFrame. A run that dies in the arithmetic -- because one
+    (class, arm) cell came back empty and a pivot had no column for it, which
+    is exactly what happened once -- must not also lose the completions it
+    already paid for. Write first, summarise second, and a broken summary is a
+    rerun of this script's last twenty lines rather than of its API calls.
+    """
     directory = report_dir / stem
     directory.mkdir(parents=True, exist_ok=True)
-    out.save(directory / "memorisation_summary.log")
     if not frame.empty:
         frame.to_csv(directory / "completions.csv", index=False)
+    return directory
+
+
+def save_report(out: Tee, directory: Path, summary: pd.DataFrame) -> Path:
+    """The log and the aggregate table, beside the completions already written."""
+    directory.mkdir(parents=True, exist_ok=True)
+    out.save(directory / "memorisation_summary.log")
     if not summary.empty:
         summary.to_csv(directory / "memorisation_summary.csv", index=False)
     return directory
@@ -1020,13 +1040,31 @@ def main() -> None:
             by_message[message] = by_message.get(message, 0) + 1
         for message, count in sorted(by_message.items(), key=lambda kv: -kv[1])[:5]:
             print(f"    {count:>5}x  {message[:100]}")
+
+        # Which cells the failures fell in. The contrast is computed per class
+        # on documents present under both arms, so failures that are spread
+        # evenly cost precision and failures concentrated in one (class, arm)
+        # cell cost the contrast itself -- and the totals above cannot tell
+        # those two apart.
+        cells: dict[tuple[str, str], list[int]] = {}
+        for outcome in outcomes:
+            klass = ("human" if outcome.task.generated_by == "human"
+                     else "machine")
+            cell = cells.setdefault((klass, outcome.task.probe), [0, 0])
+            cell[1 if outcome.error else 0] += 1
+        print("  by class and arm:")
+        for (klass, probe), (ok, bad) in sorted(cells.items()):
+            note = "  <- nothing came back" if ok == 0 else ""
+            print(f"    {klass:<9}{probe:<10}{ok:>5} completed, {bad:>4} failed"
+                  f"{note}")
     print("=" * 78)
     print()
 
     frame = rows_frame(outcomes)
+    directory = save_completions(args.report_dir, stem, frame)
     out = Tee()
     summary = summarise(frame, out, args.verbatim_run)
-    directory = save_report(out, args.report_dir, stem, frame, summary)
+    save_report(out, directory, summary)
     print(f"\nReport → {directory}")
 
 
