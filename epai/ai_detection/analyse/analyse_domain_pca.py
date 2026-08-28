@@ -31,6 +31,27 @@ geometry section: the between-domain / within-domain distance ratio, and the
 cosine between each pair of domain human->machine vectors, both computed in the
 FULL embedding space rather than in the 3 plotted components.
 
+ONE MARKER IS NOT ONE ROW, UNLESS YOU CHECK
+-------------------------------------------
+A continuous embedding never puts two documents on exactly the same coordinate,
+so the scatter can be read for density directly. A DISCRETE feature can and
+does: the 11-dim multi-hot cue vector from add_cue_features.py has at most 2048
+possible values, ~400 of which occur, so its 6000 rows draw onto ~400 points --
+one marker standing for anything from 1 row to 559, with no way to tell, and
+whichever group is drawn last hiding the ones beneath it.
+
+The COINCIDENT POINTS section reports this for every run, jittered or not, and
+``--jitter`` fixes the figure: rows sharing a point are spread over a blob whose
+AREA (volume in 3D) is proportional to how many they are, with the row-to-position
+assignment shuffled so the classes interleave instead of stacking. Density then
+reads as blob size and the class mix reads as the blob's colour. Marker sizing
+would not do it -- the groups are separate traces, so a site with 300 human and
+300 machine rows would draw two identical bubbles, one exactly on top of the
+other.
+
+Jitter touches the FIGURES ONLY. Centroids, the distance and direction tables,
+every CSV and summary.json are computed from the exact coordinates.
+
 Usage:
     # defaults: emb_luar_crud, every plot and table
     uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
@@ -63,6 +84,30 @@ Usage:
     # tables only, no figures
     uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
         data/parquet/ghostbuster_gpt35t.parquet --no-plots
+
+    # a low-cardinality feature: spread the rows that share a point
+    uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
+        data/parquet/ghostbuster_gpt56luna.parquet \
+        --feature llm_judge_cuevec_gpt56luna_v3 --jitter
+
+    # tighter blobs, if they run together
+    uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
+        data/parquet/ghostbuster_gpt56luna.parquet \
+        --feature llm_judge_cuevec_gpt56luna_v3 --jitter --jitter-scale 0.6
+
+    uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
+      data/parquet/ghostbuster_gpt56luna.parquet \
+      --feature llm_judge_cuevec_gpt56luna_v3
+    
+    uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
+      data/parquet/ghostbuster_gpt56luna.parquet \
+      --feature llm_judge_cuevec_gpt56luna_v3 --normalize standard
+    
+    uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
+      data/parquet/ghostbuster_gpt56luna.parquet \
+      --feature llm_judge_cuevec_gpt56luna_v3 --jitter
+
+
 """
 
 from __future__ import annotations
@@ -115,6 +160,29 @@ WITHIN_CROSS = "within-domain, human vs machine"
 LINK_COLOR = "#4b5563"  # neutral grey: the link belongs to neither class
 HOVER_CHARS = 240
 NORMALIZE_MODES = ("none", "l2", "standard")
+
+# --- coincident points ------------------------------------------------------
+# Two rows count as the same location when their plotted coordinates agree to
+# this fraction of the axis range. Relative, not absolute: a feature whose PCA
+# lands in [-2, 2] and one that lands in [-2000, 2000] must be judged the same
+# way, and a fixed number of decimals would merge everything in the first and
+# nothing in the second.
+COINCIDENCE_TOL = 1e-6
+
+# Radius of the largest blob, as a multiple of the typical gap between distinct
+# locations. At 1.0 the busiest site is about one gap across: blobs touch but
+# the lattice is still legible. Raise it to see density, lower it to keep
+# positions honest.
+DEFAULT_JITTER_SCALE = 1.0
+
+# Vogel's angle. Successive points placed this far apart in angle fill a disc
+# with no visible arms or radial gaps, which is what makes the blob read as
+# density rather than as a pattern of its own.
+GOLDEN_ANGLE = np.pi * (3.0 - np.sqrt(5.0))
+
+# Coincidence heavy enough to be worth a note when --jitter was not asked for.
+# Below this the scatter is telling the truth about density on its own.
+JITTER_HINT_RATIO = 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -446,6 +514,128 @@ def run_pca(X: np.ndarray, report: Report) -> tuple[np.ndarray, PCA, list[str]]:
 
 
 # ---------------------------------------------------------------------------
+# Coincident points
+# ---------------------------------------------------------------------------
+
+
+def coincident_sites(Z: np.ndarray, dims: int) -> tuple[np.ndarray, np.ndarray]:
+    """``(site index per row, rows per site)`` for the coordinates a figure plots.
+
+    Judged on the plotted components only, and recomputed per figure: two rows
+    that separate on PC3 are one point in the 2D scatter and two in the 3D one,
+    and the honest answer differs between them.
+    """
+    view = Z[:, :dims]
+    span = float(np.ptp(view)) or 1.0
+    key = np.round(view / (span * COINCIDENCE_TOL))
+    _, site, counts = np.unique(key, axis=0, return_inverse=True,
+                                return_counts=True)
+    return np.ravel(site), counts
+
+
+def coincidence_stats(Z: np.ndarray, dims: int) -> dict:
+    """How many distinct points a figure on ``dims`` components really has.
+
+    Worth reporting even when nothing is jittered: it is the difference between
+    "this feature spreads its documents out" and "this feature has 401 possible
+    answers and drew 5994 rows on top of them", and the scatter looks the same
+    either way.
+    """
+    _, counts = coincident_sites(Z, dims)
+    return {
+        "rows": int(len(Z)),
+        "sites": int(len(counts)),
+        "largest_site": int(counts.max()) if len(counts) else 0,
+        "sites_with_one_row": int((counts == 1).sum()),
+        "rows_on_shared_sites": int(counts[counts > 1].sum()) if len(counts) else 0,
+    }
+
+
+def _sunflower_offsets(n: int, radius: float, dims: int) -> np.ndarray:
+    """``n`` evenly spread offsets filling a disc (2D) or a ball (3D).
+
+    Deterministic and even, which random jitter is not: a uniform sample of 500
+    points clumps visibly, and the clumps read as structure that is not in the
+    data. The radial law puts equal AREA (2D) or VOLUME (3D) behind each point,
+    so density inside a blob is flat and the blob's size is the only thing
+    carrying the count.
+    """
+    i = np.arange(n) + 0.5
+    theta = GOLDEN_ANGLE * np.arange(n)
+    if dims == 2:
+        r = radius * np.sqrt(i / n)
+        return np.column_stack([r * np.cos(theta), r * np.sin(theta)])
+    # 3D: the same spiral in longitude, latitudes spaced so the directions land
+    # evenly on the sphere, radii cube-rooted for a flat density in the ball.
+    r = radius * np.cbrt(i / n)
+    phi = np.arccos(1.0 - 2.0 * i / n)
+    return np.column_stack([
+        r * np.sin(phi) * np.cos(theta),
+        r * np.sin(phi) * np.sin(theta),
+        r * np.cos(phi),
+    ])
+
+
+def jitter_coincident(
+    Z: np.ndarray, dims: int, scale: float, seed: int
+) -> tuple[np.ndarray, dict]:
+    """Spread rows sharing a location over a blob whose size carries the count.
+
+    A low-cardinality feature -- an 11-dim multi-hot cue vector has at most 2048
+    possible values, and in practice a few hundred occur -- puts thousands of
+    rows on a few hundred coordinates. Every one of them draws as a single
+    marker, so the scatter shows a sparse lattice whether the site holds 1 row
+    or 559, and whichever group is drawn last hides the rest.
+
+    WHY NOT SIZE THE MARKER INSTEAD. Because the groups are separate traces. A
+    site holding 300 machine rows and 300 human rows would draw two concentric
+    bubbles of equal size, one exactly on top of the other, and the mix -- the
+    one thing worth knowing about a shared site -- would be invisible. Spreading
+    the actual rows keeps one marker per document, so the blob's colours ARE the
+    composition.
+
+    Radius goes as ``n ** (1/dims)``, normalised so the busiest site reaches
+    ``scale`` x the typical gap between sites. Area in 2D (volume in 3D) is then
+    proportional to the count, which is what makes two blobs comparable by eye.
+
+    The row-to-offset assignment is shuffled under ``seed``. That is not
+    cosmetic: ``build_groups`` returns machine groups before human ones, so
+    handing out spiral positions in row order would put one class in the middle
+    of every blob and the other in a ring around it -- a clean radial pattern
+    that is an artifact of row order and nothing else.
+
+    Returns a jittered COPY. The caller keeps the exact ``Z`` for centroids,
+    and every number in the report and the CSVs is computed from that.
+    """
+    site, counts = coincident_sites(Z, dims)
+    stats = coincidence_stats(Z, dims)
+    n_max = max(stats["largest_site"], 1)
+    if n_max <= 1:
+        return Z, stats
+
+    view = Z[:, :dims]
+    # The typical gap if the distinct sites were spread evenly over the plotted
+    # extent. Scale-free, so one default works for any feature.
+    extent = float(np.mean(np.ptp(view, axis=0))) or 1.0
+    gap = extent / max(len(counts) ** (1.0 / dims), 1.0)
+    r_max = scale * gap
+
+    out = Z.copy()
+    rng = np.random.default_rng(seed)
+    order = np.argsort(site, kind="stable")
+    bounds = np.cumsum(counts)[:-1]
+    for rows in np.split(order, bounds):
+        n = len(rows)
+        if n < 2:
+            continue
+        radius = r_max * (n / n_max) ** (1.0 / dims)
+        rows = rng.permutation(rows)  # break the class ordering, keep the seed
+        out[rows, :dims] = view[rows] + _sunflower_offsets(n, radius, dims)
+    stats["max_radius"] = float(r_max)
+    return out, stats
+
+
+# ---------------------------------------------------------------------------
 # Plotting
 # ---------------------------------------------------------------------------
 
@@ -687,7 +877,21 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sample", type=int, default=None, metavar="N",
                    help="Subsample to N rows before plotting (the 3D HTML gets "
                    "heavy past ~20k points).")
-    p.add_argument("--seed", type=int, default=42, help="Seed for --sample.")
+    p.add_argument("--jitter", action="store_true",
+                   help="Spread rows that share a plotted location over a blob "
+                   "whose area is proportional to how many they are. For "
+                   "low-cardinality features (a multi-hot cue vector puts "
+                   "thousands of rows on a few hundred points), where the "
+                   "un-jittered scatter shows a sparse lattice and hides both "
+                   "the density and the class mix. Figures only — centroids, "
+                   "the geometry tables and every CSV stay on the exact "
+                   "coordinates.")
+    p.add_argument("--jitter-scale", type=float, default=DEFAULT_JITTER_SCALE,
+                   metavar="F",
+                   help="Radius of the busiest blob, in multiples of the typical "
+                   "gap between distinct locations.")
+    p.add_argument("--seed", type=int, default=42,
+                   help="Seed for --sample and for the --jitter layout.")
     p.add_argument("--no-plots", action="store_true",
                    help="Statistics only; skip the four figures.")
     p.add_argument("--no-html", action="store_true",
@@ -797,6 +1001,35 @@ def main() -> None:
     directions = direction_table(groups)
     summary = interpret(distances, directions, report)
 
+    # --- how many distinct points the scatter really has -------------------
+    # Measured whether or not --jitter was asked for, because it is invisible in
+    # the figure and changes how the figure may be read: a low-cardinality
+    # feature draws thousands of rows onto a few hundred coordinates, and one
+    # marker then stands for 1 row or for hundreds with nothing to tell them
+    # apart -- nor which class is stacked underneath.
+    report.rule("COINCIDENT POINTS")
+    coincidence = {}
+    for dims in (2, 3):
+        if Z.shape[1] < dims:
+            continue
+        sites = coincidence_stats(Z, dims)
+        coincidence[f"{dims}d"] = sites
+        report(f"  {dims}D: {sites['rows']} rows on {sites['sites']} distinct "
+               f"location(s); busiest holds {sites['largest_site']}, "
+               f"{sites['sites_with_one_row']} hold one row")
+        if args.jitter:
+            report(f"       figure jittered, blob radius ≤ {args.jitter_scale:g} x "
+                   f"the typical gap between locations")
+        elif sites["sites"] < JITTER_HINT_RATIO * sites["rows"]:
+            report(f"{YELLOW}       {sites['rows_on_shared_sites']} row(s) share a "
+                   f"location, so a marker is 1 row or {sites['largest_site']} "
+                   f"and the figure\n       cannot say which. Re-run with "
+                   f"--jitter to size each blob by its count.{RESET}")
+    summary["coincidence"] = coincidence
+    summary["jitter"] = (
+        {"scale": args.jitter_scale, "seed": args.seed} if args.jitter else None
+    )
+
     # --- save --------------------------------------------------------------
     report.rule("OUTPUT")
     tables = {
@@ -837,15 +1070,18 @@ def main() -> None:
                        f"skipping the 3D figures.{RESET}")
                 continue
             tag = "pca3d" if three_d else "pca2d"
+            dims = 3 if three_d else 2
+            Z_plot = (jitter_coincident(Z, dims, args.jitter_scale, args.seed)[0]
+                      if args.jitter else Z)
             png = out_dir / f"{tag}.png"
-            plot_static(Z, groups, links, pc_labels, title, png, three_d)
+            plot_static(Z_plot, groups, links, pc_labels, title, png, three_d)
             report(f"  {png}")
             if args.no_html:
                 continue
             if hovers is None:
                 hovers = hover_text(df)
             html_out = out_dir / f"{tag}.html"
-            plot_interactive(Z, groups, links, pc_labels, hovers, title,
+            plot_interactive(Z_plot, groups, links, pc_labels, hovers, title,
                              html_out, three_d,
                              plotly_js="cdn" if args.plotly_cdn else True)
             report(f"  {html_out}")
