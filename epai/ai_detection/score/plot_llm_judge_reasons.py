@@ -102,7 +102,7 @@ Alongside the figures:
 Usage:
     # one corpus, from the parquet: every figure, including the per-row ones
     uv run python epai/ai_detection/score/plot_llm_judge_reasons.py \
-        data/parquet/ghostbuster_gpt35t.parquet
+        data/parquet/ghostbuster_gpt56luna.parquet
 
     # the three ghostbuster generations side by side, one bar each per cue
     uv run python epai/ai_detection/score/plot_llm_judge_reasons.py \
