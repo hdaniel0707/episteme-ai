@@ -129,25 +129,21 @@ Examples:
       data/parquet/ghostbuster_gpt35t.parquet \
       --select disagree wrong uncertain confident --per-band 100 \
       --vs-cols llm_judge_score_sonnet5_v3 --yes \
-      > results/_logs/reasons_ghostbuster_gpt35t.log 2>&1 &
     
     uv run python epai/ai_detection/score/add_llm_judge_reasons.py \
       data/parquet/ghostbuster_gpt54mini.parquet \
       --select disagree wrong uncertain confident --per-band 100 \
       --vs-cols llm_judge_score_sonnet5_v3 --yes \
-      > results/_logs/reasons_ghostbuster_gpt54mini.log 2>&1 &
 
     uv run python epai/ai_detection/score/add_llm_judge_reasons.py \
       data/parquet/ghostbuster_gpt56luna.parquet \
       --select disagree wrong uncertain confident --per-band 100 \
       --vs-cols llm_judge_score_sonnet5_v3 --yes \
-      > results/_logs/reasons_ghostbuster_gpt56luna.log 2>&1 &
 
     uv run python epai/ai_detection/score/add_llm_judge_reasons.py \
       data/parquet/science_v3_gpt56luna_0811A.parquet \
       --select disagree wrong uncertain confident --per-band 100 \
       --vs-cols llm_judge_score_sonnet5_v3 --yes \
-      > results/_logs/reasons_science_v3_gpt56luna_0811A.log 2>&1 &
 
 """
 
