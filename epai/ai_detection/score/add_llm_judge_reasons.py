@@ -125,6 +125,8 @@ every ``--save-every`` rows, so an interrupted run resumes.
 
 Examples:
 
+With band
+
     uv run python epai/ai_detection/score/add_llm_judge_reasons.py \
       data/parquet/ghostbuster_gpt35t.parquet \
       --select disagree wrong uncertain confident --per-band 100 \
@@ -144,6 +146,28 @@ Examples:
       data/parquet/science_v3_gpt56luna_0811A.parquet \
       --select disagree wrong uncertain confident --per-band 100 \
       --vs-cols llm_judge_score_sonnet5_v3 --yes \
+
+ALL
+
+    uv run python epai/ai_detection/score/add_llm_judge_reasons.py \
+      data/parquet/ghostbuster_gpt35t.parquet \
+      --select all --per-band 100000 \
+      --workers 24 --save-every 500
+    
+    uv run python epai/ai_detection/score/add_llm_judge_reasons.py \
+      data/parquet/ghostbuster_gpt54mini.parquet \
+      --select all --per-band 100000 \
+      --workers 24 --save-every 500
+
+    uv run python epai/ai_detection/score/add_llm_judge_reasons.py \
+      data/parquet/ghostbuster_gpt56luna.parquet \
+      --select all --per-band 100000 \
+      --workers 24 --save-every 500
+
+    uv run python epai/ai_detection/score/add_llm_judge_reasons.py \
+      data/parquet/science_v3_gpt56luna_0811A.parquet \
+      --select all --per-band 100000 \
+      --workers 24 --save-every 500
 
 """
 
