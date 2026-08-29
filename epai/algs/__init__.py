@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from .base import ClfAlgorithm
 from .binox_mlp import BinoxMLPAlg
+from .fusion_mlp import FusionMLPAlg
+from .gated_mlp import GatedMLPAlg
 from .gradient_boosting import GradientBoostingAlg
 from .logistic import LogisticAlg
 from .svm import SVMAlg
@@ -21,6 +23,8 @@ ALGORITHMS: dict[str, type[ClfAlgorithm]] = {
     GradientBoostingAlg.name: GradientBoostingAlg,
     SimpleMLPAlg.name: SimpleMLPAlg,
     BinoxMLPAlg.name: BinoxMLPAlg,
+    FusionMLPAlg.name: FusionMLPAlg,
+    GatedMLPAlg.name: GatedMLPAlg,
 }
 
 
@@ -39,6 +43,8 @@ __all__ = [
     "ALGORITHMS",
     "BinoxMLPAlg",
     "ClfAlgorithm",
+    "FusionMLPAlg",
+    "GatedMLPAlg",
     "GradientBoostingAlg",
     "LogisticAlg",
     "SVMAlg",

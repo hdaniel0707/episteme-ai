@@ -1,5 +1,10 @@
 """A late-fusion MLP: the embedding is compressed, then the Binoculars score joins.
 
+Superseded by :mod:`fusion_mlp`, which is this architecture with an auxiliary
+input of any width (a judge's cue vector, say) and defaults chosen for it. This
+module stays as it is so that every config and every sweep leaderboard written
+against it still trains the same model.
+
 Sibling of :mod:`simple_mlp`. The difference is *where* the Binoculars score
 enters the network. Concatenated at the input it has to survive the trunk's
 compression of the embedding, and whatever is not linearly recoverable from the
@@ -20,6 +25,8 @@ from ._torch_common import (
     TRAIN_HPARAM_NAMES,
     FeatureNormalizer,
     TrainHParams,
+    aux_fill_values,
+    clean_aux,
     hidden_block,
     hparams_dict,
     logit_margin,
@@ -156,18 +163,6 @@ class BinoxMLPAlg(ClfAlgorithm):
     def resolved_params(self) -> dict:
         return {**self._arch(), **hparams_dict(read_hparams(self.params))}
 
-    def _clean_aux(self, Z: np.ndarray) -> np.ndarray:
-        """Replace non-finite scores with the training median of their column.
-
-        A failed Binoculars computation leaves a NaN or an inf, and a single one
-        of those would take the scaler's mean and std with it.
-        """
-        Z = np.asarray(Z, dtype=np.float64).reshape(len(Z), -1)
-        bad = ~np.isfinite(Z)
-        if bad.any():
-            Z = np.where(bad, self.aux_fill_, Z)
-        return Z
-
     def fit(
         self, X: np.ndarray, y: np.ndarray, Z: np.ndarray | None = None
     ) -> "BinoxMLPAlg":
@@ -189,16 +184,16 @@ class BinoxMLPAlg(ClfAlgorithm):
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        # Median over the finite training values only, so _clean_aux has a fill
-        # value that predict() can reuse unchanged on every target corpus.
-        Z_raw = np.asarray(Z, dtype=np.float64).reshape(len(Z), -1)
-        finite = np.where(np.isfinite(Z_raw), Z_raw, np.nan)
-        self.aux_fill_ = np.nan_to_num(np.nanmedian(finite, axis=0), nan=0.0)
+        # Median over the finite training values only, so clean_aux has a fill
+        # value that predict() can reuse unchanged on every target corpus. A
+        # failed Binoculars computation leaves a NaN or an inf, and a single one
+        # of those would take the scaler's mean and std with it.
+        self.aux_fill_ = aux_fill_values(Z, "median")
 
         self.normalizer = FeatureNormalizer(hp.normalize)
         self.aux_normalizer = FeatureNormalizer(arch["aux_normalize"])
         Xs = self.normalizer.fit_transform(X)
-        Zs = self.aux_normalizer.fit_transform(self._clean_aux(Z))
+        Zs = self.aux_normalizer.fit_transform(clean_aux(Z, self.aux_fill_))
 
         self.model = _BinoxMLP(
             Xs.shape[1],
@@ -228,7 +223,7 @@ class BinoxMLPAlg(ClfAlgorithm):
                 f"predict time as well"
             )
         Xs = self.normalizer.transform(X)
-        Zs = self.aux_normalizer.transform(self._clean_aux(Z))
+        Zs = self.aux_normalizer.transform(clean_aux(Z, self.aux_fill_))
         X_t = torch.from_numpy(Xs).to(self.device)
         Z_t = torch.from_numpy(Zs).to(self.device)
         self.model.eval()

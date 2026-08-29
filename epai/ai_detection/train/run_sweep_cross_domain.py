@@ -69,7 +69,7 @@ from epai.ai_detection.train.run_clf_cross_domain import (
 from epai.utils.variant_utils import (
     Variant,
     build_feature_sets,
-    spec_binox_col,
+    spec_aux_col,
     variant_columns,
 )
 from epai.ai_detection.train.replot_sweep import (
@@ -144,6 +144,14 @@ def load_sweep_config(path: Path) -> dict:
         raise ValueError(f"{path}: 'search' must be a non-empty mapping")
     if not isinstance(cfg["algorithm"], dict) or "name" not in cfg["algorithm"]:
         raise ValueError(f"{path}: 'algorithm' must be a mapping with a 'name'")
+    if "feature_sets" in cfg["algorithm"]:
+        # The restriction picks cells out of a grid, and a sweep has no grid: it
+        # searches hyper-parameters on the ONE design matrix `base` declares.
+        raise ValueError(
+            f"{path}: 'algorithm.feature_sets' has no meaning in a sweep — the "
+            f"trials all run on the single feature set of the base config; drop "
+            f"the key"
+        )
 
     obj = cfg.setdefault("objective", {})
     obj.setdefault("metric", "transfer_min")
@@ -462,7 +470,7 @@ def run_trial(
         features=list(features),
         alg_name=alg_cfg["name"],
         params=dict(params),
-        aux_col=spec_binox_col(alg_cfg),
+        aux_col=spec_aux_col(alg_cfg),
     )
     cfg_trial = dict(cfg_dev)
     cfg_trial["model"] = {**cfg_dev["model"], "n_runs": n_runs}
@@ -664,8 +672,9 @@ def print_best_params(sweep_cfg: dict, records: list[dict]) -> None:
         "id": f"{alg_cfg['name']}_swept",
         "label": f"{alg_cfg['name']} (swept)",
     }
-    if alg_cfg.get("binoculars"):
-        entry["binoculars"] = alg_cfg["binoculars"]
+    aux_col = spec_aux_col(alg_cfg)
+    if aux_col:
+        entry["aux"] = aux_col
     entry["params"] = dict(best["params"])
 
     metrics = best.get("metrics") or {}
@@ -718,8 +727,9 @@ def run_final(
         "label": f"{alg_cfg['name']} (swept)",
         "params": best["params"],
     }
-    if alg_cfg.get("binoculars"):
-        entry["binoculars"] = alg_cfg["binoculars"]
+    aux_col = spec_aux_col(alg_cfg)
+    if aux_col:
+        entry["aux"] = aux_col
 
     # The tuned model beside the config's own entries: the untuned defaults are
     # the only honest reference for what the search actually bought.
@@ -857,8 +867,9 @@ def main() -> None:
     # that a hybrid was given its auxiliary column) and the column set is the one
     # the trials will actually be filtered on.
     alg_entry = {"name": sweep_cfg["algorithm"]["name"]}
-    if sweep_cfg["algorithm"].get("binoculars"):
-        alg_entry["binoculars"] = sweep_cfg["algorithm"]["binoculars"]
+    sweep_aux = spec_aux_col(sweep_cfg["algorithm"])
+    if sweep_aux:
+        alg_entry["aux"] = sweep_aux
     cfg_dev["algorithms"] = [alg_entry]
 
     # A sweep varies hyper-parameters on ONE design matrix: the corpora are

@@ -1,4 +1,4 @@
-"""In-domain control: train on one corpus, score the held-out split of it.
+"""In-domain control: train on a corpus, score the held-out split of THAT corpus.
 
 The sibling of ``run_clf_cross_domain.py``, and the question it deliberately
 does *not* ask. That script trains on each corpus in turn and evaluates on all
@@ -27,8 +27,16 @@ CONFIG
 ------
 The same shape as a cross-domain config -- the same ``feature_sets`` x
 ``algorithms`` cross product, the same ``model`` block, the same zero-shot score
-baselines -- with one difference: ``data`` IS the corpus rather than a list of
-them, since there is no matrix to fill.
+baselines -- differing only in ``data``, which names the corpora to run rather
+than the corpora to put in a matrix.
+
+Every ``feature_sets`` entry crossed with every ``algorithms`` entry is one
+**variant**, exactly as in the matrix run: each gets its own directory, its own
+figure and a row in a comparison ranked by accuracy.
+
+SEVERAL CORPORA IN ONE RUN
+--------------------------
+``data`` may name ONE corpus directly, as it always could::
 
     data:
       parquet_path: "data/parquet/ghostbuster_gpt54mini.parquet"
@@ -36,9 +44,34 @@ them, since there is no matrix to fill.
       group_col: "id"
       # where: {domain: essay}      # optional; omit for ALL the data
 
-Every ``feature_sets`` entry crossed with every ``algorithms`` entry is one
-**variant**, exactly as in the matrix run: each gets its own directory, its own
-figure and a row in a comparison ranked by accuracy.
+...or carry a ``datasets`` list, which runs the whole experiment once per
+corpus, plus once on the whole file if ``include_pooled`` is set::
+
+    data:
+      parquet_path: "data/parquet/ghostbuster_gpt56luna.parquet"
+      human_label: "human"
+      group_col: "id"
+      datasets:
+        - {name: essay,  where: {domain: essay}}
+        - {name: reuter, where: {domain: reuter}}
+        - {name: wp,     where: {domain: wp}}
+      include_pooled: true          # + one more on the parquet, unfiltered
+
+That produces the N+1 numbers this control is usually wanted for: what the
+detector scores on each domain on its own, and what it scores trained on
+everything available.
+
+This list is NOT the cross-domain one, and the difference is the whole point:
+nothing is ever trained on one entry and tested on another. Every corpus is a
+separate, self-contained experiment, so a one-entry list is legitimate here
+where the matrix runner needs two, and none of the output is a transfer claim.
+The pooled row in particular is NOT independent of the per-domain rows -- it is
+the same documents again -- so its bar sits in the same table but adds no
+evidence to them.
+
+Output follows the shape: one corpus writes straight into ``<alg_id>/``, exactly
+as before; several write ``<alg_id>/<corpus>/`` each holding what a single-corpus
+run holds, plus ``corpus_comparison.json`` and one figure across corpora.
 
 TRAIN AND TEST
 --------------
@@ -54,20 +87,25 @@ binomial error of a single test set and understates the real uncertainty.
 
 METRICS
 -------
-Accuracy and macro F1 from the labels; AUROC and TPR at 1% and 5% FPR from the
-continuous score behind them, on both row sets. The gap is not the same size for
-all of them: a model can lose almost nothing in accuracy across the split and a
-large share of its TPR at 1% FPR, because that operating point lives in the tail
-of the human distribution -- exactly the part a fitted model has pushed furthest
-away on the rows it saw.
+Accuracy and macro F1 from the labels -- at a Youden's J threshold fit on the
+calibration slice, not an algorithm's default 0.5, exactly as in
+``run_clf_cross_domain.py``; AUROC and TPR at 1% and 5% FPR from the continuous
+score behind them, on both row sets. The gap is not the same size for all of
+them: a model can lose almost nothing in accuracy across the split and a large
+share of its TPR at 1% FPR, because that operating point lives in the tail of
+the human distribution -- exactly the part a fitted model has pushed furthest
+away on the rows it was fitted on.
 
 ``tprT@X`` / ``fprT@X`` are the transported reading: the threshold is calibrated
-to X% FPR on the TRAINING rows and applied to the held-out ones, and ``fprT@X``
-is the FPR it actually produced there. This is the weakest possible test of a
-calibration -- one corpus, one generator, two random halves -- so a realized FPR
-that already misses its nominal level here says the operating point is not stable
-even before transfer is asked about. See ``run_clf_cross_domain.py``, where the
-same threshold is carried to a corpus the model has never seen.
+to X% FPR on a calibration slice -- a grouped ~15% cut of the training half,
+never fit on and never evaluated on, see ``cd_core.carve_calibration`` -- and
+applied to the held-out rows, and ``fprT@X`` is the FPR it actually produced
+there. This is the weakest possible test of a calibration -- one corpus, one
+generator, two random halves -- so a realized FPR that already misses its
+nominal level here says the operating point is not stable even before transfer
+is asked about. See ``run_clf_cross_domain.py``, where the same threshold is
+carried to a corpus the model has never seen; the two runners carve their
+calibration slice the same way, so a shared cell agrees exactly.
 
 ``report_by`` names columns to describe the split by (``domain``,
 ``generated_by``). They are read and kept aligned with the design matrix but
@@ -78,10 +116,11 @@ expectation; this is what says whether they actually held.
 WHAT IS AND IS NOT SHARED WITH THE MATRIX RUN
 ---------------------------------------------
 Shared, so the diagonal here is the diagonal there: the grouped split (a
-document and its rewrites never straddle the cut), the binarised human-vs-machine
-target, the group-aware missing-value drop, the per-seed repetition and the
-metric definitions. Train a variant here and read the same variant's diagonal in
-a cross-domain run and you should see the same number.
+document and its rewrites never straddle the cut), the calibration carve inside
+the training half (``cd_core.carve_calibration``, same seed), the binarised
+human-vs-machine target, the group-aware missing-value drop, the per-seed
+repetition and the metric definitions. Train a variant here and read the same
+variant's diagonal in a cross-domain run and you should see the same number.
 
 Not shared, because it has no meaning here: the exclusion of target rows whose
 group was seen in training. There is no target corpus.
@@ -90,7 +129,12 @@ Run:
     uv run python epai/ai_detection/train/run_clf_in_domain.py
     uv run python epai/ai_detection/train/run_clf_in_domain.py --dry-run
     uv run python epai/ai_detection/train/run_clf_in_domain.py \
-        --cfg cfg/ai_detection/train/clf_id/clf_id_example.yaml --no-plots
+        --cfg cfg/ai_detection/train/clf_id/clf_id_domains_all.yaml --no-plots
+
+    # every domain of the suite, plus the whole parquet:
+    uv run python epai/ai_detection/train/run_clf_in_domain.py \
+        --cfg cfg/ai_detection/train/clf_id/clf_id_domains_all.yaml
+
 """
 
 from __future__ import annotations
@@ -108,21 +152,29 @@ from tqdm import tqdm
 from epai.algs import build_algorithm
 from epai.utils.cd_core import (
     BINARY_CLASSES,
+    CAL_FRAC_DEFAULT,
     baseline_specs,
     calibrate_thresholds,
+    carve_calibration,
+    HEADLINE_METRICS,
     cell_metric_specs,
     check_dataset,
+    check_mode,
+    headline_metric_specs,
     describe_variant,
     evaluate_score_rule,
     format_threshold,
     grouped_split,
+    label_predictions,
     load_prepared,
     mean_std_over_seeds,
     metrics_dict,
     oriented_scores,
+    print_headline_ranking,
     print_split_composition,
     score_metric_keys,
     split_composition,
+    youden_threshold,
 )
 from epai.utils.config_utils import (
     RESET,
@@ -131,8 +183,13 @@ from epai.utils.config_utils import (
     rel,
     resolve_configs,
 )
-from epai.utils.corpus_utils import CorpusSpec, check_single_corpus, single_corpus_spec
+from epai.utils.corpus_utils import (
+    CorpusSpec,
+    check_in_domain_corpora,
+    in_domain_specs,
+)
 from epai.utils.preflight_utils import RULE, Report, load_yaml, print_report
+from epai.utils.suite_utils import corpus_comparison_rows
 from epai.utils.train_utils import stack_features
 from epai.utils.variant_utils import (
     Variant,
@@ -152,6 +209,7 @@ from epai.utils.variant_utils import (
 )
 from epai.utils.visualization_utils import (
     plot_clf_id_comparison,
+    plot_clf_id_corpus_comparison,
     plot_clf_id_result,
 )
 
@@ -175,7 +233,8 @@ def preflight_config(cfg: dict, report: Report) -> None:
     n_errors = len(report.errors)
     # The axes, identity, model block and baselines are validated exactly as the
     # matrix run validates them; only the `data` shape differs.
-    check_config(cfg, report, data_check=check_single_corpus)
+    check_mode(cfg, report, ("in_domain",))
+    check_config(cfg, report, data_check=check_in_domain_corpora)
     if len(report.errors) > n_errors:
         print("  invalid — skipping the data checks for this config")
         return
@@ -190,12 +249,23 @@ def preflight_config(cfg: dict, report: Report) -> None:
         if baselines
         else ""
     )
-    spec = single_corpus_spec(cfg, BASE_DIR)
+    specs = in_domain_specs(cfg, BASE_DIR)
     print(
-        f"  corpus {spec.name!r} ({spec.source}), {len(fsets)} feature set(s), "
+        f"  {len(specs)} corpus/corpora, {len(fsets)} feature set(s), "
         f"{len(algorithm_specs(cfg))} algorithm(s){baseline_note}, "
-        f"{cfg['model']['n_runs']} seeds  → {len(variants)} variant(s), {n_fits} fits"
+        f"{cfg['model']['n_runs']} seeds  → {len(variants)} variant(s), "
+        f"{n_fits * len(specs)} fits"
     )
+    for spec in specs:
+        print(f"    {spec.name:<26} {spec.source}")
+    restricted = [s for s in algorithm_specs(cfg) if s["feature_sets"] is not None]
+    if restricted:
+        # The cross product no longer explains the variant count, so name the
+        # cells that were dropped before a reader wonders where they went.
+        print(
+            "  restricted to some feature sets: "
+            + ", ".join(f"{s['id']} → {list(s['feature_sets'])}" for s in restricted)
+        )
     hybrids = [v for v in variants if v.hybrid]
     if hybrids:
         print(
@@ -205,16 +275,30 @@ def preflight_config(cfg: dict, report: Report) -> None:
 
     print("\n[2/3] parquet file")
     n_errors = len(report.errors)
-    check_files(cfg, [spec], report)
+    check_files(cfg, specs, report)
     if len(report.errors) > n_errors:
         print("  unusable — skipping the data checks for this config")
         return
 
     print("\n[3/3] data, dimensions and split")
+    # Every corpus is checked even after one of them fails: the point of a
+    # preflight this thorough is that one pass names everything to fix.
+    outer = report.context
+    for spec in specs:
+        report.context = f"{outer} · {spec.name}" if outer else spec.name
+        preflight_corpus(cfg, spec, report)
+    report.context = outer
+
+
+def preflight_corpus(cfg: dict, spec: CorpusSpec, report: Report) -> None:
+    """Stage 3 for ONE corpus: its rows, its dimensions, its splits."""
+    fsets = build_feature_sets(cfg)
     group_col: str = cfg["data"]["group_col"]
     human_label: str = cfg["data"]["human_label"]
     test_size: float = cfg["model"].get("test_size", 0.30)
+    cal_frac: float = cfg["model"].get("cal_frac", CAL_FRAC_DEFAULT)
 
+    print(f"\n  corpus: {spec.name}  ({spec.source})")
     print(f"{'feature set':<26}{'rows':>8}{'dropped':>9}{'dim':>7}{'groups':>8}  classes")
     print("-" * RULE)
 
@@ -265,6 +349,36 @@ def preflight_config(cfg: dict, report: Report) -> None:
                     f"{tag}: the test half holds a single class; its accuracy is a "
                     f"base rate, not a result"
                 )
+            else:
+                # The calibration carve out of the training half (see
+                # cd_core.carve_calibration): replay it too, or a corpus with
+                # too few groups to survive a second grouped cut only fails at
+                # fit time.
+                try:
+                    fit_idx, cal_idx = carve_calibration(
+                        y[train_idx], groups[train_idx], cal_frac, seed
+                    )
+                except Exception as exc:
+                    report.error(
+                        f"{tag}: calibration carve failed: {type(exc).__name__}: {exc}"
+                    )
+                    continue
+                if len(fit_idx) == 0 or len(cal_idx) == 0:
+                    report.error(
+                        f"{tag}: calibration carve leaves {len(fit_idx)} fit / "
+                        f"{len(cal_idx)} calibration rows; adjust cal_frac={cal_frac}"
+                    )
+                elif np.unique(y[train_idx][fit_idx]).size < 2:
+                    report.error(
+                        f"{tag}: the fit rows (after carving out the calibration "
+                        f"slice) hold a single class; lower cal_frac={cal_frac} or "
+                        f"check {group_col!r}"
+                    )
+                elif np.unique(y[train_idx][cal_idx]).size < 2:
+                    report.warn(
+                        f"{tag}: the calibration slice holds a single class; its "
+                        f"Youden's J threshold and calibrate_thresholds will be NaN"
+                    )
 
     # A score baseline reads its own column, so it stands on its own row set --
     # the judge only scores the generators it was asked for.
@@ -352,6 +466,7 @@ def aggregate_runs(per_seed: list[dict]) -> dict:
         "overfit_gap": float(np.mean(tr_accs) - np.mean(accs)),
         "confusion_mean": np.mean([r["confusion"] for r in per_seed], axis=0).tolist(),
         "train_n": per_seed[0]["train_n"],
+        "cal_n": per_seed[0]["cal_n"],
         "n": per_seed[0]["n"],
         "class_balance": per_seed[0]["class_balance"],
     }
@@ -415,6 +530,7 @@ def run_variant(
     base_seed: int = cfg["seed"]
     n_runs: int = cfg["model"]["n_runs"]
     test_size: float = cfg["model"].get("test_size", 0.30)
+    cal_frac: float = cfg["model"].get("cal_frac", CAL_FRAC_DEFAULT)
 
     y = df["y"].to_numpy()
     groups = df["group"].to_numpy()
@@ -429,45 +545,57 @@ def run_variant(
         # the two numbers are directly comparable.
         train_idx, test_idx = grouped_split(y, groups, test_size, seed)
 
-        alg = build_algorithm(variant.alg_name, seed, **variant.params)
-        alg.set_fit_groups(groups[train_idx])
-        fit_alg(alg, X[train_idx], y[train_idx], Z[train_idx] if Z is not None else None)
+        # The calibration slice: carved out of the training half exactly as
+        # the cross-domain run carves it (cd_core.carve_calibration), so the
+        # two runners agree on where a threshold comes from. Never the fit
+        # rows -- a model's scores there are optimistic, which is what used to
+        # make this runner's transported TPR too strict -- and never the test
+        # rows, which would be the oracle reading.
+        fit_idx, cal_idx = carve_calibration(y[train_idx], groups[train_idx], cal_frac, seed)
+        fit_idx, cal_idx = train_idx[fit_idx], train_idx[cal_idx]
 
-        Z_train = Z[train_idx] if Z is not None else None
+        alg = build_algorithm(variant.alg_name, seed, **variant.params)
+        alg.set_fit_groups(groups[fit_idx])
+        fit_alg(alg, X[fit_idx], y[fit_idx], Z[fit_idx] if Z is not None else None)
+
+        Z_fit = Z[fit_idx] if Z is not None else None
+        Z_cal = Z[cal_idx] if Z is not None else None
         Z_test = Z[test_idx] if Z is not None else None
 
-        # There is no second corpus here, so the transported operating point of
-        # variant (b) is transported across the split instead: the threshold is
-        # calibrated to each nominal FPR on the TRAINING rows and the realized
-        # FPR is read on the held-out ones. That is the weakest possible test of
-        # a calibration -- same corpus, same generator, same everything -- and a
-        # realized FPR that already misses its nominal level here says the
-        # operating point is not even stable within one corpus, before transfer
-        # is asked about at all.
-        #
-        # It is also biased in a known direction: the model was fitted on those
-        # rows, so its human scores there sit further from the boundary than they
-        # will anywhere else, and the threshold comes out too strict. Read the
-        # realized FPR as a floor.
-        s_train = score_alg(alg, X[train_idx], Z_train)
+        # The transported operating point of variant (b): the threshold is
+        # calibrated to each nominal FPR on the calibration slice and the
+        # realized FPR is read on the held-out test rows. Youden's J on the
+        # same slice drives accuracy/macro F1 below.
+        s_cal = score_alg(alg, X[cal_idx], Z_cal)
         cal_thresholds = (
-            calibrate_thresholds(y[train_idx], s_train) if s_train is not None else None
+            calibrate_thresholds(y[cal_idx], s_cal) if s_cal is not None else None
+        )
+        label_threshold = (
+            youden_threshold(y[cal_idx], s_cal) if s_cal is not None else None
         )
 
+        s_test = score_alg(alg, X[test_idx], Z_test)
         res = metrics_dict(
             y[test_idx],
-            predict_alg(alg, X[test_idx], Z_test),
-            scores=score_alg(alg, X[test_idx], Z_test),
+            label_predictions(
+                predict_alg(alg, X[test_idx], Z_test), s_test, label_threshold
+            ),
+            scores=s_test,
             cal_thresholds=cal_thresholds,
+            label_threshold=label_threshold,
         )
-        # The same model on the rows it was fitted on. Not a result -- it is the
-        # denominator for one: train minus test is what the model failed to
-        # generalise, and a headline test score means something different at a
-        # 0.4-point gap than at a 15-point one.
+        # The same model on the rows it was actually fitted on (fit_idx, not
+        # the whole training half -- the calibration slice was never fit on).
+        # Not a result -- it is the denominator for one: fit minus test is
+        # what the model failed to generalise, and a headline test score means
+        # something different at a 0.4-point gap than at a 15-point one.
+        s_fit = score_alg(alg, X[fit_idx], Z_fit)
         train_res = metrics_dict(
-            y[train_idx],
-            predict_alg(alg, X[train_idx], Z_train),
-            scores=s_train,
+            y[fit_idx],
+            label_predictions(
+                predict_alg(alg, X[fit_idx], Z_fit), s_fit, label_threshold
+            ),
+            scores=s_fit,
         )
         res["train_accuracy"] = train_res["accuracy"]
         res["train_macro_f1"] = train_res["macro_f1"]
@@ -475,7 +603,8 @@ def run_variant(
         for key in score_metric_keys():
             if key in train_res:
                 res[f"train_{key}"] = train_res[key]
-        res["train_n"] = int(len(train_idx))
+        res["train_n"] = int(len(fit_idx))
+        res["cal_n"] = int(len(cal_idx))
         per_seed.append(res)
 
         if save_models:
@@ -522,13 +651,17 @@ def run_baseline(cfg: dict, spec: CorpusSpec, bl: dict, out_dir: Path) -> dict:
     """One zero-shot score baseline on the held-out split. Nothing is fitted.
 
     Same split and seeds as the trained variants, so its row lands in the same
-    table. The cutoff is the config's and never looks at the data at all; the
-    split matters only because it decides which rows the baseline is read on.
+    table. The declared cutoff never looks at the data at all and is still
+    recorded, but no longer drives accuracy/macro F1 -- those come from a
+    Youden's J threshold fit on the same calibration slice the trained
+    variant of this corpus uses, for the reasons ``cd_core.BaselineKind``
+    documents.
     """
     group_col: str = cfg["data"]["group_col"]
     human_label: str = cfg["data"]["human_label"]
     n_runs: int = cfg["model"]["n_runs"]
     test_size: float = cfg["model"].get("test_size", 0.30)
+    cal_frac: float = cfg["model"].get("cal_frac", CAL_FRAC_DEFAULT)
     col, machine_is_high = bl["column"], bool(bl.get("machine_is_high", False))
     threshold = float(bl["threshold"])
 
@@ -542,18 +675,22 @@ def run_baseline(cfg: dict, spec: CorpusSpec, bl: dict, out_dir: Path) -> dict:
 
     per_seed: list[dict] = []
     for i in range(n_runs):
-        train_idx, test_idx = grouped_split(y, groups, test_size, cfg["seed"] + i)
-        # Variant (b) across the split, as for the trained variants -- except
-        # that a zero-shot score is not fitted to the training rows at all, so
-        # this one is unbiased: a realized FPR that misses its nominal level here
-        # is the detector's score distribution moving between two random halves
-        # of ONE corpus, with no overfitting to blame it on.
-        cal_thresholds = calibrate_thresholds(
-            y[train_idx], oriented_scores(scores[train_idx], machine_is_high)
-        )
+        seed = cfg["seed"] + i
+        train_idx, test_idx = grouped_split(y, groups, test_size, seed)
+        # The calibration slice: carved from the training half exactly as the
+        # trained variant of this corpus carves it, same seed, so the two
+        # transport a threshold fit on identical rows. Nothing is fitted here,
+        # so this is unbiased in the same sense the old training-half
+        # calibration was -- a zero-shot score never saw the fit rows either --
+        # but it now sits on the same rows as every other row of the table.
+        _, cal_idx = carve_calibration(y[train_idx], groups[train_idx], cal_frac, seed)
+        cal_idx = train_idx[cal_idx]
+        oriented_cal = oriented_scores(scores[cal_idx], machine_is_high)
+        cal_thresholds = calibrate_thresholds(y[cal_idx], oriented_cal)
+        label_threshold = youden_threshold(y[cal_idx], oriented_cal)
         res = evaluate_score_rule(
             scores[test_idx], y[test_idx], threshold, machine_is_high,
-            cal_thresholds=cal_thresholds,
+            cal_thresholds=cal_thresholds, label_threshold=label_threshold,
         )
         # The same cutoff on the training half. The gap against the held-out
         # half should be ~0: the cutoff saw no data at all, so there is no
@@ -568,6 +705,7 @@ def run_baseline(cfg: dict, spec: CorpusSpec, bl: dict, out_dir: Path) -> dict:
             if key in train_res:
                 res[f"train_{key}"] = train_res[key]
         res["train_n"] = int(len(train_idx))
+        res["cal_n"] = int(len(cal_idx))
         res["threshold"] = float(threshold)
         per_seed.append(res)
 
@@ -644,8 +782,8 @@ def print_result(label: str, summary: dict) -> None:
         print(
             "\n  tpr@X is (a): the threshold is fit on the very rows it is scored\n"
             "  on. tprT@X / fprT@X are (b): the threshold is fit to X% FPR on the\n"
-            "  TRAINING rows and carried to the held-out ones — fprT@X is what it\n"
-            "  actually cost there. Within one corpus this is the easiest possible\n"
+            "  calibration slice and carried to the held-out ones — fprT@X is what\n"
+            "  it actually cost there. Within one corpus this is the easiest possible\n"
             "  test of a calibration; a miss here will only widen under transfer."
         )
 
@@ -658,7 +796,14 @@ def print_result(label: str, summary: dict) -> None:
 
 
 def print_ranking(alg_label: str, rows: list[dict], noun: str = "variant") -> None:
-    """Rank the variants by held-out accuracy."""
+    """Rank the variants by held-out accuracy, then repeat under every metric.
+
+    Two tables, the same shape the matrix run prints: the accuracy ranking with
+    the train / test / gap columns that are this script's whole reason to exist,
+    then the SAME rows under ``cd_core.HEADLINE_METRICS`` -- so an in-domain
+    result can be laid beside a cross-domain or leave-one-domain-out one without
+    opening the JSON to find its AUROC.
+    """
     order = sorted(rows, key=lambda r: r["accuracy_mean"], reverse=True)
     width = max(26, max((len(r["label"]) for r in order), default=0) + 4)
     print()
@@ -681,6 +826,20 @@ def print_ranking(alg_label: str, rows: list[dict], noun: str = "variant") -> No
     print("  gap = train − test accuracy, in points: what did not generalise even")
     print("        within this corpus. A large gap under a high test score means")
     print("        the score is carried by capacity, not by signal.")
+    # Held-out rows only: the train columns belong to the table above, where the
+    # pair is the point, and repeating them here would double the width to say
+    # something already said.
+    print_headline_ranking(
+        order, noun=noun, width=width,
+        title=f"{alg_label} — HELD-OUT ROWS UNDER EVERY HEADLINE METRIC",
+        note=(
+            "  The threshold behind tprT@X (and the Youden's J behind accuracy /\n"
+            "  macro F1) is fitted on a calibration slice carved out of the\n"
+            "  training half — never the fit rows, never the held-out ones — the\n"
+            "  same procedure and, for a shared corpus and seed, the same rows a\n"
+            "  matrix run uses. See cd_core.carve_calibration."
+        ),
+    )
     if any(r.get("baseline") for r in order):
         print("  ★ zero-shot baseline: no classifier trained")
     hybrids = [r for r in order if r.get("hybrid")]
@@ -693,15 +852,168 @@ def print_ranking(alg_label: str, rows: list[dict], noun: str = "variant") -> No
 
 
 def run_config(cfg_path: Path, cfg: dict, alg_dir: Path) -> None:
-    """Every variant of one config, plus its comparison figure."""
+    """One config: every corpus it names, and the comparison across them.
+
+    A config naming ONE corpus is exactly what it always was -- the variants,
+    their figures and the ranking written straight into ``alg_dir``.
+
+    A config with ``data.datasets`` runs that whole thing once per corpus, one
+    directory deeper, and adds the level the list exists for: one row per
+    variant holding its per-corpus held-out accuracy, ranked by the unweighted
+    mean over corpora, as ``corpus_comparison.json`` beside the corpus
+    directories. No model ever crosses two corpora here -- that is the matrix
+    run's job -- so the comparison is a table of independent results, not a
+    transfer claim.
+    """
     alg_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy(cfg_path, alg_dir / "config.yaml")
     with open(alg_dir / "config.json", "w") as f:
         json.dump(cfg, f, indent=2)
 
+    specs = in_domain_specs(cfg, BASE_DIR)
+    # The layout follows the config's SHAPE, not how many corpora it happened to
+    # resolve to: a one-entry `datasets` list still writes a corpus directory, so
+    # adding a second entry later does not silently move every path.
+    if not cfg["data"].get("datasets"):
+        run_corpus(cfg, specs[0], alg_dir)
+        return
+
+    per_corpus: dict[str, list[dict]] = {}
+    for spec in tqdm(specs, desc="Corpora", unit="corpus"):
+        corpus_dir = alg_dir / spec.name
+        corpus_dir.mkdir(parents=True, exist_ok=True)
+        per_corpus[spec.name] = run_corpus(cfg, spec, corpus_dir)["variants"]
+
+    names = [s.name for s in specs]
+    labels = {s.name: s.label for s in specs}
+    rows = corpus_comparison_rows(per_corpus, names)
+    comparison = {
+        "alg_id": cfg["alg_id"],
+        "alg_label": cfg["alg_label"],
+        "noun": comparison_noun(cfg),
+        "subtitle": (
+            f"{len(names)} corpora · {cfg['model']['n_runs']} seeds · "
+            f"grouped by {cfg['data']['group_col']!r} · held-out "
+            f"{cfg['model'].get('test_size', 0.30):.0%} · chance = 50%"
+        ),
+        "corpus_names": names,
+        "corpus_labels": labels,
+        "corpus_sources": {s.name: s.source for s in specs},
+        "classes": BINARY_CLASSES,
+        "config": cfg,
+        "variants": rows,
+    }
+    with open(alg_dir / "corpus_comparison.json", "w") as f:
+        json.dump(comparison, f, indent=2)
+
+    print_corpus_ranking(cfg["alg_label"], rows, names, labels,
+                         noun=comparison["noun"])
+    if PLOTS_ENABLED:
+        plot_clf_id_corpus_comparison(alg_dir, comparison)
+
+
+def _num(value, default: float = float("nan")) -> float:
+    """One aggregate as a float, with a missing or unparseable cell as NaN.
+
+    Only the printing below needs it -- the row building moved to
+    ``suite_utils.corpus_comparison_rows``, which has its own copy for the same
+    reason: a table has to render a gap as a dash, not raise on it.
+    """
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def print_corpus_ranking(
+    alg_label: str,
+    rows: list[dict],
+    names: list[str],
+    labels: dict[str, str],
+    noun: str = "variant",
+) -> None:
+    """Rank the variants by mean in-domain accuracy, corpora still visible.
+
+    Two tables: the per-corpus accuracy columns -- the N+1 view this level exists
+    for -- and then the same rows under every ``cd_core.HEADLINE_METRICS``,
+    meaned over those same corpora. The second is what makes this run
+    comparable to a matrix run, which is ranked on transfer AUROC and the
+    transported TPR long before anyone looks at its accuracy.
+    """
+    order = sorted(
+        rows, key=lambda r: (-_num(r.get("accuracy_mean"), -1.0), r["label"])
+    )
+    width = max(26, max((len(r["label"]) for r in order), default=0) + 4)
+    col = max(10, max((len(labels.get(n, n)) for n in names), default=0) + 2)
+    header = (
+        f"{noun:<{width}}"
+        + "".join(f"{labels.get(n, n):>{col}}" for n in names)
+        + f"{'mean':>{col}}{'±corpora':>10}{'worst':>9}"
+    )
+    print()
+    print("=" * max(RULE, len(header)))
+    print(f"  {alg_label} — {noun.upper()}S RANKED BY MEAN IN-DOMAIN ACCURACY")
+    print("=" * max(RULE, len(header)))
+    print(header)
+    print("-" * max(RULE, len(header)))
+    for r in order:
+        mark = "★ " if r.get("baseline") else ("◆ " if r.get("hybrid") else "  ")
+        line = f"{mark + r['label']:<{width}}"
+        for n in names:
+            value = _num(r["per_corpus"].get(n, {}).get("accuracy_mean"))
+            line += (
+                f"{'—':>{col}}" if not np.isfinite(value)
+                else f"{value*100:>{col-1}.1f}%"
+            )
+        line += (
+            f"{_num(r.get('accuracy_mean'))*100:>{col-1}.1f}%"
+            f"{_num(r.get('accuracy_across_corpora_std'))*100:>9.1f} "
+            f"{_num(r.get('accuracy_worst'))*100:>8.1f}%"
+        )
+        print(line)
+    print("-" * max(RULE, len(header)))
+    print("  Each column is a SEPARATE experiment: trained and tested on that")
+    print("  corpus alone. Nothing here crosses corpora — for that, run")
+    print("  epai/ai_detection/train/run_clf_cross_domain.py.")
+    print("  mean     = unweighted over the columns; ±corpora is their spread,")
+    print("             which is 'do the corpora agree', not a seed error bar.")
+    print("  Chance is 50%. These are upper bounds on a deployed detector.")
+    if any(r.get("baseline") for r in order):
+        print("  ★ zero-shot baseline: no classifier trained")
+    if any(r.get("hybrid") for r in order):
+        cols = sorted({r.get("aux_column", "?") for r in order if r.get("hybrid")})
+        print(
+            f"  ◆ hybrid: trained on the shared features PLUS {', '.join(cols)}, "
+            f"so it is not ranked on equal information"
+        )
+
+    # The same rows under every headline metric, each one meaned over the same
+    # corpora. Ranking on accuracy alone is how a variant that separates well but
+    # cannot hold an operating point ends up at the top of the only table anyone
+    # reads.
+    print_headline_ranking(
+        order, noun=noun, width=width,
+        title=f"{alg_label} — MEAN OVER CORPORA, EVERY HEADLINE METRIC",
+        note=(
+            "  Every column is the unweighted mean over the same corpora as the\n"
+            "  table above, so a row is only comparable to another row of this\n"
+            "  table — never to a single corpus's number."
+        ),
+    )
+
+
+def run_corpus(cfg: dict, spec: CorpusSpec, alg_dir: Path) -> dict:
+    """Every variant on ONE corpus, plus its comparison figure.
+
+    Returns the ``in_domain_comparison`` payload it wrote, which is what the
+    cross-corpus layer above stacks.
+    """
+    alg_dir.mkdir(parents=True, exist_ok=True)
+
     group_col: str = cfg["data"]["group_col"]
     human_label: str = cfg["data"]["human_label"]
-    spec = single_corpus_spec(cfg, BASE_DIR)
     fsets = build_feature_sets(cfg)
     variants = build_variants(cfg)
     aux = aux_columns(cfg)
@@ -726,6 +1038,14 @@ def run_config(cfg_path: Path, cfg: dict, alg_dir: Path) -> None:
 
     rows: list[dict] = []
     for fs in tqdm(fsets, desc="Feature sets", unit="set", leave=False):
+        # An entry's `feature_sets` restriction can leave a set with nothing to
+        # train; loading the corpus to fit nothing on it is wasted I/O. The
+        # preflight has already warned about it.
+        fs_variants = [v for v in variants if v.fs_id == fs.id]
+        if not fs_variants:
+            tqdm.write(f"\n{'─' * 60}\n  feature set: {fs.id} — no algorithm, skipped")
+            continue
+
         # Load and stack one feature set once; every algorithm on it reuses the
         # result. The missing-value filter runs over the features and every
         # auxiliary column together, so a hybrid and a plain algorithm are scored
@@ -755,8 +1075,7 @@ def run_config(cfg_path: Path, cfg: dict, alg_dir: Path) -> None:
             print_split_composition(composition[fs.id])
 
         for variant in tqdm(
-            [v for v in variants if v.fs_id == fs.id], desc="Variants",
-            unit="var", leave=False,
+            fs_variants, desc="Variants", unit="var", leave=False,
         ):
             hybrid_note = f" + {variant.aux_col}" if variant.aux_col else ""
             tqdm.write(f"\n→ {variant.id}  ({variant.alg_name}{hybrid_note})")
@@ -790,16 +1109,22 @@ def run_config(cfg_path: Path, cfg: dict, alg_dir: Path) -> None:
         rows.append(summarise(payload))
 
     noun = comparison_noun(cfg)
+    # Named after the corpus as well as the config: with several corpora in one
+    # run these headings and figure titles would otherwise be identical, and the
+    # only thing that differs between them is which corpus produced them.
+    corpus_label = f"{cfg['alg_label']} — {spec.label}"
     comparison = {
         "alg_id": cfg["alg_id"],
-        "alg_label": cfg["alg_label"],
+        "alg_label": corpus_label,
         "noun": noun,
         "subtitle": (
-            f"{spec.name} · {cfg['model']['n_runs']} seeds · "
+            f"{spec.source} · {cfg['model']['n_runs']} seeds · "
             f"grouped by {group_col!r} · held-out "
             f"{cfg['model'].get('test_size', 0.30):.0%} · chance = 50%"
         ),
         "corpus": spec.name,
+        "corpus_label": spec.label,
+        "corpus_source": spec.source,
         "split_composition": composition,
         "classes": BINARY_CLASSES,
         "config": cfg,
@@ -808,9 +1133,10 @@ def run_config(cfg_path: Path, cfg: dict, alg_dir: Path) -> None:
     with open(alg_dir / "in_domain_comparison.json", "w") as f:
         json.dump(comparison, f, indent=2)
 
-    print_ranking(cfg["alg_label"], rows, noun=noun)
+    print_ranking(corpus_label, rows, noun=noun)
     if PLOTS_ENABLED:
         plot_clf_id_comparison(alg_dir, comparison)
+    return comparison
 
 
 # ---------------------------------------------------------------------------

@@ -8,8 +8,24 @@ or after a run made with ``--no-plots``. It dispatches on the filenames:
   * every ``in_domain.json`` -> that variant's confusion matrix, via
     ``plot_clf_id_result`` on its directory. This covers each variant directory
     and each zero-shot baseline directory.
-  * every ``in_domain_comparison.json`` -> the ranked comparison figure, via
-    ``plot_clf_id_comparison``.
+  * every ``in_domain_comparison.json`` -> that corpus's ranked comparison
+    figure, via ``plot_clf_id_comparison``.
+  * every ``corpus_comparison.json`` -> the figures across corpora written by a
+    run whose config named several, via ``plot_clf_id_corpus_comparison``.
+
+REBUILDING THE CROSS-CORPUS ROWS
+--------------------------------
+That last one is the one exception to "redraw, never rewrite". Its ``variants``
+list is a *stack* of the per-corpus ``in_domain_comparison.json`` files beside
+it, and those are the authority: they hold every metric each variant produced.
+So before drawing, the stack is recomputed from them and written back.
+
+That is what lets a run made before a metric was added to the headline set pick
+it up without retraining a single model -- the numbers were always in the
+per-corpus files, only the summary above them was narrower. Nothing is
+recomputed from data: if a per-corpus file does not have a metric, neither does
+the rebuilt row. The file is left exactly as found when no per-corpus
+comparison can be located beside it.
 
 The two filenames are distinct from the cross-domain ones on purpose: pointing
 either replot script at the whole ``results/`` tree redraws only its own
@@ -34,18 +50,46 @@ import matplotlib
 
 matplotlib.use("Agg")  # headless: write files, never open a window
 
+from epai.utils.suite_utils import corpus_comparison_rows  # noqa: E402
 from epai.utils.visualization_utils import (  # noqa: E402  (after backend set)
     plot_clf_id_comparison,
+    plot_clf_id_corpus_comparison,
     plot_clf_id_result,
 )
 
 RESULT = "in_domain.json"
 COMPARISON = "in_domain_comparison.json"
+CORPUS_COMPARISON = "corpus_comparison.json"
 
 
 def _load(path: Path) -> dict:
     with open(path) as f:
         return json.load(f)
+
+
+def _rebuild_corpus_rows(path: Path) -> tuple[dict, bool]:
+    """Restack a ``corpus_comparison.json`` from the per-corpus files beside it.
+
+    Returns ``(payload, rebuilt)``. See the module docstring for why this one
+    file is rewritten rather than only redrawn. A corpus whose
+    ``in_domain_comparison.json`` is missing is skipped, and if none is found the
+    payload is returned untouched -- a stale summary is better than an empty one.
+    """
+    payload = _load(path)
+    names = payload.get("corpus_names") or []
+    per_corpus: dict[str, list[dict]] = {}
+    for name in names:
+        corpus_cmp = path.parent / str(name) / COMPARISON
+        if corpus_cmp.is_file():
+            per_corpus[name] = _load(corpus_cmp).get("variants") or []
+
+    if not per_corpus:
+        return payload, False
+
+    payload["variants"] = corpus_comparison_rows(per_corpus, names)
+    with open(path, "w") as f:
+        json.dump(payload, f, indent=2)
+    return payload, True
 
 
 def replot_folder(root: Path) -> dict[str, int]:
@@ -55,7 +99,7 @@ def replot_folder(root: Path) -> dict[str, int]:
     files directly inside ``root`` as well as in any subdirectory, so pointing at
     a single result directory works just as well as pointing at the whole tree.
     """
-    counts = {"results": 0, "comparisons": 0, "errors": 0}
+    counts = {"results": 0, "comparisons": 0, "corpora": 0, "errors": 0}
 
     for path in sorted(root.rglob(RESULT)):
         print(f"[result] {path.parent}")
@@ -71,6 +115,18 @@ def replot_folder(root: Path) -> dict[str, int]:
         try:
             plot_clf_id_comparison(path.parent, _load(path))
             counts["comparisons"] += 1
+        except Exception as exc:
+            print(f"  [ERROR] {path}: {type(exc).__name__}: {exc}")
+            counts["errors"] += 1
+
+    for path in sorted(root.rglob(CORPUS_COMPARISON)):
+        print(f"[corpora] {path.parent}")
+        try:
+            payload, rebuilt = _rebuild_corpus_rows(path)
+            if rebuilt:
+                print(f"  rebuilt {path.name} from the per-corpus comparisons")
+            plot_clf_id_corpus_comparison(path.parent, payload)
+            counts["corpora"] += 1
         except Exception as exc:
             print(f"  [ERROR] {path}: {type(exc).__name__}: {exc}")
             counts["errors"] += 1
@@ -98,7 +154,10 @@ def main() -> None:
     print(f"Replotting from: {root}\n")
     counts = replot_folder(root)
 
-    if counts["results"] + counts["comparisons"] == 0 and counts["errors"] == 0:
+    if (
+        counts["results"] + counts["comparisons"] + counts["corpora"] == 0
+        and counts["errors"] == 0
+    ):
         print(
             f"\nNo in-domain JSON found under {root}. Point this at a "
             f"results/clf_id/<experiment>/ folder or one of its subdirectories."
@@ -106,8 +165,9 @@ def main() -> None:
         return
 
     print(
-        f"\nDone. Replotted {counts['results']} result(s) and "
-        f"{counts['comparisons']} comparison(s)."
+        f"\nDone. Replotted {counts['results']} result(s), "
+        f"{counts['comparisons']} comparison(s) and "
+        f"{counts['corpora']} across-corpora figure(s)."
     )
     if counts["errors"]:
         print(f"{counts['errors']} file(s) failed — see the [ERROR] lines above.")

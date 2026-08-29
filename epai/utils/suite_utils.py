@@ -75,7 +75,11 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from epai.utils.cd_core import BY_SEED_SUFFIX, cell_metric_specs
+from epai.utils.cd_core import (
+    BY_SEED_SUFFIX,
+    cell_metric_specs,
+    headline_metric_specs,
+)
 from epai.utils.corpus_utils import check_dataset_specs, check_where
 from epai.utils.preflight_utils import RULE
 
@@ -375,6 +379,12 @@ def suite_comparison_rows(
             "baseline": bool(first.get("baseline")),
             "n_suites": len(present),
             "per_suite": {},
+            # The training design is declared once for the whole run, so every
+            # suite of one config shares it. Carried onto the row because the
+            # figures' legend and the ranking's footnote name the two sides of
+            # the matrix, and under `mode: lodo` those names are the opposite of
+            # the `cross` ones.
+            "mode": first.get("mode", "cross"),
         }
         if first.get("baseline_kind"):
             row["baseline_kind"] = first["baseline_kind"]
@@ -462,6 +472,118 @@ def suite_comparison_rows(
             )
         rows.append(row)
 
+    return rows
+
+
+def corpus_comparison_rows(
+    per_corpus: dict[str, list[dict]], names: list[str]
+) -> list[dict]:
+    """One row per variant, holding its per-corpus numbers and their mean.
+
+    Variants are matched across corpora by their ``variant`` id, which is shared
+    by construction: ``feature_sets`` x ``algorithms`` is declared once for the
+    whole config and every corpus runs the same cross product. A variant absent
+    from a corpus keeps its cell as NaN rather than being dropped, so a partial
+    run reads as a gap and not as a silently shorter mean.
+
+    The mean is UNWEIGHTED -- each corpus counts once, whatever its row count --
+    and it is never reported without the spread across corpora beside it,
+    because a variant whose in-domain score swings by corpus has not been
+    measured, it has been sampled. Note that the pooled ``all`` row is NOT
+    independent of the per-domain ones: it is the same documents again. It is
+    included in the table because it is the number a detector trained on
+    everything actually gets, and excluded from nothing else because the mean is
+    a summary of the table, not an estimator.
+    """
+    order: list[str] = []
+    seen: dict[str, dict] = {}
+    for name in names:
+        for row in per_corpus.get(name, []):
+            vid = row.get("variant") or row.get("label", "")
+            if vid not in seen:
+                order.append(vid)
+                seen[vid] = row
+
+    rows: list[dict] = []
+    for vid in order:
+        first = seen[vid]
+        by_corpus = {
+            name: next(
+                (
+                    r
+                    for r in per_corpus.get(name, [])
+                    if (r.get("variant") or r.get("label", "")) == vid
+                ),
+                None,
+            )
+            for name in names
+        }
+        row: dict = {
+            "variant": vid,
+            "label": first.get("label", vid),
+            "feature_dim": first.get("feature_dim", 0),
+            "baseline": bool(first.get("baseline")),
+            "n_corpora": sum(1 for r in by_corpus.values() if r is not None),
+            "per_corpus": {},
+        }
+        for key in ("baseline_kind", "column", "hybrid", "aux_column"):
+            if first.get(key):
+                row[key] = first[key]
+
+        # Every headline metric, not accuracy alone: this table is the one an
+        # in-domain run is read against a matrix run, and those are compared on
+        # AUROC and the two TPR readings before anyone looks at accuracy.
+        carried = [f"{spec.key}_mean" for spec in headline_metric_specs()]
+        carried += [f"{spec.key}_std" for spec in headline_metric_specs()]
+        carried += ["train_accuracy_mean", "overfit_gap", "n", "train_n"]
+        for name in names:
+            cell = by_corpus[name]
+            row["per_corpus"][name] = (
+                {k: cell[k] for k in carried if k in cell}
+                if cell is not None
+                else {}
+            )
+
+        # One set of aggregates per metric, all over the SAME axis: the corpora.
+        row["metrics"] = []
+        for spec in headline_metric_specs():
+            values = np.array(
+                [
+                    _num(row["per_corpus"][name].get(f"{spec.key}_mean"))
+                    for name in names
+                ],
+                dtype=float,
+            )
+            if not np.isfinite(values).any():
+                continue
+            row["metrics"].append(spec.key)
+            with np.errstate(invalid="ignore"):
+                row[f"{spec.key}_mean"] = float(np.nanmean(values))
+                # The spread ACROSS corpora, not across seeds: "do the corpora
+                # agree", which is the only uncertainty this table can speak to.
+                row[f"{spec.key}_across_corpora_std"] = float(np.nanstd(values))
+                # "Worst" follows the metric's own direction, so it is the
+                # minimum for a TPR and the maximum for a realized FPR.
+                row[f"{spec.key}_worst"] = float(
+                    np.nanmin(values) if spec.higher_is_better else np.nanmax(values)
+                )
+
+        gaps = np.array(
+            [_num(row["per_corpus"][name].get("overfit_gap")) for name in names],
+            dtype=float,
+        )
+        with np.errstate(invalid="ignore"):
+            row["overfit_gap"] = (
+                float(np.nanmean(gaps)) if np.isfinite(gaps).any() else float("nan")
+            )
+        # Historical unqualified aliases, kept because the ranking sorts on them
+        # and the figure written before the other metrics existed reads them.
+        row.setdefault("accuracy_mean", float("nan"))
+        row["accuracy_across_corpora_std"] = row.get(
+            "accuracy_across_corpora_std", float("nan")
+        )
+        row["accuracy_worst"] = row.get("accuracy_worst", float("nan"))
+        rows.append(row)
     return rows
 
 
@@ -586,7 +708,7 @@ def print_suite_ranking(
         print("-" * rule)
         arrow = "higher is better" if spec.higher_is_better else "LOWER is better"
         print(
-            f"  per-dataset columns = that dataset's own transfer (off-diagonal) mean; "
+            f"  per-dataset columns = that dataset's own transfer mean; "
             f"reference {spec.reference*100:g}%, {arrow}"
         )
         print(

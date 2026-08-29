@@ -23,6 +23,7 @@ slightly different files -- which is what a preflight exists to prevent.
 
 from __future__ import annotations
 
+import difflib
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -153,15 +154,26 @@ def build_feature_sets(cfg: dict) -> list[FeatureSet]:
     return sets
 
 
-def spec_binox_col(entry: dict) -> str | None:
-    """The auxiliary Binoculars column one ``algorithms`` entry asks for, or None.
+def spec_aux_col(entry: dict) -> str | None:
+    """The auxiliary column one ``algorithms`` entry asks for, or None.
 
-    ``binoculars: true`` takes the default column, a string names one, and
-    ``false`` / absent means the entry is a plain algorithm on the feature set
-    alone. A non-None value makes the entry a *hybrid*: it sees the score on top
-    of the shared feature set, which the ranking and the figures mark.
+    ``aux: <column>`` names it and ``aux: true`` takes the default Binoculars
+    column; an absent key means the entry is a plain algorithm on the feature
+    set alone (writing ``false`` is rejected by the preflight rather than read
+    as "no" -- drop the key instead). A non-None value makes the entry a
+    *hybrid*: it sees that column on top of the shared feature set, which the
+    ranking and the figures mark.
+
+    ``binoculars`` is the older spelling of the same key and still works, since
+    every existing config and every sweep leaderboard entry is written with it.
+    It reads wrong on the algorithms this key now mostly serves -- ``fusion_mlp``
+    and ``gated_mlp`` take a judge's cue vector, not a score -- so ``aux`` is
+    what new configs should say. When both appear, ``aux`` wins and the
+    preflight rejects the entry if they disagree, rather than silently picking.
     """
-    value = entry.get("binoculars")
+    value = entry.get("aux")
+    if value is None:
+        value = entry.get("binoculars")
     if value is True:
         return DEFAULT_BINOX_COL
     if isinstance(value, str) and value.strip():
@@ -169,15 +181,51 @@ def spec_binox_col(entry: dict) -> str | None:
     return None
 
 
+#: The old name of :func:`spec_aux_col`, kept so an import outside this package
+#: does not break on the rename.
+spec_binox_col = spec_aux_col
+
+
+def spec_feature_sets(entry: dict) -> tuple[str, ...] | None:
+    """The feature-set ids one ``algorithms`` entry restricts itself to, or None.
+
+    ``None`` -- the key is absent -- means "every feature set", which is the
+    cross product this config's two axes have always produced and what every
+    entry without the key keeps doing.
+
+    The key exists for an algorithm that is only *meaningful* on some of them.
+    ``fusion_mlp`` and ``gated_mlp`` name their second input on the entry itself
+    (``aux``), so the grid would otherwise hand them a design matrix holding the
+    very column they were already given as ``Z`` -- a cell that trains, lands in
+    the ranking, and is marked as a hybrid while having seen nothing extra. A
+    restriction says which ``X`` the entry is valid for, so the entry owns both
+    of its inputs rather than half of one.
+
+    An unusable value (``[]``, a mapping, a list of non-strings) returns an empty
+    tuple, which produces no variants at all and which
+    :func:`check_algorithms` reports rather than letting the entry vanish.
+    """
+    value = entry.get("feature_sets")
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(v for v in value if isinstance(v, str) and v.strip())
+
+
 def algorithm_specs(cfg: dict) -> list[dict]:
-    """Normalise ``algorithms`` to ``{id, name, label, params, binoculars}`` dicts.
+    """Normalise ``algorithms`` to ``{id, name, label, params, aux, feature_sets}``.
 
     An entry may be a bare string (``"logistic"``) or a mapping with ``name``
     and optional ``id`` (output-folder name, so two entries of the same
     algorithm with different params do not collide), ``label`` (shown on figures),
-    ``params`` (hyper-parameters passed to the algorithm) and ``binoculars`` (an
+    ``params`` (hyper-parameters passed to the algorithm), ``aux`` (an
     auxiliary column handed to the algorithm beside the design matrix -- only
-    algorithms whose class sets ``uses_aux`` accept one).
+    algorithms whose class sets ``uses_aux`` accept one; spelled ``binoculars``
+    in older configs, see :func:`spec_aux_col`) and ``feature_sets`` (the ids
+    this entry restricts itself to; see :func:`spec_feature_sets`).
     """
     specs: list[dict] = []
     for entry in cfg.get("algorithms", []) or []:
@@ -188,7 +236,8 @@ def algorithm_specs(cfg: dict) -> list[dict]:
                     "name": entry,
                     "label": entry,
                     "params": {},
-                    "binoculars": None,
+                    "aux": None,
+                    "feature_sets": None,
                 }
             )
         elif isinstance(entry, dict) and isinstance(entry.get("name"), str):
@@ -199,44 +248,74 @@ def algorithm_specs(cfg: dict) -> list[dict]:
                     "name": name,
                     "label": entry.get("label", name),
                     "params": entry.get("params") or {},
-                    "binoculars": spec_binox_col(entry),
+                    "aux": spec_aux_col(entry),
+                    "feature_sets": spec_feature_sets(entry),
                 }
             )
     return specs
 
 
+def variant_pairs(cfg: dict) -> list[tuple[FeatureSet, dict]]:
+    """Every (feature set, algorithm) pair this config asks for, in run order.
+
+    The cross product of the two axes, minus the cells an entry's
+    ``feature_sets`` restriction excludes (see :func:`spec_feature_sets`). A grid
+    with a restriction in it is ragged, which the figures show as a missing cell
+    -- honest, since that cell was never trained.
+
+    A restriction changes which cells exist, never what any of them is trained
+    on: the missing-value filter is still built per feature set from
+    :func:`variant_columns`, over every auxiliary column in the config. Two cells
+    in one ranking must stand on the same rows whether or not they happen to use
+    the same inputs.
+    """
+    algs = algorithm_specs(cfg)
+    return [
+        (fs, alg)
+        for fs in build_feature_sets(cfg)
+        for alg in algs
+        if alg["feature_sets"] is None or fs.id in alg["feature_sets"]
+    ]
+
+
 def build_variants(cfg: dict) -> list[Variant]:
-    """The cross product of the two axes, named by whichever one actually varies.
+    """The pairs of :func:`variant_pairs`, named by whichever axis actually varies.
 
     A pure embedding sweep keeps writing ``<alg_id>/emb_luar/`` and a pure
     algorithm sweep ``<alg_id>/logistic/`` -- the axis that is held fixed adds
     nothing to a name, and pinning it there would only make every existing
     results path longer. Only a genuine 2-D run needs both halves.
+
+    "Varies" is counted over the pairs that survive the restrictions rather than
+    over the two lists, so a config whose entries are all pinned to one feature
+    set is named like the one-feature-set config it effectively is. With no
+    restriction anywhere the two counts coincide, so no existing config's paths
+    move.
     """
-    fsets = build_feature_sets(cfg)
-    algs = algorithm_specs(cfg)
-    both = len(fsets) > 1 and len(algs) > 1
+    pairs = variant_pairs(cfg)
+    n_fs = len({fs.id for fs, _ in pairs})
+    n_alg = len({alg["id"] for _, alg in pairs})
+    both = n_fs > 1 and n_alg > 1
 
     variants: list[Variant] = []
-    for fs in fsets:
-        for alg in algs:
-            if both:
-                vid, label = f"{fs.id}__{alg['id']}", f"{fs.label} — {alg['label']}"
-            elif len(fsets) > 1:
-                vid, label = fs.id, fs.label
-            else:
-                vid, label = alg["id"], alg["label"]
-            variants.append(
-                Variant(
-                    id=vid,
-                    label=label,
-                    fs_id=fs.id,
-                    features=list(fs.columns),
-                    alg_name=alg["name"],
-                    params=alg["params"],
-                    aux_col=alg["binoculars"],
-                )
+    for fs, alg in pairs:
+        if both:
+            vid, label = f"{fs.id}__{alg['id']}", f"{fs.label} — {alg['label']}"
+        elif n_fs > 1:
+            vid, label = fs.id, fs.label
+        else:
+            vid, label = alg["id"], alg["label"]
+        variants.append(
+            Variant(
+                id=vid,
+                label=label,
+                fs_id=fs.id,
+                features=list(fs.columns),
+                alg_name=alg["name"],
+                params=alg["params"],
+                aux_col=alg["aux"],
             )
+        )
     return variants
 
 
@@ -246,7 +325,9 @@ def comparison_noun(cfg: dict) -> str:
     A run that swept algorithms should say so on its figures rather than call
     them "variants"; only a 2-D run has no better word.
     """
-    n_fs, n_alg = len(build_feature_sets(cfg)), len(algorithm_specs(cfg))
+    pairs = variant_pairs(cfg)
+    n_fs = len({fs.id for fs, _ in pairs})
+    n_alg = len({alg["id"] for _, alg in pairs})
     if n_fs > 1 and n_alg > 1:
         return "variant"
     return "feature set" if n_fs > 1 else "algorithm"
@@ -260,7 +341,7 @@ def aux_columns(cfg: dict) -> list[str]:
     missing-value filter, though -- see ``variant_columns`` -- so that every
     algorithm in the config trains and is scored on an identical row set.
     """
-    cols = [s["binoculars"] for s in algorithm_specs(cfg) if s["binoculars"]]
+    cols = [s["aux"] for s in algorithm_specs(cfg) if s["aux"]]
     return list(dict.fromkeys(cols))
 
 
@@ -271,6 +352,11 @@ def variant_columns(fs: FeatureSet, cfg: dict) -> list[str]:
     algorithm trains on are exactly the rows the plain ones train on. Filtering
     per algorithm instead would score them on different subsets and quietly make
     the comparison table meaningless.
+
+    Deliberately not narrowed by an entry's ``feature_sets`` restriction either.
+    A feature set that no hybrid runs on is still filtered on every auxiliary
+    column in the config, so its cells stand on the same rows as the cells that
+    do use one -- one row set per config, whichever cells exist.
     """
     return list(dict.fromkeys(list(fs.columns) + aux_columns(cfg)))
 
@@ -389,26 +475,59 @@ def check_algorithms(cfg: dict, report: Report) -> None:
             continue
 
         # An auxiliary column and an algorithm that takes one must agree, in
-        # both directions: a 'binoculars' key on an algorithm that ignores it
-        # would silently not be a hybrid, and a hybrid without one cannot fit.
+        # both directions: an 'aux' key on an algorithm that ignores it would
+        # silently not be a hybrid, and a hybrid without one cannot fit.
         uses_aux = bool(getattr(ALGORITHMS[s["name"]], "uses_aux", False))
-        asked = isinstance(entry, dict) and entry.get("binoculars") is not None
-        if asked and not s["binoculars"]:
+        keys = ["aux", "binoculars"] if isinstance(entry, dict) else []
+        given = {k: entry[k] for k in keys if entry.get(k) is not None}
+        if len(given) == 2 and given["aux"] != given["binoculars"]:
+            # One entry naming two different columns has no reading that is
+            # obviously right, and picking 'aux' silently would train on a column
+            # the config also names elsewhere.
             report.error(
-                f"{s['id']}: 'binoculars' must be true or a column name, got "
-                f"{entry.get('binoculars')!r}"
+                f"{s['id']}: 'aux' and 'binoculars' are the same key and disagree "
+                f"({given['aux']!r} vs {given['binoculars']!r}); keep 'aux' only"
             )
-        elif s["binoculars"] and not uses_aux:
+        elif given and not s["aux"]:
+            key = "aux" if "aux" in given else "binoculars"
+            report.error(
+                f"{s['id']}: {key!r} must be true or a column name, got "
+                f"{given[key]!r}"
+            )
+        elif s["aux"] and not uses_aux:
             report.error(
                 f"{s['id']}: {s['name']!r} does not take an auxiliary column, so "
-                f"'binoculars' would be ignored — drop it, or use an algorithm "
+                f"'aux' would be ignored — drop it, or use an algorithm "
                 f"that sets uses_aux"
             )
-        elif uses_aux and not s["binoculars"]:
+        elif uses_aux and not s["aux"]:
             report.error(
                 f"{s['id']}: {s['name']!r} needs an auxiliary column — set "
-                f"'binoculars: {DEFAULT_BINOX_COL}' on this entry"
+                f"'aux: <column>' on this entry (e.g. "
+                f"'aux: {DEFAULT_BINOX_COL}')"
             )
+
+        # A restriction must name feature sets this config declares: a typo that
+        # matched nothing would silently drop every cell of this entry, which
+        # looks exactly like an algorithm that was never configured.
+        restrict = s["feature_sets"]
+        if restrict is not None:
+            known = [fs.id for fs in build_feature_sets(cfg)]
+            if not restrict:
+                report.error(
+                    f"{s['id']}: 'feature_sets' names no usable feature-set id "
+                    f"(it takes a string or a list of them, from {known}); drop "
+                    f"the key to run on every feature set"
+                )
+            for fs_id in restrict:
+                if fs_id in known:
+                    continue
+                close = difflib.get_close_matches(fs_id, known, n=1)
+                hint = f" (did you mean {close[0]!r}?)" if close else ""
+                report.error(
+                    f"{s['id']}: 'feature_sets' names {fs_id!r}, which is not a "
+                    f"feature set of this config{hint}. Declared: {known}"
+                )
 
         # Build it and check its hyper-parameter *values* here, so a name the
         # algorithm does not read (a mistranscribed sweep winner) or an
@@ -420,6 +539,20 @@ def check_algorithms(cfg: dict, report: Report) -> None:
             alg.validate_params()
         except Exception as exc:  # a known name that still cannot be built
             report.error(f"{s['id']}: cannot build {s['name']!r}: {exc}")
+
+    # A feature set every entry has restricted itself away from is loaded, row-
+    # filtered and then trained on by nothing. That is legal -- it still widens
+    # the missing-value filter for the sets that do run -- but it is far more
+    # often a leftover entry or a restriction that named the wrong id, so say so
+    # rather than let a config quietly describe an axis it does not run.
+    used = {fs.id for fs, _ in variant_pairs(cfg)}
+    idle = [fs.id for fs in build_feature_sets(cfg) if fs.id not in used]
+    if idle and used:
+        report.warn(
+            f"feature set(s) {idle} have no algorithm: every entry's "
+            f"'feature_sets' restriction excludes them, so nothing will be "
+            f"trained on them (their columns still join the row filter)"
+        )
 
 
 def fit_alg(alg, X: np.ndarray, y: np.ndarray, Z: np.ndarray | None):
@@ -463,8 +596,8 @@ def check_config(cfg: dict, report: Report, data_check=check_dataset_specs) -> N
     baseline blocks mean the same thing whether the config will produce a
     transfer matrix or a single held-out split. ``data`` is the one part that
     differs -- a list of corpora to put in a matrix, or one corpus to train on --
-    so its check is passed in (``check_dataset_specs`` or
-    ``check_single_corpus``).
+    so its check is passed in (``check_dataset_specs`` for a matrix run,
+    ``check_in_domain_corpora`` for the in-domain one).
     """
     if not isinstance(cfg, dict):
         report.error(f"config must be a YAML mapping, got {type(cfg).__name__}")

@@ -6,12 +6,22 @@
 # and the baselines declared once and used unchanged on each.
 #
 # WHAT IT IS ASKING RIGHT NOW. Three feature sets — the LUAR embedding, the LLM
-# judge's eleven cue bits, and the two stacked — across three algorithms, on the
-# one corpus that carries cues on every row. That is a 3x3 grid per dataset, not
-# the one-row algorithm comparison this file used to run, and it is why only
+# judge's eleven cue bits, and the two stacked — across five algorithms, on the
+# one corpus that carries cues on every row. The grid is RAGGED: `fusion_mlp` and
+# `gated_mlp` are pinned to `emb_luar_crud` (they take the cue column as their
+# own second input, so a set that already holds it would feed them the same bits
+# twice), which makes 3x5 minus 4 = 11 cells per dataset rather than 15. It is
+# not the one-row algorithm comparison this file used to run, and it is why only
 # `ghostbuster_gpt56luna` is uncommented under `suites` below: the cue column is
 # the constraint, and the block there says exactly how to get the other three
 # datasets back.
+#
+# THE TWO QUESTIONS ON THE ALGORITHM AXIS. `logistic` / `svm` / `simple_mlp` are
+# the same model on three different inputs — the feature question. The two
+# fusion entries ask a second one: given the SAME two inputs, does it matter
+# WHERE the cue vector enters the network? Their control is not the embedding
+# row, it is `luar_crud+cuevec__simple_mlp` — the same pair concatenated at the
+# input instead of joined after the embedding is compressed.
 #
 # WHAT IS SHARED AND WHAT IS NOT. `feature_sets`, `algorithms`, the baselines,
 # `model` and `seed` are declared once here and used unchanged for every dataset:
@@ -34,13 +44,13 @@
 # is telling you something about generators; one that only falls on science_v3 is
 # telling you something about the corpus.
 #
-# COST. 1 dataset x 3 sources x 3 seeds x 3 feature sets x 3 algorithms = 81
-# fits, plus 8 baseline rows per source x seed — the 5 Binoculars versions under
-# `binoculars_baseline` and the 3 LLM judges under `llm_judge_baseline` at the
-# bottom. The baseline rows are cheap: no model is fitted, each is a fixed cutoff
-# on a column already in the parquet, and none of them touches `feature_sets`, so
-# widening the feature axis did not multiply them. Uncommenting the other three
-# suites takes the training cost to 324 fits.
+# COST. 1 dataset x 3 sources x 3 seeds x 11 variants = 99 fits, plus 8 baseline
+# rows per source x seed — the 5 Binoculars versions under `binoculars_baseline`
+# and the 3 LLM judges under `llm_judge_baseline` at the bottom. The baseline
+# rows are cheap: no model is fitted, each is a fixed cutoff on a column already
+# in the parquet, and none of them touches `feature_sets`, so widening either
+# axis did not multiply them. Uncommenting the other three suites takes the
+# training cost to 396 fits.
 #
 # Run:
 #   uv run python epai/ai_detection/train/run_clf_cross_domain.py \
@@ -58,12 +68,14 @@
 # are not the ones the previous one-feature-set runs wrote.
 #   results/clf_cd/<experiment_id>/all_datasets/
 #       ghostbuster_gpt56luna/       ← exactly what a single-dataset run writes
-#           emb_luar_crud__logistic/            ← the 9 trained variants
+#           emb_luar_crud__logistic/            ← the 11 trained variants
 #           emb_luar_crud__svm/
 #           emb_luar_crud__simple_mlp/
+#           emb_luar_crud__fusion_cuevec/       ← ◆ the two pinned fusion cells;
+#           emb_luar_crud__gated_cuevec/          no cuevec__* twins by design
 #           cuevec__logistic/                   ← the 11 readable coefficients
 #           cuevec__svm/  cuevec__simple_mlp/
-#           luar_crud+cuevec__logistic/
+#           luar_crud+cuevec__logistic/         ← the early-fusion control row
 #           luar_crud+cuevec__svm/  luar_crud+cuevec__simple_mlp/
 #           binoculars/                         ← ★ falcon-7b (the paper's pair)
 #           binoculars__qwen25_7b/              ← ★ one directory per version
@@ -86,6 +98,37 @@ alg_id: "all_datasets"
 alg_label: "embedding vs judge cues — feature x algorithm"
 
 seed: 42
+
+# ---------------------------------------------------------------------------
+# THE TRAINING DESIGN — how many corpora each model sees
+# ---------------------------------------------------------------------------
+
+# `cross` is what this file has always run and the default when the key is
+# absent: each model trains on ONE corpus and is evaluated on all of them, so
+# the diagonal of every matrix is in-domain and everything off it is transfer.
+# It is deliberately the harshest reading — a single-source model has every
+# incentive to memorise corpus artifacts — and it is the design that produced
+# the ~98% in-domain / at-or-below-chance transfer this whole folder exists to
+# explain.
+#
+# The other two designs run the SAME feature sets, the SAME algorithms, the SAME
+# seeds and the SAME splits on the SAME corpora, so their numbers sit beside
+# these ones directly:
+#
+#   train on two domains, test on the third   (leave-one-domain-out)
+#     mode: lodo   — cfg/ai_detection/train/clf_lodo/clf_lodo_suites_all.yaml
+#     Same runner, same output layout, same cost. The in-domain mask is the
+#     inverse of this one's: the DIAGONAL becomes the transfer cell.
+#
+#   train and test on one domain, no matrix   (in-domain)
+#     cfg/ai_detection/train/clf_id/clf_id_domains_all.yaml, run with
+#     epai/ai_detection/train/run_clf_in_domain.py — a separate script because
+#     with no transfer cells there is no transfer mean, no gap and no ranking.
+#     That config also adds the whole-parquet row.
+#
+# Changing this one key changes the meaning of every number the run produces, so
+# it is stated rather than defaulted.
+mode: cross
 
 data:
   # Shared by every dataset: they describe the question, not the corpus. A suite
@@ -234,12 +277,16 @@ extra_binary_text: []
 # The algorithm axis — identical across every dataset AND every feature set
 # ---------------------------------------------------------------------------
 
-# ONE CAVEAT NOW THAT THE FEATURE AXIS VARIES. These three are applied unchanged
-# to an 11-dim input as well as a 512-dim one, which is what keeps the nine cells
-# comparable — but `simple_mlp` was tuned on the embedding, and a [256] hidden
-# layer with mixup over eleven binary dimensions is far more capacity than the
-# input has. Expect its `cuevec` row to be the noisiest of the three and read
-# `logistic` as the honest reading of what the cues alone can do.
+# ONE CAVEAT NOW THAT THE FEATURE AXIS VARIES. The first three are applied
+# unchanged to an 11-dim input as well as a 512-dim one, which is what keeps
+# those nine cells comparable — but `simple_mlp` was tuned on the embedding, and
+# a [256] hidden layer with mixup over eleven binary dimensions is far more
+# capacity than the input has. Expect its `cuevec` row to be the noisiest of the
+# three and read `logistic` as the honest reading of what the cues alone can do.
+#
+# The last two are NOT applied to every set: they carry `feature_sets` and run on
+# the embedding only. See the block above them for why, and for what they are to
+# be read against.
 algorithms:
   - name: logistic
     label: "Logistic Regression"
@@ -289,9 +336,53 @@ algorithms:
   #     weight_decay: 0.0001
   #     patience: 10
 
+  # THE TWO FUSION ENTRIES ARE PINNED TO `emb_luar_crud`, AND MUST BE.
+  # Both name the cue column as their SECOND input (`aux`), so on the `cuevec`
+  # or `luar_crud+cuevec` sets the grid would hand them the same eleven bits a
+  # second time as X — a cell that trains, lands in the ranking, and carries a ◆
+  # claiming it saw an extra input it did not. `feature_sets` drops those cells
+  # instead of producing them; the figures show them as holes, which is honest.
+  #
+  # THE CONTROL FOR BOTH IS `luar_crud+cuevec` UNDER `simple_mlp`: the same two
+  # inputs, concatenated at the front instead of joined late. Read
+  # emb_luar_crud__fusion_cuevec against that cell, not against
+  # emb_luar_crud__simple_mlp — the embedding-only row answers a different
+  # question.
+  #
+  # ONE CONFOUND, STATED SO IT IS NOT MISTAKEN FOR ARCHITECTURE. simple_mlp above
+  # runs with `val_frac: 0.0` (it early-stops on the TRAINING loss and trains on
+  # all of its rows); fusion_mlp and gated_mlp default to a real grouped 15%
+  # validation split early-stopped on AUROC. A gap between them is architecture
+  # AND stopping rule. To isolate the architecture, either add
+  # `val_frac: 0.15, val_metric: auroc` to a second simple_mlp entry, or set
+  # `val_frac: 0.0, val_metric: loss` on these two.
+  - name: fusion_mlp
+    id: fusion_cuevec
+    label: "LUAR ⊕ judge cues (late fusion)"
+    feature_sets: [emb_luar_crud]
+    aux: llm_judge_cuevec_gpt56luna_v3
+    params: {pre_dims: [256, 16], post_dims: [32], aux_dims: [32]}
+
+  # The gate is the reason to run this one: after the fit, `alg.gate_` says how
+  # much of the embedding branch the model chose to use, and
+  # `alg.branch_scores(X, Z)` splits any corpus's score into the cue term and the
+  # gated embedding term. Both are on the pickled model —
+  #   emb_luar_crud__gated_cuevec/models/<seed>/<source>.joblib
+  - name: gated_mlp
+    id: gated_cuevec
+    label: "judge cues + gated LUAR"
+    feature_sets: [emb_luar_crud]
+    aux: llm_judge_cuevec_gpt56luna_v3
+    params: {emb_dims: [256, 64], aux_dims: [32], gate: sigmoid}
+
+
 model:
   n_runs: 3           # seeds; each dataset's matrix is the mean over them
   test_size: 0.30
+  # Share of the training pool carved off for threshold calibration
+  # (Youden's J, TPR@FPR transport) -- never the fit rows, never the eval
+  # rows. See cd_core.carve_calibration.
+  cal_frac: 0.15
 
 # ---------------------------------------------------------------------------
 # Optional zero-shot score baselines
@@ -324,28 +415,24 @@ model:
 # ghostbuster_gpt56luna, the same 6 rows in every column, so all five rows still
 # stand on identical evidence).
 #
-# READ THESE ROWS ON AUROC, NOT ON ACCURACY.
-# ------------------------------------------
 # A threshold belongs to a COLUMN, not to the family: the five pairs put the
 # score on five different scales, so the paper's constant says nothing about a
 # pair it was never calibrated on. Only `binoculars_score` carries a real cutoff
-# here (0.9015310749276843, the paper's accuracy mode; the low-FPR mode is
+# below (0.9015310749276843, the paper's accuracy mode; the low-FPR mode is
 # 0.8536432310785527). The other four carry a PLACEHOLDER 0.95 — a declared
 # operating point so the run is reproducible, not a calibrated one.
 #
-# So for the four placeholder rows read `suite_comparison_auroc.png` and
-# `suite_comparison_tpr_at_srcfpr_0.01.png`, neither of which ever looks at the
-# declared cutoff (an ROC sweeps every threshold). Do NOT read their accuracy,
-# macro F1 or confusion matrix — those are the only numbers the cutoff moves, and
-# on an uncalibrated scale they say more about 0.95 than about the detector.
-# Refit a pair's threshold on a held-out split before quoting its accuracy, then
-# replace the 0.95 on that entry.
+# EVERY METRIC ON EVERY ROW HERE IS READABLE, placeholder or not. Accuracy,
+# macro F1 and the confusion matrix no longer come from the declared cutoff
+# above — they come from a Youden's J threshold fit on the calibration slice
+# carved out of each row's training pool (cd_core.evaluate_score_rule /
+# cd_core.BaselineKind), the same procedure and the same rows a trained
+# variant uses. The declared cutoff is kept for reference and is still what
+# an ROC sweeps around; it no longer gates which numbers mean something.
 binoculars_baseline:
   enabled: true
   columns:
-    # Calibrated — every metric on this row is readable.
     - {column: "binoculars_score", threshold: 0.9015310749276843, label: "binoculars falcon-7b"}
-    # Uncalibrated placeholders — read AUROC / TPR@FPR only, see above.
     - {column: "binoculars_score_qwen25_7b",   threshold: 0.95, label: "binoculars qwen2.5-7b"}
     - {column: "binoculars_score_falcon3_7b",  threshold: 0.95, label: "binoculars falcon3-7b"}
     - {column: "binoculars_score_mistral_v03", threshold: 0.95, label: "binoculars mistral-v0.3"}
@@ -364,10 +451,10 @@ binoculars_baseline:
 # (epai/ai_detection/score/add_llm_judge_scores.py), which is what makes them
 # directly comparable.
 #
-# UNLIKE THE PLACEHOLDER BINOCULARS ROWS, EVERY METRIC HERE IS READABLE. 0.5 is
-# the judge's own neutral point, not a stand-in cutoff, and it means the same
-# thing to both judges — so accuracy, macro F1 and the confusion matrix are as
-# legitimate on these rows as AUROC.
+# EVERY METRIC HERE IS READABLE, same as the Binoculars rows above. 0.5 is the
+# judge's own neutral point, not a stand-in cutoff, and it means the same
+# thing to both judges; accuracy/macro F1/the confusion matrix are fit the
+# same Youden's J way as every other row's regardless.
 #
 # WHAT TO WATCH. gpt56luna is the API control. qwen3-14b is the local judge
 # (`--model qwen3-14b`, bf16 on the A100) and it sits on the capability axis the

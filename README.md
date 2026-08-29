@@ -104,9 +104,10 @@ episteme-ai/
 │   ├── citation_impact/
 │   │   └── fetch/                 # Semantic Scholar query configs
 │   ├── ai_detection/
-│   │   └── train/clf_cd/,         # One annotated sample config each:
-│   │       train/clf_id/,         #   clf_cd_example.yaml, clf_id_example.yaml,
-│   │       train/sweep/           #   sweep_example.yaml
+│   │   └── train/clf_cd/,         # One config each, annotated sample and working
+│   │       train/clf_lodo/,       #   experiment at once — the three training
+│   │       train/clf_id/,         #   designs (cross / lodo / in-domain),
+│   │       train/sweep/           #   plus sweep_example.yaml
 │   ├── science_data/              # Corpus-building config + query lists
 │   │   └── prompts/               #   Every prompt sent, one file per prompt_config id
 │   └── ghostbuster/               # One config for the whole ghostbuster pipeline
@@ -772,10 +773,10 @@ all problems are reported together.
 
 #### Cross-domain transfer control (`run_clf_cross_domain.py`)
 
-**Config:** `cfg/ai_detection/train/clf_cd/clf_cd_example.yaml` · **Output:** `results/clf_cd/<experiment_id>/`
+**Config:** `cfg/ai_detection/train/clf_cd/clf_cd_suites_all.yaml` · **Output:** `results/clf_cd/<experiment_id>/`
 
 ```bash
-uv run python epai/ai_detection/train/run_clf_cross_domain.py             # the sample config
+uv run python epai/ai_detection/train/run_clf_cross_domain.py             # the clf_cd folder
 uv run python epai/ai_detection/train/run_clf_cross_domain.py --dry-run   # preflight only
 uv run python epai/ai_detection/train/run_clf_cross_domain.py --cfg a.yaml b.yaml
 ```
@@ -785,10 +786,44 @@ target accuracy matrix. The off-diagonal shows how well the classifier transfers
 to unseen corpora — distinguishing "learned machine-generated-ness" from
 "learned corpus artifacts".
 
-The folder holds exactly one config: `clf_cd_example.yaml`, which is both a
-working experiment and the annotated reference for every key. Copy it to start a
-new one — each run also writes its config into its own results directory, so a
-finished experiment carries its config with it.
+Each folder holds exactly one config, which is both a working experiment and the
+annotated reference for every key. Copy it to start a new one — each run also
+writes its config into its own results directory, so a finished experiment
+carries its config with it.
+
+##### The three training designs
+
+How many corpora each model trains on is the run's `mode`. All three run the
+**same** feature sets, algorithms, seeds and splits on the **same** corpora, so
+their numbers are directly comparable; only which rows go into each model
+changes.
+
+| design | `mode` | config | runner |
+|---|---|---|---|
+| train on 1 domain, test on all | `cross` | `clf_cd/clf_cd_suites_all.yaml` | `run_clf_cross_domain.py` |
+| train on 2 domains, test on the 3rd | `lodo` | `clf_lodo/clf_lodo_suites_all.yaml` | `run_clf_cross_domain.py` |
+| train + test on 1 domain, and on the whole parquet | `in_domain` | `clf_id/clf_id_domains_all.yaml` | `run_clf_in_domain.py` |
+
+`mode: lodo` — leave-one-domain-out — is the same matrix over the same corpora,
+with each model trained on the **union of every corpus but one**. A row is named
+after the corpus it held out, so on every row the **diagonal** cell is the
+transfer number and the cells beside it are a held-out split of the training
+pool: the in-domain mask is the exact inverse of `cross`. Nothing downstream
+reads the diagonal to tell them apart — every cell carries its own `in_domain`
+flag, and the printed tables, the boxed heatmap cells, the score-distribution
+tints and the figure legends all follow it.
+
+It answers the question `cross` cannot: a single-source model has every incentive
+to memorise its corpus, so if transfer stays at chance even when the model *does*
+see domain diversity, the failure is not "not enough diversity".
+
+The two live in different folders so a zero-argument run never trains both by
+accident:
+
+```bash
+uv run python epai/ai_detection/train/run_clf_cross_domain.py \
+    --cfg cfg/ai_detection/train/clf_lodo/clf_lodo_suites_all.yaml
+```
 
 ##### Sweeping an axis
 
@@ -833,25 +868,22 @@ feature sweep, `<alg_id>/logistic/` for an algorithm sweep,
 
 #### In-domain control (`run_clf_in_domain.py`)
 
-**Config:** `cfg/ai_detection/train/clf_id/clf_id_example.yaml` · **Output:** `results/clf_id/<experiment_id>/`
+**Config:** `cfg/ai_detection/train/clf_id/clf_id_domains_all.yaml` · **Output:** `results/clf_id/<experiment_id>/`
 
 ```bash
-uv run python epai/ai_detection/train/run_clf_in_domain.py             # the sample config
+uv run python epai/ai_detection/train/run_clf_in_domain.py             # the clf_id folder
 uv run python epai/ai_detection/train/run_clf_in_domain.py --dry-run   # preflight only
 ```
 
-Trains on **one** corpus — all of it by default — and scores the held-out grouped
-split of that same corpus. It asks "how well does this separate human from
-machine text *here*", not "does it transfer", and the ~97–99% it reports is an
-upper bound on a deployed detector rather than an estimate of one. That gap is
-exactly what the cross-domain script exists to measure, so this is its control,
-not its replacement.
+Trains on a corpus and scores the held-out grouped split of **that same corpus**.
+It asks "how well does this separate human from machine text *here*", not "does
+it transfer", and the ~97–99% it reports is an upper bound on a deployed detector
+rather than an estimate of one. That gap is exactly what the cross-domain script
+exists to measure, so this is its control, not its replacement.
 
 Same config shape as a `clf_cd` config — the same `feature_sets` × `algorithms`
-cross product, the same `model` block, the same ★ baselines — with one
-difference: `data` **is** the corpus rather than a list of them, since there is
-no matrix to fill. A `datasets:` list here is a preflight error naming the other
-runner.
+cross product, the same `model` block, the same ★ baselines. `data` may name one
+corpus directly:
 
 ```yaml
 data:
@@ -860,6 +892,80 @@ data:
   group_col: "id"
   # where: {domain: essay}   # optional; omit to train on ALL the data
 ```
+
+…or carry a `datasets` list, which runs the whole experiment **once per corpus**,
+plus once on the whole parquet with `include_pooled` — the N+1 numbers this
+control is usually wanted for:
+
+```yaml
+data:
+  parquet_path: "data/parquet/ghostbuster_gpt56luna.parquet"
+  human_label: "human"
+  group_col: "id"
+  datasets:
+    - {name: essay,  where: {domain: essay}}
+    - {name: reuter, where: {domain: reuter}}
+    - {name: wp,     where: {domain: wp}}
+  include_pooled: true          # + one more on the parquet, unfiltered
+```
+
+This list is **not** the cross-domain one: nothing is ever trained on one entry
+and tested on another, so a one-entry list is legitimate here where the matrix
+runner needs two, and none of the output is a transfer claim. The pooled row is
+the number a detector trained on everything available actually gets — and it is
+not independent of the per-domain rows, because it is the same documents again.
+
+One corpus writes straight into `<alg_id>/`, exactly as before; several write
+`<alg_id>/<corpus>/` each holding what a single-corpus run holds, plus
+`corpus_comparison.json` and one figure ranking every variant by its mean
+in-domain accuracy with the per-corpus columns still visible, then the same rows
+under every headline metric (shape only — the numbers below are made up):
+
+```
+variant                    essay   reuter       wp      all     mean  ±corpora    worst
+  Logistic Regression      98.7%    99.1%    97.9%    98.6%    98.6%       0.4    97.9%
+★ binoculars falcon-7b     86.4%    82.0%    79.3%    82.5%    82.6%       2.5    79.3%
+
+variant                    auroc  tprT@1%    tpr@1%      acc        f1
+  Logistic Regression      99.9%    97.4%     99.0%    98.6%     98.6%
+★ binoculars falcon-7b     76.5%    24.5%     26.2%    82.6%     56.6%
+```
+
+##### The headline metric set
+
+`cd_core.HEADLINE_METRICS` is one tuple read by all three designs, so a variant
+is reported under the same five numbers whichever produced it — and it drives the
+figure set as well (`CD_PLOT_METRICS` is now that same tuple), so one figure per
+metric per variant in every mode.
+
+| | what it is |
+|---|---|
+| `auroc` | threshold-free separability — the only one that owes nothing to a cutoff |
+| `tpr_at_srcfpr_0.01` | **(b)** threshold fitted to 1% FPR on the calibration slice, carried over unchanged — the deployable number |
+| `tpr_at_fpr_0.01` | **(a)** the same point, threshold read off the tested cell's own ROC — an oracle, here so the (a)−(b) distance is visible |
+| `accuracy` | the headline everyone reads first, kept honest by sitting fourth — its threshold is Youden's J, fit on the same calibration slice as (b) |
+| `macro_f1` | accuracy's balance-aware twin, same threshold; tracks it closely on this near-balanced task |
+
+The realized FPR behind (b) is deliberately not in the set — it is not a score,
+it is the price of one, and it is annotated inside the cells of the (b) matrix
+where the pair has to be read together.
+
+##### Where a threshold comes from
+
+Every threshold above — the transported TPR@FPR levels and the Youden's J
+behind accuracy/macro F1 — is fit on a **calibration slice**: a grouped
+`cal_frac` (default 15%) of the training pool, carved out with
+`cd_core.carve_calibration` and never touched by the fit itself. The model
+trains on the rest of the pool; the eval rows (the held-out split, or a
+transfer target) are never involved in either. This is true in every mode,
+including the cells that used to be special cases — the `cross` diagonal and
+the `lodo` held-out row, where calibrating on the eval split itself used to
+collapse the transported reading into the oracle one — and it is true for the
+zero-shot score baselines too, which calibrate on the identical rows (same
+corpus, same seed) the trained variant of that row uses. `cross`, `lodo` and
+`in_domain` therefore agree on a shared cell exactly, which they did not
+before this: the in-domain runner used to calibrate on the training rows
+themselves, which biased the transported TPR too strict.
 
 Every variant is scored on the held-out rows **and** on the rows it trained on,
 so the ranking carries a `gap` column — train minus test accuracy, i.e. what
@@ -1535,7 +1641,7 @@ The `epai/utils/` and `epai/algs/` modules are shared and should not be modified
 | `epai/utils/cd_core.py` | The experiment engine: corpus loading, the grouped split, metrics, seed aggregation, the zero-shot score baselines, and the preflight data/split checks — shared by both runners and the sweep |
 | `epai/utils/variant_utils.py` | The two config axes (`feature_sets` × `algorithms`), the `Variant` they produce, and the config validation both runners share |
 | `epai/utils/visualization_utils.py` | Plotly and matplotlib plot functions |
-| `epai/algs/` | Pluggable `ClfAlgorithm` subclasses (logistic, svm, gradient_boosting, simple_mlp, binox_mlp), each owning its own preprocessing and hyper-parameters |
+| `epai/algs/` | Pluggable `ClfAlgorithm` subclasses (logistic, svm, gradient_boosting, simple_mlp, binox_mlp, fusion_mlp, gated_mlp), each owning its own preprocessing and hyper-parameters |
 
 ---
 
@@ -1619,6 +1725,9 @@ algorithms:                  # one classifier per entry; crossed with the above
 model:
   n_runs: 3
   test_size: 0.30
+  cal_frac: 0.15              # share of the training pool held out for
+                              # threshold calibration; see "Where a
+                              # threshold comes from" above
 ```
 
 `parquet_path` (and `drop_classes`) may be set once under `data`, as above, or

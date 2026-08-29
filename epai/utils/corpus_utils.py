@@ -220,6 +220,65 @@ def single_corpus_spec(cfg: dict, base_dir: Path = BASE_DIR) -> CorpusSpec:
     )
 
 
+#: Name and label of the corpus ``include_pooled`` adds: the parquet with no
+#: per-corpus ``where`` on it at all. "The whole file", which is what the
+#: in-domain run wants beside the per-domain rows -- the number a detector
+#: trained on everything available actually gets.
+POOLED_NAME = "all"
+POOLED_LABEL = "all data"
+
+
+def pooled_spec(cfg: dict, base_dir: Path = BASE_DIR) -> CorpusSpec:
+    """The whole parquet as one corpus, for an in-domain config's pooled row.
+
+    Deliberately NOT the union of the ``datasets`` entries: those are a
+    selection, and "train on everything in the file" is the question people
+    actually ask beside the per-domain ones. Any ``data``-level ``where`` still
+    applies -- it is the config saying which rows of the file are in the
+    experiment at all -- and only the per-dataset conditions are dropped.
+
+    ``include_pooled`` may be ``true`` or a mapping overriding ``name`` /
+    ``label``, for the case where a corpus is already called ``all``.
+    """
+    data = cfg["data"]
+    entry = data.get("include_pooled")
+    entry = entry if isinstance(entry, dict) else {}
+    return CorpusSpec.from_dict(
+        {
+            "name": str(entry.get("name") or POOLED_NAME),
+            "label": str(entry.get("label") or POOLED_LABEL),
+            "parquet_path": data.get("parquet_path"),
+            "where": data.get("where"),
+            "domain": data.get("domain"),
+            "drop_classes": data.get("drop_classes"),
+        },
+        base_dir,
+    )
+
+
+def in_domain_specs(cfg: dict, base_dir: Path = BASE_DIR) -> list[CorpusSpec]:
+    """The corpora an in-domain config trains on, each on its own.
+
+    Three shapes, and they are one list here so the runner has one loop:
+
+      * no ``datasets``          -- ``data`` IS the corpus, exactly as before.
+      * ``datasets: [...]``      -- one in-domain result per entry.
+      * ``include_pooled: true`` -- plus one more on the whole file.
+
+    Unlike a cross-domain ``datasets`` list these corpora never meet: no model
+    is trained on one and tested on another, and there is no matrix. The list is
+    "run this experiment once per corpus", which is why an in-domain config may
+    legitimately name only one entry where a cross-domain one needs two.
+    """
+    data = cfg["data"]
+    if not data.get("datasets"):
+        return [single_corpus_spec(cfg, base_dir)]
+    specs = dataset_specs(cfg, base_dir)
+    if data.get("include_pooled"):
+        specs.append(pooled_spec(cfg, base_dir))
+    return specs
+
+
 def dataset_specs(cfg: dict, base_dir: Path = BASE_DIR) -> list[CorpusSpec]:
     """Every dataset of a cross-domain config, in config order."""
     data = cfg["data"]
@@ -483,12 +542,74 @@ def check_where(raw, context: str, report) -> None:
             )
 
 
+def check_in_domain_corpora(cfg: dict, report) -> None:
+    """Validate the ``data`` block of an in-domain config, in either shape.
+
+    ``data`` may name ONE corpus directly, or carry a ``datasets`` list to run
+    the same experiment once per corpus (plus the whole file, with
+    ``include_pooled``). The two are told apart by the key, exactly as the
+    cross-domain runner tells a flat config from a suite one.
+
+    The list here is NOT the cross-domain list: nothing is trained on one entry
+    and tested on another, so one entry is legitimate and the "needs at least
+    two" rule does not apply.
+    """
+    data = cfg.get("data")
+    if not isinstance(data, dict):
+        report.error("'data' must be a mapping")
+        return
+
+    pooled = data.get("include_pooled")
+    if pooled is not None and not isinstance(pooled, (bool, dict)):
+        report.error(
+            "data 'include_pooled' must be true/false, or a mapping overriding "
+            f"'name' / 'label', got {type(pooled).__name__}"
+        )
+    if pooled and not data.get("datasets"):
+        report.error(
+            "data sets 'include_pooled' but no 'datasets' — with no per-corpus "
+            "list, 'data' already IS the whole file and the pooled row would be "
+            "a duplicate of it"
+        )
+
+    if not data.get("datasets"):
+        check_single_corpus(cfg, report)
+        return
+
+    check_dataset_specs(cfg, report, min_datasets=1, noun="an in-domain run")
+    if "parquet_path" not in data:
+        # Not required by check_dataset_specs (an entry may name its own file),
+        # but the pooled row has no entry to take one from.
+        if pooled:
+            report.error(
+                "data 'include_pooled' needs 'data.parquet_path' — the pooled "
+                "corpus is the whole of one file, so there has to be one file"
+            )
+
+    # The pooled entry shares the namespace with the datasets, and two corpora
+    # of one name would write into one directory.
+    if pooled:
+        names = [
+            str(spec.get("name"))
+            for spec in (data.get("datasets") or [])
+            if isinstance(spec, dict)
+        ]
+        pooled_name = str(
+            (pooled.get("name") if isinstance(pooled, dict) else None) or POOLED_NAME
+        )
+        if pooled_name in names:
+            report.error(
+                f"the pooled corpus is named {pooled_name!r} and so is a dataset "
+                f"— set include_pooled: {{name: <other>}} to tell them apart"
+            )
+
+
 def check_single_corpus(cfg: dict, report) -> None:
     """Validate ``data`` when it *is* the corpus -- the in-domain config shape.
 
-    The counterpart of :func:`check_dataset_specs`. A ``datasets`` list here is
-    almost certainly a cross-domain config pointed at the wrong runner, so it is
-    named as such rather than ignored.
+    The counterpart of :func:`check_dataset_specs`, and the branch
+    :func:`check_in_domain_corpora` takes when there is no ``datasets`` list. It
+    is also still the whole check for a runner that accepts nothing else.
     """
     data = cfg.get("data")
     if not isinstance(data, dict):
@@ -498,14 +619,6 @@ def check_single_corpus(cfg: dict, report) -> None:
     for key in ("human_label", "group_col", "parquet_path"):
         if key not in data:
             report.error(f"data is missing {key!r}")
-
-    if "datasets" in data:
-        report.error(
-            "data has a 'datasets' list, which is the cross-domain shape: an "
-            "in-domain run trains on ONE corpus, so 'data' names it directly "
-            "(parquet_path / where / drop_classes). Run the matrix with "
-            "epai/ai_detection/train/run_clf_cross_domain.py instead"
-        )
 
     domain = data.get("domain")
     if domain is not None and (not isinstance(domain, str) or not domain.strip()):
@@ -525,11 +638,18 @@ def check_single_corpus(cfg: dict, report) -> None:
         report.error("data 'drop_classes' must be a list")
 
 
-def check_dataset_specs(cfg: dict, report, min_datasets: int = 2) -> None:
+def check_dataset_specs(
+    cfg: dict, report, min_datasets: int = 2, noun: str = "cross-domain"
+) -> None:
     """Validate the shape of ``data.datasets`` -- keys, types, unique names.
 
-    Shared by every cross-domain runner: they used to carry a copy each, which
-    is how one of them ended up accepting a key the others rejected.
+    Shared by every runner that takes a corpus list: they used to carry a copy
+    each, which is how one of them ended up accepting a key the others rejected.
+
+    ``min_datasets`` and ``noun`` are what differs between them. A cross-domain
+    list is the axes of a matrix and needs two entries to have one; an in-domain
+    list is "run this once per corpus", where one entry is a legitimate thing to
+    ask for -- and the message has to name the run the reader is actually doing.
     """
     data = cfg.get("data")
     if not isinstance(data, dict):
@@ -543,7 +663,8 @@ def check_dataset_specs(cfg: dict, report, min_datasets: int = 2) -> None:
     specs = data.get("datasets") or []
     if not isinstance(specs, (list, tuple)) or len(specs) < min_datasets:
         report.error(
-            f"cross-domain needs at least {min_datasets} datasets, got {len(specs)}"
+            f"{noun} needs at least {min_datasets} dataset(s), "
+            f"got {len(specs) if isinstance(specs, (list, tuple)) else specs!r}"
         )
         return
 

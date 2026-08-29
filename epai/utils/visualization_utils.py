@@ -26,6 +26,10 @@ from epai.utils.cd_core import (
     MetricSpec,
     cell_metric_specs,
     level_tag,
+    HEADLINE_METRICS,
+    domain_mask,
+    headline_metric_specs,
+    present_headline_specs,
     present_metric_specs,
     split_diag,
     transported_fpr_key,
@@ -949,6 +953,8 @@ def _plot_cd_matrix(
     higher_is_better: bool = True,
     extra: np.ndarray | None = None,
     extra_fmt: str = "",
+    row_labels: list[str] | None = None,
+    in_domain: np.ndarray | None = None,
 ) -> None:
     """One annotated source x target heatmap.
 
@@ -963,10 +969,18 @@ def _plot_cd_matrix(
     nothing without knowing whether the threshold that bought it cost 1% or 40%
     false positives.
 
-    The in-domain diagonal is boxed, because those cells answer a different
-    question (held-out same-corpus) than the off-diagonal ones.
+    The in-domain cells are boxed, because they answer a different question
+    (a held-out split of what the row trained on) than the transfer ones. WHICH
+    cells those are comes from ``in_domain``, never from the diagonal: a
+    ``mode: lodo`` matrix boxes everything except it. ``row_labels`` names what
+    each row trained on, which in that mode is not the corpus the row is keyed
+    by. Both default to the ``cross`` reading.
     """
     n = len(labels)
+    row_labels = list(row_labels) if row_labels is not None else list(labels)
+    in_domain = (
+        np.eye(n, dtype=bool) if in_domain is None else np.asarray(in_domain, dtype=bool)
+    )
     if diverging:
         # Symmetric about the reference so the white midpoint lands on it, and
         # reversed for a lower-is-better metric so red always means "worse".
@@ -989,7 +1003,7 @@ def _plot_cd_matrix(
     ax.set_xticks(range(n))
     ax.set_yticks(range(n))
     ax.set_xticklabels(labels, rotation=35, ha="right")
-    ax.set_yticklabels(labels)
+    ax.set_yticklabels(row_labels)
     ax.set_xlabel("TESTED ON  (test set)", fontweight="bold", labelpad=10)
     ax.set_ylabel("TRAINED ON  (train set)", fontweight="bold", labelpad=10)
     ax.set_title(title, pad=12)
@@ -1031,11 +1045,13 @@ def _plot_cd_matrix(
                 linespacing=1.4,
                 color=color,
             )
-        ax.add_patch(
-            plt.Rectangle(
-                (i - 0.5, i - 0.5), 1, 1, fill=False, edgecolor="black", linewidth=2.5
-            )
-        )
+            if in_domain[i, j]:
+                ax.add_patch(
+                    plt.Rectangle(
+                        (j - 0.5, i - 0.5), 1, 1,
+                        fill=False, edgecolor="black", linewidth=2.5,
+                    )
+                )
 
 
 #: Characters per caption line, and the height one line occupies. The captions
@@ -1091,6 +1107,14 @@ def _save_clf_cd_figures(out_dir: Path, payload: dict) -> None:
     cfg = payload["config"]
     alg_label = payload.get("alg_label", payload.get("alg_id", out_dir.name))
 
+    # Which cells are in-domain, and what each row actually trained on. Under
+    # `mode: lodo` neither is the diagonal / the corpus name, and a payload
+    # written before `mode` existed falls back to exactly what it meant.
+    in_domain = domain_mask(summary, names)
+    lodo = bool(in_domain.size) and not in_domain.diagonal().any()
+    src_label_of: dict = payload.get("source_labels") or label_of
+    row_labels = [src_label_of.get(n, n) for n in names]
+
     n_runs = cfg["model"]["n_runs"]
     # No "chance = 50%" here any more: this subtitle is shared by every metric
     # figure, and chance is 50% for only three of them. Each figure states its own
@@ -1134,18 +1158,29 @@ def _save_clf_cd_figures(out_dir: Path, payload: dict) -> None:
         fig, ax = plt.subplots(figsize=(size, size * 0.85))
         _plot_cd_matrix(
             ax, mat, std, counts, labels,
-            f"{alg_label} — cross-domain, {spec.label} (%)\n{subtitle}",
+            f"{alg_label} — "
+            f"{'leave-one-domain-out' if lodo else 'cross-domain'}, "
+            f"{spec.label} (%)\n{subtitle}",
             f"{spec.label} (dashed = {spec.reference*100:g}%)", fig,
             reference=spec.reference,
             diverging=spec.diverging,
             higher_is_better=spec.higher_is_better,
             extra=extra,
             extra_fmt="FPR ",
+            row_labels=row_labels,
+            in_domain=in_domain,
         )
         note = _wrap_note(
-            "Boxed diagonal = in-domain (held-out grouped test split of the SAME "
-            "corpus). Off-diagonal = transfer to an unseen corpus. "
-            "Cells show mean ± std over seeds"
+            (
+                "Each row trained on every corpus BUT one. Boxed cells = "
+                "in-domain: a held-out grouped split of that training pool. The "
+                "one unboxed cell in each row is the corpus left out — the "
+                "transfer number, and here it is the diagonal."
+                if lodo else
+                "Boxed diagonal = in-domain (held-out grouped test split of the "
+                "SAME corpus). Off-diagonal = transfer to an unseen corpus."
+            )
+            + " Cells show mean ± std over seeds"
             + (", then the realized FPR" if extra is not None else "")
             + "; n = test rows. Target rows whose group was seen in training are "
             "excluded.",
@@ -1163,28 +1198,54 @@ def _save_clf_cd_figures(out_dir: Path, payload: dict) -> None:
     # In-domain vs transfer, per train set and per test set. Accuracy only: this
     # figure asks "which corpus fails", which is a different question from "how
     # does this variant rank", and one metric per panel is what makes it legible.
-    diag = np.diag(acc)
-    off_mask = ~np.eye(len(names), dtype=bool)
-    out_mean = np.array(
-        [acc[i][off_mask[i]].mean() for i in range(len(names))]
-    )  # trained here, tested elsewhere
-    in_mean = np.array(
-        [acc[:, j][off_mask[:, j]].mean() for j in range(len(names))]
-    )  # trained elsewhere, tested here
+    #
+    # Driven off the mask rather than the diagonal, so under `lodo` the left
+    # panel contrasts each pool's held-out split against the corpus it left out,
+    # and the right panel reads "how well is this corpus detected by the model
+    # that never saw it" — which is the LODO number, one per corpus.
+    off_mask = ~in_domain
+    with np.errstate(invalid="ignore"):
+        diag = np.array([
+            np.nanmean(acc[i][in_domain[i]]) if in_domain[i].any() else np.nan
+            for i in range(len(names))
+        ])  # trained here, tested on rows of the same pool
+        out_mean = np.array([
+            np.nanmean(acc[i][off_mask[i]]) if off_mask[i].any() else np.nan
+            for i in range(len(names))
+        ])  # trained here, tested on a corpus the pool did not hold
+        in_mean = np.array([
+            np.nanmean(acc[:, j][off_mask[:, j]]) if off_mask[:, j].any() else np.nan
+            for j in range(len(names))
+        ])  # trained elsewhere, tested here
 
     fig, axes = plt.subplots(1, 2, figsize=(max(11.0, 2.0 * len(names) + 6), 5.2))
     x = np.arange(len(names))
     w = 0.38
 
-    b1 = axes[0].bar(x - w / 2, diag, w, label="in-domain (tested on itself)", color="steelblue")
-    b2 = axes[0].bar(x + w / 2, out_mean, w, label="transfer out (mean of other test sets)", color="orange")
+    b1 = axes[0].bar(
+        x - w / 2, diag, w, color="steelblue",
+        label=(
+            "in-domain (held-out split of the pool)" if lodo
+            else "in-domain (tested on itself)"
+        ),
+    )
+    b2 = axes[0].bar(
+        x + w / 2, out_mean, w, color="orange",
+        label=(
+            "transfer (the corpus left out)" if lodo
+            else "transfer out (mean of other test sets)"
+        ),
+    )
     axes[0].bar_label(b1, fmt="%.3f", fontsize=8, padding=2)
     axes[0].bar_label(b2, fmt="%.3f", fontsize=8, padding=2)
     axes[0].set_xticks(x)
-    axes[0].set_xticklabels(labels, rotation=25, ha="right")
+    axes[0].set_xticklabels(row_labels, rotation=25, ha="right")
     axes[0].set_xlabel("TRAINED ON  (train set)", fontweight="bold")
     axes[0].set_ylabel("Accuracy")
-    axes[0].set_title("Per train set: does it survive leaving its corpus?")
+    axes[0].set_title(
+        "Per training pool: what does the held-out corpus cost?" if lodo
+        else "Per train set: does it survive leaving its corpus?"
+    )
 
     b3 = axes[1].bar(x, in_mean, w * 1.6, color="seagreen")
     axes[1].bar_label(b3, fmt="%.3f", fontsize=8, padding=2)
@@ -1192,14 +1253,21 @@ def _save_clf_cd_figures(out_dir: Path, payload: dict) -> None:
     axes[1].set_xticklabels(labels, rotation=25, ha="right")
     axes[1].set_xlabel("TESTED ON  (test set)", fontweight="bold")
     axes[1].set_ylabel("Accuracy")
-    axes[1].set_title("Per test set: transfer in (mean of models trained elsewhere)")
+    axes[1].set_title(
+        "Per test set: the model that never saw it" if lodo
+        else "Per test set: transfer in (mean of models trained elsewhere)"
+    )
 
     for ax in axes:
         ax.axhline(CD_CHANCE, linestyle="--", color="red", linewidth=1.2, label="chance")
         ax.set_ylim(0, 1.15)
         ax.legend(fontsize=8, loc="upper right")
 
-    fig.suptitle(f"{alg_label} — in-domain vs transfer\n{subtitle}")
+    fig.suptitle(
+        f"{alg_label} — in-domain vs transfer"
+        + (" (leave-one-domain-out)" if lodo else "")
+        + f"\n{subtitle}"
+    )
     fig.tight_layout()
     fig.savefig(out_dir / "cross_domain_summary.png", dpi=150)
     plt.close(fig)
@@ -1264,13 +1332,16 @@ def plot_cd_score_hist(out_dir: Path, payload: dict) -> None:
     reports that number; this one shows the mechanism that produces it, because
     no aggregate can:
 
-      * On the **diagonal** panel of a row, the cut is placed so that exactly
-        ``level`` of the HUMAN scores fall at or right of it. That is the whole
-        definition of the operating point, and it is a construction on blue
-        alone -- the machine scores have no say in where the line goes.
-      * On every **off-diagonal** panel of that row, the same line is drawn
-        again, unmoved. Nothing is re-fitted. What changes is the corpus under
-        it.
+      * The cut is placed on the row's **calibration slice** (see
+        ``cd_core.carve_calibration``), a grouped cut of the training pool that
+        is disjoint from every panel drawn in the row -- so that exactly
+        ``level`` of the HUMAN scores in that slice fall at or right of it.
+        That is the whole definition of the operating point, and it is a
+        construction on blue alone: the machine scores have no say in where the
+        line goes. The calibration slice itself is never drawn as a panel.
+      * On every panel of that row -- in-domain (tinted) and transfer alike --
+        the same line is drawn again, unmoved. Nothing is re-fitted. What
+        changes is the corpus under it.
 
     So a row reads left to right as one question: does the line still mean what
     it meant when it was placed? A detector whose score distributions merely
@@ -1297,19 +1368,39 @@ def plot_cd_score_hist(out_dir: Path, payload: dict) -> None:
 
     label_of: dict = payload.get("dataset_labels", {})
     labels = [label_of.get(n, n) for n in names]
+    src_label_of: dict = payload.get("source_labels") or label_of
+    row_labels = [src_label_of.get(n, n) for n in names]
     alg_label = payload.get("alg_label", payload.get("alg_id", out_dir.name))
     level = float(dist.get("level", 0.01))
     pct = f"{level * 100:g}%"
     n = len(names)
 
+    # It is calibrated on the SOURCE's calibration slice (see
+    # cd_core.carve_calibration) -- a grouped cut of the training pool that is
+    # disjoint from every panel drawn here, in-domain or transfer alike, under
+    # `cross` and `lodo` both. No panel is where the cut "came from" any more;
+    # the mask below only says which panels are in-domain (tinted) so the cut
+    # can be read against a same-corpus distribution as well as a transferred
+    # one.
+    in_domain = domain_mask(payload.get("summary") or {}, names)
+    lodo = bool(in_domain.size) and not in_domain.diagonal().any()
+
     lo, hi = _score_dist_range(cells, thresholds, names)
     edges = np.linspace(lo, hi, CD_SCORE_BINS + 1)
 
     note = _wrap_note(
-        f"Each row's cut is set on its diagonal panel, where {pct} of human "
-        "scores fall right of it, then drawn unmoved across the row. Bars are "
-        "each class's share of itself: red right of the line is the TPR, blue "
-        f"right of it the realized FPR. Seed {dist.get('seed', 0)}."
+        (
+            f"Each row's cut is fit on a calibration slice held out from every "
+            f"panel — the tinted panels are the in-domain ones — where {pct} of "
+            f"human scores fall right of it, then drawn unmoved onto the corpus "
+            f"that row left out (the untinted panel)."
+            if lodo else
+            f"Each row's cut is fit on a calibration slice held out from every "
+            f"panel, including the diagonal, where {pct} of human scores fall "
+            f"right of it, then drawn unmoved across the row."
+        )
+        + " Bars are each class's share of itself: red right of the line is the "
+        f"TPR, blue right of it the realized FPR. Seed {dist.get('seed', 0)}."
     )
 
     panel = 2.35
@@ -1332,12 +1423,14 @@ def plot_cd_score_hist(out_dir: Path, payload: dict) -> None:
             scores = np.asarray(cell["scores"], dtype=float)
             y = np.asarray(cell["y"], dtype=int)
 
-            # The cut's own panel is the one that defined it. Tinted and named,
-            # so a reader scanning a row can see where the line came from -- the
-            # whole figure is the difference between that panel and the others.
-            if i == j:
+            # The panels that defined the cut. Tinted and named, so a reader
+            # scanning a row can see where the line came from -- the whole
+            # figure is the difference between those panels and the rest.
+            if in_domain[i, j]:
                 ax.set_facecolor("#eef2f7")
-                ax.text(0.025, 0.94, "cut set here", transform=ax.transAxes,
+                ax.text(0.025, 0.94,
+                        "cut set on these" if lodo else "cut set here",
+                        transform=ax.transAxes,
                         ha="left", va="top", fontsize=8, style="italic",
                         color="0.35")
             # Everything at or right of the line is called machine. A faint band
@@ -1380,7 +1473,7 @@ def plot_cd_score_hist(out_dir: Path, payload: dict) -> None:
             if i == 0:
                 ax.set_title(labels[j], fontsize=9.5, pad=6)
             if j == 0:
-                ax.set_ylabel(labels[i], fontsize=9.5, fontweight="bold")
+                ax.set_ylabel(row_labels[i], fontsize=9.5, fontweight="bold")
             ax.tick_params(labelsize=7.5)
             for side in ("top", "right"):
                 ax.spines[side].set_visible(False)
@@ -1402,6 +1495,7 @@ def plot_cd_score_hist(out_dir: Path, payload: dict) -> None:
     fig.suptitle(
         f"{alg_label} — score distributions and the transported {pct} FPR cut\n"
         "rows: CALIBRATED ON  ·  columns: TESTED ON"
+        + ("  (leave-one-domain-out)" if lodo else "")
     )
     # Placed by hand: supxlabel's default y lands in the caption strip, and every
     # strip on this figure is already known in inches.
@@ -1603,23 +1697,27 @@ def _ensure_row_aggregates(rows: list[dict]) -> list[dict]:
 
 #: The metrics every cross-domain figure is drawn for, in reporting order, and
 #: the only ones. This is a PLOTTING filter, not a measurement one: a run still
-#: computes and writes every key ``cell_metric_specs()`` defines -- macro F1, the
-#: target-calibrated TPR, the realized FPR, the 5% operating point -- into its
-#: JSONs and its printed tables. They simply do not each get a figure. Nine
-#: metrics x two figure kinds plus a grid was fifty-odd files per run, which
-#: buries the three a run is actually read on.
+#: computes and writes every key ``cell_metric_specs()`` defines -- the realized
+#: FPR, the 5% operating point -- into its JSONs and its printed tables. They
+#: simply do not each get a figure. Nine metrics x two figure kinds plus a grid
+#: was fifty-odd files per run, which buries the ones a run is actually read on.
 #:
-#: The TPR here is the TRANSPORTED reading: the threshold is calibrated to 1% FPR
-#: on the SOURCE's held-out split and carried to the target unchanged, which is
-#: the number a deployed detector would actually get. The target-calibrated
-#: ``tpr_at_fpr_0.01`` -- threshold read off the tested cell's own ROC -- assumes
-#: labelled human text from the target corpus and is not that number.
+#: It is now exactly ``cd_core.HEADLINE_METRICS``, which is also what the
+#: in-domain tables and figures report, so a variant is drawn under the same five
+#: metrics whichever of the three training designs produced it. Read that
+#: constant for why those five. Trimming the figure set again means trimming this
+#: tuple, which no longer changes what any table says.
+#:
+#: One consequence worth knowing before wondering why two figures look identical:
+#: on this binarised task the classes are near-balanced, so ``macro_f1`` tracks
+#: ``accuracy`` closely and their two matrices will often agree to a decimal.
+#: That is a property of the corpus, not a duplicated figure.
 #:
 #: A transported TPR is half a measurement: it is bought at a realized FPR, and
 #: that FPR is not plotted. It is not lost either -- it is annotated inside the
 #: cells of the per-variant TPR matrix (see :func:`_save_clf_cd_figures`), which
 #: is where the pair has to be read together anyway.
-CD_PLOT_METRICS: tuple[str, ...] = ("auroc", "tpr_at_srcfpr_0.01", "accuracy")
+CD_PLOT_METRICS: tuple[str, ...] = HEADLINE_METRICS
 
 #: Fraction of the axis span kept clear on the right for the per-row numbers.
 CD_GUTTER_FRAC = 0.26
@@ -1977,8 +2075,16 @@ def _cd_transfer_color(row: dict) -> str:
 
 
 def _cd_seed_legend(order: list[dict], n_seeds: int) -> list:
-    """Legend entries shared by the ranked figure and the cross-dataset one."""
+    """Legend entries shared by the ranked figure and the cross-dataset one.
+
+    "Off-diagonal" is the right name for the transfer side under ``mode: cross``
+    and the exactly wrong one under ``mode: lodo``, where the transfer cell IS
+    the diagonal. The rows carry their mode, so the legend says which side each
+    dot came from in the terms of the run that produced it.
+    """
     from matplotlib.lines import Line2D
+
+    lodo = any(r.get("mode") == "lodo" for r in order)
 
     def mark(color: str, filled: bool, label: str) -> Line2D:
         return Line2D(
@@ -1989,8 +2095,15 @@ def _cd_seed_legend(order: list[dict], n_seeds: int) -> list:
         )
 
     handles = [
-        mark(CD_TRANSFER_COLOR, True, "transfer (off-diagonal)"),
-        mark(CD_IN_DOMAIN_COLOR, False, "in-domain (diagonal)"),
+        mark(
+            CD_TRANSFER_COLOR, True,
+            "transfer (the corpus left out)" if lodo else "transfer (off-diagonal)",
+        ),
+        mark(
+            CD_IN_DOMAIN_COLOR, False,
+            "in-domain (held-out split of the training pool)" if lodo
+            else "in-domain (diagonal)",
+        ),
     ]
     # The ★, not a second dot: a baseline's transfer dot is the same orange as
     # everyone else's, so a marker entry here would just repeat the first one.
@@ -2882,9 +2995,12 @@ def _save_id_metric_figure(out_dir: Path, payload: dict) -> None:
     in the tail of the human distribution, which is exactly the part a fitted
     model has pushed furthest away on the rows it saw.
 
-    The transported columns (``tprT`` / ``fprT``) have no train bar on purpose:
-    their threshold is calibrated ON the training rows, so scoring it back there
-    would report the nominal FPR by construction and say nothing.
+    The transported columns (``tprT`` / ``fprT``) have no train bar: the
+    diagnostic ``train_res`` (see ``run_clf_in_domain.run_variant``) is scored
+    without ``cal_thresholds``, so those keys are simply absent -- the fit
+    rows are not the calibration slice a transported threshold comes from
+    (``cd_core.carve_calibration``), so a train-side reading of them was never
+    a meaningful third axis, just an unbuilt one.
     """
     s = payload["summary"]
     specs = [m for m in cell_metric_specs() if f"{m.key}_mean" in s]
@@ -3167,6 +3283,227 @@ def plot_clf_id_comparison(exp_dir: Path, payload: dict) -> None:
         noun=noun, slug=slug, subtitle=payload.get("subtitle", ""),
     )
     print(f"Comparison plot saved to: {exp_dir}")
+
+
+#: Bar hues for the per-corpus columns of the in-domain corpus comparison. One
+#: sequential family rather than a categorical one: the columns are the SAME
+#: measurement on different corpora, not different measurements, and a
+#: categorical palette would invite reading a hue as a kind. The pooled row is
+#: told apart by its hatch instead -- it is not independent of the others, it is
+#: the same documents again.
+ID_CORPUS_COLORS = ["#c6dbef", "#9ecae1", "#6baed6", "#4292c6", "#2171b5", "#08519c"]
+ID_POOLED_HATCH = "//"
+
+
+def plot_clf_id_corpus_comparison(exp_dir: Path, payload: dict) -> None:
+    """Every variant's in-domain result per corpus, one figure per headline metric.
+
+    ``payload`` is the ``corpus_comparison.json`` written by
+    ``run_clf_in_domain.py`` when its config names several corpora. One figure is
+    written per :data:`HEADLINE_METRICS` entry the rows carry, as
+    ``in_domain_corpus_comparison_<metric>.png`` -- the same five metrics, in the
+    same order, that the matrix runs draw, so an in-domain figure and a
+    cross-domain one can be put side by side.
+
+    The bars in one group are INDEPENDENT experiments -- a model trained and
+    tested on that corpus alone -- so the group is a table, not a decomposition,
+    and there is no transfer claim anywhere on these figures. The right panel is
+    the train minus held-out accuracy gap, meaned over the corpora, repeated on
+    every figure because it is the context a headline number is read in: a 99%
+    means something different at a 0.4-point gap than at a 15-point one, whatever
+    metric produced it.
+
+    A pooled row (the whole file, from ``include_pooled``) is hatched: it is the
+    same documents as the per-domain bars beside it, counted again, so its bar is
+    a number to read and not evidence to add.
+    """
+    rows: list[dict] = payload.get("variants") or []
+    names: list[str] = payload.get("corpus_names") or []
+    if not rows or not names:
+        print(f"No corpus comparison to draw in {exp_dir}")
+        return
+
+    specs = [
+        spec for spec in headline_metric_specs()
+        if any(f"{spec.key}_mean" in r for r in rows)
+    ]
+    if not specs:
+        print(f"No headline metrics on the rows in {exp_dir}")
+        return
+
+    for spec in specs:
+        _plot_id_corpus_metric(exp_dir, payload, rows, names, spec)
+
+
+def _plot_id_corpus_metric(
+    exp_dir: Path,
+    payload: dict,
+    rows: list[dict],
+    names: list[str],
+    spec: MetricSpec,
+) -> None:
+    """One corpus-comparison figure, for one metric. See the caller."""
+    label_of: dict = payload.get("corpus_labels") or {}
+    labels = [label_of.get(n, n) for n in names]
+    alg_label = payload.get("alg_label", payload.get("alg_id", exp_dir.name))
+    subtitle = payload.get("subtitle", "")
+    noun = payload.get("noun", "variant")
+    pooled = {
+        n for n in names
+        if str(label_of.get(n, n)).lower() in ("all", "all data") or n.lower() == "all"
+    }
+
+    # Ranked by THIS metric, so each figure answers its own question. A row the
+    # metric is missing from sorts last rather than disappearing.
+    order = sorted(
+        rows,
+        key=lambda r: (
+            -_num(r.get(f"{spec.key}_mean"), -1.0)
+            if spec.higher_is_better
+            else _num(r.get(f"{spec.key}_mean"), 1e9),
+            str(r.get("label", "")),
+        ),
+    )
+    y = np.arange(len(order), dtype=float)
+    n_bars = len(names)
+    # The group fills 0.82 of a row whatever the corpus count, so a two-corpus
+    # figure does not draw two very fat bars and a six-corpus one still leaves a
+    # visible gutter between groups.
+    h = 0.82 / n_bars
+
+    fig_h = max(4.2, 0.46 * len(order) * n_bars / 3 + 2.6)
+    fig, axes = plt.subplots(
+        1, 2, figsize=(max(12.0, 1.1 * n_bars + 9.0), fig_h),
+        gridspec_kw={"width_ratios": [3.0, 1.0]}, sharey=True,
+    )
+
+    per_corpus = [
+        np.array(
+            [
+                _num(r.get("per_corpus", {}).get(name, {}).get(f"{spec.key}_mean"))
+                for r in order
+            ],
+            dtype=float,
+        )
+        for name in names
+    ]
+    for k, name in enumerate(names):
+        values = per_corpus[k]
+        errs = np.array(
+            [
+                _num(r.get("per_corpus", {}).get(name, {}).get(f"{spec.key}_std"), 0.0)
+                for r in order
+            ],
+            dtype=float,
+        )
+        offset = (n_bars - 1) / 2.0 - k
+        bars = axes[0].barh(
+            y + offset * h, np.nan_to_num(values, nan=0.0), h,
+            xerr=np.nan_to_num(errs, nan=0.0),
+            error_kw={"elinewidth": 0.8, "ecolor": "0.35"},
+            color=ID_CORPUS_COLORS[k % len(ID_CORPUS_COLORS)],
+            edgecolor="white", linewidth=0.4,
+            hatch=ID_POOLED_HATCH if name in pooled else None,
+            label=labels[k] + (" (pooled)" if name in pooled else ""),
+        )
+        axes[0].bar_label(
+            bars, fontsize=7,
+            labels=["" if not np.isfinite(v) else f"{v*100:.1f}" for v in values],
+            padding=2,
+        )
+
+    # The mean over the columns, as a rule across the group rather than a bar: it
+    # is a summary OF that group, and an extra bar would read as an extra corpus.
+    # Drawn in data coordinates so it spans exactly the group whatever the corpus
+    # count, which a fixed marker size would not.
+    means = np.array([_num(r.get(f"{spec.key}_mean")) for r in order], dtype=float)
+    for yi, m in zip(y, means):
+        if np.isfinite(m):
+            axes[0].plot([m, m], [yi - 0.44, yi + 0.44], color="black",
+                         linewidth=1.5, zorder=5, solid_capstyle="butt")
+    axes[0].plot([], [], color="black", linewidth=1.5, label="mean over corpora")
+
+    # The reference is the metric's own, NOT 0.5 for everything: a random
+    # detector scores 0.5 accuracy but only 1% TPR at 1% FPR, and drawing the
+    # chance line at 50% on a TPR@1%FPR panel would make every working detector
+    # look broken.
+    axes[0].axvline(
+        spec.reference, linestyle="--", color="red", linewidth=1.2,
+        label=f"reference ({spec.reference*100:g}%)",
+    )
+    axes[0].set_yticks(y)
+    axes[0].set_yticklabels(
+        [_cd_row_mark(r) + str(r.get("label", "")) for r in order], fontsize=9
+    )
+    axes[0].invert_yaxis()
+    # Scaled to the data rather than pinned to [0.4, 1]: a transported TPR can
+    # sit anywhere in [0, 1], and an axis that always starts at 0.4 either clips
+    # it or flattens every difference worth seeing.
+    finite = np.concatenate([v[np.isfinite(v)] for v in per_corpus] + [np.array([spec.reference])])
+    lo, hi = _cd_pad(float(finite.min()), float(finite.max()))
+    axes[0].set_xlim(max(spec.floor, lo), min(spec.ceiling + 0.02, hi + 0.02))
+    axes[0].set_xlabel(
+        f"{spec.label} — trained and tested on that corpus"
+        + ("" if spec.higher_is_better else "   (lower is better)")
+    )
+    axes[0].set_title(f"In-domain {spec.label} per corpus", fontsize=10)
+    _cd_xgrid(axes[0])
+
+    gaps = np.array([_num(r.get("overfit_gap")) for r in order], dtype=float)
+    gap_bars = axes[1].barh(
+        y, np.nan_to_num(gaps, nan=0.0), 0.6, color="#d9a441", edgecolor="white",
+        linewidth=0.4,
+    )
+    axes[1].bar_label(
+        gap_bars, fontsize=7.5,
+        labels=["" if not np.isfinite(v) else f"{v*100:.1f}" for v in gaps],
+        padding=2,
+    )
+    axes[1].axvline(0.0, color="0.3", linewidth=1.0)
+    axes[1].set_xlabel("train − held-out accuracy (points)")
+    axes[1].set_title("Overfit gap, meaned over corpora", fontsize=10)
+    _cd_xgrid(axes[1])
+
+    fig.suptitle(
+        f"{alg_label} — in-domain {spec.label}, every corpus\n{subtitle}"
+    )
+    note = _wrap_note(
+        f"Each bar is a SEPARATE experiment: one {noun} trained and tested on "
+        "that corpus alone, on a grouped held-out split. Nothing on this figure "
+        "crosses corpora — no model is ever tested on a corpus it did not train "
+        "on, so none of it is a transfer result. Error bars are ±1 SD over "
+        "seeds, whose test halves overlap, so they understate the sampling "
+        "error.",
+        spec.note,
+        (
+            "The hatched bar is the whole file pooled: the same documents as the "
+            "other bars in its group, counted again, so it is a number to read "
+            "and not evidence to add to them."
+            if pooled else ""
+        ),
+        "★ zero-shot baseline (no classifier trained) · ◆ hybrid: also saw an "
+        "auxiliary column, so it is not ranked on equal information."
+        if any(r.get("baseline") or r.get("hybrid") for r in order) else "",
+    )
+    handles, legend_labels = axes[0].get_legend_handles_labels()
+    # The caption is a variable number of lines and the legend a variable number
+    # of rows, so the strip below the axes is measured rather than guessed -- and
+    # clamped, because a very long caption on a short figure would otherwise ask
+    # tight_layout for a negative plotting area.
+    note_frac = _note_strip(note, fig)
+    legend_frac = _legend_strip_in(len(handles)) / fig_h
+    bottom = min(note_frac + legend_frac, 0.45)
+    fig.legend(
+        handles, legend_labels, fontsize=8, loc="lower center",
+        ncol=min(len(handles), 6), frameon=False,
+        bbox_to_anchor=(0.5, min(note_frac, bottom)),
+    )
+    fig.text(0.01, 0.01, note, fontsize=7.5, color="dimgray", va="bottom")
+    fig.tight_layout(rect=(0, bottom, 1, 0.93))
+    fig.savefig(
+        exp_dir / f"in_domain_corpus_comparison_{spec.filename}.png", dpi=150
+    )
+    plt.close(fig)
 
 
 def _plot_id_comparison_metrics(

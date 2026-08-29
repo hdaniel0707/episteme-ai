@@ -1,10 +1,11 @@
 """Shared training machinery for the PyTorch classifiers in this package.
 
-:mod:`simple_mlp` and :mod:`binox_mlp` differ only in what their network does
-with the inputs. Everything around the network -- how the features are
-normalised, how a validation split is taken, when training stops, what the loss
-does to the labels -- is identical, and lives here so that a regularizer added
-once applies to both rather than being implemented twice and drifting.
+:mod:`simple_mlp`, :mod:`binox_mlp`, :mod:`fusion_mlp` and :mod:`gated_mlp`
+differ only in what their network does with the inputs. Everything around the
+network -- how the features are normalised, how an auxiliary matrix is cleaned,
+how a validation split is taken, when training stops, what the loss does to the
+labels -- is identical, and lives here so that a regularizer added once applies
+to all of them rather than being implemented four times and drifting.
 
 Every knob below defaults to what the two algorithms did before this module
 existed, so a config written against the old code trains the same model:
@@ -313,6 +314,72 @@ class FeatureNormalizer:
 
 
 # ---------------------------------------------------------------------------
+# The auxiliary matrix
+# ---------------------------------------------------------------------------
+
+
+#: How a non-finite auxiliary entry is replaced. See :func:`aux_fill_values`.
+AUX_FILL_MODES = ("zero", "median")
+
+
+def parse_aux_fill(mode: str) -> str:
+    """Validate an ``aux_fill`` setting. Returns it unchanged."""
+    if mode not in AUX_FILL_MODES:
+        raise ValueError(
+            f"aux_fill must be one of {sorted(AUX_FILL_MODES)}, got {mode!r}"
+        )
+    return mode
+
+
+def as_aux_matrix(Z) -> np.ndarray:
+    """The auxiliary input as a 2-D float64 matrix, whatever width it has.
+
+    A scalar column (the Binoculars score) arrives as ``(n,)`` and a vector one
+    (a judge's cue vector) as ``(n, k)``; both become ``(n, k>=1)`` here so every
+    caller downstream is written once, for a matrix.
+    """
+    return np.asarray(Z, dtype=np.float64).reshape(len(Z), -1)
+
+
+def aux_fill_values(Z, mode: str) -> np.ndarray:
+    """Per-column stand-in for a non-finite auxiliary entry, fitted on train.
+
+    Which stand-in is right depends on what the column *is*, so it is a config
+    choice rather than a constant:
+
+    ``median``
+        For a continuous score. A failed Binoculars computation leaves a NaN or
+        an inf, and a single one of those would take a StandardScaler's mean and
+        std with it; the training median is the least committal replacement.
+
+    ``zero``
+        For a multi-hot indicator vector, where the training median is a
+        fraction that no real row can hold and that a downstream ReLU basis
+        would read as a half-cited cue. 0.0 is the vector's own word for "this
+        cue was not cited", which is the honest reading of a missing entry --
+        the rows that were never *looked at* are dropped upstream by the
+        loader's missing-value filter and never reach this function.
+
+    The value is computed once on the training split and reused unchanged on
+    every target corpus, exactly like the normaliser's statistics.
+    """
+    Z = as_aux_matrix(Z)
+    if parse_aux_fill(mode) == "zero":
+        return np.zeros(Z.shape[1], dtype=np.float64)
+    finite = np.where(np.isfinite(Z), Z, np.nan)
+    return np.nan_to_num(np.nanmedian(finite, axis=0), nan=0.0)
+
+
+def clean_aux(Z, fill: np.ndarray) -> np.ndarray:
+    """Replace every non-finite auxiliary entry with its column's ``fill`` value."""
+    Z = as_aux_matrix(Z)
+    bad = ~np.isfinite(Z)
+    if bad.any():
+        Z = np.where(bad, fill, Z)
+    return Z
+
+
+# ---------------------------------------------------------------------------
 # Network building blocks
 # ---------------------------------------------------------------------------
 
@@ -348,6 +415,34 @@ def mlp_layers(in_dim: int, hidden_dims: list[int], hp: TrainHParams) -> tuple[l
     prev = in_dim
     for h in hidden_dims:
         layers += hidden_block(prev, h, hp.dropout, hp.norm_layer)
+        prev = h
+    return layers, prev
+
+
+def aux_layers(in_dim: int, dims: list[int], dropout: float) -> tuple[list, int]:
+    """The hidden stack for an auxiliary branch, plus the width it ends at.
+
+    Two deliberate differences from :func:`mlp_layers`, both of which exist to
+    keep a *small* input intact where the embedding path is free to be squeezed:
+
+    * no input dropout. Zeroing one of eleven cue bits removes an eleventh of
+      everything the branch knows, where zeroing one of 512 embedding dimensions
+      removes something the other 511 largely still carry.
+    * no LayerNorm, whatever ``norm_layer`` says. LayerNorm rescales each sample
+      to unit variance across the layer's features, which throws away the branch
+      activation's overall magnitude -- and for a multi-hot cue vector that
+      magnitude is *how many cues were cited*, one of the few unambiguous
+      signals eleven bits carry.
+
+    An empty ``dims`` yields an empty stack, i.e. the raw auxiliary vector is
+    passed through unchanged.
+    """
+    layers: list[nn.Module] = []
+    prev = in_dim
+    for h in dims:
+        layers += [nn.Linear(prev, h), nn.ReLU()]
+        if dropout:
+            layers.append(nn.Dropout(dropout))
         prev = h
     return layers, prev
 

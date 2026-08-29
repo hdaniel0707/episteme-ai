@@ -22,10 +22,11 @@ exclusion of target rows whose group was seen in training -- live in
 METRICS
 -------
 Every cell is reported under several metrics, each with its own matrix and its
-own figure: accuracy and macro F1 from the predicted labels, and AUROC plus TPR
-at 1% and 5% FPR from the continuous score behind them. Accusing a human is the
-expensive error, so the low-FPR operating point is the one a deployed detector
-is actually graded on.
+own figure: accuracy and macro F1 from the predicted labels -- at a Youden's J
+threshold fit on the calibration slice, not an algorithm's default 0.5 -- and
+AUROC plus TPR at 1% and 5% FPR from the continuous score behind them.
+Accusing a human is the expensive error, so the low-FPR operating point is the
+one a deployed detector is actually graded on.
 
 TPR@FPR appears twice, and the pair is the point:
 
@@ -33,13 +34,17 @@ TPR@FPR appears twice, and the pair is the point:
     tested. This is what the literature reports, and it measures separability:
     it assumes human text from the target corpus is available to calibrate on.
   * ``tpr_at_srcfpr_<level>`` -- (b) the threshold is fit to that FPR on the
-    SOURCE's held-out split and carried to the target unchanged, with
-    ``fpr_at_srcfpr_<level>`` recording what it actually cost there.
+    SOURCE's calibration slice -- a grouped cut of the training pool, never
+    fit on and never evaluated on (see ``cd_core.carve_calibration``) -- and
+    carried to the target unchanged, with ``fpr_at_srcfpr_<level>`` recording
+    what it actually cost there.
 
 A model can hold its AUROC and its (a) score under transfer while its (b) score
 collapses, because the score distribution shifted even though the ordering
-survived -- which is invisible to accuracy, to AUROC and to (a) alike. On the
-diagonal (b) degenerates to (a) by construction; only the off-diagonal is new.
+survived -- which is invisible to accuracy, to AUROC and to (a) alike. (b) does
+NOT degenerate to (a) on the diagonal: the calibration slice is disjoint from
+the evaluation set in every cell, so every cell of the (b) matrix is new
+information, not just the off-diagonal.
 
 The mechanism behind (b) is drawn rather than only reported. Each variant gets
 ``cross_domain_score_hist_0.01.png``: a source x target grid of the human (blue)
@@ -54,6 +59,57 @@ None of this is recoverable from a matrix already on disk: a confusion matrix
 cannot be turned back into a ranking, and per-document scores were not kept
 before ``score_dist`` existed, so a run predating either has to be re-run rather
 than replotted.
+
+MODE: HOW MANY CORPORA EACH MODEL TRAINS ON
+-------------------------------------------
+The matrix above is one of two training designs this script runs, chosen by the
+top-level ``mode`` key. Both produce a matrix of exactly the same shape, over
+exactly the same corpora, with exactly the same fit count -- and their cells
+mean opposite things, which is why the mode is printed by the preflight, drawn
+into every figure title and stored on every payload.
+
+``mode: cross`` (the default, and every config written before this key). The
+numbers in both sketches below are INVENTED and are there to show the shape and
+where the in-domain cells land::
+
+              tested on
+              essay   reuter   wp
+    trained   [98.1]   51.2   49.7      [ ] = in-domain, the diagonal
+    on        49.9   [97.6]   50.4      everything else = transfer
+              50.8    52.0  [98.4]
+
+Each model sees ONE corpus. That is deliberately harsh -- a single-source model
+has every incentive to memorise corpus artifacts -- and it is the design that
+produced the finding this whole folder exists around: ~98% in-domain, at or
+below chance off it.
+
+``mode: lodo`` -- leave-one-domain-out::
+
+                        tested on
+                        essay   reuter   wp
+    trained on          [51.0]  [97.2]  [97.9]   row `essay` = the model that
+      reuter + wp                                never saw an essay
+    trained on           97.4   [50.6]   97.6
+      essay + wp
+    trained on           97.8    97.1   [51.4]
+      essay + reuter
+
+Each model trains on the union of every corpus BUT one, so it does see domain
+diversity -- the complementary and arguably fairer question. Row ``essay`` means
+"essay was held out": on that row the DIAGONAL cell is the transfer number and
+every other cell is a held-out grouped split of the training pool. The in-domain
+mask is the exact inverse of ``cross``, so nothing downstream reads the diagonal
+to find out which is which; every cell carries an ``in_domain`` flag written
+from the run's ``cd_core.TrainingPlan``.
+
+What does NOT change with the mode: the corpora, the variants, the seeds, the
+grouped split, the group exclusion, the metrics, the baselines, the output
+layout, the number of fits. Only which rows go into each model.
+
+The third design -- train and test on one corpus, no matrix at all -- is
+``run_clf_in_domain.py``, which also runs every corpus of a list plus the whole
+file pooled. It is a separate script because with no transfer cells there is no
+transfer mean, no gap and no ranking to sort them by.
 
 SUITES: SEVERAL DATASETS IN ONE RUN
 -----------------------------------
@@ -178,31 +234,37 @@ A corpus is a ``CorpusSpec`` -- a parquet plus an optional ``domain`` -- so the
 six datasets of a full matrix are six slices of two combined files rather than
 six separate parquets. See ``epai/utils/corpus_utils.py``.
 
-``cfg/ai_detection/train/clf_cd/clf_cd_example.yaml`` is the annotated sample and
-the folder's only config, so the zero-argument run below is that experiment.
-Copy it to start a new one; each run also writes its config beside its results.
+``cfg/ai_detection/train/clf_cd/`` holds the ``mode: cross`` configs and is the
+default ``--cfg-dir``, so the zero-argument run is that folder.
+``cfg/ai_detection/train/clf_lodo/`` holds the ``mode: lodo`` ones and is reached
+with ``--cfg`` (or ``--cfg-dir``), which keeps the two designs from training in
+one invocation by accident. Each is an annotated sample as well as a working
+experiment: copy one to start a new run, and each finished run also writes its
+config beside its results.
 
 Run:
+    # the default folder: cfg/ai_detection/train/clf_cd/
     uv run python epai/ai_detection/train/run_clf_cross_domain.py
     uv run python epai/ai_detection/train/run_clf_cross_domain.py --dry-run
-    uv run python epai/ai_detection/train/run_clf_cross_domain.py \
-        --cfg cfg/ai_detection/train/clf_cd/clf_cd_example.yaml --no-plots
-    
-    uv run python epai/ai_detection/train/run_clf_cross_domain.py \
-            --cfg cfg/ai_detection/train/clf_cd/clf_cd_science_v3.yaml
-    
-    uv run python epai/ai_detection/train/run_clf_cross_domain.py \
-        --cfg cfg/ai_detection/train/clf_cd/clf_cd_ghostbuster_gpt35t.yaml
-    
-    uv run python epai/ai_detection/train/run_clf_cross_domain.py \
-        --cfg cfg/ai_detection/train/clf_cd/clf_cd_ghostbuster_gpt54mini.yaml
 
-    uv run python epai/ai_detection/train/run_clf_cross_domain.py \
-        --cfg cfg/ai_detection/train/clf_cd/clf_cd_ghostbuster_gpt56luna.yaml
-
-    # all four datasets in one run, with the comparison across them:
+    # every dataset of the suite, with the comparison across them:
     uv run python epai/ai_detection/train/run_clf_cross_domain.py \
         --cfg cfg/ai_detection/train/clf_cd/clf_cd_suites_all.yaml
+    uv run python epai/ai_detection/train/run_clf_cross_domain.py \
+        --cfg cfg/ai_detection/train/clf_cd/clf_cd_suites_all.yaml --no-plots
+
+    # the same variants, trained on two domains and tested on the third:
+    uv run python epai/ai_detection/train/run_clf_cross_domain.py \
+        --cfg cfg/ai_detection/train/clf_lodo/clf_lodo_suites_all.yaml
+
+    # the in-domain control, on the same corpora plus the whole parquet:
+    uv run python epai/ai_detection/train/run_clf_in_domain.py \
+        --cfg cfg/ai_detection/train/clf_id/clf_id_domains_all.yaml
+    
+    uv run python epai/ai_detection/train/run_clf_cross_domain.py \
+      --cfg cfg/ai_detection/train/clf_cd/clf_cd_suites_all.yaml \
+            cfg/ai_detection/train/clf_lodo/clf_lodo_suites_all.yaml
+
 """
 
 from __future__ import annotations
@@ -219,27 +281,38 @@ from tqdm import tqdm
 from epai.algs import build_algorithm
 from epai.utils.cd_core import (
     BINARY_CLASSES,
+    CAL_FRAC_DEFAULT,
     SCORE_DIST_KEY,
     SCORE_DIST_LEVEL,
     Prepared,
     aggregate_seeds,
     baseline_specs,
     calibrate_thresholds,
+    carve_calibration,
     check_baseline_datasets,
     check_dataset,
+    check_mode,
+    check_plan,
     check_splits,
     describe_variant,
     grouped_split,
+    label_predictions,
     level_tag,
     load_prepared,
     metrics_dict,
+    pool_array,
+    pool_frame,
     print_matrix,
     print_ranking,
+    run_mode,
     run_score_baseline,
     score_dist_cell,
     score_dist_payload,
+    source_labels,
     summarise_baseline,
     summarise_variant,
+    training_plan,
+    youden_threshold,
 )
 from epai.utils.config_utils import (
     RESET,
@@ -290,6 +363,17 @@ DEFAULT_RESULTS_DIR = BASE_DIR / "results" / "clf_cd"
 #: ``replot_cross_domain.py`` draws every one of them from the JSON afterwards.
 PLOTS_ENABLED = True
 
+#: One line per training design, printed by the preflight. The two produce
+#: matrices of identical shape whose cells mean opposite things, so which one is
+#: running is said out loud before any of it is read. See ``cd_core.RUN_MODES``.
+MODE_BLURB = {
+    "cross": "train on ONE corpus; the diagonal is in-domain, the rest transfer",
+    "lodo": (
+        "leave-one-domain-out: train on every corpus BUT one; the diagonal is "
+        "the transfer cell, the rest is the training pool held out"
+    ),
+}
+
 
 # ---------------------------------------------------------------------------
 # Config: the two axes
@@ -326,6 +410,7 @@ def preflight_config(cfg: dict, report: Report) -> None:
     """
     print("\n[1/3] config")
     n_errors = len(report.errors)
+    check_mode(cfg, report, ("cross", "lodo"))
     check_config(
         cfg, report,
         data_check=check_suites if has_suites(cfg) else check_dataset_specs,
@@ -362,10 +447,24 @@ def preflight_config(cfg: dict, report: Report) -> None:
         f"{baseline_note}, {cfg['model']['n_runs']} seeds  → "
         f"{len(variants)} variant(s), {n_fits} fits"
     )
+    # The mode is the experiment, so it is said before anything else about the
+    # data: the fit count above is the same either way, and the numbers the run
+    # produces mean opposite things.
+    mode = run_mode(cfg)
+    print(f"  mode: {mode} — {MODE_BLURB[mode]}" if mode in MODE_BLURB else
+          f"  mode: {mode}")
     if has_suites(cfg):
         for suite in suites:
             names = [d["name"] for d in suite.cfg["data"]["datasets"]]
             print(f"    {suite.name:<26} {len(names)} corpora — {', '.join(names)}")
+    restricted = [s for s in algorithm_specs(cfg) if s["feature_sets"] is not None]
+    if restricted:
+        # The cross product no longer explains the variant count, so name the
+        # cells that were dropped before a reader wonders where they went.
+        print(
+            "  restricted to some feature sets: "
+            + ", ".join(f"{s['id']} → {list(s['feature_sets'])}" for s in restricted)
+        )
     hybrids = [v for v in variants if v.hybrid]
     if hybrids:
         # These see more than the feature set, so say so before anything runs.
@@ -385,6 +484,11 @@ def preflight_config(cfg: dict, report: Report) -> None:
         if suite.name:
             print(f"\n{'·' * RULE}\ndataset: {suite.name}\n{'·' * RULE}")
             report.context = f"{outer} · {suite.name}" if outer else suite.name
+        check_plan(
+            suite.cfg,
+            [d["name"] for d in suite.cfg["data"]["datasets"]],
+            report,
+        )
         preflight_data(suite.cfg, report)
     report.context = outer
 
@@ -527,10 +631,19 @@ def run_variant(
     hyper-parameter sweep turns it off: it fits thousands of throwaway candidates
     and only the winner is ever reloaded, so keeping them all would cost
     gigabytes for nothing.
+
+    A "source" is a row of the matrix, not necessarily a corpus: under
+    ``mode: lodo`` it is every corpus but one, pooled. The plan is the only
+    thing that knows the difference, and it is also what decides whether a cell
+    is in-domain or transfer -- so nothing here compares ``source`` to
+    ``target`` to find out.
     """
     base_seed: int = cfg["seed"]
     n_runs: int = cfg["model"]["n_runs"]
     test_size: float = cfg["model"].get("test_size", 0.30)
+    cal_frac: float = cfg["model"].get("cal_frac", CAL_FRAC_DEFAULT)
+    plan = training_plan(cfg, names)
+    row_labels = source_labels(plan, labels)
 
     feature_dim = int(next(iter(X_all.values())).shape[1])
 
@@ -559,47 +672,74 @@ def run_variant(
         seed_res: dict[str, dict] = {}
 
         for source in names:
-            df_s = data[source]
-            X_s, y_s = X_all[source], df_s["y"].to_numpy()
-            Z_s = Z_all[source]
+            # The training pool: one corpus under `cross`, all but one under
+            # `lodo`. Pooled here rather than at load time so every corpus is
+            # still read from the parquet exactly once per feature set.
+            #
+            # Inside the seed loop on purpose, though the pool does not depend on
+            # the seed: hoisting it would hold every pool's design matrix at once
+            # (roughly N-1 extra copies of the corpus under `lodo`) to save a few
+            # concatenations per variant, which is nothing beside fitting the
+            # model. Under `cross` the pool is one corpus and `pool_*` returns the
+            # loaded array itself, so neither cost exists there at all.
+            members = plan.trained_on(source)
+            df_s = pool_frame(members, data)
+            X_s = pool_array(members, X_all)
+            Z_s = pool_array(members, Z_all)
+            y_s = df_s["y"].to_numpy()
             groups_s = df_s["group"].to_numpy()
 
             train_idx, test_idx = grouped_split(y_s, groups_s, test_size, seed)
+            # The exclusion is keyed on the WHOLE training pool, fit rows and
+            # calibration rows alike -- the calibration slice's labels were
+            # still looked at (to choose a threshold), so a target group that
+            # only appears there would still be a free hit if it were not
+            # excluded.
             train_groups = set(groups_s[train_idx])
+
+            # The calibration slice: carved out of the training pool, never
+            # the fit rows and never the eval rows, in every mode. See
+            # cd_core.carve_calibration. Offset from `seed` so the two draws
+            # are independent rather than correlated permutations of the same
+            # RNG stream.
+            fit_idx, cal_idx = carve_calibration(
+                y_s[train_idx], groups_s[train_idx], cal_frac, seed
+            )
+            fit_idx, cal_idx = train_idx[fit_idx], train_idx[cal_idx]
 
             # A fresh algorithm per (seed, source); each owns its preprocessing.
             alg = build_algorithm(variant.alg_name, seed, **variant.params)
-            # Groups for the training rows only. An algorithm that carves its own
+            # Groups for the fit rows only. An algorithm that carves its own
             # validation split out of them (the torch ones, under `val_frac`) needs
             # these to keep a document and its rewrites on one side of that split,
             # the same guarantee the outer split above gives. Ignored by the rest.
-            alg.set_fit_groups(groups_s[train_idx])
+            alg.set_fit_groups(groups_s[fit_idx])
             fit_alg(
                 alg,
-                X_s[train_idx],
-                y_s[train_idx],
-                Z_s[train_idx] if Z_s is not None else None,
+                X_s[fit_idx],
+                y_s[fit_idx],
+                Z_s[fit_idx] if Z_s is not None else None,
             )
 
-            # The source's held-out split, scored once: it is the in-domain
-            # evaluation set AND the calibration set for the transported
-            # thresholds of variant (b). Held-out rather than training rows on
-            # purpose -- a model's scores on the rows it was fitted on push the
-            # human distribution away from the boundary, which would make the
-            # transported threshold reflect the overfit rather than the corpus.
-            #
-            # The consequence, stated plainly because no key can carry it: on the
-            # diagonal the calibration set *is* the evaluation set, so the
-            # transported reading degenerates to the target-calibrated one there
-            # and only the off-diagonal cells of the (b) matrices are new
-            # information.
-            s_test = score_alg(
-                alg, X_s[test_idx], Z_s[test_idx] if Z_s is not None else None
+            # The calibration slice, scored once: it is what the transported
+            # thresholds of variant (b) and the Youden's J threshold behind
+            # accuracy/macro F1 are fit on. Never the fit rows (a model's
+            # scores on rows it was fitted on push the human distribution away
+            # from the boundary, which would make the threshold reflect the
+            # overfit rather than the corpus) and never the eval rows (which
+            # would be the oracle reading in disguise) -- true in every cell,
+            # including the diagonal under `cross` and the held-out row under
+            # `lodo`, which is the whole point of the carve.
+            s_cal = score_alg(
+                alg, X_s[cal_idx], Z_s[cal_idx] if Z_s is not None else None
             )
             cal_thresholds = (
-                calibrate_thresholds(y_s[test_idx], s_test)
-                if s_test is not None
+                calibrate_thresholds(y_s[cal_idx], s_cal)
+                if s_cal is not None
                 else None
+            )
+            label_threshold = (
+                youden_threshold(y_s[cal_idx], s_cal) if s_cal is not None else None
             )
 
             if keep_scores and cal_thresholds is not None:
@@ -610,17 +750,21 @@ def run_variant(
 
             seed_res[source] = {}
             for target in names:
-                if target == source:
-                    # In-domain: the corpus's own held-out grouped test split.
+                if len(members) == 1 and target == source:
+                    # In-domain, and the pool IS this corpus: its own held-out
+                    # grouped test split.
+                    Z_test = Z_s[test_idx] if Z_s is not None else None
+                    s_test = score_alg(alg, X_s[test_idx], Z_test)
                     res = metrics_dict(
                         y_s[test_idx],
-                        predict_alg(
-                            alg,
-                            X_s[test_idx],
-                            Z_s[test_idx] if Z_s is not None else None,
+                        label_predictions(
+                            predict_alg(alg, X_s[test_idx], Z_test),
+                            s_test,
+                            label_threshold,
                         ),
                         scores=s_test,
                         cal_thresholds=cal_thresholds,
+                        label_threshold=label_threshold,
                     )
                     res["excluded"] = 0
                     if keep_scores and s_test is not None and source in dist_cells:
@@ -632,6 +776,12 @@ def run_variant(
                     # `essay` and `essay_gpt54mini` share their human documents
                     # (same source files, same ids). Any target row whose group
                     # was trained on would be a free hit, so drop it.
+                    #
+                    # This is also what makes a pooled row's OWN corpora into
+                    # held-out splits under `lodo`: excluding the training
+                    # groups from `essay` leaves exactly the part of `essay`
+                    # that the pool's split held out. Same rule, same code path;
+                    # only the plan says which of the two readings it is.
                     keep = ~df_t["group"].isin(train_groups).to_numpy()
                     Z_t = Z_all[target]
                     X_t = X_all[target][keep]
@@ -643,16 +793,20 @@ def run_variant(
                     )
                     res = metrics_dict(
                         df_t.loc[keep, "y"].to_numpy(),
-                        predict_alg(alg, X_t, Z_keep),
+                        label_predictions(
+                            predict_alg(alg, X_t, Z_keep), s_t, label_threshold
+                        ),
                         scores=s_t,
                         cal_thresholds=cal_thresholds,
+                        label_threshold=label_threshold,
                     )
                     res["excluded"] = int((~keep).sum())
                     if keep_scores and s_t is not None and source in dist_cells:
                         dist_cells[source][target] = score_dist_cell(
                             s_t, df_t.loc[keep, "y"].to_numpy()
                         )
-                res["train_n"] = int(len(train_idx))
+                res["train_n"] = int(len(fit_idx))
+                res["cal_n"] = int(len(cal_idx))
                 seed_res[source][target] = res
 
             # Persist last: the torch algorithms' save() moves the model to CPU,
@@ -669,7 +823,7 @@ def run_variant(
 
         per_seed.append(seed_res)
 
-    summary = aggregate_seeds(per_seed, names)
+    summary = aggregate_seeds(per_seed, names, plan=plan)
 
     # The per-variant config copy the figures read: `features` and `model.ml_alg`
     # are what the matrix subtitles are built from, and `alg_id` / `alg_label`
@@ -694,8 +848,14 @@ def run_variant(
         "resolved_params": resolved_params(variant, base_seed),
         "binoculars": variant.aux_col,
         "feature_dim": feature_dim,
+        "mode": plan.mode,
         "dataset_names": names,
         "dataset_labels": labels,
+        # The row axis, which is the corpus axis only under `cross`. Kept
+        # separately so a figure never labels the one model that never saw an
+        # essay "essay".
+        "source_labels": row_labels,
+        "source_members": {n: plan.trained_on(n) for n in names},
         "classes": BINARY_CLASSES,
         "config": var_cfg,
         "summary": summary,
@@ -728,11 +888,12 @@ def comparison_subtitle(cfg: dict, n_corpora: int) -> str:
         feats += f" (◆ also + {', '.join(aux)})"
 
     algo = algs[0]["label"] if len(algs) == 1 else f"{len(algs)} algorithms"
+    design = "leave-one-domain-out · " if run_mode(cfg) == "lodo" else ""
     # No chance level here: this line is shared by every per-metric comparison
     # figure, and chance is 50% for accuracy / macro F1 / AUROC but the nominal
     # FPR for the TPR@FPR ones. Each figure prints its own reference instead.
     return (
-        f"{feats} · {algo} · {cfg['model']['n_runs']} seeds · "
+        f"{design}{feats} · {algo} · {cfg['model']['n_runs']} seeds · "
         f"grouped by {cfg['data']['group_col']!r} · {n_corpora} corpora"
     )
 
@@ -835,8 +996,17 @@ def run_suite(cfg: dict, alg_dir: Path) -> dict:
     variants = build_variants(cfg)
     aux = aux_columns(cfg)
 
+    plan = training_plan(cfg, names)
+
     tqdm.write("\n" + "=" * RULE)
     tqdm.write(f"  ALG ID     : {cfg['alg_id']}")
+    tqdm.write(f"  MODE       : {plan.mode} — {MODE_BLURB.get(plan.mode, '')}")
+    if plan.mode != "cross":
+        for name in names:
+            tqdm.write(
+                f"               row {name!r}: trained on "
+                f"{', '.join(plan.trained_on(name))}"
+            )
     tqdm.write(f"  VARIANTS   : {[v.id for v in variants]}")
     if len(fsets) > 1:
         tqdm.write(f"  FEATURES   : {len(fsets)} sets — {[fs.id for fs in fsets]}")
@@ -855,6 +1025,14 @@ def run_suite(cfg: dict, alg_dir: Path) -> dict:
 
     rows: list[dict] = []
     for fs in tqdm(fsets, desc="Feature sets", unit="set", leave=False):
+        # An entry's `feature_sets` restriction can leave a set with nothing to
+        # train, and loading four corpora to fit nothing on them is minutes of
+        # I/O for no output. The preflight has already warned about it.
+        fs_variants = [v for v in variants if v.fs_id == fs.id]
+        if not fs_variants:
+            tqdm.write(f"\n{'─' * 60}\n  feature set: {fs.id} — no algorithm, skipped")
+            continue
+
         # Load and stack one feature set once; every algorithm on it reuses the
         # result. The missing-value filter runs over the features and the
         # auxiliary columns together, so a row a hybrid algorithm cannot use is
@@ -873,10 +1051,7 @@ def run_suite(cfg: dict, alg_dir: Path) -> dict:
         }
 
         for variant in tqdm(
-            [v for v in variants if v.fs_id == fs.id],
-            desc="Variants",
-            unit="var",
-            leave=False,
+            fs_variants, desc="Variants", unit="var", leave=False
         ):
             hybrid_note = f" + {variant.aux_col}" if variant.aux_col else ""
             tqdm.write(f"\n→ {variant.id}  ({variant.alg_name}{hybrid_note})")
@@ -894,7 +1069,8 @@ def run_suite(cfg: dict, alg_dir: Path) -> dict:
                 variant, cfg, X_all, data, names, labels, out_dir
             )
             print_matrix(
-                payload["alg_label"], payload["summary"], payload["dataset_names"]
+                payload["alg_label"], payload["summary"], payload["dataset_names"],
+                row_labels=payload.get("source_labels"),
             )
 
             # Plot as we go: an interrupted run still leaves finished variants
@@ -923,7 +1099,8 @@ def run_suite(cfg: dict, alg_dir: Path) -> dict:
         bl_dir.mkdir(parents=True, exist_ok=True)
         payload = run_score_baseline(cfg, bl_dir, bl)
         print_matrix(
-            payload["alg_label"], payload["summary"], payload["dataset_names"]
+            payload["alg_label"], payload["summary"], payload["dataset_names"],
+            row_labels=payload.get("source_labels"),
         )
         if PLOTS_ENABLED:
             plot_clf_cd_result(bl_dir)
