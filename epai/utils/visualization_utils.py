@@ -1578,6 +1578,13 @@ CD_BASELINE_STYLES: dict[str, dict] = {
                    "hatch": "/"},
     "llm_judge": {"label": "LLM Judge baseline", "color": CD_BASELINE_COLOR,
                   "hatch": "\\"},
+    # The two families that read high ⇒ machine. Hatches are picked to stay
+    # apart from / and \\ at small bar widths, where the two diagonals start to
+    # look alike.
+    "fastdetect": {"label": "Fast-DetectGPT baseline", "color": CD_BASELINE_COLOR,
+                   "hatch": "x"},
+    "detector": {"label": "Pretrained detector baseline", "color": CD_BASELINE_COLOR,
+                 "hatch": "."},
 }
 # A baseline whose family cannot be told (an older payload, a third detector).
 CD_BASELINE_FALLBACK = {

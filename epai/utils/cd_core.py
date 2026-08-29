@@ -123,6 +123,11 @@ DEFAULT_BINOX_COL = "binoculars_score"
 # LOW score means machine, the same direction as Binoculars.
 DEFAULT_JUDGE_COL = "llm_judge_score_gpt56luna_v2"
 
+# The two detector families added alongside them. Both read the OPPOSITE way to
+# the two above -- see the machine_is_high notes in BASELINE_KINDS.
+DEFAULT_FASTDETECT_COL = "fastdetect_crit_falcon_7b"
+DEFAULT_DETECTOR_COL = "detector_score_radar"
+
 
 # ---------------------------------------------------------------------------
 # Feature columns
@@ -235,6 +240,37 @@ BASELINE_KINDS: tuple[BaselineKind, ...] = (
         column_prefix="llm_judge_score",  # ..._<model>_<prompt>, one per judge
         machine_is_high=False,  # the judge reports P(human), so LOW means machine
         label="LLM judge",
+    ),
+    BaselineKind(
+        key="fastdetect",
+        cfg_key="fastdetect_baseline",
+        default_col=DEFAULT_FASTDETECT_COL,
+        # 'fastdetect_crit_qwen25_7b' -> the row 'fastdetect__qwen25_7b'. Note
+        # the stem stops at _crit: the prob and ntok columns of the same pair are
+        # not scores, and a config must never be able to point a baseline at one.
+        column_prefix="fastdetect_crit",
+        # THE FIRST FAMILY THAT READS THE OTHER WAY. The criterion is a
+        # standardised distance above the reference mean, so machine text scores
+        # HIGH -- while Binoculars, over the very same model pairs, scores LOW.
+        # This flag is the only thing separating the two, and getting it wrong
+        # raises nothing: it reports a working detector as below-chance.
+        machine_is_high=True,
+        label="Fast-DetectGPT",
+    ),
+    BaselineKind(
+        key="detector",
+        cfg_key="detector_baseline",
+        default_col=DEFAULT_DETECTOR_COL,
+        # 'detector_score_pangram_roberta' -> 'detector__pangram_roberta'. Stops
+        # at _score for the same reason: _ntok_ and _bucket_ are not scores.
+        column_prefix="detector_score",
+        # Both members read high for machine, but they are not the same
+        # quantity: RADAR emits P(AI), EditLens an expected edit-bucket in
+        # [0, 1]. They share a family because they share a direction and a
+        # provenance (pretrained supervised detectors that never saw this
+        # corpus), not because their numbers are interchangeable.
+        machine_is_high=True,
+        label="Pretrained detector",
     ),
 )
 

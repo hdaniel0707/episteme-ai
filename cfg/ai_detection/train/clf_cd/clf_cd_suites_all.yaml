@@ -474,6 +474,80 @@ llm_judge_baseline:
     - {column: "llm_judge_score_qwen3_14b_v3", label: "llm judge qwen3-14b"}
     - {column: "llm_judge_score_sonnet5_v3", label: "llm judge sonnet-5"}
 
+# THE TWO FAMILIES BELOW READ THE OPPOSITE WAY TO THE TWO ABOVE.
+# ---------------------------------------------------------------------------
+# Binoculars and the judge both score LOW for machine. Fast-DetectGPT and the
+# pretrained detectors score HIGH for machine. That is not a config setting —
+# the direction belongs to the detector and lives in
+# `cd_core.BASELINE_KINDS[...].machine_is_high`, so a `columns` entry here
+# cannot get it wrong and there is deliberately no knob for it. It is called out
+# because every threshold below reads `score >= thr ⇒ machine`, the reverse of
+# the two blocks above, and a number copied between blocks would be silently
+# backwards.
+#
+# ENABLED, AND ONLY VALID WHILE `ghostbuster_gpt56luna` IS THE ONLY SUITE.
+# ---------------------------------------------------------------------------
+# That corpus carries these columns; the three commented-out suites do not yet.
+# Enabling a family before every ACTIVE dataset carries its columns aborts the
+# preflight naming the ones that lack it — correct behaviour, not something to
+# work around. So if you uncomment another suite, score it first:
+#     uv run python epai/ai_detection/score/run_fastdetect_pairs.py <parquet> --gpu 0
+#     uv run python epai/ai_detection/score/add_detector_scores.py <parquet> --gpu 0
+# or set `enabled: false` on these two blocks until you have.
+
+# Fast-DetectGPT — the conditional probability curvature, over the SAME four
+# model pairs as the Binoculars rows above. That pairing is the point: same
+# corpus, same two models, same 512-token cap, one statistic swapped, so a
+# difference between a `binoculars__<pair>` row and its `fastdetect__<pair>`
+# twin is a fact about the statistic rather than about the models.
+#
+# Only the `_crit_` columns appear here, and only they ever should. The
+# `fastdetect_prob_*` columns are Null for every pair upstream did not calibrate
+# (three of the four below), and where they do exist the mapping is non-monotone
+# in the left tail — it returns P(machine)→1 for emphatically human text, on 28%
+# of rows in the smoke test. `fastdetect_ntok_*` is a token count, not a score.
+#
+# THRESHOLDS. `fastdetect_crit_falcon_7b` gets 1.43, the midpoint of the two
+# class means upstream fitted for that pair (mu0 = -0.0707 human, mu1 = 2.9306
+# machine). The other three are uncalibrated and carry a PLACEHOLDER 1.2 — the
+# midpoints of the four pairs upstream *did* calibrate cluster between 0.83 and
+# 1.43, so 1.2 is in the right region of the scale without pretending to be
+# fitted for these pairs. As with every other family, the declared cutoff no
+# longer drives accuracy or macro F1 (those come from Youden's J on the
+# calibration slice); it is the reference reading and what the ROC sweeps around.
+fastdetect_baseline:
+  enabled: true
+  columns:
+    - {column: "fastdetect_crit_falcon_7b",   threshold: 1.43, label: "fast-detectgpt falcon-7b"}
+    - {column: "fastdetect_crit_qwen25_7b",   threshold: 1.2,  label: "fast-detectgpt qwen2.5-7b"}
+    - {column: "fastdetect_crit_falcon3_7b",  threshold: 1.2,  label: "fast-detectgpt falcon3-7b"}
+    - {column: "fastdetect_crit_mistral_v03", threshold: 1.2,  label: "fast-detectgpt mistral-v0.3"}
+
+# Pretrained supervised detectors — the only baseline family here that is neither
+# zero-shot nor trained on this corpus. RADAR and Open Pangram were fitted by
+# other people on other data and have never seen these rows, which is what makes
+# them the external check on whether a deployed detector transfers here.
+#
+# Unlike the other three families these two are NOT the same detector read off
+# different machinery: RADAR emits P(AI) from a binary head, EditLens an expected
+# edit-bucket in [0, 1] from a 4-bucket ordinal head. They share a family because
+# they share a direction and a provenance, not because the numbers are
+# interchangeable — so read the two rows as two detectors, not as one detector
+# under two settings.
+#
+# 0.5 is a real neutral point for both, the same way it is for the judge, so the
+# family carries one threshold rather than one per column.
+#
+# `detector_score_pangram_roberta` is commented out: the Hub repo is gated and
+# access is pending, so no parquet carries the column yet. Uncomment once
+# `add_detector_scores.py --detectors pangram_roberta` has run on every dataset.
+detector_baseline:
+  enabled: true
+  threshold: 0.5
+  columns:
+    - {column: "detector_score_radar", label: "radar"}
+    # - {column: "detector_score_pangram_roberta", label: "open pangram"}
+
 # ---------------------------------------------------------------------------
 # Preflight guards
 # ---------------------------------------------------------------------------

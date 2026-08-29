@@ -68,6 +68,26 @@ and different corpora get one process each, pinned to their own card.
 Re-running is safe. A pair whose column is already complete makes
 score_parquets.py report "nothing to do" and exit 0, so an interrupted run is
 resumed by issuing the same command again.
+
+Examples:
+    Smoke test:
+        uv run python epai/ai_detection/score/run_fastdetect_pairs.py \
+            data/parquet/x_ghostbuster_gpt56luna.parquet \
+            --pairs gptneo-2.7b --cpu-threads 16 --gpu 0 --limit 50
+    
+    Runs:
+
+        uv run python epai/ai_detection/score/run_fastdetect_pairs.py \
+            data/parquet/ghostbuster_gpt56luna.parquet --gpu 0 --cpu-threads 16 
+
+    Combined with other detectors:
+
+        uv run python epai/ai_detection/score/run_fastdetect_pairs.py \
+            data/parquet/ghostbuster_gpt56luna.parquet --gpu 1 --cpu-threads 16 --yes && \
+        uv run python epai/ai_detection/score/add_detector_scores.py \
+            data/parquet/ghostbuster_gpt56luna.parquet --gpu 1 --yes
+
+
 """
 
 from __future__ import annotations

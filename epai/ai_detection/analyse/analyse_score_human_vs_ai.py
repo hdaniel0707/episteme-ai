@@ -116,6 +116,12 @@ Usage:
     uv run python epai/ai_detection/analyse/analyse_score_human_vs_ai.py \
         data/parquet/ghostbuster_gpt56luna.parquet:gpt56luna:0701A --domains wp \
         --metric llm_judge --score-cols llm_judge_score_gpt56luna_v3
+    
+    uv run python epai/ai_detection/analyse/analyse_score_human_vs_ai.py \
+      data/parquet/ghostbuster_gpt56luna.parquet:gpt56luna:0701A --metric fastdetect
+ 
+    uv run python epai/ai_detection/analyse/analyse_score_human_vs_ai.py \
+      data/parquet/ghostbuster_gpt56luna.parquet:gpt56luna:0701A --metric detector    
 """
 
 from __future__ import annotations
@@ -193,6 +199,36 @@ METRICS: dict[str, Metric] = {
         label="LLM-judge P(human)",
         ai_is_high=False,  # the judge reports P(human), so low ⇒ machine
         hist_range=(0.0, 1.0),  # a probability: bin the whole range, always
+    ),
+    "fastdetect": Metric(
+        key="fastdetect",
+        # NOT "fastdetect_": that would also sweep up fastdetect_prob_* and
+        # fastdetect_ntok_*. The probability column is a convenience that is Null
+        # for every uncalibrated pair and non-monotone in the left tail even where
+        # it exists, and the token counts are not scores at all. The criterion is
+        # the number, so the prefix names it exactly.
+        prefix="fastdetect_crit_",
+        label="Fast-DetectGPT criterion",
+        # The first metric here that runs the other way: the criterion is a
+        # standardised distance above the reference mean, so machine text scores
+        # HIGH. Binoculars, over the very same model pairs, scores low. Getting
+        # this wrong does not raise -- it reports a good detector as below-chance.
+        ai_is_high=True,
+        # Unbounded and pair-dependent (roughly -3..+6 in practice), so no fixed
+        # histogram range: let each pair's own spread set the bins.
+        hist_range=None,
+    ),
+    "detector": Metric(
+        key="detector",
+        # Again the narrow prefix, to exclude detector_ntok_* and
+        # detector_bucket_*.
+        prefix="detector_score_",
+        label="Pretrained detector score",
+        ai_is_high=True,  # both RADAR and EditLens read high for machine
+        # RADAR emits a probability; EditLens emits an expected bucket normalised
+        # to [0,1]. Different quantities, same range, and both are meant to be
+        # read against a 0.5 cut -- so bin the whole range for either.
+        hist_range=(0.0, 1.0),
     ),
 }
 DEFAULT_METRIC = "binox"

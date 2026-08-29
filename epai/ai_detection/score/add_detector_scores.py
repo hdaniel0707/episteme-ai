@@ -126,6 +126,7 @@ DETECTORS: dict[str, dict] = {
         "ntok_column": "detector_ntok_radar",
         "bucket_column": None,
         "requires": (),
+        "gated": False,
         "note": "RoBERTa-large despite the name -- the 'Vicuna-7B' is the "
                 "generator it was adversarially trained against, not the "
                 "detector. Non-commercial licence, inherited from Vicuna.",
@@ -144,7 +145,11 @@ DETECTORS: dict[str, dict] = {
         "ntok_column": "detector_ntok_pangram_roberta",
         "bucket_column": "detector_bucket_pangram_roberta",
         "requires": ("emoji",),
-        "note": "Open Pangram / EditLens (ICLR 2026). Ordinal bucket head; the "
+        # Open weights, but the Hub repo is behind an access request. Accepting
+        # the licence on the model page is a one-off; the token then needs to be
+        # visible to this process (HF_TOKEN in the repo .env, loaded above).
+        "gated": True,
+        "note": "Open Pangram / EditLens (ICLR 2026). GATED on the Hub. Ordinal bucket head; the "
                 "score is the expected bucket in [0,1]. CC BY-NC-SA 4.0.",
     },
     "pangram_llama3b": {
@@ -163,6 +168,7 @@ DETECTORS: dict[str, dict] = {
         # detector is registered and blocked rather than silently absent -- the
         # findings table names it and says what it needs.
         "requires": ("peft", "bitsandbytes", "emoji"),
+        "gated": True,
         "note": "Stronger of the two Open Pangram models and a 1024-token "
                 "context, but needs peft + bitsandbytes and a gated Llama base. "
                 "Not in the default set.",
@@ -359,6 +365,13 @@ def blocking_reason(name: str) -> str | None:
     Checked up front so a two-model run does not die on the second, and so the
     findings table can name a detector it is not going to run instead of quietly
     omitting it.
+
+    The reachability check is the reason this touches the network: a gated repo
+    (Open Pangram is one) raises only when the weights are first requested, which
+    is *after* any earlier detector has finished. That turns a missing licence
+    acceptance -- a thirty-second fix -- into a failure discovered at the end of
+    someone else's run. Fetching the config alone is a few hundred bytes and
+    settles access, existence and connectivity before a single row is scored.
     """
     spec = DETECTORS[name]
     for package in spec["requires"]:
@@ -369,6 +382,18 @@ def blocking_reason(name: str) -> str | None:
                 return ("needs emoji (or --no-emoji-normalization, which changes "
                         "the numbers)")
             return f"needs {package}"
+
+    try:
+        AutoConfig.from_pretrained(spec["checkpoint"])
+    except Exception as exc:
+        text = f"{exc}"
+        if "gated repo" in text or "restricted" in text or "401" in text or "403" in text:
+            return (f"gated repo — accept the licence at "
+                    f"https://huggingface.co/{spec['checkpoint']} and make sure "
+                    f"HF_TOKEN is set")
+        # Offline with a warm cache is fine; from_pretrained would have served
+        # this from disk. Anything else is reported as-is rather than guessed at.
+        return f"cannot load config: {type(exc).__name__}: {text.splitlines()[0][:90]}"
     return None
 
 
