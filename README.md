@@ -68,6 +68,8 @@ episteme-ai/
 │   │   │                          #   truncate_text.py
 │   │   ├── embed/add_embeddings.py#   Add multiple embedding columns to a Parquet
 │   │   ├── score/                 #   run_binox_pairs.py (Binoculars pairs),
+│   │   │                          #   run_fastdetect_pairs.py (Fast-DetectGPT pairs),
+│   │   │                          #   add_detector_scores.py (RADAR, Open Pangram),
 │   │   │                          #   add_llm_judge_scores.py (LLM-as-judge)
 │   │   ├── analyse/               #   PCA/geometry, surface artifacts, score EDA
 │   │   └── train/                 #   run_clf_cross_domain.py + replot_cross_domain.py,
@@ -97,6 +99,8 @@ episteme-ai/
 │
 ├── external/
 │   ├── Binoculars/                # Git submodule: the Binoculars fork, own uv env
+│   ├── fast-detect-gpt/           # Git submodule: the Fast-DetectGPT fork, own uv env
+│   ├── EditLens/                  # Git submodule: Open Pangram — REFERENCE ONLY, no env
 │   └── ghostbuster/               # Git submodule: the ghostbuster fork, own uv env
 │       └── data/                  #   gitignored; seeded by hand, written by generate.py
 │
@@ -132,8 +136,8 @@ This project uses [uv](https://github.com/astral-sh/uv) for dependency managemen
 
 ### Clean clone
 
-Two forks live here as git submodules — Binoculars (scoring) and ghostbuster (generation) — so
-clone with `--recurse-submodules`:
+Four forks live here as git submodules — Binoculars and fast-detect-gpt (scoring), EditLens
+(reference only), and ghostbuster (generation) — so clone with `--recurse-submodules`:
 
 ```bash
 git clone --recurse-submodules git@github.com:hdaniel0707/episteme-ai.git
@@ -142,6 +146,10 @@ cd episteme-ai
 # If you cloned without the flag, or a submodule is empty:
 git submodule update --init
 ```
+
+`git pull` does **not** update submodule contents, so run `git submodule update --init
+--recursive` after pulling on a machine that already has the repo — a stale or empty submodule is
+the usual reason a scoring command fails on the server but works on the laptop.
 
 The submodules are cloned over SSH, so the machine needs SSH access to them as well as to this one.
 Datasets under `store/` are Git LFS pointers after a fresh clone — see
@@ -155,15 +163,18 @@ On the compute server, do this **before** the `uv sync` commands in the next sec
 has to be in place when an environment is first resolved, or uv installs CPU torch and you have to
 tear the venv down and sync again.
 
-Append the block below to **both** pyproject files. Each environment installs its own torch, so
-each one needs its own index — doing only the first is the usual mistake:
+Append the block below to **all three** pyproject files. Each environment installs its own torch,
+so each one needs its own index — doing only the first is the usual mistake:
 
 1. `pyproject.toml` — this repo
 2. `external/Binoculars/pyproject.toml` — the submodule
+3. `external/fast-detect-gpt/pyproject.toml` — the submodule
 
 **Not** `external/ghostbuster/pyproject.toml`. That fork depends on torch but only its `--logprob*`
 and `--gen_perturb*` stages touch it, and pipeline 4 runs neither: generation is API calls. CPU
 torch there is correct and keeps the venv small.
+
+**Not** `external/EditLens/` either — it has no environment at all (see below).
 
 ```toml
 [[tool.uv.index]]
@@ -182,8 +193,9 @@ repo, or every laptop clone will start pulling CUDA wheels too.
 
 ### Environments
 
-There are **three** uv environments, deliberately kept apart: this repo pins `transformers>=4.57`,
-and both forks pin `transformers>=5.12`. They cannot share a venv.
+There are **four** uv environments, deliberately kept apart: this repo pins
+`transformers>=4.57`, and the three scoring/generation forks pin `transformers>=5.12`. They cannot
+share a venv.
 
 ```bash
 # 1. This repo -> .venv  (also installs epai editable, via [tool.uv] package = true)
@@ -192,28 +204,62 @@ uv sync
 # 2. The Binoculars fork -> external/Binoculars/.venv
 uv sync --project external/Binoculars
 
-# 3. The ghostbuster fork -> external/ghostbuster/.venv
+# 3. The Fast-DetectGPT fork -> external/fast-detect-gpt/.venv
+uv sync --project external/fast-detect-gpt
+
+# 4. The ghostbuster fork -> external/ghostbuster/.venv
 uv sync --project external/ghostbuster
 ```
 
-If step 3 fails while building the `ghostbuster` package itself — its `pyproject.toml` says
+**`external/EditLens` gets no environment and is never executed.** Its licence is CC BY-NC-SA
+(share-alike), so importing or extending its code would propagate that licence into this tree. The
+Open Pangram *weights* are loaded by `add_detector_scores.py` in this repo's venv, and the one
+thing that reads the fork —
+`epai/ai_detection/score/check_editlens_cleaning.py`, which verifies our reimplementation of its
+text preprocessing still matches — runs on a bare `python3` with no venv at all:
+
+```bash
+python3 epai/ai_detection/score/check_editlens_cleaning.py   # expect 16/16 identical
+```
+
+Run that after any `git pull` inside the fork. If it fails, `detector_score_pangram_*` is scoring
+text the model was not trained on, and the column is wrong with nothing in the output to say so.
+
+`external/fast-detect-gpt/pyproject.toml` is **ours**, not upstream's — that fork ships only a
+`requirements.txt` pinning `transformers==4.28.1`, which cannot load anything newer than early
+2023. The pin is stale rather than load-bearing: the entire method is twenty lines of pure torch
+over two `AutoModelForCausalLM` logit tensors. `requirements.txt` is left untouched as the record
+of what the paper ran.
+
+If step 4 fails while building the `ghostbuster` package itself — its `pyproject.toml` says
 `version = "0.1.0"` while its `setup.py` says `1.0`, which some setuptools versions reject — add
 `--no-install-project`. Nothing is lost: `generate.py` is always run with `cwd` inside the fork, so
 `import utils` resolves from there whether or not the project was installed.
 
-Confirm they really are separate — the three prefixes must differ:
+Confirm they really are separate — the four prefixes must differ:
 
 ```bash
-uv run                                python -c "import sys, transformers; print(sys.prefix, transformers.__version__)"
-uv run --project external/Binoculars  python -c "import sys, transformers; print(sys.prefix, transformers.__version__)"
-uv run --project external/ghostbuster python -c "import sys, transformers; print(sys.prefix, transformers.__version__)"
+uv run                                   python -c "import sys, transformers; print(sys.prefix, transformers.__version__)"
+uv run --project external/Binoculars     python -c "import sys, transformers; print(sys.prefix, transformers.__version__)"
+uv run --project external/fast-detect-gpt python -c "import sys, transformers; print(sys.prefix, transformers.__version__)"
+uv run --project external/ghostbuster    python -c "import sys, transformers; print(sys.prefix, transformers.__version__)"
 ```
 
-On the server, add `torch.cuda.is_available()` to that check for this repo and Binoculars — it must
-be `True` in both; `False` means the CUDA index above was missing when that venv was resolved. The
+Do not have any venv activated when running a `--project` command by hand. `VIRTUAL_ENV` from an
+activated shell either makes uv warn and ignore the flag or, worse, honour it and import the wrong
+transformers. The pipeline drivers strip `VIRTUAL_ENV` and `UV_PROJECT_ENVIRONMENT` before
+launching a fork subprocess, but nothing sits between your shell and a hand-typed command:
+
+```bash
+echo "VIRTUAL_ENV=$VIRTUAL_ENV  UV_PROJECT_ENVIRONMENT=$UV_PROJECT_ENVIRONMENT"   # both empty
+```
+
+On the server, add `torch.cuda.is_available()` to that check for this repo, Binoculars and
+fast-detect-gpt — it must be `True` in all three; `False` means the CUDA index above was missing when that venv was resolved. The
 ghostbuster env is expected to report `False`, and that is fine (see the CUDA section).
 
-Never add `binoculars` or `ghostbuster` to this project's `dependencies` / `[tool.uv.sources]`, and
+Never add `binoculars`, `fast-detect-gpt` or `ghostbuster` to this project's `dependencies` /
+`[tool.uv.sources]`, and
 never declare a `[tool.uv.workspace]` here. Any of those fuses the environments back together.
 
 The ghostbuster fork also needs its own `.env`, because it calls `load_dotenv()` against its own
@@ -232,17 +278,29 @@ otherwise.
 
 A submodule points at a specific commit of its fork and never moves on its own — that is what ties a
 set of scores, or a corpus, to the code that produced it. To pick up fork changes (note the branch:
-`main` for Binoculars, `master` for ghostbuster):
+`main` for Binoculars, fast-detect-gpt and EditLens, `master` for ghostbuster):
 
 ```bash
 git -C external/Binoculars pull origin main
 git add external/Binoculars
 git commit -m "Bump Binoculars to $(git -C external/Binoculars rev-parse --short HEAD)"
 
+git -C external/fast-detect-gpt pull origin main
+git add external/fast-detect-gpt
+git commit -m "Bump fast-detect-gpt to $(git -C external/fast-detect-gpt rev-parse --short HEAD)"
+
+git -C external/EditLens pull origin main
+git add external/EditLens
+git commit -m "Bump EditLens to $(git -C external/EditLens rev-parse --short HEAD)"
+
 git -C external/ghostbuster pull origin master
 git add external/ghostbuster
 git commit -m "Bump ghostbuster to $(git -C external/ghostbuster rev-parse --short HEAD)"
 ```
+
+After a fast-detect-gpt bump, `run_fastdetect_pairs.py` re-checks on every run that its vendored
+copy of the criterion still matches upstream's, and prints a warning if not. After an EditLens
+bump, run `check_editlens_cleaning.py` — nothing checks that one automatically.
 
 Both halves matter: the pull moves the working copy, the commit records the new SHA so a fresh
 clone gets the same code. Re-run `uv sync --project external/<fork>` only when the pull changed
@@ -634,6 +692,89 @@ gaps in an already-scored file. Two details worth knowing:
   installed into the env.
 - The script calls `load_dotenv()`, which walks up from the repo root and picks up **this** repo's
   `.env` — so `HF_TOKEN` is read from there. The submodule needs no `.env` of its own.
+
+**Fast-DetectGPT scores** come from `external/fast-detect-gpt`, also in its own environment. It is
+a *different statistic over the same models*, not another Binoculars pair: Binoculars is a ratio of
+two perplexities, Fast-DetectGPT is the conditional probability curvature — the scoring model's
+log-likelihood of the text, standardised against the mean and variance it would expect under the
+sampling model's own distribution.
+
+```bash
+# four pairs, one after another, in place -> fastdetect_crit_*, _prob_*, _ntok_*
+uv run python epai/ai_detection/score/run_fastdetect_pairs.py \
+    data/parquet/ghostbuster_gpt56luna.parquet --gpu 0 --cpu-threads 16
+
+# smoke test first: one model doing both jobs, ~5GiB, minutes, on a throwaway copy
+uv run --project external/fast-detect-gpt \
+    python external/fast-detect-gpt/score_parquets.py /tmp/smoke.parquet \
+    --pair gptneo-2.7b --limit 50 --gpu 0 --yes
+```
+
+The default pair set — `falcon-7b`, `qwen25-7b`, `falcon3-7b`, `mistral-v03` — mirrors the
+Binoculars registry exactly, so every `binoculars_score*` column gets a same-models twin and
+nothing new is downloaded. `--pairs falcon-7b llama3-8b` adds the pair the authors now recommend;
+note it is Llama-**3**, not 3.1, so the weights cached for `binoculars_score_llama31_8b` do not
+satisfy it and it is a fresh gated ~32GB pull.
+
+Three things about these columns that will bite if forgotten:
+
+- **The sign is inverted relative to Binoculars.** `fastdetect_crit_*` reads **high** for machine
+  text; `binoculars_score` reads **low**. Any config or plot consuming both needs the direction
+  per column.
+- **`fastdetect_prob_*` is Null for most pairs, on purpose.** Upstream published its Normal-fit
+  constants for four pairs only, and borrowing another pair's would produce a number that looks
+  like a probability, sorts correctly, and is wrong. Of the defaults, only `falcon-7b` has them.
+- **Even where it exists, the probability is non-monotone in the left tail.** Upstream sets
+  `sigma1 = 2*sigma0`, so below a turning point about one sd under the human mean (crit ≈ −1.07 for
+  falcon-7b) emphatically-human text is assigned P(machine) → 1. The run counts those rows as
+  `prob_nonmonotone` in its summary JSON. **Use the criterion, not the probability.**
+
+**Pretrained detector scores** — RADAR and Open Pangram — run in *this* repo's venv, since both are
+plain transformers sequence classifiers. They are the only supervised baseline here that never saw
+this corpus: everything else supervised is our classifier on our embeddings, fitted on these rows.
+
+```bash
+# -> detector_score_radar, detector_score_pangram_roberta (+ _bucket_*, _ntok_*)
+uv run python epai/ai_detection/score/add_detector_scores.py \
+    data/parquet/ghostbuster_gpt56luna.parquet --gpu 0
+
+# RADAR only — no `emoji` dependency needed
+uv run python epai/ai_detection/score/add_detector_scores.py \
+    data/parquet/ghostbuster_gpt56luna.parquet --detectors radar --gpu 0
+```
+
+| Key | Model | Head |
+|---|---|---|
+| `radar` | RADAR-Vicuna-7B (RoBERTa-large, 512 tok) | binary P(AI), **logit index 0** |
+| `pangram_roberta` | Open Pangram / EditLens (RoBERTa-large, 512 tok) | 4-bucket ordinal → expected bucket ÷ 3 |
+| `pangram_llama3b` | Open Pangram Llama-3.2-3B (1024 tok) | blocked: QLoRA adapter, needs peft + bitsandbytes |
+
+Both score **high for more AI**, matching `fastdetect_crit_*` and opposite to `binoculars_score`.
+RADAR's AI index is not discoverable from the artifact — its `config.json` carries no `id2label`,
+so transformers labels the heads `LABEL_0`/`LABEL_1` and only IBM's own inference snippet says
+which is which. It is hardcoded, with that reasoning, in the registry.
+
+`pangram_roberta` needs the `emoji` package (`uv add emoji`), because EditLens's `clean_text` calls
+it and the checkpoint was trained on text put through that function. Without it the detector blocks
+itself rather than silently scoring differently.
+
+Two properties of EditLens's preprocessing are worth knowing before reading its column:
+
+- **It lowercases the text and collapses all whitespace.** That makes it structurally blind to the
+  surface artifact driving in-domain accuracy here (the curly-quote / punctuation / layout signal
+  whose sign flips between domains). This is a *feature* of the baseline — it cannot be winning on
+  the artifact — but it means the column is not measuring the same thing as an embedding classifier.
+- **It can delete the first line.** `remove_ai_header` drops the opening line when it starts with
+  "Sure", "Here", "Abstract", "Title", "Certainly" or "I'm happy to help", by raw prefix match — so
+  `"Herewith I submit..."` and `"Titles are hard."` also trigger it. On the science corpus
+  "Abstract" opens the *human* documents, making it a class-correlated edit to the input. Every run
+  counts the affected rows as `header_stripped` and prints it; **cross-tab that against
+  `generated_by` before trusting the column on a science corpus.**
+
+Both scripts write the Parquet after each pair/detector finishes, save a summary JSON next to it,
+and exit non-zero if anything was skipped. Read `rows_truncated_at_cap` in those summaries before
+using any of these columns: at a 512-token cap, a long science paper is scored on its first page,
+and `detector_ntok_*` / `fastdetect_ntok_*` record exactly how much each row actually saw.
 
 **Script:** `epai/ai_detection/embed/add_embeddings.py`
 **Output:** overwrites / extends the input Parquet with new `emb_*` columns
