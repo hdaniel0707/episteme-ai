@@ -188,8 +188,36 @@ torchvision = { index = "pytorch-cu128" }
 torchaudio = { index = "pytorch-cu128" }
 ```
 
-Both files are tracked by git, so keep this edit local to the server — don't commit it to either
-repo, or every laptop clone will start pulling CUDA wheels too.
+`torchvision` and `torchaudio` are in the block for the repo's own environment; the two forks
+depend on neither, and listing a source for a package that is not in the dependency tree is a
+harmless no-op, so the same block can be pasted into all three unchanged.
+
+All three files are tracked by git, so keep this edit local to the server — don't commit it to any
+of the three repos, or every laptop clone will start pulling CUDA wheels too.
+
+#### If you already synced without the index
+
+This is the common mistake, and it does not announce itself: the environment builds fine and the
+scoring scripts run, they just run on the CPU. The tell is in the findings table every scorer
+prints before it starts work —
+
+```
+device : CPU (no CUDA available) — this will be extremely slow
+```
+
+— and in the throughput, which lands around 30 s/doc instead of tens of docs/s. Swapping the index
+is a re-resolution rather than an upgrade, so the installed CPU wheel has to go first:
+
+```bash
+# add the block above to external/<fork>/pyproject.toml, then:
+rm -rf external/<fork>/.venv
+uv sync --project external/<fork>
+
+# confirm before spending GPU-hours — this must print True
+uv run --project external/<fork> python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+```
+
+Check it for **every** environment that scores, not just the one you noticed.
 
 ### Environments
 
