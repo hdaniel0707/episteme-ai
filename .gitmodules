@@ -4,3 +4,9 @@
 [submodule "external/ghostbuster"]
 	path = external/ghostbuster
 	url = git@github.com:hdaniel0707/ghostbuster.git
+[submodule "external/fast-detect-gpt"]
+	path = external/fast-detect-gpt
+	url = git@github.com:hdaniel0707/fast-detect-gpt.git
+[submodule "external/EditLens"]
+	path = external/EditLens
+	url = git@github.com:hdaniel0707/EditLens.git
