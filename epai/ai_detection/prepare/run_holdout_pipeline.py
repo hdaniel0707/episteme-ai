@@ -77,6 +77,14 @@ Then turn the block on and check before training anything:
     #   data.eval_only.enabled: true
     uv run python epai/ai_detection/train/run_clf_in_domain.py \
         --cfg cfg/ai_detection/train/clf_id/clf_id_domains_all.yaml --dry-run
+
+Example
+    Dry run:
+        uv run python epai/ai_detection/prepare/run_holdout_pipeline.py --dry-run --cpu-threads 16 --gpu 0
+
+    Run:
+        uv run python epai/ai_detection/prepare/run_holdout_pipeline.py --yes --cpu-threads 16 --gpu 0 
+
 """
 
 from __future__ import annotations
@@ -194,6 +202,11 @@ def build_stages(args: argparse.Namespace) -> list[Stage]:
     out = str(args.out)
     gpu = ["--gpu", str(args.gpu)] if args.gpu is not None else []
     yes = ["--yes"] if args.yes else []
+    # Passed only to the six stages that take it. The three that do not --
+    # restructure, standardize and cue-features -- run no model at all: they are
+    # pandas over 82 rows, so there is no thread pool to cap and the flag would
+    # be an unrecognised argument rather than a no-op.
+    cpu = ["--cpu-threads", str(args.cpu_threads)] if args.cpu_threads else []
 
     judge_cols = [
         f"llm_judge_score_{judge_stem(j)}_{PROMPT_VERSION}" for j in args.judges
@@ -227,7 +240,7 @@ def build_stages(args: argparse.Namespace) -> list[Stage]:
         Stage(
             "embed",
             f"{EMBED_DIR}/add_embeddings.py",
-            [out, "--embedders", *args.embedders, *gpu, *yes],
+            [out, "--embedders", *args.embedders, *gpu, *cpu, *yes],
             produces=[f"emb_{e}" for e in args.embedders],
         ),
 
@@ -235,7 +248,7 @@ def build_stages(args: argparse.Namespace) -> list[Stage]:
         Stage(
             "binox",
             f"{SCORE_DIR}/run_binox_pairs.py",
-            [out, "--pairs", *args.binox_pairs, *gpu, *yes],
+            [out, "--pairs", *args.binox_pairs, *gpu, *cpu, *yes],
             produces=[_binox_column(p) for p in args.binox_pairs],
         ),
 
@@ -246,7 +259,7 @@ def build_stages(args: argparse.Namespace) -> list[Stage]:
         Stage(
             "fastdetect",
             f"{SCORE_DIR}/run_fastdetect_pairs.py",
-            [out, "--pairs", *args.fastdetect_pairs, *gpu, *yes],
+            [out, "--pairs", *args.fastdetect_pairs, *gpu, *cpu, *yes],
             produces=[
                 f"fastdetect_crit_{p.replace('-', '_')}" for p in args.fastdetect_pairs
             ],
@@ -257,7 +270,7 @@ def build_stages(args: argparse.Namespace) -> list[Stage]:
         Stage(
             "detectors",
             f"{SCORE_DIR}/add_detector_scores.py",
-            [out, "--detectors", *args.detectors, *gpu, *yes],
+            [out, "--detectors", *args.detectors, *gpu, *cpu, *yes],
             produces=[f"detector_score_{d}" for d in args.detectors],
         ),
     ]
@@ -271,7 +284,7 @@ def build_stages(args: argparse.Namespace) -> list[Stage]:
             Stage(
                 f"judge-{judge}",
                 f"{SCORE_DIR}/add_llm_judge_scores.py",
-                [out, "--model", judge, "--prompt", PROMPT_VERSION, *yes],
+                [out, "--model", judge, "--prompt", PROMPT_VERSION, *cpu, *yes],
                 produces=[column],
             )
         )
@@ -295,7 +308,7 @@ def build_stages(args: argparse.Namespace) -> list[Stage]:
             "judge-reasons",
             f"{SCORE_DIR}/add_llm_judge_reasons.py",
             [out, "--model", args.cue_judge, "--prompt", PROMPT_VERSION,
-             "--select", "all", "--per-band", str(args.per_band), *yes],
+             "--select", "all", "--per-band", str(args.per_band), *cpu, *yes],
             # The RATIONALE column, not the cue lists. Coverage is decided by
             # whether the judge answered at all: an explained row whose two cue
             # lists are empty is a real observation (the judge found nothing)
@@ -422,6 +435,14 @@ def parse_args() -> argparse.Namespace:
                         "then filled in place by every stage after it.")
     p.add_argument("--gpu", default=None, metavar="ID",
                    help="GPU to pass to the embedding and scoring stages.")
+    p.add_argument("--cpu-threads", type=int, default=None, metavar="N",
+                   help="Cap the CPU pools (OMP/MKL and torch's intra-op pool) "
+                        "of every stage that runs a model. Same flag, same "
+                        "meaning as on those scripts run by hand; the three "
+                        "stages that run no model do not take it and are not "
+                        "given it. Worth setting on a shared box, where an "
+                        "uncapped tokenizer pool will take every core it can "
+                        "see.")
     p.add_argument("--embedders", nargs="+", default=list(DEFAULT_EMBEDDERS),
                    metavar="NAME",
                    help="Embedders to compute. Only the ones a feature set "
@@ -483,6 +504,7 @@ def main() -> None:
     print(f"  input        {rel(args.src)}")
     print(f"  output       {rel(args.out)}")
     print(f"  gpu          {args.gpu if args.gpu is not None else 'not set'}")
+    print(f"  cpu threads  {args.cpu_threads if args.cpu_threads else 'not capped'}")
     print(f"  stages       {' → '.join(s.key for s in stages)}")
     columns = [c for s in stages for c in s.produces]
     print(f"  columns      {len(columns)} — {', '.join(columns)}")
@@ -566,6 +588,7 @@ def main() -> None:
             f"uv run python epai/ai_detection/prepare/run_holdout_pipeline.py "
             f"--from {failed.key}"
             + (f" --gpu {args.gpu}" if args.gpu is not None else "")
+            + (f" --cpu-threads {args.cpu_threads}" if args.cpu_threads else "")
         )
         notify.failed(failed.key, results[-1][1], results[-1][2], resume=resume)
         print(
