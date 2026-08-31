@@ -210,7 +210,7 @@ data:
   #
   # Ignored by run_sweep_cross_domain.py, which fits throwaway candidates.
   eval_only:
-    enabled: false
+    enabled: true
     datasets:
       - name: "denario"
         label: "Denario (AI-written papers)"

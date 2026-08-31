@@ -86,6 +86,12 @@ Examples:
             data/parquet/ghostbuster_gpt56luna.parquet --gpu 1 --cpu-threads 16 --yes && \
         uv run python epai/ai_detection/score/add_detector_scores.py \
             data/parquet/ghostbuster_gpt56luna.parquet --gpu 1 --yes
+        
+        
+        uv run python epai/ai_detection/score/run_fastdetect_pairs.py \
+            data/parquet/science_v3_gpt56luna_0811A.parquet --gpu 3 --cpu-threads 16 --yes && \
+        uv run python epai/ai_detection/score/add_detector_scores.py \
+            data/parquet/science_v3_gpt56luna_0811A.parquet --gpu 3 --yes
 
 
 """

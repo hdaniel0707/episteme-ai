@@ -288,7 +288,9 @@ Run:
     
     with in domain:
     uv run python epai/ai_detection/train/run_clf_in_domain.py \
-        --cfg cfg/ai_detection/train/clf_id/clf_id_domains_all.yaml && \
+        --cfg cfg/ai_detection/train/clf_id/clf_id_ghostbuster_gpt56luna.yaml && \
+    uv run python epai/ai_detection/train/run_clf_in_domain.py \
+            --cfg cfg/ai_detection/train/clf_id/clf_id_science_v3.yaml && \
     uv run python epai/ai_detection/train/run_clf_cross_domain.py \
         --cfg cfg/ai_detection/train/clf_cd/clf_cd_suites_all.yaml \
                 cfg/ai_detection/train/clf_lodo/clf_lodo_suites_all.yaml                                                                   
