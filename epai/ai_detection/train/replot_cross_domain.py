@@ -57,6 +57,7 @@ import matplotlib
 matplotlib.use("Agg")  # headless: write files, never open a window
 
 from epai.utils.cd_core import attach_by_seed  # noqa: E402
+from epai.utils.holdout_viz import plot_holdout_comparison  # noqa: E402
 from epai.utils.suite_utils import mean_by_seed_across  # noqa: E402
 from epai.utils.visualization_utils import (  # noqa: E402  (after backend set)
     plot_clf_cd_alg_comparison,
@@ -67,6 +68,11 @@ from epai.utils.visualization_utils import (  # noqa: E402  (after backend set)
 )
 
 CROSS_DOMAIN = "cross_domain.json"
+#: The eval-only tables, one per holdout corpus. Kept out of COMPARISONS
+#: because those entries are backfilled from per-seed aggregates that a
+#: holdout does not have -- its error bar is binomial on n, not a seed
+#: spread. See epai/utils/holdout_core.py.
+HOLDOUT_GLOB = "holdout_*.json"
 
 #: Row keys that name a variant's own sub-directory, in the order to try them.
 #: ``variant`` is the id the runner names the directory after; ``label`` is the
@@ -220,7 +226,7 @@ def replot_folder(root: Path) -> dict[str, int]:
     files directly inside ``root`` as well as in any subdirectory, so pointing at
     a single result directory works just as well as pointing at the whole tree.
     """
-    counts = {"matrices": 0, "comparisons": 0, "errors": 0}
+    counts = {"matrices": 0, "comparisons": 0, "holdouts": 0, "errors": 0}
 
     # Per-matrix figures: one cross_domain.json per variant / baseline directory.
     # plot_clf_cd_result reads the file from the directory.
@@ -247,6 +253,15 @@ def replot_folder(root: Path) -> dict[str, int]:
                 print(f"  [ERROR] {path}: {type(exc).__name__}: {exc}")
                 counts["errors"] += 1
 
+    for path in sorted(root.rglob(HOLDOUT_GLOB)):
+        print(f"[holdout] {path.parent} — {path.name}")
+        try:
+            plot_holdout_comparison(path.parent, _load(path))
+            counts["holdouts"] += 1
+        except Exception as exc:
+            print(f"  [ERROR] {path}: {type(exc).__name__}: {exc}")
+            counts["errors"] += 1
+
     return counts
 
 
@@ -270,7 +285,7 @@ def main() -> None:
     print(f"Replotting from: {root}\n")
     counts = replot_folder(root)
 
-    total = counts["matrices"] + counts["comparisons"]
+    total = counts["matrices"] + counts["comparisons"] + counts["holdouts"]
     if total == 0 and counts["errors"] == 0:
         print(
             f"\nNo cross-domain JSON found under {root}. Point this at a "
@@ -279,8 +294,9 @@ def main() -> None:
         return
 
     print(
-        f"\nDone. Replotted {counts['matrices']} matrix set(s) and "
-        f"{counts['comparisons']} comparison(s)."
+        f"\nDone. Replotted {counts['matrices']} matrix set(s), "
+        f"{counts['comparisons']} comparison(s) and "
+        f"{counts['holdouts']} eval-only figure set(s)."
     )
     if counts["errors"]:
         print(f"{counts['errors']} file(s) failed — see the [ERROR] lines above.")

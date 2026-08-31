@@ -292,6 +292,143 @@ def dataset_specs(cfg: dict, base_dir: Path = BASE_DIR) -> list[CorpusSpec]:
 
 
 # ---------------------------------------------------------------------------
+# Eval-only corpora
+# ---------------------------------------------------------------------------
+
+#: Config key holding the corpora that are only ever EVALUATED on, never
+#: trained on and never put on a matrix axis. See :func:`eval_only_specs`.
+EVAL_ONLY_KEY = "eval_only"
+
+
+def eval_only_block(cfg: dict) -> dict | None:
+    """``data.eval_only``, when it is present and switched on.
+
+    Opt-in exactly like a baseline family: absent, ``enabled: false`` or
+    malformed all read as "no holdout corpora", so a config that has never
+    heard of one behaves as it always did and a config that carries one turns
+    it off by editing a single boolean rather than deleting the block and its
+    documentation with it.
+    """
+    block = (cfg.get("data") or {}).get(EVAL_ONLY_KEY)
+    if not isinstance(block, dict) or not block.get("enabled", True):
+        return None
+    return block
+
+
+def eval_only_specs(cfg: dict, base_dir: Path = BASE_DIR) -> list[CorpusSpec]:
+    """The corpora a config evaluates on but never trains on, in config order.
+
+    These are NOT ``datasets``. Nothing is fitted on them, they never appear on
+    a matrix axis, they take no share of a train/test split and they change no
+    number in the main results -- every threshold applied to them was fitted
+    somewhere else, on the training corpora, and carried over unchanged. What
+    they add is one more evaluation of models that are already trained.
+
+    That is what makes a corpus with only ONE class expressible at all. A
+    ``datasets`` entry holding only machine rows is an error (``check_dataset``
+    says so, and it is right: nothing can be trained or split on it). A corpus
+    that is only ever *read* has no such requirement -- the Denario papers are
+    LLM-written end to end, and "what share of them does a detector calibrated
+    on essays catch" is a well-posed question with no human row in sight.
+
+    The entries take the same shape and the same ``data``-level defaults as
+    ``datasets`` (``parquet_path`` / ``where`` / ``drop_classes``), except that
+    ``parquet_path`` is normally given per entry: a holdout corpus is almost
+    always a different file from the one being trained on.
+    """
+    block = eval_only_block(cfg)
+    if block is None:
+        return []
+    data = cfg["data"]
+    default_path = data.get("parquet_path")
+    default_drop = data.get("drop_classes")
+    # Deliberately NOT inheriting `data.where`: that condition selects rows of
+    # the TRAINING file (a domain of the combined parquet, say), and a column it
+    # names may not exist in the holdout file at all -- where it does exist it
+    # would silently narrow the holdout to a slice nobody asked for.
+    return [
+        CorpusSpec.from_dict(spec, base_dir, default_path, default_drop, None)
+        for spec in (block.get("datasets") or [])
+    ]
+
+
+def check_eval_only_corpora(cfg: dict, report, training_names: list[str]) -> None:
+    """Validate ``data.eval_only``: its shape, and that it collides with nothing.
+
+    ``training_names`` is what the run's own corpora are called. A holdout that
+    reuses one of those names would write into that corpus's output directory
+    and land in its figures, which is the one failure mode that would change a
+    result this block exists never to touch.
+    """
+    data = cfg.get("data")
+    if not isinstance(data, dict):
+        return
+    block = data.get(EVAL_ONLY_KEY)
+    if block is None:
+        return
+    if not isinstance(block, dict):
+        report.error(
+            f"data '{EVAL_ONLY_KEY}' must be a mapping with 'datasets' (and an "
+            f"optional 'enabled'), got {type(block).__name__}"
+        )
+        return
+    if "enabled" in block and not isinstance(block["enabled"], bool):
+        report.error(f"data '{EVAL_ONLY_KEY}.enabled' must be a boolean")
+    if not block.get("enabled", True):
+        return
+
+    specs = block.get("datasets")
+    if not isinstance(specs, (list, tuple)) or not specs:
+        report.error(
+            f"data '{EVAL_ONLY_KEY}' is enabled but names no 'datasets' — either "
+            f"list the corpora to evaluate on, or set enabled: false"
+        )
+        return
+
+    default_path = data.get("parquet_path")
+    names: list[str] = []
+    for i, spec in enumerate(specs):
+        where = f"{EVAL_ONLY_KEY}.datasets[{i}]"
+        if not isinstance(spec, dict):
+            report.error(f"{where} must be a mapping")
+            continue
+        if "name" not in spec:
+            report.error(f"{where} is missing 'name'")
+        if not spec.get("parquet_path") and not default_path:
+            report.error(
+                f"{where} has no 'parquet_path' and 'data.parquet_path' is not "
+                f"set — one of the two must name a file"
+            )
+        domain = spec.get("domain")
+        if domain is not None and (not isinstance(domain, str) or not domain.strip()):
+            report.error(f"{where} '{DOMAIN_COL}' must be a non-empty string when given")
+        check_where(spec.get("where"), where, report)
+        if domain is not None and isinstance(spec.get("where"), dict) and (
+            DOMAIN_COL in spec["where"]
+        ):
+            report.error(
+                f"{where} sets both '{DOMAIN_COL}: {domain}' and "
+                f"'where.{DOMAIN_COL}: {spec['where'][DOMAIN_COL]}' — 'domain' is "
+                f"shorthand for the same condition, so keep only one"
+            )
+        drop = spec.get("drop_classes") or []
+        if not isinstance(drop, (list, tuple)):
+            report.error(f"{where} 'drop_classes' must be a list")
+        names.append(spec.get("name"))
+
+    dupes = sorted({n for n in names if names.count(n) > 1})
+    if dupes:
+        report.error(f"{EVAL_ONLY_KEY} dataset names must be unique, repeated: {dupes}")
+    clash = sorted(set(names) & set(training_names))
+    if clash:
+        report.error(
+            f"{EVAL_ONLY_KEY} names a corpus the run already trains on: {clash}. "
+            f"A holdout is never trained on and never enters the main figures, so "
+            f"it has to be told apart from the corpora that are — rename it."
+        )
+
+
+# ---------------------------------------------------------------------------
 # Reading
 # ---------------------------------------------------------------------------
 

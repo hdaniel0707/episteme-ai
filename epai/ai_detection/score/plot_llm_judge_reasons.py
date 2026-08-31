@@ -119,6 +119,10 @@ Usage:
     uv run python epai/ai_detection/score/plot_llm_judge_reasons.py \
         data/parquet/ghostbuster_gpt56luna.parquet \
         --domains wp --judge gpt56luna_v3
+    
+    uv run python epai/ai_detection/score/plot_llm_judge_reasons.py \
+        data/parquet/ghostbuster_gpt56luna.parquet \
+        data/parquet/science_v3_gpt56luna_0811A.parquet
 """
 
 from __future__ import annotations

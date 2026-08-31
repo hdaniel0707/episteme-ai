@@ -93,7 +93,14 @@ SHARED_DATA_KEYS: tuple[str, ...] = ("human_label", "group_col")
 
 #: ``data`` keys a suite may set for itself, falling back to the ``data`` level.
 #: The same defaulting the datasets already have, one level out.
-SUITE_DATA_KEYS: tuple[str, ...] = ("parquet_path", "where", "drop_classes")
+#:
+#: ``eval_only`` is here rather than in SHARED_DATA_KEYS because a holdout has
+#: to carry every column the suite it is evaluated beside reads: two suites
+#: scored by different judges cannot always share one. Declared once under
+#: ``data`` it applies to every suite, which is the usual case.
+SUITE_DATA_KEYS: tuple[str, ...] = (
+    "parquet_path", "where", "drop_classes", "eval_only",
+)
 
 #: Keys of a suite entry that are the suite's identity rather than its data.
 SUITE_META_KEYS: tuple[str, ...] = ("name", "label", "datasets")

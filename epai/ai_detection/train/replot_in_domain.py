@@ -50,6 +50,7 @@ import matplotlib
 
 matplotlib.use("Agg")  # headless: write files, never open a window
 
+from epai.utils.holdout_viz import plot_holdout_comparison  # noqa: E402
 from epai.utils.suite_utils import corpus_comparison_rows  # noqa: E402
 from epai.utils.visualization_utils import (  # noqa: E402  (after backend set)
     plot_clf_id_comparison,
@@ -60,6 +61,10 @@ from epai.utils.visualization_utils import (  # noqa: E402  (after backend set)
 RESULT = "in_domain.json"
 COMPARISON = "in_domain_comparison.json"
 CORPUS_COMPARISON = "corpus_comparison.json"
+#: The eval-only tables, one per holdout corpus. Redrawn, never rebuilt:
+#: unlike the cross-corpus stack there is nothing beside them to recompute
+#: from -- the rows were merged across corpora when the run wrote the file.
+HOLDOUT_GLOB = "holdout_*.json"
 
 
 def _load(path: Path) -> dict:
@@ -99,7 +104,8 @@ def replot_folder(root: Path) -> dict[str, int]:
     files directly inside ``root`` as well as in any subdirectory, so pointing at
     a single result directory works just as well as pointing at the whole tree.
     """
-    counts = {"results": 0, "comparisons": 0, "corpora": 0, "errors": 0}
+    counts = {"results": 0, "comparisons": 0, "corpora": 0, "holdouts": 0,
+              "errors": 0}
 
     for path in sorted(root.rglob(RESULT)):
         print(f"[result] {path.parent}")
@@ -131,6 +137,15 @@ def replot_folder(root: Path) -> dict[str, int]:
             print(f"  [ERROR] {path}: {type(exc).__name__}: {exc}")
             counts["errors"] += 1
 
+    for path in sorted(root.rglob(HOLDOUT_GLOB)):
+        print(f"[holdout] {path.parent} — {path.name}")
+        try:
+            plot_holdout_comparison(path.parent, _load(path))
+            counts["holdouts"] += 1
+        except Exception as exc:
+            print(f"  [ERROR] {path}: {type(exc).__name__}: {exc}")
+            counts["errors"] += 1
+
     return counts
 
 
@@ -155,7 +170,8 @@ def main() -> None:
     counts = replot_folder(root)
 
     if (
-        counts["results"] + counts["comparisons"] + counts["corpora"] == 0
+        counts["results"] + counts["comparisons"] + counts["corpora"]
+        + counts["holdouts"] == 0
         and counts["errors"] == 0
     ):
         print(
@@ -166,8 +182,9 @@ def main() -> None:
 
     print(
         f"\nDone. Replotted {counts['results']} result(s), "
-        f"{counts['comparisons']} comparison(s) and "
-        f"{counts['corpora']} across-corpora figure(s)."
+        f"{counts['comparisons']} comparison(s), "
+        f"{counts['corpora']} across-corpora figure(s) and "
+        f"{counts['holdouts']} eval-only figure set(s)."
     )
     if counts["errors"]:
         print(f"{counts['errors']} file(s) failed — see the [ERROR] lines above.")

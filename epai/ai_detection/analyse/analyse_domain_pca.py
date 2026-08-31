@@ -106,6 +106,10 @@ Usage:
     uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
       data/parquet/ghostbuster_gpt56luna.parquet \
       --feature llm_judge_cuevec_gpt56luna_v3 --jitter
+    
+    uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
+      data/parquet/science_v3_gpt56luna_0811A.parquet \
+      --feature llm_judge_cuevec_gpt56luna_v3 --jitter
 
 
 """

@@ -90,6 +90,9 @@ Usage:
     # the fully-explained corpus, written in place
     uv run python epai/ai_detection/score/add_cue_features.py \
         data/parquet/ghostbuster_gpt56luna.parquet
+    
+    uv run python epai/ai_detection/score/add_cue_features.py \
+        data/parquet/science_v3_gpt56luna_0811A.parquet
 
     # look first: coverage, per-cue rates and the drop it would cause
     uv run python epai/ai_detection/score/add_cue_features.py \

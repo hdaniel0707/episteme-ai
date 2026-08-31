@@ -152,13 +152,100 @@ data:
     #     - {name: "reuter_gpt54mini", label: "reuter", where: {domain: "reuter"}}
     #     - {name: "wp_gpt54mini",     label: "wp",     where: {domain: "wp"}}
     #
-    # - name: "science_v3"
-    #   label: "science_v3 (gpt-5.6-luna)"
-    #   parquet_path: "data/parquet/science_v3_gpt56luna_0811A.parquet"
-    #   datasets:
-    #     - {name: "computer_science", label: "comp. sci.", where: {domain: "computer_science"}}
-    #     - {name: "mathematics",      label: "maths",      where: {domain: "mathematics"}}
-    #     - {name: "sociology",        label: "sociology",  where: {domain: "sociology"}}
+    - name: "science_v3"
+      label: "science_v3 (gpt-5.6-luna)"
+      parquet_path: "data/parquet/science_v3_gpt56luna_0811A.parquet"
+      datasets:
+        - {name: "computer_science", label: "comp. sci.", where: {domain: "computer_science"}}
+        - {name: "mathematics",      label: "maths",      where: {domain: "mathematics"}}
+        - {name: "sociology",        label: "sociology",  where: {domain: "sociology"}}
+
+  # -------------------------------------------------------------------------
+  # Eval-only corpora — the extra evaluation, never part of the results above
+  # -------------------------------------------------------------------------
+  #
+  # Corpora that are EVALUATED on but never trained on. Nothing here takes a row
+  # from a split, contributes a cell to a matrix, a row to a ranking or a bar to
+  # any figure produced above. Every threshold applied here was fitted on the
+  # training corpora and carried over unchanged. Turn the block off and this
+  # config produces byte-identical output to the one that predates it.
+  #
+  # Output is entirely its own:
+  #   holdout_<name>.json            the table
+  #   holdout_<name>_<metric>.png    one figure per reportable metric
+  # written beside the main comparison, never into it. This is supplementary
+  # material — an extra page in the paper, not a column of the main result.
+  #
+  # WHY IT EXISTS. The Denario papers are LLM-written research papers, end to
+  # end: 82 rows, all machine, no human counterpart in the file. As a `datasets`
+  # entry it is an error and rightly so — there is nothing to train on, nothing
+  # to split and no ROC to read. The question it CAN answer needs none of that:
+  #
+  #     "a detector calibrated at 1% FPR on essays — how many of these does it
+  #      catch?"
+  #
+  # WHAT GETS REPORTED, AND WHAT CANNOT BE.
+  #   tpr_at_srcfpr_0.01 / _0.05   the headline. Threshold fitted to that FPR on
+  #                                the SOURCE's calibration slice and applied
+  #                                here unchanged — the deployable reading.
+  #   accuracy                     at the source's Youden's J. On an all-machine
+  #                                corpus this IS recall, and a detector that
+  #                                answers "machine" to everything scores 100%.
+  #                                The figures draw that ceiling.
+  #   declared_accuracy            baselines only: the same share at the
+  #                                DECLARED cutoff below, which saw no data.
+  #
+  #   NOT reported, because there is no human row to define them on: AUROC,
+  #   macro F1, TPR at this corpus's own FPR, and the realized FPR. They are
+  #   OMITTED, not zeroed. The last one is the real limit: nothing says what a
+  #   detection cost here, so these rates cannot be ranked against each other on
+  #   their own — read a row beside the same detector's transfer cells.
+  #
+  # THE CONFOUND, stated on every figure: these documents are also a different
+  # GENRE from every training corpus. A low rate is not separable into "missed
+  # this generator" and "reads scientific prose as human".
+  #
+  # ERROR BARS are the Wilson interval on n, not the spread over seeds — the
+  # seeds refit the source's threshold, they do not resample these 82 rows.
+  #
+  # BEFORE ENABLING IT. A holdout must carry every column every variant and
+  # every enabled baseline in this config reads — the preflight aborts naming
+  # the ones it lacks, which is correct: a Denario figure covering three
+  # detectors out of twelve with nothing saying which nine are missing is worse
+  # than a run that refuses to start. The raw denario_papers.parquet carries
+  # none of them; it has to go through the detection-schema bridge and then the
+  # same scoring chain as any other corpus:
+  #
+  #   uv run python epai/ai_detection/prepare/prepare_denario_detect.py
+  #   uv run python epai/ai_detection/prepare/standardize_text.py \
+  #       data/parquet/denario_detect.parquet
+  #   uv run python epai/ai_detection/embed/add_embeddings.py \
+  #       data/parquet/denario_detect.parquet --gpu 0
+  #   uv run python epai/ai_detection/score/run_binox_pairs.py \
+  #       data/parquet/denario_detect.parquet --gpu 0
+  #   uv run python epai/ai_detection/score/run_fastdetect_pairs.py \
+  #       data/parquet/denario_detect.parquet --gpu 0
+  #   uv run python epai/ai_detection/score/add_detector_scores.py \
+  #       data/parquet/denario_detect.parquet --gpu 0
+  #   uv run python epai/ai_detection/score/add_llm_judge_scores.py \
+  #       data/parquet/denario_detect.parquet --model <judge>
+  #   uv run python epai/ai_detection/score/add_llm_judge_reasons.py \
+  #       data/parquet/denario_detect.parquet --model gpt56luna
+  #   uv run python epai/ai_detection/score/add_cue_features.py \
+  #       data/parquet/denario_detect.parquet
+  #
+  # A LENGTH CAVEAT worth checking before believing a number: Denario abstracts
+  # are not the ~200 words the ghostbuster corpora were cut to. Compare them
+  # with epai/ai_detection/analyse/analyse_text_lengths.py and truncate if they
+  # do not match, or length becomes the confound instead of genre.
+  #
+  # Ignored by run_sweep_cross_domain.py, which fits throwaway candidates.
+  eval_only:
+    enabled: false
+    datasets:
+      - name: "denario"
+        label: "Denario (AI-written papers)"
+        parquet_path: "data/parquet/denario_detect.parquet"
 
 # ---------------------------------------------------------------------------
 # The feature axis — three entries: embedding, judge cues, and both

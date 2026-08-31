@@ -113,6 +113,27 @@ never stacked into it -- the model must not see ``domain``. The split is grouped
 by ``group_col`` but NOT stratified, so a column's proportions hold only in
 expectation; this is what says whether they actually held.
 
+EVAL-ONLY CORPORA (optional)
+----------------------------
+``data.eval_only`` names corpora that are EVALUATED on but never trained on.
+Nothing there takes a row from a split, contributes a cell to a table above or a
+bar to a figure above; every threshold applied to it was fitted on the training
+corpora and carried over unchanged. It exists for a corpus that cannot be a
+``datasets`` entry at all -- the Denario papers are LLM-written end to end, so
+there is no human row to split on, no ROC to read and no threshold to fit -- and
+it answers the one question that needs none of those:
+
+    "a detector calibrated at 1% FPR on essays -- how many of these does it catch?"
+
+Output is its own: ``holdout_<name>.json`` and ``holdout_<name>_<metric>.png``,
+beside the main comparison and never inside it. The columns of that table are the
+corpora that supplied the threshold, so the spread across a row is what the
+choice of calibration corpus costs. On an all-machine holdout accuracy IS recall,
+the ceiling is 100%, and AUROC / macro F1 / the realized FPR are undefined and
+omitted rather than zeroed. See ``epai/utils/holdout_core.py`` for what that
+does and does not license you to claim.
+
+
 WHAT IS AND IS NOT SHARED WITH THE MATRIX RUN
 ---------------------------------------------
 Shared, so the diagonal here is the diagonal there: the grouped split (a
@@ -185,12 +206,26 @@ from epai.utils.config_utils import (
 )
 from epai.utils.corpus_utils import (
     CorpusSpec,
+    check_eval_only_corpora,
     check_in_domain_corpora,
+    eval_only_specs,
     in_domain_specs,
 )
+from epai.utils.holdout_core import (
+    HOLDOUT_KEY,
+    aggregate_holdout,
+    check_holdout_corpora,
+    evaluate_baseline_on_holdout,
+    evaluate_variant_on_holdout,
+    holdout_comparison,
+    load_holdout,
+    merge_holdout_rows,
+    print_holdout_table,
+)
+from epai.utils.holdout_viz import plot_holdout_comparison
 from epai.utils.preflight_utils import RULE, Report, load_yaml, print_report
 from epai.utils.suite_utils import corpus_comparison_rows
-from epai.utils.train_utils import stack_features
+from epai.utils.train_utils import CLF_TARGET_COL, stack_features
 from epai.utils.variant_utils import (
     Variant,
     algorithm_specs,
@@ -238,6 +273,13 @@ def preflight_config(cfg: dict, report: Report) -> None:
     if len(report.errors) > n_errors:
         print("  invalid — skipping the data checks for this config")
         return
+
+    # The eval-only block is checked here rather than inside check_config: it is
+    # the one part of `data` that means the same thing to both runners, and it
+    # needs the resolved corpus names to refuse a holdout that collides with one.
+    check_eval_only_corpora(
+        cfg, report, [s.name for s in in_domain_specs(cfg, BASE_DIR)]
+    )
 
     fsets = build_feature_sets(cfg)
     variants = build_variants(cfg)
@@ -288,6 +330,11 @@ def preflight_config(cfg: dict, report: Report) -> None:
         report.context = f"{outer} · {spec.name}" if outer else spec.name
         preflight_corpus(cfg, spec, report)
     report.context = outer
+
+    # Once for the whole config, not once per corpus: a holdout is the same file
+    # whichever corpus supplies the threshold, and it has to carry every column
+    # every variant and baseline in the run reads.
+    check_holdout_corpora(cfg, report, BASE_DIR)
 
 
 def preflight_corpus(cfg: dict, spec: CorpusSpec, report: Report) -> None:
@@ -511,6 +558,14 @@ def summarise(payload: dict) -> dict:
                      f"train_{key}_std"):
             if name in s:
                 row[name] = s[name]
+    # Carried, not merged: the holdout numbers ride along on the row so the
+    # cross-corpus layer can stitch them into their own table, and every
+    # consumer of this row reads named keys, so they change nothing here.
+    if payload.get(HOLDOUT_KEY):
+        row[HOLDOUT_KEY] = payload[HOLDOUT_KEY]
+    if payload.get("hybrid"):
+        row["hybrid"] = True
+        row["aux_column"] = payload.get("aux_column")
     return row
 
 
@@ -521,11 +576,22 @@ def run_variant(
     df,
     out_dir: Path,
     save_models: bool = True,
+    holdouts: dict | None = None,
+    source: str = "",
 ) -> dict:
     """Fit and score one variant on the corpus's held-out split, over every seed.
 
     ``X`` / ``df`` are loaded once per feature set by ``run_config`` and shared
     across every algorithm trained on it, exactly as the matrix run does.
+
+    ``holdouts`` are the eval-only corpora (see ``epai/utils/holdout_core.py``),
+    already loaded for this feature set. They are scored inside the seed loop --
+    the only place the fitted model and the thresholds fitted on ITS calibration
+    slice exist together -- and nothing about them touches the held-out split
+    above: they take no rows from it, contribute to no metric in it, and their
+    results are written under their own key. ``source`` names the corpus that
+    supplied the thresholds, which is this corpus, and becomes the column a
+    holdout figure reads.
     """
     base_seed: int = cfg["seed"]
     n_runs: int = cfg["model"]["n_runs"]
@@ -605,6 +671,27 @@ def run_variant(
                 res[f"train_{key}"] = train_res[key]
         res["train_n"] = int(len(fit_idx))
         res["cal_n"] = int(len(cal_idx))
+
+        # The eval-only corpora, under THIS seed's thresholds. Fitted on the
+        # calibration slice above and applied unchanged -- nothing is refitted
+        # here and no threshold is chosen on these rows, which is what makes the
+        # number a deployment reading rather than an oracle one. The training
+        # groups are passed so the "a target row whose group was trained on is a
+        # free hit" rule applies here too; on a holdout from a different file it
+        # removes nothing, and the count says so.
+        if holdouts:
+            res[HOLDOUT_KEY] = {
+                name: evaluate_variant_on_holdout(
+                    alg, hold, cal_thresholds, label_threshold,
+                    train_groups=set(groups[train_idx]),
+                    aux=(
+                        stack_features(hold.df, [variant.aux_col])[0]
+                        if variant.aux_col and len(hold.df)
+                        else None
+                    ),
+                )
+                for name, hold in holdouts.items()
+            }
         per_seed.append(res)
 
         if save_models:
@@ -642,12 +729,41 @@ def run_variant(
         "summary": aggregate_runs(per_seed),
         "per_seed": per_seed,
     }
+    if holdouts:
+        payload[HOLDOUT_KEY] = _holdout_summary(per_seed, holdouts, source)
+    if variant.aux_col:
+        payload["hybrid"] = True
+        payload["aux_column"] = variant.aux_col
     with open(out_dir / "in_domain.json", "w") as f:
         json.dump(payload, f, indent=2)
     return payload
 
 
-def run_baseline(cfg: dict, spec: CorpusSpec, bl: dict, out_dir: Path) -> dict:
+def _holdout_summary(per_seed: list[dict], holdouts: dict, source: str) -> dict:
+    """``{holdout: {source: aggregate}}`` from the per-seed holdout cells.
+
+    The extra ``source`` level looks redundant for an in-domain run, where one
+    pass has exactly one source -- and it is exactly what lets ``run_config``
+    stitch the passes back into one table whose columns are the corpora. See
+    ``holdout_core.merge_holdout_rows``.
+    """
+    return {
+        name: {
+            source: aggregate_holdout(
+                [r[HOLDOUT_KEY][name] for r in per_seed if name in r.get(HOLDOUT_KEY, {})]
+            )
+        }
+        for name in holdouts
+    }
+
+
+def run_baseline(
+    cfg: dict,
+    spec: CorpusSpec,
+    bl: dict,
+    out_dir: Path,
+    holdouts: dict | None = None,
+) -> dict:
     """One zero-shot score baseline on the held-out split. Nothing is fitted.
 
     Same split and seeds as the trained variants, so its row lands in the same
@@ -707,6 +823,20 @@ def run_baseline(cfg: dict, spec: CorpusSpec, bl: dict, out_dir: Path) -> dict:
         res["train_n"] = int(len(train_idx))
         res["cal_n"] = int(len(cal_idx))
         res["threshold"] = float(threshold)
+
+        # The eval-only corpora, read off this baseline's own column. Same two
+        # thresholds the cells above answer to, plus the DECLARED cutoff, which
+        # is the only genuinely zero-shot reading anywhere in the run and the one
+        # an off-the-shelf deployment would actually get.
+        if holdouts:
+            res[HOLDOUT_KEY] = {
+                name: evaluate_baseline_on_holdout(
+                    hold, threshold, machine_is_high,
+                    cal_thresholds, label_threshold,
+                    train_groups=set(groups[train_idx]),
+                )
+                for name, hold in holdouts.items()
+            }
         per_seed.append(res)
 
     summary = aggregate_runs(per_seed)
@@ -737,6 +867,8 @@ def run_baseline(cfg: dict, spec: CorpusSpec, bl: dict, out_dir: Path) -> dict:
         "summary": summary,
         "per_seed": per_seed,
     }
+    if holdouts:
+        payload[HOLDOUT_KEY] = _holdout_summary(per_seed, holdouts, spec.name)
     with open(out_dir / "in_domain.json", "w") as f:
         json.dump(payload, f, indent=2)
     return payload
@@ -875,7 +1007,14 @@ def run_config(cfg_path: Path, cfg: dict, alg_dir: Path) -> None:
     # resolve to: a one-entry `datasets` list still writes a corpus directory, so
     # adding a second entry later does not silently move every path.
     if not cfg["data"].get("datasets"):
-        run_corpus(cfg, specs[0], alg_dir)
+        comparison = run_corpus(cfg, specs[0], alg_dir)
+        # One corpus, so the holdout table has one column: what this detector
+        # catches under the one threshold this run produced.
+        write_holdout_comparisons(
+            cfg, alg_dir,
+            {specs[0].name: comparison["variants"]},
+            [specs[0].name], {specs[0].name: specs[0].label},
+        )
         return
 
     per_corpus: dict[str, list[dict]] = {}
@@ -910,6 +1049,54 @@ def run_config(cfg_path: Path, cfg: dict, alg_dir: Path) -> None:
                          noun=comparison["noun"])
     if PLOTS_ENABLED:
         plot_clf_id_corpus_comparison(alg_dir, comparison)
+
+    # The eval-only table, at this level and only at this level: its columns are
+    # the corpora that supplied the thresholds, and no single corpus's pass
+    # knows about the others. Written beside the main comparison, never into it.
+    write_holdout_comparisons(cfg, alg_dir, per_corpus, names, labels)
+
+
+def write_holdout_comparisons(
+    cfg: dict,
+    alg_dir: Path,
+    per_corpus: dict[str, list[dict]],
+    names: list[str],
+    labels: dict[str, str],
+) -> None:
+    """One ``holdout_<name>.json`` and its figures per eval-only corpus.
+
+    The Denario question in one table: rows are the detectors this run produced,
+    columns are the corpora whose calibration slice supplied the threshold, and
+    every cell is the same documents scored again. Nothing here is a transfer
+    cell -- no model was trained on the holdout and none was tested on a corpus
+    it did not train on -- and nothing here enters ``corpus_comparison.json`` or
+    any figure that reads it.
+    """
+    hold_specs = eval_only_specs(cfg, BASE_DIR)
+    if not hold_specs:
+        return
+
+    group_col: str = cfg["data"]["group_col"]
+    human_label: str = cfg["data"]["human_label"]
+
+    for spec in hold_specs:
+        rows = merge_holdout_rows(per_corpus, spec.name, names)
+        if not rows:
+            print(f"\nNo holdout results for {spec.name} — nothing written.")
+            continue
+        # Re-read the corpus once, for the row counts and class balance the
+        # payload describes itself with. Cheap (one scalar column) and it means
+        # the JSON says what it stood on without trusting a cell to carry it.
+        hold = load_holdout(spec, [CLF_TARGET_COL], group_col, human_label)
+        payload = holdout_comparison(
+            cfg, hold, rows, labels, names,
+            alg_label=f"{cfg['alg_label']} — eval-only",
+        )
+        with open(alg_dir / f"holdout_{spec.name}.json", "w") as f:
+            json.dump(payload, f, indent=2)
+        print_holdout_table(payload, rows, names)
+        if PLOTS_ENABLED:
+            plot_holdout_comparison(alg_dir, payload)
 
 
 def _num(value, default: float = float("nan")) -> float:
@@ -1033,6 +1220,12 @@ def run_corpus(cfg: dict, spec: CorpusSpec, alg_dir: Path) -> dict:
     )
     if report_by:
         tqdm.write(f"  REPORT BY  : {report_by}  (split composition only, never a feature)")
+    hold_specs = eval_only_specs(cfg, BASE_DIR)
+    if hold_specs:
+        tqdm.write(
+            f"  EVAL-ONLY  : {[h.name for h in hold_specs]}  "
+            f"(scored under this corpus's thresholds; never trained on)"
+        )
     tqdm.write(f"  OUTPUT     : {alg_dir}")
     tqdm.write("=" * RULE)
 
@@ -1061,6 +1254,22 @@ def run_corpus(cfg: dict, spec: CorpusSpec, alg_dir: Path) -> dict:
         tqdm.write(f"  {prep.name:<20} {len(prep.df):>6} rows  {prep.class_counts}")
         X = stack_features(prep.df, list(fs.columns))[0]
 
+        # The eval-only corpora, read with the same columns and stacked the same
+        # way. Loaded per feature set because the design matrix is per feature
+        # set; they take no part in the split below and no part in any fit.
+        holdouts = {
+            h.name: load_holdout(
+                h, variant_columns(fs, cfg), group_col, human_label,
+                stack=list(fs.columns),
+            )
+            for h in hold_specs
+        }
+        for hold in holdouts.values():
+            tqdm.write(
+                f"  {('· ' + hold.name):<20} {len(hold.df):>6} rows  "
+                f"{hold.class_counts}   (eval only)"
+            )
+
         # Every variant on this feature set takes the same splits, so the
         # composition is a property of the split, measured once, not of a model.
         if report_by:
@@ -1086,7 +1295,10 @@ def run_corpus(cfg: dict, spec: CorpusSpec, alg_dir: Path) -> dict:
             out_dir = alg_dir / variant.id
             out_dir.mkdir(parents=True, exist_ok=True)
 
-            payload = run_variant(variant, cfg, X, prep.df, out_dir)
+            payload = run_variant(
+                variant, cfg, X, prep.df, out_dir,
+                holdouts=holdouts, source=spec.name,
+            )
             print_result(payload["alg_label"], payload["summary"])
             if PLOTS_ENABLED:
                 plot_clf_id_result(out_dir)
@@ -1096,13 +1308,23 @@ def run_corpus(cfg: dict, spec: CorpusSpec, alg_dir: Path) -> dict:
                 row["aux_column"] = variant.aux_col
             rows.append(row)
 
-        del prep, X
+        del prep, X, holdouts
 
     for bl in baseline_specs(cfg):
         tqdm.write(f"\n→ {bl['label']}  ({describe_variant(bl)})")
         bl_dir = alg_dir / bl["name"]
         bl_dir.mkdir(parents=True, exist_ok=True)
-        payload = run_baseline(cfg, spec, bl, bl_dir)
+        # One scalar column, so the holdout is loaded per baseline rather than
+        # per feature set -- a baseline stands on the rows ITS column is filled
+        # for, on a holdout exactly as on the corpus.
+        bl_holdouts = {
+            h.name: load_holdout(
+                h, [bl["column"]], group_col, human_label,
+                score_col=bl["column"],
+            )
+            for h in hold_specs
+        }
+        payload = run_baseline(cfg, spec, bl, bl_dir, holdouts=bl_holdouts)
         print_result(payload["alg_label"], payload["summary"])
         if PLOTS_ENABLED:
             plot_clf_id_result(bl_dir)

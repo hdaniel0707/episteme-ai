@@ -2190,7 +2190,9 @@ def evaluate_score_rule(
     )
 
 
-def run_score_baseline(cfg: dict, out_dir: Path, variant: dict) -> dict:
+def run_score_baseline(
+    cfg: dict, out_dir: Path, variant: dict, holdout_eval=None
+) -> dict:
     """Full source x target matrix for one zero-shot score-baseline variant.
 
     No classifier is trained and no threshold is fitted. ``variant`` comes from
@@ -2225,6 +2227,16 @@ def run_score_baseline(cfg: dict, out_dir: Path, variant: dict) -> dict:
     placing a threshold at a nominal FPR needs human rows to place it on, and
     so does an ROC or a Youden's J. Its claim to have seen no labels holds
     only for the declared-cutoff reading now kept purely for reference.
+
+    ``holdout_eval`` is the one hook this function has for the eval-only
+    corpora (``epai/utils/holdout_core.py``), and it is inert unless a config
+    asks for one. Called once per (seed, source) with the thresholds that
+    source produced and the groups it trained on, its return value is filed
+    under a key of its own. It cannot reach any cell of the matrix: it is
+    called after the target loop, it is passed no writable state, and nothing
+    below reads what it returns. A run with no ``data.eval_only`` block
+    produces a byte-identical payload to one from before this parameter
+    existed.
     """
     threshold = float(variant["threshold"])
     score_col: str = variant["column"]
@@ -2259,6 +2271,9 @@ def run_score_baseline(cfg: dict, out_dir: Path, variant: dict) -> dict:
 
     # per_seed[i][source][target] -> metrics
     per_seed: list[dict] = []
+    # seed_holdouts[source] -> one entry per seed, each {holdout: metrics}.
+    # Empty and unused unless `holdout_eval` was given.
+    seed_holdouts: dict[str, list[dict]] = {}
     # The first seed's raw scores, for the score-distribution figure. Oriented
     # here so the stored cut always reads "at or above => machine", whichever
     # way the raw column ran. See SCORE_DIST_KEY.
@@ -2350,6 +2365,21 @@ def run_score_baseline(cfg: dict, out_dir: Path, variant: dict) -> dict:
                 res["threshold"] = float(threshold)
                 seed_res[source][target] = res
 
+            if holdout_eval is not None:
+                # Outside the target loop and keyed apart from it: an eval-only
+                # corpus is not a target and must never become a column of this
+                # matrix. See epai/utils/holdout_core.py.
+                seed_holdouts.setdefault(source, []).append(
+                    holdout_eval(
+                        source=source,
+                        threshold=threshold,
+                        machine_is_high=machine_is_high,
+                        cal_thresholds=cal_thresholds,
+                        label_threshold=label_threshold,
+                        train_groups=train_groups,
+                    )
+                )
+
         per_seed.append(seed_res)
 
     # 'threshold_mean' is the config's cutoff in every cell, but is kept per cell
@@ -2397,6 +2427,8 @@ def run_score_baseline(cfg: dict, out_dir: Path, variant: dict) -> dict:
             seed=base_seed, level=SCORE_DIST_LEVEL, machine_is_high=True,
         ),
     }
+    if seed_holdouts:
+        payload["holdout_per_seed"] = seed_holdouts
     with open(out_dir / "cross_domain.json", "w") as f:
         json.dump(payload, f, indent=2)
     return payload
