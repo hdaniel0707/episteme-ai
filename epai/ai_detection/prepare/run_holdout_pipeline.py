@@ -26,6 +26,12 @@ hand and is a default in the stage list below:
   * ``binoculars_score`` (falcon-7b, the paper's pair and the only calibrated
     threshold in the config) is NOT in ``run_binox_pairs.py``'s DEFAULT_PAIRS --
     it has to be named, or that baseline row has no column.
+  * ``falcon3-7b``'s base and instruct tokenizers are "extended" (same vocab
+    plus added control tokens), which the strict tokenizer check rejects at
+    startup -- a fast exit 1 with an empty column, before a single row is
+    scored. It runs as its own stage carrying ``--allow-token-mismatch``, so
+    that flag does not also switch the check off for the four pairs that pass
+    it honestly.
   * ``add_detector_scores.py`` defaults to ``radar pangram_roberta`` and the
     Pangram repo is gated, so the default set fails on access. Only radar is
     asked for.
@@ -128,6 +134,23 @@ DEFAULT_EMBEDDERS = ("luar_crud",)
 DEFAULT_BINOX_PAIRS = (
     "falcon-7b", "qwen25-7b", "falcon3-7b", "mistral-v03", "llama31-8b",
 )
+
+#: Pairs whose base and instruct tokenizers are "extended" -- same vocabulary
+#: plus added control tokens -- which score_parquets.py's strict tokenizer check
+#: rejects at startup, before it scores a single row (a fast exit 1 with an
+#: empty column, not a scoring failure). They need --allow-token-mismatch.
+#:
+#: They get their OWN stage rather than that flag being added to the whole run.
+#: run_binox_pairs.py takes the flag once and passes it to every pair of that
+#: invocation, so a single stage would also switch the check off for the pairs
+#: that pass it honestly -- and the check is what stands between a genuinely
+#: re-mapped token ("INCOMPATIBLE", not "extended") and a column full of
+#: numbers that mean nothing. Each pair is already its own subprocess, so
+#: splitting the stage costs one extra parent process and no extra model loads.
+#:
+#: Check a pair before adding it here, and read the verdict rather than assuming:
+#:   uv run --project external/Binoculars python external/Binoculars/check_pairs.py
+BINOX_EXTENDED_TOKENIZER = ("falcon3-7b", "falcon3-1b")
 
 #: Fast-DetectGPT pairs -- the same four the `fastdetect_baseline` block lists,
 #: which are also that script's own defaults. Named anyway so this file says
@@ -244,14 +267,31 @@ def build_stages(args: argparse.Namespace) -> list[Stage]:
             produces=[f"emb_{e}" for e in args.embedders],
         ),
 
-        # 4. Binoculars, all five columns the config's baseline block lists.
-        Stage(
+    ]
+
+    # 4. Binoculars. Split in two by tokenizer verdict, not for convenience:
+    #    see BINOX_EXTENDED_TOKENIZER for why the permissive flag must not cover
+    #    the pairs that do not need it. Either stage is omitted when no pair
+    #    asked for is on its side.
+    strict = [p for p in args.binox_pairs if p not in BINOX_EXTENDED_TOKENIZER]
+    extended = [p for p in args.binox_pairs if p in BINOX_EXTENDED_TOKENIZER]
+    if strict:
+        stages.append(Stage(
             "binox",
             f"{SCORE_DIR}/run_binox_pairs.py",
-            [out, "--pairs", *args.binox_pairs, *gpu, *cpu, *yes],
-            produces=[_binox_column(p) for p in args.binox_pairs],
-        ),
+            [out, "--pairs", *strict, *gpu, *cpu, *yes],
+            produces=[_binox_column(p) for p in strict],
+        ))
+    if extended:
+        stages.append(Stage(
+            "binox-extended",
+            f"{SCORE_DIR}/run_binox_pairs.py",
+            [out, "--pairs", *extended, "--allow-token-mismatch",
+             *gpu, *cpu, *yes],
+            produces=[_binox_column(p) for p in extended],
+        ))
 
+    stages += [
         # 5. Fast-DetectGPT over the same model pairs, one statistic swapped.
         #    Only the `_crit_` columns are ever read: the `_prob_` ones are Null
         #    for every pair upstream did not calibrate, and non-monotone where
