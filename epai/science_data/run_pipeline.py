@@ -53,6 +53,7 @@ from epai.science_data.config import (
     BASE_DIR,
     DEFAULT_CFG_PATH,
     DEFAULT_QUERIES_PATH,
+    default_variant,
     final_path,
     generated_by_label,
     load_pipeline_config,
@@ -239,11 +240,7 @@ def main() -> None:
     # the fetch has run.
     cfg = load_pipeline_config(args.cfg)
     generators = cfg["generate"]["generators"]
-    variant = args.variant or (
-        generated_by_label(generators[0]["model"], cfg).replace(":", "_")
-        if len(generators) == 1
-        else "multi"
-    )
+    variant = args.variant or default_variant(cfg)
 
     stages = select(build_stages(args, variant), args)
     if not stages:

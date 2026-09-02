@@ -77,8 +77,11 @@ import numpy as np
 
 from epai.utils.cd_core import (
     BY_SEED_SUFFIX,
+    ZEROSHOT_MARK,
     cell_metric_specs,
     headline_metric_specs,
+    print_row_mark_legend,
+    row_mark_pad,
 )
 from epai.utils.corpus_utils import check_dataset_specs, check_where
 from epai.utils.preflight_utils import RULE
@@ -695,7 +698,7 @@ def print_suite_ranking(
         print(header)
         print("-" * rule)
         for r in order:
-            mark = "★ " if r.get("baseline") else ("◆ " if r.get("hybrid") else "  ")
+            mark = row_mark_pad(r)
             # A mean over fewer datasets than the run covered is not the same
             # number as the rows around it, so it never sits unmarked among them.
             name_cell = mark + r["label"] + (
@@ -733,19 +736,12 @@ def print_suite_ranking(
             f"\n  ! covers fewer than the {len(suite_names)} datasets of the run, so "
             f"its MEAN is not taken over the same\n    evidence as the rows around "
             f"it. A trained variant cannot end up here (the axes are\n    declared "
-            f"once for every dataset); a ★ baseline whose score column is missing "
-            f"from a\n    parquet is stopped by the preflight rather than reduced "
-            f"to this."
+            f"once for every dataset); a {ZEROSHOT_MARK} baseline whose score "
+            f"column is missing from a\n    parquet is stopped by the preflight "
+            f"rather than reduced to this."
         )
-    if any(r.get("baseline") for r in rows):
-        print("\n  ★ zero-shot baseline: no classifier trained")
-    hybrids = [r for r in rows if r.get("hybrid")]
-    if hybrids:
-        cols = sorted({r.get("aux_column") or "?" for r in hybrids})
-        print(
-            f"  ◆ hybrid: trained on the shared features PLUS {', '.join(cols)}, so "
-            f"it is not ranked on equal information"
-        )
+    print()
+    print_row_mark_legend(rows)
 
 
 def _short(text: str, width: int) -> str:

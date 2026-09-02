@@ -43,11 +43,13 @@ continuous score behind them. TPR at a fixed FPR is reported *twice*, once
 with the threshold fit on the cell being tested and once with the source's
 threshold transported to it, and the difference between those two readings is
 where the transfer failure this experiment hunts actually shows up. Accuracy
-and macro F1 answer to a threshold too now -- Youden's J, fit on the same
-calibration slice the transported reading uses -- so a cell's label-derived
-numbers and its score-derived ones are fit the same way instead of one of
-them defaulting to 0.5 or an arbitrary config cutoff. See the "Score metrics"
-section below for what each one claims.
+and macro F1 answer to a threshold too: for a TRAINED variant that is Youden's
+J, fit on the same calibration slice the transported reading uses, so a cell's
+label-derived numbers and its score-derived ones are fit the same way instead
+of one of them defaulting to 0.5. For a zero-shot BASELINE it is the cutoff the
+config declared, and nothing about that row is fitted at all -- see
+:func:`baseline_fits_threshold`. See the "Score metrics" section below for what
+each one claims.
 
 Four invariants this module exists to hold:
 
@@ -63,10 +65,11 @@ Four invariants this module exists to hold:
   * **Calibration never the fit rows, never the eval rows.** Every threshold
     this module fits -- the transported TPR@FPR levels, the Youden's J behind
     accuracy/macro F1 -- is fit on the calibration slice carved out of the
-    training pool, in every mode, for trained variants and zero-shot baselines
-    alike. Calibrating on the fit rows reads a model's own overfit as a
-    threshold; calibrating on the eval rows is the oracle reading in disguise.
-    See :func:`carve_calibration`.
+    training pool, in every mode. A zero-shot baseline fits none of them by
+    default and so has nothing to calibrate; when a config asks it to, it
+    calibrates on that same slice and no other. Calibrating on the fit rows
+    reads a model's own overfit as a threshold; calibrating on the eval rows is
+    the oracle reading in disguise. See :func:`carve_calibration`.
 
 A corpus is a :class:`~epai.utils.corpus_utils.CorpusSpec` -- a parquet plus an
 optional ``domain`` -- so six datasets can be six slices of two files.
@@ -130,6 +133,119 @@ DEFAULT_DETECTOR_COL = "detector_score_radar"
 
 
 # ---------------------------------------------------------------------------
+# Row marks: what a reader has to be able to tell apart at a glance
+# ---------------------------------------------------------------------------
+#
+# One distinction, drawn one way, everywhere -- the printed tables here and the
+# figures in ``visualization_utils`` / ``holdout_viz`` share these three
+# constants so a row cannot mean one thing on a table and another on the picture
+# beside it.
+#
+#   ❄  saw no training data. A fixed cutoff on a score column, taken from the
+#      config, applied unchanged to every corpus.
+#   ☀  was fitted on rows from the training pool.
+#   ◆  a trained row that also saw an extra input beside the shared feature set,
+#      so its rank is not read on equal information. It follows the ☀ rather
+#      than replacing it: hot/cold is the primary split, hybrid is a footnote
+#      on the trained side of it.
+#
+# WHY GLYPHS AND NOTHING ELSE. There used to be a hatch pattern on every
+# baseline bar as well, one per detector family. It was doing two jobs badly:
+# at bar widths under about a centimetre "/" and "\" are indistinguishable, and
+# the pattern implied the families were a scale when they are just names. The
+# family is already spelled out in the row's own label. So the bars are solid
+# and the glyph carries the whole distinction.
+#
+# These are BMP characters on purpose. matplotlib renders with the fonts it
+# ships (DejaVu Sans here -- there is no system font at all in the sandbox), and
+# DejaVu has no non-BMP table: an emoji such as 🔥 U+1F525 renders as a missing-
+# glyph box. ❄ U+2744 and ☀ U+2600 are both in DejaVu Sans. Anything put here
+# must be checked against that font before it ships.
+ZEROSHOT_MARK = "❄"
+TRAINED_MARK = "☀"
+HYBRID_MARK = "◆"
+
+
+def baseline_was_fitted(row: dict) -> bool:
+    """Whether this zero-shot row's operating point was refit rather than declared.
+
+    False for every trained row (the question does not apply) and for a baseline
+    read at its declared cutoff, which is the default. True when the run set
+    ``baseline_fit_threshold`` -- and true for a result produced BEFORE that
+    switch existed, when fitting was the only behaviour.
+
+    That second case is the reason this is not a plain lookup. A payload from
+    then carries no ``fit_threshold`` key, and defaulting it to "not fitted"
+    would put a ❄ and the words "no training" on numbers that came from a
+    Youden's J fit on the training pool -- a false claim printed over a real
+    result, produced by nothing more than replotting an old JSON. So an absent
+    key falls back to evidence in the row itself: a ``*_at_srcfpr_*`` aggregate
+    cannot exist unless a threshold was placed on human rows from a training
+    corpus, whatever the row calls itself.
+    """
+    if not row.get("baseline"):
+        return False
+    if "fit_threshold" in row:
+        return bool(row["fit_threshold"])
+    return any("_at_srcfpr_" in str(k) for k in row)
+
+
+def row_mark(row: dict) -> str:
+    """The glyph prefix for one comparison row, trailing space included.
+
+    ``"❄ "`` for a zero-shot baseline, ``"☀◆ "`` for a hybrid, ``"☀ "`` for
+    every other trained variant. Never empty: an unmarked row would read as a
+    fourth, unexplained kind.
+    """
+    if row.get("baseline"):
+        return f"{ZEROSHOT_MARK} "
+    return f"{TRAINED_MARK}{HYBRID_MARK} " if row.get("hybrid") else f"{TRAINED_MARK} "
+
+
+def row_mark_pad(row: dict) -> str:
+    """:func:`row_mark`, padded so a column of marks stays a column.
+
+    ``☀◆`` is one character wider than the others, which walks a fixed-width
+    table's names out of alignment. Only the printed tables need this; the
+    figures place the mark as its own artist.
+    """
+    return f"{row_mark(row):<3}"
+
+
+def zeroshot_legend_text(rows: list[dict]) -> str:
+    """What ❄ means for THESE rows -- which is not always the same sentence.
+
+    Under the default it means what it says. On a run with
+    ``baseline_fit_threshold`` on, and on any result produced before that switch
+    existed, the row trained no classifier but its cutoff WAS fitted on the
+    training pool, and a legend that omitted that would be the most misleading
+    line on the figure.
+    """
+    if any(baseline_was_fitted(r) for r in rows):
+        return (
+            f"{ZEROSHOT_MARK} zero-shot detector, FITTED CUTOFF: no classifier "
+            f"was trained, but the operating point behind accuracy / macro F1 "
+            f"was refit on the calibration slice"
+        )
+    return f"{ZEROSHOT_MARK} zero-shot: declared cutoff, no training"
+
+
+def print_row_mark_legend(rows: list[dict]) -> None:
+    """The footnote explaining whichever marks these rows actually used."""
+    if any(r.get("baseline") for r in rows):
+        print(f"  {zeroshot_legend_text(rows)}")
+    if any(not r.get("baseline") for r in rows):
+        print(f"  {TRAINED_MARK} trained on rows from the training pool")
+    hybrids = [r for r in rows if r.get("hybrid")]
+    if hybrids:
+        cols = sorted({r.get("aux_column", "?") for r in hybrids})
+        print(
+            f"  {HYBRID_MARK} hybrid: trained on the shared features PLUS "
+            f"{', '.join(cols)}, so it is not ranked on equal information"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Feature columns
 # ---------------------------------------------------------------------------
 
@@ -179,24 +295,12 @@ class BaselineKind:
     shared, so a third detector is one more entry here.
 
     A family contributes one variant PER COLUMN it is given, and every cutoff is
-    taken from the config -- but that cutoff no longer decides accuracy or
-    macro F1. It used to (a documented, fixed operating point read straight off
-    the config), and an earlier version of this module tried calibrating it
-    with Youden's J and dropped the idea: back when AUROC and TPR@fixed-FPR
-    were the only metrics anyone read, a calibrated cutoff bought a second row
-    that was bit-identical under both of them, since neither reads a threshold
-    at all. It is not idle now: accuracy and macro F1 are HEADLINE_METRICS,
-    read and compared across every row family, and a declared cutoff put every
-    baseline column at the mercy of whatever number its config happened to
-    carry -- one detector's declared threshold already sat close to Youden's J
-    and read as "calibrated", the next sat at an arbitrary round number and
-    read as broken, and most of the gap between them was the cutoff, not the
-    detector. So the declared cutoff is still recorded, still the rule an ROC
-    sweeps around, but accuracy/macro F1/the confusion matrix now come from a
-    Youden's J threshold fit on the calibration slice -- see
-    ``cd_core.evaluate_score_rule`` -- the same procedure and the same rows a
-    trained variant uses, so every row of a table answers to the same
-    discipline.
+    taken from the config. By default that cutoff is the whole rule: accuracy,
+    macro F1 and the confusion matrix all come from it, so a ❄ row is what an
+    off-the-shelf deployment of that detector would actually get on these rows
+    and nothing on it was fitted to anything. See
+    :func:`baseline_fits_threshold` for the switch that changes this and for the
+    argument on the other side.
 
     Several columns of one family is the normal case once a detector has been
     run with more than one configuration -- Binoculars scored with two model
@@ -273,6 +377,43 @@ BASELINE_KINDS: tuple[BaselineKind, ...] = (
         label="Pretrained detector",
     ),
 )
+
+
+#: Config key for the opt-in fitted operating point. See
+#: :func:`baseline_fits_threshold`.
+BASELINE_FIT_THRESHOLD_KEY = "baseline_fit_threshold"
+
+
+def baseline_fits_threshold(cfg: dict) -> bool:
+    """Whether the baselines get a fitted operating point instead of their cutoff.
+
+    Default FALSE, which is the reading the ❄ mark claims: the config's declared
+    cutoff decides accuracy, macro F1 and the confusion matrix, and the
+    ``*_at_srcfpr_*`` pair -- which can only exist by placing a threshold on
+    human rows from the training pool -- is not reported for a baseline at all.
+    Under that default a baseline row is zero-shot under every number it
+    carries except AUROC and ``tpr_at_fpr_*``, and those two are read off the
+    evaluation cell's own ROC without any training corpus being involved.
+
+    Set ``baseline_fit_threshold: true`` at the top level of a config to get the
+    other reading back: a Youden's J threshold fit on the same calibration
+    slice, from the same seed, that the trained variants use, plus the
+    transported ``*_at_srcfpr_*`` metrics. That was the default for a while and
+    the argument for it is real -- accuracy and macro F1 are HEADLINE_METRICS
+    compared across every row of a table, and a declared cutoff puts each
+    baseline column at the mercy of whatever number its config happens to carry.
+    Several of the cutoffs in this repo's configs are openly PLACEHOLDERS (0.95
+    for four Binoculars pairs, 1.2 for three Fast-DetectGPT pairs), so their
+    default bars measure the placeholder as much as the detector.
+
+    That is a real cost and it is the honest one to pay here. Fitting the cutoff
+    bought comparability by quietly removing the thing the ❄ rows exist to
+    show: a detector whose published operating point lands in the wrong place on
+    a new corpus IS broken there, and a Youden's J refit hides exactly that
+    failure. The placeholders are a config problem -- calibrate them, or drop
+    the columns -- not a reason to refit every baseline in the run.
+    """
+    return bool(cfg.get(BASELINE_FIT_THRESHOLD_KEY, False))
 
 
 def baseline_block(cfg: dict, kind: BaselineKind) -> dict | None:
@@ -520,7 +661,15 @@ def check_baseline_block(cfg: dict, kind: BaselineKind, report: Report) -> None:
 
 
 def check_score_baselines(cfg: dict, report: Report) -> None:
-    """Validate every baseline block."""
+    """Validate every baseline block, and the run-wide operating-point switch."""
+    if BASELINE_FIT_THRESHOLD_KEY in cfg and not isinstance(
+        cfg[BASELINE_FIT_THRESHOLD_KEY], bool
+    ):
+        report.error(
+            f"'{BASELINE_FIT_THRESHOLD_KEY}' must be a boolean -- true refits "
+            f"every baseline's cutoff on the calibration slice, false (the "
+            f"default) uses the cutoff each column declares"
+        )
     for kind in BASELINE_KINDS:
         check_baseline_block(cfg, kind, report)
 
@@ -1452,11 +1601,15 @@ def cell_metric_specs(
 #:                         between (a) and (b) is visible: that distance is the
 #:                         part of a transfer failure that AUROC cannot see.
 #:   accuracy              the headline everyone reads first, kept honest by
-#:                         sitting fourth. Its threshold is Youden's J
-#:                         (``youden_threshold``), fit on the same calibration
-#:                         slice as (b) rather than an algorithm's default 0.5
-#:                         or a baseline's declared cutoff, so it is comparable
-#:                         across every row of a table.
+#:                         sitting fourth. On a trained row its threshold is
+#:                         Youden's J (``youden_threshold``), fit on the same
+#:                         calibration slice as (b) rather than an algorithm's
+#:                         default 0.5. On a ❄ baseline it is the declared
+#:                         cutoff -- which is the number that row exists to
+#:                         report, and the one place a table's rows are NOT
+#:                         answering to the same fitting procedure. Read a
+#:                         baseline's accuracy as "what this detector does out
+#:                         of the box", not as its best achievable score.
 #:   macro_f1              accuracy's balance-aware twin, same threshold. On
 #:                         this binarised task the classes are near-balanced,
 #:                         so it will track accuracy closely; it earns its
@@ -1595,13 +1748,16 @@ BY_SEED_SUFFIX = "_by_seed"
 #: Shape, under ``payload[SCORE_DIST_KEY]``::
 #:
 #:     {"seed": 0, "level": 0.01, "machine_is_high": true,
-#:      "thresholds": {source: float},              # the transported cut
+#:      "cut_kind": "srcfpr" | "declared",          # what the cut is
+#:      "thresholds": {source: float},              # the cut, per row
 #:      "cells": {source: {target: {"scores": [...], "y": [0|1, ...]}}}}
 #:
 #: Scores are on the ORIENTED scale (high = machine) so the cut is always "at or
 #: above this is called machine", whatever direction the raw column ran in.
 #: ``thresholds[source]`` is fitted on the source's calibration slice (see
-#: ``carve_calibration``) and applied unchanged across the row.
+#: ``carve_calibration``) and applied unchanged across the row -- unless
+#: ``cut_kind`` is ``"declared"``, where it is the config's fixed cutoff for a
+#: zero-shot baseline and is therefore the SAME number on every row.
 #:
 #: One seed, not all of them: pooling seeds would blur the very thing the figure
 #: is for (where one fixed cut fell), and the seed-to-seed movement is already
@@ -1643,12 +1799,23 @@ def score_dist_payload(
     seed: int,
     level: float,
     machine_is_high: bool = True,
+    cut_kind: str = "srcfpr",
 ) -> dict:
-    """Assemble :data:`SCORE_DIST_KEY`. See that constant for the shape."""
+    """Assemble :data:`SCORE_DIST_KEY`. See that constant for the shape.
+
+    ``cut_kind`` says what the stored cut IS, because the figure's caption is a
+    different sentence for each and a wrong caption on a right line is worse
+    than no caption: ``"srcfpr"`` for a threshold calibrated to ``level`` FPR on
+    the source's calibration slice, ``"declared"`` for a zero-shot baseline's
+    config cutoff, which is one constant across every row and was fit on
+    nothing. ``level`` is meaningless under ``"declared"`` and the caption must
+    not quote it.
+    """
     return {
         "seed": int(seed),
         "level": float(level),
         "machine_is_high": bool(machine_is_high),
+        "cut_kind": str(cut_kind),
         "thresholds": {k: float(v) for k, v in thresholds.items()},
         "cells": cells,
     }
@@ -1861,6 +2028,10 @@ def summarise_baseline(payload: dict) -> dict:
     row["baseline"] = True
     row["baseline_kind"] = payload.get("baseline_kind", BASELINE_KINDS[0].key)
     row["column"] = payload.get("column")
+    # Carried onto the row so a figure drawn from a comparison JSON alone still
+    # knows what the ❄ on it is allowed to claim. See `baseline_was_fitted`.
+    if "fit_threshold" in payload:
+        row["fit_threshold"] = bool(payload["fit_threshold"])
     return row
 
 
@@ -2165,16 +2336,21 @@ def evaluate_score_rule(
 ) -> dict:
     """Score the threshold rule, read in the metric's direction, on one eval set.
 
-    ``threshold`` is the baseline's declared cutoff, still applied when
-    ``label_threshold`` is absent (a variant with no calibration slice, e.g. a
-    single-class one). When ``label_threshold`` IS given -- the Youden's J
-    threshold fit on the calibration slice, on the *oriented* scale like
-    ``cal_thresholds`` -- it takes over accuracy/macro F1 via
-    :func:`label_predictions`, so a baseline's confusion matrix answers to the
-    same fitted operating point a trained variant's does, not to an arbitrary
-    config number. The oriented score still gives AUROC and both TPR@FPR
-    readings either way. ``cal_thresholds`` are on the oriented scale too, i.e.
-    what :func:`calibrate_thresholds` returned for the calibration slice.
+    ``threshold`` is the baseline's declared cutoff and, by default, the whole
+    rule: with ``label_threshold`` and ``cal_thresholds`` both None -- what
+    :func:`run_score_baseline` passes unless a config sets
+    ``baseline_fit_threshold`` -- accuracy, macro F1 and the confusion matrix
+    come from it, and the ``*_at_srcfpr_*`` keys are absent rather than NaN
+    (:func:`score_metrics` omits them when there is no transported threshold to
+    apply). AUROC and ``tpr_at_fpr_*`` are unaffected either way: they read the
+    oriented score's ranking on this evaluation set and never see a cutoff.
+
+    When ``label_threshold`` IS given -- the Youden's J threshold fit on the
+    calibration slice, on the *oriented* scale like ``cal_thresholds`` -- it
+    takes over accuracy/macro F1 via :func:`label_predictions`, so a baseline's
+    confusion matrix answers to the same fitted operating point a trained
+    variant's does. ``cal_thresholds`` are on the oriented scale too, i.e. what
+    :func:`calibrate_thresholds` returned for the calibration slice.
     """
     oriented = oriented_scores(scores, machine_is_high)
     declared_pred = (
@@ -2216,17 +2392,25 @@ def run_score_baseline(
     disappear from the baseline's evaluation set. The row counts printed here and
     in the preflight are what the baseline actually stands on.
 
-    The declared cutoff is still recorded (``threshold`` / ``threshold_mean``)
-    but no longer drives accuracy or macro F1: those come from a Youden's J
-    threshold fit on the calibration slice, the same procedure and (per
-    seed) the same rows a trained variant uses, so a baseline's confusion
-    matrix sits on the same footing as the rows it is compared against
-    instead of an arbitrary config number (see :class:`BaselineKind`). AUROC
-    and the TPR@FPR readings never saw the declared cutoff either way. That
-    also means the baseline is not zero-shot under any of those metrics --
-    placing a threshold at a nominal FPR needs human rows to place it on, and
-    so does an ROC or a Youden's J. Its claim to have seen no labels holds
-    only for the declared-cutoff reading now kept purely for reference.
+    THE OPERATING POINT. By default (``baseline_fit_threshold`` unset or false,
+    see :func:`baseline_fits_threshold`) the declared cutoff decides accuracy,
+    macro F1 and the confusion matrix, and the transported ``*_at_srcfpr_*``
+    metrics are not reported: placing a threshold at a nominal FPR needs human
+    rows from the training pool to place it on, and a row that did that is not
+    zero-shot however it is labelled. What a ❄ row still carries is AUROC and
+    ``tpr_at_fpr_*``, both read off the evaluation cell's own ROC, which no
+    training corpus ever touches.
+
+    The split is still taken, and the training groups are still excluded from
+    every transfer cell, even though nothing is fitted on either. That is not
+    vestigial: the baseline's evaluation rows have to be the same rows the
+    trained variants were scored on, or the two cannot share a table.
+
+    With ``baseline_fit_threshold: true`` the calibration slice is carved as
+    before and both fitted readings come back -- the Youden's J label threshold
+    and the per-level transported thresholds -- on the same rows, from the same
+    seed, as the trained variants. The declared cutoff is recorded either way
+    (``threshold`` / ``threshold_mean``).
 
     ``holdout_eval`` is the one hook this function has for the eval-only
     corpora (``epai/utils/holdout_core.py``), and it is inert unless a config
@@ -2241,6 +2425,12 @@ def run_score_baseline(
     threshold = float(variant["threshold"])
     score_col: str = variant["column"]
     machine_is_high: bool = bool(variant.get("machine_is_high", False))
+    fit_threshold = baseline_fits_threshold(cfg)
+    # The declared cutoff on the ORIENTED scale (high = machine), which is the
+    # scale every threshold below and every stored score distribution uses. A
+    # low-means-machine column is negated on the way in, so its cutoff has to be
+    # negated with it or the cut would be drawn on the wrong side of the data.
+    oriented_threshold = float(oriented_scores(np.array([threshold]), machine_is_high)[0])
 
     base_seed: int = cfg["seed"]
     group_col: str = cfg["data"]["group_col"]
@@ -2302,26 +2492,38 @@ def run_score_baseline(
             # the trained variants carve it, same seed, so the two transport a
             # threshold fit on IDENTICAL rows. Never `test_idx` -- calibrating
             # there degenerates to the oracle reading on every in-domain cell,
-            # which is the bug this carve exists to avoid. Nothing is fit here,
-            # but the pool is still split so the baseline's calibration rows
-            # line up with the classifier's fit_idx/cal_idx split for the same
-            # source and seed.
+            # which is the bug this carve exists to avoid. The pool is still
+            # split even when nothing is fitted on it, so the baseline's
+            # calibration rows line up with the classifier's fit_idx/cal_idx
+            # split for the same source and seed.
             _, cal_idx = carve_calibration(y_s[train_idx], groups_s[train_idx], cal_frac, seed)
             cal_idx = train_idx[cal_idx]
-            oriented_cal = oriented_scores(s_s[cal_idx], machine_is_high)
 
-            # The transported operating points of variant (b): thresholds fixed
-            # to hit each nominal FPR on the calibration slice, then carried
-            # unchanged to every target.
-            cal_thresholds = calibrate_thresholds(y_s[cal_idx], oriented_cal)
-            # The label threshold behind accuracy/macro F1 (see
-            # `evaluate_score_rule`), fit on the same slice.
-            label_threshold = youden_threshold(y_s[cal_idx], oriented_cal)
+            # Both fitted operating points, and they exist together or not at
+            # all: the transported thresholds of variant (b) -- fixed to hit
+            # each nominal FPR on the calibration slice, then carried unchanged
+            # to every target -- and the Youden's J label threshold behind
+            # accuracy/macro F1. Under the default they are None, and a None
+            # here is what makes the row zero-shot all the way down: the
+            # `*_at_srcfpr_*` keys are then never written and the declared
+            # cutoff labels every cell. See `baseline_fits_threshold`.
+            cal_thresholds = label_threshold = None
+            if fit_threshold:
+                oriented_cal = oriented_scores(s_s[cal_idx], machine_is_high)
+                cal_thresholds = calibrate_thresholds(y_s[cal_idx], oriented_cal)
+                label_threshold = youden_threshold(y_s[cal_idx], oriented_cal)
 
             if keep_scores:
                 dist_cells[source] = {}
-                dist_thresholds[source] = float(
-                    cal_thresholds[level_tag(SCORE_DIST_LEVEL)]
+                # The cut the score-distribution figure draws: whichever one
+                # actually produced this row's labels. Constant across sources
+                # under the default -- which is itself the thing to see on that
+                # figure, one line in the same place on every row while the
+                # distributions move underneath it.
+                dist_thresholds[source] = (
+                    float(cal_thresholds[level_tag(SCORE_DIST_LEVEL)])
+                    if cal_thresholds is not None
+                    else oriented_threshold
                 )
 
             seed_res[source] = {}
@@ -2392,7 +2594,12 @@ def run_score_baseline(
     bx_cfg["features"] = [score_col]
     bx_cfg["model"] = dict(cfg["model"])
     bx_cfg["model"]["ml_alg"] = (
-        f"{variant['kind']} (fixed threshold {format_threshold(threshold)})"
+        f"{variant['kind']} "
+        + (
+            f"(cutoff {format_threshold(threshold)}, refit on the calibration slice)"
+            if fit_threshold
+            else f"(fixed threshold {format_threshold(threshold)})"
+        )
     )
     bx_cfg["alg_id"] = f"{cfg['alg_id']}__{variant['name']}"
     bx_cfg["alg_label"] = f"{cfg['alg_label']} — {variant['label']}"
@@ -2407,6 +2614,10 @@ def run_score_baseline(
         "machine_is_high": machine_is_high,
         "column": score_col,
         "threshold": threshold,
+        # What the numbers in this payload answer to. Read by the figures and
+        # the tables, and the reason an old payload (which has no such key and
+        # was fitted) still describes itself correctly: absent means fitted.
+        "fit_threshold": fit_threshold,
         "feature_dim": 1,
         "mode": plan.mode,
         "dataset_names": names,
@@ -2425,6 +2636,7 @@ def run_score_baseline(
         SCORE_DIST_KEY: score_dist_payload(
             dist_cells, dist_thresholds,
             seed=base_seed, level=SCORE_DIST_LEVEL, machine_is_high=True,
+            cut_kind="srcfpr" if fit_threshold else "declared",
         ),
     }
     if seed_holdouts:
@@ -2527,7 +2739,7 @@ def print_ranking(alg_label: str, rows: list[dict], noun: str = "variant") -> No
     )
     print("-" * RULE)
     for r in order:
-        mark = "★ " if r.get("baseline") else ("◆ " if r.get("hybrid") else "  ")
+        mark = row_mark_pad(r)
         print(
             f"{mark + r['label']:<{width}}{r['feature_dim']:>6}"
             f"{r['in_domain_mean']*100:>11.1f}%{r['transfer_mean']*100:>10.1f}%"
@@ -2545,15 +2757,7 @@ def print_ranking(alg_label: str, rows: list[dict], noun: str = "variant") -> No
         print("  transfer  = mean of the off-diagonal (unseen corpus); chance is 50%")
     print("  gap       = in-domain − transfer, i.e. what does not survive transfer")
     print_metric_ranking(order, noun=noun, width=width)
-    if any(r.get("baseline") for r in order):
-        print("  ★ zero-shot baseline: no classifier trained")
-    hybrids = [r for r in order if r.get("hybrid")]
-    if hybrids:
-        cols = sorted({r.get("aux_column", "?") for r in hybrids})
-        print(
-            f"  ◆ hybrid: trained on the shared features PLUS {', '.join(cols)}, so "
-            f"it is not ranked on equal information"
-        )
+    print_row_mark_legend(order)
 
 
 def print_headline_ranking(
@@ -2592,7 +2796,7 @@ def print_headline_ranking(
     print(header)
     print("-" * max(RULE, len(header)))
     for r in order:
-        mark = "★ " if r.get("baseline") else ("◆ " if r.get("hybrid") else "  ")
+        mark = row_mark_pad(r)
         line = f"{mark + str(r.get('label', '')):<{width}}"
         for m in specs:
             value = r.get(f"{prefix}{m.key}_mean")
@@ -2647,7 +2851,7 @@ def print_metric_ranking(
     print(header)
     print("-" * max(RULE, len(header)))
     for r in order:
-        mark = "★ " if r.get("baseline") else ("◆ " if r.get("hybrid") else "  ")
+        mark = row_mark_pad(r)
         line = f"{mark + r['label']:<{width}}"
         for m in specs:
             value = r.get(f"transfer_{m.key}_mean")

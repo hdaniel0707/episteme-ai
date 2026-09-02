@@ -218,22 +218,43 @@ prompt:
 
 # ------------------------------------------------------------- generate ----
 generate:
+  # Concurrent in-flight calls, ACROSS all generators. Set it to the slowest
+  # provider's safe rate: the OpenAI default handles 8 easily, the shared
+  # GenAI4Science default endpoint does not — use 2–3 while any generator routes
+  # there, or the whole run trips its rate limit.
   max_workers: 8
+
+  # Seconds to wait on one call before it counts as a failure (default 300).
+  # A cold open-weight model on a shared endpoint can take minutes to load;
+  # call_with_retry then retries it. Only raise this for a provider that needs it.
+  # request_timeout: 300
 
   # Add entries here to bring in more generators later. Checkpoints are keyed
   # by (id, label), so a new generator only issues the calls it is missing —
-  # the existing rows are never regenerated.
+  # the existing rows are never regenerated. This is how the open-weight AI
+  # class is added to an existing corpus: extend this list and re-run generate.
   #
   # The `generated_by` label is DERIVED, never typed: "<model_slug>:<prompt_config>",
-  # so gpt-5.6-luna under prompt config 0807A becomes "gpt56luna:0807A". The
-  # whole point is that a label cannot disagree with what actually produced the
-  # row, which a hand-written one can. It still starts with "gpt", so
-  # cfg/colors.yaml resolves it to the GPT family by prefix as before.
+  # so gpt-5.6-luna under prompt config 0807A becomes "gpt56luna:0807A", and
+  # gpt-oss:120b becomes "gptoss120b:0807A". The whole point is that a label
+  # cannot disagree with what actually produced the row, which a hand-written
+  # one can. cfg/colors.yaml resolves it to a family by prefix.
   #
-  # Only `model` is configurable. Two generators must have distinct model slugs
-  # or they would share a label — the config check enforces that.
+  # Each entry needs `model`. It reaches that model through an OpenAI-compatible
+  # endpoint; `provider` picks which host:
+  #   (omitted) / "openai"  — OpenAI itself, key from $OPENAI_API_KEY
+  #   "genai4science"        — HUN-REN SZTAKI, key from $GENAI4SCIENCE_API_KEY,
+  #                            base URL from $GENAI4SCIENCE_BASE_URL or the
+  #                            built-in default
+  # Any other OpenAI-compatible host: give `base_url` and `api_key_env` directly.
+  # Two generators must have distinct model slugs or they would share a label —
+  # the config check enforces that.
   generators:
     - model: "gpt-5.6-luna"
+    # - model: "gpt-oss:120b"
+    #   provider: "genai4science"
+    # - model: "llama3.3:70b"
+    #   provider: "genai4science"
 
   # Drop any paper for which some generator failed, so every id carries a
   # complete set of rows. Applied at export, not during generation.

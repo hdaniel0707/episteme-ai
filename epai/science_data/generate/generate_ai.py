@@ -55,6 +55,7 @@ Run (--cfg defaults to the example in cfg/science_data/):
 from __future__ import annotations
 
 import argparse
+import os
 import re
 from pathlib import Path
 
@@ -65,8 +66,10 @@ from openai import OpenAI
 from epai.science_data.config import (
     BASE_DIR,
     DEFAULT_CFG_PATH,
+    default_variant,
     final_path,
     generated_by_label,
+    generator_endpoint,
     load_pipeline_config,
     load_prompt_config,
     prompt_config_path,
@@ -86,6 +89,13 @@ load_dotenv()
 _LEADING_LABEL_RE = re.compile(r"^\s*(abstract|summary)\b[\s:.\-—]*", re.IGNORECASE)
 _MARKDOWN_RE = re.compile(r"[*_#`]+")
 _WS_RE = re.compile(r"\s+")
+
+# Open-weight generators (Qwen, DeepSeek-R1, gpt-oss) can wrap the answer in a
+# reasoning block. Left in `text` it is a token the human class can never carry
+# — the exact kind of source artifact this corpus exists to avoid. Only paired
+# <think>…</think> is removed; a malformed unclosed one falls through to the
+# empty-response check in call_with_retry and is recorded as a failed call.
+_THINK_RE = re.compile(r"<think\b[^>]*>.*?</think>", re.IGNORECASE | re.DOTALL)
 
 # `uid` is unique per row, `id` is the PAIR key shared by a paper's human row
 # and every generated row derived from it. Both are needed and they do
@@ -138,6 +148,9 @@ def clean_generated(text: str, *, strip_labels: bool = False) -> str:
     produce. (It is also why it must not be applied to the human text -- the
     pattern would eat the underscores in ``k_B`` and ``H_2``.)
     """
+    # Reasoning block first: it can itself contain markdown and section labels,
+    # and stripping those out of it before removing the block would leave debris.
+    text = _THINK_RE.sub("", text)
     # Markdown FIRST. Both label patterns anchor on a word boundary that `**`
     # defeats, so "**Background:**" would survive the structured-label strip and
     # then lose only its asterisks -- leaving a bare "Background:" in the AI
@@ -163,15 +176,36 @@ def _key(paper_id: str, label: str) -> str:
 
 
 def generate(df: pd.DataFrame, cfg: dict, prompts: dict, retry_failed: bool) -> Shard:
-    client = OpenAI()
     shard = Shard(shard_path(cfg, "generate"))
     # Same key oa_fetch reads for the human abstracts. Bound once here rather
     # than inside the lambda so the setting cannot differ between calls.
     strip_labels = strip_structured_labels_enabled(cfg)
 
+    # One client per distinct endpoint. Generators sharing a base_url share a
+    # client (the SDK is thread-safe); a run that lists a generator it never
+    # actually calls — every row already in the shard — still needs that
+    # provider's key, which is the honest failure: don't list what you can't run.
+    clients: dict[tuple[str | None, str], OpenAI] = {}
+    request_timeout = cfg["generate"].get("request_timeout", 300)
+
+    def client_for(gen: dict) -> OpenAI:
+        base_url, api_key_env = generator_endpoint(gen)
+        cache_key = (base_url, api_key_env)
+        if cache_key not in clients:
+            api_key = os.environ.get(api_key_env)
+            if not api_key:
+                raise SystemExit(
+                    f"{api_key_env} is not set — needed by generator {gen['model']!r}."
+                )
+            clients[cache_key] = OpenAI(
+                api_key=api_key, base_url=base_url, timeout=request_timeout
+            )
+        return clients[cache_key]
+
     tasks = []
     for gen in cfg["generate"]["generators"]:
         label = generated_by_label(gen["model"], cfg)
+        client = client_for(gen)
         for row in df.to_dict("records"):
             tasks.append(
                 (
@@ -287,22 +321,17 @@ def main() -> None:
         "--variant",
         default=None,
         help="filename suffix. Defaults to the single generator's label with "
-        "the ':' replaced (gpt54mini_0807A), or 'multi' when several are "
-        "configured.",
+        "the ':' replaced (gpt54mini_0807A), or 'multi_<prompt_config>' when "
+        "several are configured.",
     )
     args = parser.parse_args()
 
     cfg = load_pipeline_config(args.cfg)
     prompts = load_prompt_config(cfg)
-    generators = cfg["generate"]["generators"]
     # ':' is legal in a POSIX filename but confuses shell completion, scp-style
     # host:path parsing and Windows entirely, so the label's separator becomes
     # '_' in the filename only. The label itself keeps the colon.
-    variant = args.variant or (
-        generated_by_label(generators[0]["model"], cfg).replace(":", "_")
-        if len(generators) == 1
-        else "multi"
-    )
+    variant = args.variant or default_variant(cfg)
     print(f"Prompt config: {prompt_config_path(cfg).relative_to(BASE_DIR)}")
 
     df = load_parquet(prompts_path(cfg))

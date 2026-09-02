@@ -39,10 +39,14 @@ rather than writing NaN for them.
 
 Present when the holdout holds only machine rows:
 
-  accuracy              the share flagged machine at the source's Youden's J
-                        threshold. On a single-class set this is identically
-                        RECALL, and a detector that answers "machine" to
-                        everything scores 1.000. That is not a defect of the
+  accuracy              the share flagged machine. On a trained variant that
+                        is at the source's Youden's J threshold; on a ❄
+                        baseline it is at the config's declared cutoff, which
+                        depends on no source at all (see
+                        ``cd_core.baseline_fits_threshold``). On a
+                        single-class set this is identically RECALL, and a
+                        detector that answers "machine" to everything scores
+                        1.000. That is not a defect of the
                         measurement, it is the ceiling of it, and every figure
                         this module draws marks that ceiling. Read it as a
                         detection rate, never as a quality score.
@@ -53,8 +57,12 @@ Present when the holdout holds only machine rows:
                         corpus that has humans; what is measured here is only
                         what that costs in detections.
   declared_accuracy     baselines only: the same share at the config's declared
-                        cutoff (the paper's constant), which saw no data at all.
-                        The off-the-shelf reading.
+                        cutoff, which saw no data at all. Under the default
+                        (``baseline_fit_threshold`` off) this is IDENTICAL to
+                        ``accuracy`` above -- the declared cutoff is what
+                        produced it -- and it is kept as its own key only so
+                        that a run with the fit switched on still reports the
+                        off-the-shelf reading beside the fitted one.
   n, n_machine, n_human, confusion, class_balance
 
 Absent, because the corpus has no human row to define them on:
@@ -109,11 +117,18 @@ from epai.utils.cd_core import (
     mean_std_over_seeds,
     metrics_dict,
     oracle_tpr_key,
+    print_row_mark_legend,
+    row_mark_pad,
     transported_fpr_key,
     transported_tpr_key,
     TPR_AT_FPR_LEVELS,
 )
-from epai.utils.corpus_utils import CorpusSpec, eval_only_specs, parquet_schema
+from epai.utils.corpus_utils import (
+    CorpusSpec,
+    eval_only_specs,
+    parquet_schema,
+    pooled_source_name,
+)
 from epai.utils.preflight_utils import RULE, Report
 from epai.utils.train_utils import CLF_TARGET_COL, stack_features
 from epai.utils.variant_utils import (
@@ -379,10 +394,18 @@ def evaluate_baseline_on_holdout(
     """One zero-shot score column on one holdout corpus. Same rule, same source.
 
     ``declared_accuracy`` is the extra number a baseline can report and a trained
-    variant cannot: the share flagged machine by the config's DECLARED cutoff --
-    the paper's constant, which saw no data at all. It is the only genuinely
-    zero-shot reading in the whole run, and on an all-machine corpus it is the
-    one an off-the-shelf deployment would actually get.
+    variant cannot: the share flagged machine by the config's DECLARED cutoff,
+    which saw no data at all, and on an all-machine corpus is what an
+    off-the-shelf deployment would actually get.
+
+    Under the default operating point (``cd_core.baseline_fits_threshold``, off
+    unless a config asks) ``label_threshold`` and ``cal_thresholds`` arrive as
+    None, which makes ``accuracy`` here the declared reading too -- the two keys
+    then carry the same number, and the ``*_at_srcfpr_*`` keys are absent
+    because there was no transported threshold to apply. That is the intended
+    shape: on an eval-only corpus with no human rows, a threshold transported
+    from a training corpus is the ONLY thing a fit could have contributed, and
+    turning it off leaves a figure whose every bar is genuinely zero-shot.
     """
     keep = _exclude_seen(hold, train_groups or set())
     if hold.scores is None or not keep.any():
@@ -551,6 +574,9 @@ def _row_identity(payload: dict) -> dict:
     }
     if payload.get("column"):
         row["column"] = payload["column"]
+    # See cd_core.baseline_was_fitted: what the ❄ on this row may claim.
+    if "fit_threshold" in payload:
+        row["fit_threshold"] = bool(payload["fit_threshold"])
     if payload.get("hybrid"):
         row["hybrid"] = True
         row["aux_column"] = payload.get("aux_column")
@@ -633,6 +659,17 @@ def holdout_comparison(
         "n_unscored": int(hold.n_missing_dropped),
         "source_names": list(source_order),
         "source_labels": dict(source_labels),
+        # Which single column the figure should draw when it draws one. The
+        # pooled row -- the model trained on the whole file -- is the only
+        # source that is not an arbitrary pick, so an in-domain run names it
+        # here. A cross-domain or lodo run has no such row and leaves this None,
+        # which the figure reads as "average the sources instead". None rather
+        # than a guessed default: a figure that silently picked the first source
+        # would be showing one domain's calibration and calling it the result.
+        "primary_source": (
+            pooled_source_name(cfg)
+            if pooled_source_name(cfg) in source_order else None
+        ),
         "subtitle": (
             f"{hold.spec.source} · {int(len(hold.df))} rows "
             f"({', '.join(f'{k} {v}' for k, v in hold.class_counts.items())}) · "
@@ -815,18 +852,25 @@ def print_holdout_table(
     if not rows:
         return
     labels = payload.get("source_labels") or {}
-    specs = holdout_metric_specs()
-    present = [s for s in specs if any(f"{s.key}_mean" in r for r in rows)]
-    if not present:
+    # Per metric, the rows that actually carry it. A zero-shot row reports no
+    # tpr@srcFPR (there is no transported threshold behind it), and printing it
+    # as `nan%` in every column would read as a measurement rather than as an
+    # absence. Dropped from that table instead, and counted under it.
+    by_spec = [
+        (spec, [r for r in rows if f"{spec.key}_mean" in r])
+        for spec in holdout_metric_specs()
+    ]
+    by_spec = [(spec, present) for spec, present in by_spec if present]
+    if not by_spec:
         return
 
     single = payload.get("single_class")
     width = max(26, max((len(r["label"]) for r in rows), default=0) + 4)
     col = max(10, max((len(labels.get(n, n)) for n in source_order), default=0) + 2)
 
-    for spec in present:
+    for spec, spec_rows in by_spec:
         order = sorted(
-            rows,
+            spec_rows,
             key=lambda r: (-float(r.get(f"{spec.key}_mean", -1.0)), str(r["label"])),
         )
         header = (
@@ -844,8 +888,7 @@ def print_holdout_table(
         print(header)
         print("-" * max(RULE, len(header)))
         for r in order:
-            mark = "★ " if r.get("baseline") else "  "
-            line = f"{mark + r['label']:<{width}}"
+            line = f"{row_mark_pad(r) + r['label']:<{width}}"
             for n in source_order:
                 value = r.get("per_source", {}).get(n, {}).get(f"{spec.key}_mean")
                 line += (
@@ -870,6 +913,14 @@ def print_holdout_table(
             line += f"{mean*100:>{col-1}.1f}%{worst*100:>8.1f}%{ci:>16}"
             print(line)
         print("-" * max(RULE, len(header)))
+        omitted = len(rows) - len(order)
+        if omitted:
+            print(
+                f"  {omitted} detector(s) omitted: they report no {spec.short}. A "
+                f"zero-shot row has none by construction — that metric is a "
+                f"threshold placed at a nominal FPR on human rows from a training "
+                f"corpus, and placing one is what a zero-shot row does not do."
+            )
 
     n = payload.get("n")
     print(f"  {payload['holdout_label']}: {n} rows, {payload.get('class_balance')}")
@@ -890,5 +941,4 @@ def print_holdout_table(
         "  spread is something else: how much the number moved as the SOURCE's\n"
         "  threshold changed."
     )
-    if any(r.get("baseline") for r in rows):
-        print("  ★ zero-shot baseline: no classifier trained")
+    print_row_mark_legend(rows)

@@ -14,6 +14,7 @@ things live outside it, each so it can be swapped independently:
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -159,9 +160,21 @@ def load_pipeline_config(path: Path) -> dict:
     generators = cfg["generate"].get("generators") or []
     if not generators:
         raise ValueError(f"{path}: generate.generators must list at least one generator")
+    allowed_generator_keys = {"model", "provider", "base_url", "api_key_env"}
     for g in generators:
         if not g.get("model"):
             raise ValueError(f"{path}: generator {g!r} needs a model")
+        unknown = g.keys() - allowed_generator_keys
+        if unknown:
+            raise ValueError(
+                f"{path}: generator {g['model']!r} has unknown key(s): {sorted(unknown)}"
+            )
+        # Resolves the provider shorthand and checks base_url/api_key_env agree;
+        # a bad provider name should fail here, not after the fetch.
+        try:
+            generator_endpoint(g)
+        except ValueError as exc:
+            raise ValueError(f"{path}: {exc}") from exc
     # `generated_by` is derived as <model_slug>:<prompt_config>, so two
     # generators are distinguishable only if their models are — and two models
     # whose slugs collide ("gpt-5.4-mini" vs "gpt_5_4_mini") would silently
@@ -405,6 +418,59 @@ def generated_by_label(model: str, cfg: dict) -> str:
     the one field in the corpus that can disagree with what actually happened.
     """
     return f"{model_slug(model)}:{cfg['prompt_config']}"
+
+
+# The generate stage sends only ``model`` and ``messages``, so any
+# OpenAI-compatible endpoint serves. ``provider`` is a shorthand for the two
+# hosts this project uses; a bare ``base_url`` + ``api_key_env`` covers any
+# other. Absent both, a generator is plain OpenAI, exactly as before.
+GENAI4SCIENCE_BASE_URL_DEFAULT = "https://genai.science-cloud.hu/api"
+
+
+def generator_endpoint(g: dict) -> tuple[str | None, str]:
+    """``(base_url, api_key_env)`` for one ``generators`` entry.
+
+    ``base_url`` ``None`` means OpenAI's own endpoint — the SDK's default — so
+    an entry with neither ``provider`` nor ``base_url`` behaves as it did before
+    this routing existed. ``api_key_env`` is always a name, never a key: the
+    value is read from the environment when the client is built.
+    """
+    provider = g.get("provider")
+    base_url = g.get("base_url")
+    api_key_env = g.get("api_key_env")
+
+    if provider is None:
+        if base_url and not api_key_env:
+            raise ValueError(
+                f"generator {g.get('model')!r}: base_url is set but api_key_env "
+                "is not — name the env var holding that endpoint's key"
+            )
+        return base_url, api_key_env or "OPENAI_API_KEY"
+    if provider == "openai":
+        return base_url, api_key_env or "OPENAI_API_KEY"
+    if provider == "genai4science":
+        return (
+            base_url
+            or os.environ.get("GENAI4SCIENCE_BASE_URL", GENAI4SCIENCE_BASE_URL_DEFAULT),
+            api_key_env or "GENAI4SCIENCE_API_KEY",
+        )
+    raise ValueError(
+        f"generator {g.get('model')!r}: unknown provider {provider!r}; use "
+        "'openai', 'genai4science', or set base_url + api_key_env directly"
+    )
+
+
+def default_variant(cfg: dict) -> str:
+    """Filename suffix for the generate output when ``--variant`` is not given.
+
+    One generator: its label with the ``:`` swapped for ``_`` (``gpt56luna_0811A``).
+    Several: ``multi_<prompt_config>``, so the file still names its prompt arm
+    even though no single model owns it.
+    """
+    generators = cfg["generate"]["generators"]
+    if len(generators) == 1:
+        return generated_by_label(generators[0]["model"], cfg).replace(":", "_")
+    return f"multi_{cfg['prompt_config']}"
 
 
 def shard_path(cfg: dict, stage: str) -> Path:

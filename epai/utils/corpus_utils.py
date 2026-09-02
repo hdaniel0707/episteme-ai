@@ -228,6 +228,24 @@ POOLED_NAME = "all"
 POOLED_LABEL = "all data"
 
 
+def pooled_source_name(cfg: dict) -> str | None:
+    """The name of the corpus ``include_pooled`` adds, or None if it adds none.
+
+    The one row that was trained on everything the file holds, which is the row
+    a summary figure should show when it has space for exactly one. Honours the
+    ``include_pooled: {name: ...}`` override, so a config whose own corpora are
+    already called ``all`` still gets the right answer. Returns None for a
+    cross-domain or lodo config, where every row leaves something out and there
+    is no "trained on all of it" row to prefer.
+    """
+    data = cfg.get("data") or {}
+    entry = data.get("include_pooled")
+    if not entry or not data.get("datasets"):
+        return None
+    entry = entry if isinstance(entry, dict) else {}
+    return str(entry.get("name") or POOLED_NAME)
+
+
 def pooled_spec(cfg: dict, base_dir: Path = BASE_DIR) -> CorpusSpec:
     """The whole parquet as one corpus, for an in-domain config's pooled row.
 

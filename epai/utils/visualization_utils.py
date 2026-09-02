@@ -24,6 +24,8 @@ from epai.utils.cd_core import (
     CD_CHANCE_RATE,
     SCORE_DIST_KEY,
     MetricSpec,
+    TRAINED_MARK,
+    ZEROSHOT_MARK,
     cell_metric_specs,
     level_tag,
     HEADLINE_METRICS,
@@ -31,8 +33,10 @@ from epai.utils.cd_core import (
     headline_metric_specs,
     present_headline_specs,
     present_metric_specs,
+    row_mark,
     split_diag,
     transported_fpr_key,
+    zeroshot_legend_text,
 )
 
 
@@ -1382,6 +1386,12 @@ def plot_cd_score_hist(out_dir: Path, payload: dict) -> None:
     # the mask below only says which panels are in-domain (tinted) so the cut
     # can be read against a same-corpus distribution as well as a transferred
     # one.
+    #
+    # Under `cut_kind: "declared"` none of that applies: the cut is the config's
+    # fixed cutoff for a zero-shot baseline, identical on every row, fit on no
+    # rows at all. Then no panel set it, `level` means nothing, and the tint
+    # would be claiming a provenance the line does not have.
+    declared_cut = str(dist.get("cut_kind", "srcfpr")) == "declared"
     in_domain = domain_mask(payload.get("summary") or {}, names)
     lodo = bool(in_domain.size) and not in_domain.diagonal().any()
 
@@ -1390,6 +1400,13 @@ def plot_cd_score_hist(out_dir: Path, payload: dict) -> None:
 
     note = _wrap_note(
         (
+            "The cut is this detector's DECLARED cutoff, straight from the "
+            "config — the same number on every panel of the figure, fit on no "
+            "rows at all. So every panel is a fair look at where an "
+            "off-the-shelf deployment of it would land, and the tinted panels "
+            "are in-domain only in the sense that some other model trained "
+            "there."
+            if declared_cut else
             f"Each row's cut is fit on a calibration slice held out from every "
             f"panel — the tinted panels are the in-domain ones — where {pct} of "
             f"human scores fall right of it, then drawn unmoved onto the corpus "
@@ -1426,7 +1443,7 @@ def plot_cd_score_hist(out_dir: Path, payload: dict) -> None:
             # The panels that defined the cut. Tinted and named, so a reader
             # scanning a row can see where the line came from -- the whole
             # figure is the difference between those panels and the rest.
-            if in_domain[i, j]:
+            if in_domain[i, j] and not declared_cut:
                 ax.set_facecolor("#eef2f7")
                 ax.text(0.025, 0.94,
                         "cut set on these" if lodo else "cut set here",
@@ -1488,13 +1505,19 @@ def plot_cd_score_hist(out_dir: Path, payload: dict) -> None:
         Patch(facecolor=CD_MACHINE_COLOR, alpha=0.55, edgecolor=CD_MACHINE_COLOR,
               label="AI"),
         Line2D([], [], color=CD_CUT_COLOR, linewidth=1.6,
-               label=f"cut at {pct} source FPR"),
+               label="declared cutoff (fit on nothing)" if declared_cut
+               else f"cut at {pct} source FPR"),
         Patch(facecolor="0.90", edgecolor="none", label="called machine"),
     ]
 
     fig.suptitle(
-        f"{alg_label} — score distributions and the transported {pct} FPR cut\n"
-        "rows: CALIBRATED ON  ·  columns: TESTED ON"
+        f"{alg_label} — score distributions and "
+        + ("the declared cutoff" if declared_cut
+           else f"the transported {pct} FPR cut")
+        + "\n"
+        + ("rows: THE POOL THE SPLIT CAME FROM  ·  columns: TESTED ON"
+           if declared_cut
+           else "rows: CALIBRATED ON  ·  columns: TESTED ON")
         + ("  (leave-one-domain-out)" if lodo else "")
     )
     # Placed by hand: supxlabel's default y lands in the caption strip, and every
@@ -1561,40 +1584,50 @@ def plot_clf_cd_results(exp_dir: Path) -> None:
 # drawn in its own colour reads as a different kind of measurement rather than a
 # competitor on the same scale.
 #
-# What marks a baseline is the ★ on its row label, in one place. The old figure
+# What marks a baseline is the ❄ on its row label, in one place. The old figure
 # had it three ways at once -- an oversized ★ marker, a crimson hue, and the
 # label mark -- with crimson also meaning "reference line" a few inches away.
 CD_IN_DOMAIN_COLOR = "steelblue"
 CD_TRANSFER_COLOR = "orange"
-# The ★ on a baseline's row label and in the legend. Same orange as the dot it
-# stands for, so the mark and the mark's data point read as one thing.
+# The hue a baseline's DATA marker takes. Deliberately the same orange every
+# other transfer dot uses: the figure is a comparison, and a row drawn in its
+# own hue reads as a different kind of measurement rather than a competitor on
+# the same scale. The mark on the row label is what says which kind it is.
 CD_BASELINE_COLOR = CD_TRANSFER_COLOR
 
-# Zero-shot baseline families. The hatch is what tells them apart wherever a
-# figure draws bars rather than markers; on the marker figures they are told
-# apart by the family name on the legend's ★ entry.
+# Zero-shot baseline families. Nothing on a figure distinguishes them any more:
+# the bars are solid and the family is spelled out in the row's own label. The
+# entries survive because a family still names things -- the legend line, the
+# printed summaries -- and dropping the mapping would only scatter those
+# strings.
+#
+# The per-family HATCH is gone on purpose. It was a second encoding of the one
+# bit the ❄ already carries, and it encoded it badly: below about a centimetre
+# of bar, "/" and "\\" are the same texture, and a pattern per family implies an
+# ordering the families do not have.
 CD_BASELINE_STYLES: dict[str, dict] = {
-    "binoculars": {"label": "Binoculars baseline", "color": CD_BASELINE_COLOR,
-                   "hatch": "/"},
-    "llm_judge": {"label": "LLM Judge baseline", "color": CD_BASELINE_COLOR,
-                  "hatch": "\\"},
-    # The two families that read high ⇒ machine. Hatches are picked to stay
-    # apart from / and \\ at small bar widths, where the two diagonals start to
-    # look alike.
-    "fastdetect": {"label": "Fast-DetectGPT baseline", "color": CD_BASELINE_COLOR,
-                   "hatch": "x"},
-    "detector": {"label": "Pretrained detector baseline", "color": CD_BASELINE_COLOR,
-                 "hatch": "."},
+    "binoculars": {"label": "Binoculars baseline", "color": CD_BASELINE_COLOR},
+    "llm_judge": {"label": "LLM Judge baseline", "color": CD_BASELINE_COLOR},
+    "fastdetect": {"label": "Fast-DetectGPT baseline", "color": CD_BASELINE_COLOR},
+    "detector": {"label": "Pretrained detector baseline", "color": CD_BASELINE_COLOR},
 }
 # A baseline whose family cannot be told (an older payload, a third detector).
-CD_BASELINE_FALLBACK = {
-    "label": "zero-shot baseline", "color": CD_BASELINE_COLOR, "hatch": "-"
-}
-CD_HATCH_LINEWIDTH = 0.8  # bar outline *and* hatch stroke weight
-# The hatch is only a "this is a baseline" flag, so it is drawn in translucent
-# black: it sits behind the numbers instead of competing with them, and the
-# family is carried by the hatch pattern plus the coloured ★ on the row label.
-CD_HATCH_COLOR = (0.0, 0.0, 0.0, 0.35)
+CD_BASELINE_FALLBACK = {"label": "zero-shot baseline", "color": CD_BASELINE_COLOR}
+
+# The two row marks, and the hues they are drawn in. These colour the GLYPH
+# only -- never a bar, never a data marker -- so the comparison axes keep one
+# colour scheme and the mark keeps another. Cool for the cutoff that was handed
+# to us, warm for the one fitted on rows: that is the whole mnemonic, and it is
+# why the glyphs are a snowflake and a sun rather than two arbitrary symbols.
+# See cd_core.ZEROSHOT_MARK for why they are BMP characters.
+CD_ZEROSHOT_MARK_COLOR = "#3f7fb5"
+CD_TRAINED_MARK_COLOR = "#d98b28"
+
+#: Legend text for the trained mark. Its zero-shot counterpart is not a constant:
+#: what ❄ is allowed to claim depends on how the rows were produced, so it comes
+#: from ``cd_core.zeroshot_legend_text`` per figure.
+CD_TRAINED_LEGEND = f"{TRAINED_MARK} trained on the training pool"
+
 # Items trained on the shared feature set, and hybrids, are the same kind of
 # thing (a trained classifier), so they share a colour and are told apart by
 # marker shape -- ● vs ◆ -- not by hue, which is reserved for the baselines.
@@ -1618,37 +1651,45 @@ def _cd_baseline_style(row: dict) -> dict:
     return CD_BASELINE_STYLES.get(kind, CD_BASELINE_FALLBACK)
 
 
-def _cd_baseline_legend_styles(order: list[dict], is_baseline) -> list[dict]:
-    """The distinct baseline styles present, in the order the families are listed.
-
-    Deduplicated so a family that appears on several rows still contributes
-    exactly one legend entry, and stable so the left and right panels of a figure
-    list the same families in the same order.
-    """
-    seen: dict[str, dict] = {}
-    for row, baseline in zip(order, is_baseline):
-        if not baseline:
-            continue
-        style = _cd_baseline_style(row)
-        seen.setdefault(style["label"], style)
-    ordering = [s["label"] for s in CD_BASELINE_STYLES.values()]
-    return sorted(
-        seen.values(),
-        key=lambda s: ordering.index(s["label"]) if s["label"] in ordering else len(ordering),
-    )
-
-
 def _cd_row_mark(row: dict) -> str:
-    """Prefix for a comparison row: ★ zero-shot baseline, ◆ hybrid, else none.
+    """Prefix for a comparison row: ``❄`` zero-shot, ``☀`` trained, ``☀◆`` hybrid.
 
-    A row that is neither was trained on exactly the shared feature set, which
-    is the only case where its rank can be read straight off the figure.
+    Delegates to ``cd_core.row_mark`` so the glyph on a figure is the same
+    glyph the printed table beside it used. Unlike the old mark this is never
+    empty: "trained on exactly the shared feature set" is a claim about the row
+    and deserves to be stated, not left as the absence of a symbol.
     """
-    if row.get("baseline"):
-        return "★ "
-    if row.get("hybrid"):
-        return "◆ "
-    return ""
+    return row_mark(row)
+
+
+def _cd_mark_color(row: dict) -> str:
+    """The hue of one row's mark. Never the hue of its data -- see the constants."""
+    return CD_ZEROSHOT_MARK_COLOR if row.get("baseline") else CD_TRAINED_MARK_COLOR
+
+
+def _cd_mark_legend_handles(rows: list[dict]) -> list:
+    """Legend entries for whichever marks these rows used, or none if uniform.
+
+    The handle is deliberately empty and the glyph lives in the label text.
+    matplotlib can draw a text marker (``marker="$❄$"``) but routes it through
+    mathtext, which is a second font-resolution path and a second place for a
+    missing glyph to appear as a box; the label text goes through the same
+    renderer as every axis label on the figure, which is already known to work
+    for these characters.
+
+    Returns nothing when every row is the same kind: a legend that explains a
+    distinction the figure does not draw is noise.
+    """
+    from matplotlib.lines import Line2D
+
+    kinds = {bool(r.get("baseline")) for r in rows}
+    if len(kinds) < 2:
+        return []
+    return [
+        Line2D([], [], linestyle="none", marker="none",
+               label=zeroshot_legend_text(rows)),
+        Line2D([], [], linestyle="none", marker="none", label=CD_TRAINED_LEGEND),
+    ]
 
 
 def _num(value, default: float = float("nan")) -> float:
@@ -1745,7 +1786,8 @@ CD_GUTTER_FRAC = 0.26
 CD_SD_LINEWIDTH = 2.6
 
 #: Marker size of a mean. One size and one shape for every row: a baseline used
-#: to draw an oversized ★ here and now draws the same ● as everything else.
+#: to draw an oversized ★ here and now draws the same ● as everything else, and
+#: what it is is said once, on the row label.
 CD_MARKER_SIZE = 8.0
 
 
@@ -1771,7 +1813,7 @@ def _row_metric_signature(row: dict, spec: MetricSpec) -> tuple:
 
     Two rows with the same signature produce the same bar, the same scatter point
     and the same matrix line, so drawing both says nothing the first did not.
-    The mark and the baseline family are part of it: a ★ row and a plain row that
+    The mark and the baseline family are part of it: a ❄ row and a ☀ row that
     happened to tie are still two different claims and must not merge.
     """
     matrix = row.get(spec.key)
@@ -2112,16 +2154,10 @@ def _cd_seed_legend(order: list[dict], n_seeds: int) -> list:
             else "in-domain (diagonal)",
         ),
     ]
-    # The ★, not a second dot: a baseline's transfer dot is the same orange as
-    # everyone else's, so a marker entry here would just repeat the first one.
-    # What needs explaining is the mark on its row label.
-    is_baseline = [bool(r.get("baseline")) for r in order]
-    handles += [
-        Line2D([], [], linestyle="none", marker="*", color=style["color"],
-               markeredgecolor="black", markeredgewidth=0.4, markersize=11,
-               label=f"★ {style['label']} (zero-shot)")
-        for style in _cd_baseline_legend_styles(order, is_baseline)
-    ]
+    # The row marks, not a second dot: a baseline's transfer dot is the same
+    # orange as everyone else's, so a marker entry here would just repeat the
+    # first one. What needs explaining is the ❄ / ☀ on the row label.
+    handles += _cd_mark_legend_handles(order)
     handles.append(
         Line2D([], [], color="0.45", linewidth=CD_SD_LINEWIDTH,
                solid_capstyle="butt",
@@ -2297,8 +2333,9 @@ def _plot_cd_ranked(
                         color=CD_SUITE_MEAN_COLOR, linewidth=1.2, zorder=2)
             _cd_draw_estimate(ax, y[idx], in_stats[idx], color=CD_IN_DOMAIN_COLOR,
                               filled=False, zorder=5)
-            # Same ● whatever produced the row; the hue is what says zero-shot
-            # baseline. A ★ here would make shape carry two meanings at once.
+            # Same ● whatever produced the row: the row label's ❄ / ☀ says
+            # which kind it is. A second shape here would make shape carry two
+            # meanings at once.
             _cd_draw_estimate(ax, y[idx], tr_stats[idx],
                               color=_cd_transfer_color(row), filled=True, zorder=7)
         ax.axvline(spec.reference, linestyle="--", color="red", linewidth=1.2,
@@ -2411,10 +2448,10 @@ def _plot_cd_comparison(
     Zero-shot baselines (``baseline: true``) draw the same ● in the same orange
     as every other row -- the figure is a comparison, and a row in its own hue
     reads as a different kind of measurement rather than a competitor on one
-    scale. A ★ on the row label is what marks them. Hybrids (``hybrid: true``)
-    carry a ◆ there for the same reason: they were trained on extra information
-    (the Binoculars score on top of the shared feature set) and their rank should
-    say so.
+    scale. A ❄ on the row label is what marks them, against the ☀ every trained
+    row carries. Hybrids (``hybrid: true``) add a ◆ to that ☀: they were trained
+    on extra information (a detector score on top of the shared feature set) and
+    their rank should say so.
 
     This used to write a second figure beside the ranked one: every source->target
     cell of every item as a heatmap. It is gone. The per-variant matrices already
@@ -2643,7 +2680,7 @@ def _suite_row_order(rows: list[dict], spec: MetricSpec) -> list[dict]:
 def _draw_cd_row_mark_label(
     ax, label: str, row: dict, y: float, *, x_offset: float = -6.0
 ) -> None:
-    """A row label whose ★ / ◆ is coloured and whose name is not.
+    """A row label whose ❄ / ☀ is coloured and whose name is not.
 
     A tick label is a single Text artist and cannot hold two colours, so the
     label is drawn as a packed box right-aligned where the tick label would have
@@ -2662,11 +2699,10 @@ def _draw_cd_row_mark_label(
                                                      fontweight="bold"))
     ]
     if mark:
-        mark_color = (
-            _cd_baseline_style(row)["color"] if row.get("baseline")
-            else CD_HYBRID_COLOR
+        parts.insert(
+            0,
+            TextArea(mark, textprops=dict(color=_cd_mark_color(row), fontsize=10)),
         )
-        parts.insert(0, TextArea(mark, textprops=dict(color=mark_color, fontsize=10)))
     ax.add_artist(
         AnnotationBbox(
             HPacker(children=parts, align="center", pad=0.0, sep=3.0),
@@ -2917,8 +2953,9 @@ def _plot_suite_dumbbells(
 # Written by epai/ai_detection/train/run_clf_in_domain.py. One corpus, one
 # held-out split, so there is no matrix and no transfer axis -- the figures say
 # what a variant scores at home and nothing about anywhere else. They reuse the
-# cross-domain marks (★ baseline, ◆ hybrid) and the 50% chance line so the two
-# figure sets can sit side by side without the symbols changing meaning.
+# cross-domain marks (❄ zero-shot, ☀ trained, ◆ hybrid) and the 50% chance line,
+# so the two figure sets can sit side by side without the symbols changing
+# meaning.
 
 
 def _id_rows(payload: dict) -> list[dict]:
@@ -3163,7 +3200,6 @@ def plot_clf_id_comparison(exp_dir: Path, payload: dict) -> None:
     labels = [f"{_cd_row_mark(r)}{r['label']}" for r in order]
     test = np.array([r["accuracy_mean"] for r in order])
     test_std = np.array([r["accuracy_std"] for r in order])
-    is_baseline = np.array([bool(r.get("baseline")) for r in order])
     # Payloads written before the train pass existed carry no train score. Drawing
     # a NaN bar would label it "nan"; drop the series instead so an older result
     # replots as what it is -- held-out accuracy alone.
@@ -3188,12 +3224,11 @@ def plot_clf_id_comparison(exp_dir: Path, payload: dict) -> None:
         n_comp = sum(len(v) for v in composition.values())
         plot_h = max(plot_h, 0.36 * n_comp + 1.0)
 
-    # What the legend will hold: the bar series, the chance line, and one star per
-    # baseline family present. Counted here rather than after plotting, so the
-    # strip is sized to the rows that actually get drawn.
-    n_legend = (2 if has_train else 1) + 1 + len(
-        _cd_baseline_legend_styles(order, is_baseline)
-    )
+    # What the legend will hold: the bar series, the chance line, and the two
+    # row-mark entries when both kinds of row are present. Counted here rather
+    # than after plotting, so the strip is sized to the rows that actually get
+    # drawn.
+    n_legend = (2 if has_train else 1) + 1 + len(_cd_mark_legend_handles(order))
     legend_in, footnote_in = _legend_strip_in(n_legend), _id_footnote_in()
     fig_h = plot_h + legend_in + footnote_in
 
@@ -3218,14 +3253,6 @@ def plot_clf_id_comparison(exp_dir: Path, payload: dict) -> None:
                  color=ID_TEST_COLOR, label="test (held out)")
     ax.bar_label(b2, fmt="%.3f", fontsize=7, padding=2)
     bars.append(b2)
-    # Baselines keep the cross-domain hatch, per family, so a starred row means
-    # the same thing in both figure sets.
-    for idx in np.nonzero(is_baseline)[0]:
-        style = _cd_baseline_style(order[idx])
-        for bar in (b[idx] for b in bars):
-            bar.set_hatch(style["hatch"])
-            bar.set_edgecolor(CD_HATCH_COLOR)
-            bar.set_linewidth(CD_HATCH_LINEWIDTH)
     # The gap is the point of the panel, so it is written where it happens rather
     # than left to be eyeballed off two bar ends.
     for idx, r in enumerate(order):
@@ -3244,13 +3271,7 @@ def plot_clf_id_comparison(exp_dir: Path, payload: dict) -> None:
     ax.set_title("Ranked by held-out accuracy", fontsize=10)
 
     handles, _ = ax.get_legend_handles_labels()
-    from matplotlib.lines import Line2D
-
-    for style in _cd_baseline_legend_styles(order, is_baseline):
-        handles.append(
-            Line2D([], [], linestyle="none", marker="*", color=style["color"],
-                   markersize=11, label=style["label"])
-        )
+    handles += _cd_mark_legend_handles(order)
     if ax_comp is not None:
         _plot_split_composition(ax_comp, composition)
 
@@ -3279,10 +3300,7 @@ def plot_clf_id_comparison(exp_dir: Path, payload: dict) -> None:
         bbox_transform=fig.transFigure,
         ncol=max(1, min(len(handles), 3)), frameon=False,
     )
-    prev = plt.rcParams["hatch.linewidth"]
-    plt.rcParams["hatch.linewidth"] = CD_HATCH_LINEWIDTH
     fig.savefig(exp_dir / f"{slug}_comparison.png", dpi=150, bbox_inches="tight")
-    plt.rcParams["hatch.linewidth"] = prev
     plt.close(fig)
 
     _plot_id_comparison_metrics(
@@ -3488,8 +3506,8 @@ def _plot_id_corpus_metric(
             "and not evidence to add to them."
             if pooled else ""
         ),
-        "★ zero-shot baseline (no classifier trained) · ◆ hybrid: also saw an "
-        "auxiliary column, so it is not ranked on equal information."
+        f"{zeroshot_legend_text(order)} · {TRAINED_MARK} trained · ◆ hybrid: "
+        "also saw an auxiliary column, so it is not ranked on equal information."
         if any(r.get("baseline") or r.get("hybrid") for r in order) else "",
     )
     handles, legend_labels = axes[0].get_legend_handles_labels()
@@ -3794,16 +3812,6 @@ def plot_sweep_holdout(
     ax.bar_label(b_dev, fmt="%.3f", fontsize=8, label_type="center", color="white")
     ax.bar_label(b_held, fmt="%.3f", fontsize=8, label_type="center", color="white")
 
-    # Baselines keep the hatch and the ★ they carry everywhere else in this
-    # module, so a zero-shot rule never reads as another tuned model.
-    for idx, entry in enumerate(entries):
-        if entry["row"].get("baseline"):
-            style = _cd_baseline_style(entry["row"])
-            for bar in (b_dev[idx], b_held[idx]):
-                bar.set_hatch(style["hatch"])
-                bar.set_edgecolor(CD_HATCH_COLOR)
-                bar.set_linewidth(CD_HATCH_LINEWIDTH)
-
     for idx, entry in enumerate(entries):
         for offset, cells, color in (
             (h / 2, entry["dev"], SWEEP_DEV_COLOR),
@@ -3858,8 +3866,8 @@ def plot_sweep_holdout(
     fig.text(
         0.5, -0.075,
         f"held out: {', '.join(holdout)}  ·  hollow marks are the individual "
-        f"source→target cells behind each mean  ·  ★ zero-shot baseline, "
-        f"◆ hybrid (extra input)",
+        f"source→target cells behind each mean  ·  {ZEROSHOT_MARK} zero-shot "
+        f"(declared cutoff), {TRAINED_MARK} trained, ◆ hybrid (extra input)",
         ha="center", va="top", fontsize=8, color=SWEEP_INK_MUTED,
     )
 

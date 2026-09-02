@@ -101,9 +101,9 @@ from epai.science_data.config import (
     BASE_DIR,
     DEFAULT_CFG_PATH,
     DEFAULT_QUERIES_PATH,
+    default_variant,
     embed_config,
     final_path,
-    generated_by_label,
     load_pipeline_config,
 )
 from epai.science_data.run_pipeline import (
@@ -584,12 +584,7 @@ def main() -> None:
     # than after the fetch — and because the variant, and therefore every path
     # below, is derived from it.
     cfg = load_pipeline_config(args.cfg)
-    generators = cfg["generate"]["generators"]
-    variant = args.variant or (
-        generated_by_label(generators[0]["model"], cfg).replace(":", "_")
-        if len(generators) == 1
-        else "multi"
-    )
+    variant = args.variant or default_variant(cfg)
 
     src = final_path(cfg, variant)
     # One promoted file, filled in place by standardize, score and embed. The

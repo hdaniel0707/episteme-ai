@@ -178,9 +178,9 @@ feature_sets:
     id: "cuevec"
     label: "judge cues (11-dim)"
 
-  - columns: [emb_luar_crud, llm_judge_cuevec_gpt56luna_v3]
-    id: "luar_crud+cuevec"
-    label: "luar_crud + judge cues"
+  # - columns: [emb_luar_crud, llm_judge_cuevec_gpt56luna_v3]
+  #   id: "luar_crud+cuevec"
+  #   label: "luar_crud + judge cues"
 
 extra_features: []
 extra_binary_text: []
@@ -300,6 +300,21 @@ model:
 # Optional zero-shot score baselines
 # ---------------------------------------------------------------------------
 
+# WHERE A BASELINE'S OPERATING POINT COMES FROM. Off, and it should stay off:
+# every ❄ row below is then read at the cutoff its entry declares, which is the
+# only reading that is actually zero-shot and the only one that can show a
+# published operating point landing in the wrong place on a new corpus.
+#
+# Set it true and each baseline instead gets a Youden's J threshold fit on the
+# same calibration slice, from the same seed, as the trained variants, plus the
+# transported tpr_at_srcfpr_* / fpr_at_srcfpr_* metrics that only exist once a
+# threshold has been placed on human rows. That buys comparability — accuracy
+# and macro F1 stop depending on whatever number a config happened to carry —
+# at the price of the failure mode the ❄ rows exist to expose, and it makes the
+# ❄ mark on every figure a lie. Use it to answer "how good is this SCORE",
+# never "how good is this DETECTOR". See cd_core.baseline_fits_threshold.
+baseline_fit_threshold: false
+
 # A baseline runs on every dataset or on none: its column must exist in all four
 # parquets, or the preflight refuses to start. That is deliberate — a ★ row whose
 # mean silently covered two of four datasets would sit in the same ranking as
@@ -334,21 +349,29 @@ model:
 # 0.8536432310785527). The other four carry a PLACEHOLDER 0.95 — a declared
 # operating point so the run is reproducible, not a calibrated one.
 #
-# EVERY METRIC ON EVERY ROW HERE IS READABLE, placeholder or not. Accuracy,
-# macro F1 and the confusion matrix no longer come from the declared cutoff
-# above — they come from a Youden's J threshold fit on the calibration slice
-# carved out of each row's training pool (cd_core.evaluate_score_rule /
-# cd_core.BaselineKind), the same procedure and the same rows a trained
-# variant uses. The declared cutoff is kept for reference and is still what
-# an ROC sweeps around; it no longer gates which numbers mean something.
+# THE CUTOFF ABOVE IS THE WHOLE RULE. Accuracy, macro F1 and the confusion
+# matrix all come from it, so a ❄ row is what an off-the-shelf deployment of
+# that detector would get on these rows and nothing on it was fitted to
+# anything. The `*_at_srcfpr_*` metrics are NOT reported for these rows: placing
+# a threshold at a nominal FPR needs human rows from the training pool to place
+# it on, and a row that did that is not zero-shot however it is labelled. AUROC
+# and tpr_at_fpr_* survive — both are read off the evaluation cell's own ROC,
+# which no training corpus ever touches.
+#
+# WHICH MEANS A PLACEHOLDER CUTOFF IS NOW VISIBLE IN THE BARS, where it used to
+# be washed out by a refit. That is the intended behaviour and not a reason to
+# switch the refit back on: a detector whose published operating point lands in
+# the wrong place on a new corpus IS broken there. Fix it by calibrating the
+# cutoff or by dropping the column — see `baseline_fit_threshold` at the top of
+# this file for the escape hatch and for the argument against using it.
 binoculars_baseline:
   enabled: true
   columns:
-    - {column: "binoculars_score", threshold: 0.9015310749276843, label: "binoculars falcon-7b"}
-    - {column: "binoculars_score_qwen25_7b",   threshold: 0.95, label: "binoculars qwen2.5-7b"}
-    - {column: "binoculars_score_falcon3_7b",  threshold: 0.95, label: "binoculars falcon3-7b"}
-    - {column: "binoculars_score_mistral_v03", threshold: 0.95, label: "binoculars mistral-v0.3"}
-    - {column: "binoculars_score_llama31_8b",  threshold: 0.95, label: "binoculars llama3.1-8b"}
+    - {column: "binoculars_score", threshold: 0.9015, label: "binoculars falcon-7b"}
+    - {column: "binoculars_score_qwen25_7b",   threshold: 0.9015, label: "binoculars qwen2.5-7b"}
+    - {column: "binoculars_score_falcon3_7b",  threshold: 0.9015, label: "binoculars falcon3-7b"}
+    - {column: "binoculars_score_mistral_v03", threshold: 0.9015, label: "binoculars mistral-v0.3"}
+    - {column: "binoculars_score_llama31_8b",  threshold: 0.9015, label: "binoculars llama3.1-8b"}
 
 # The judge rows work exactly like the Binoculars rows above: `columns` is the
 # switch, each entry becomes one ★ row in the ranking and one source x target
@@ -363,10 +386,10 @@ binoculars_baseline:
 # (epai/ai_detection/score/add_llm_judge_scores.py), which is what makes them
 # directly comparable.
 #
-# EVERY METRIC HERE IS READABLE, same as the Binoculars rows above. 0.5 is the
-# judge's own neutral point, not a stand-in cutoff, and it means the same
-# thing to both judges; accuracy/macro F1/the confusion matrix are fit the
-# same Youden's J way as every other row's regardless.
+# THE CUTOFF IS REAL HERE, unlike several of the Binoculars and Fast-DetectGPT
+# rows above: 0.5 is the judge's own neutral point, not a stand-in, and it means
+# the same thing to every judge. So these rows are the cleanest read on the
+# figure of what a declared operating point actually delivers.
 #
 # WHAT TO WATCH. gpt56luna is the API control. qwen3-14b is the local judge
 # (`--model qwen3-14b`, bf16 on the A100) and it sits on the capability axis the
@@ -424,9 +447,10 @@ llm_judge_baseline:
 # machine). The other three are uncalibrated and carry a PLACEHOLDER 1.2 — the
 # midpoints of the four pairs upstream *did* calibrate cluster between 0.83 and
 # 1.43, so 1.2 is in the right region of the scale without pretending to be
-# fitted for these pairs. As with every other family, the declared cutoff no
-# longer drives accuracy or macro F1 (those come from Youden's J on the
-# calibration slice); it is the reference reading and what the ROC sweeps around.
+# fitted for these pairs. As with every other family, that declared cutoff IS
+# what drives accuracy, macro F1 and the confusion matrix — so these three rows
+# measure the placeholder as much as the detector, and are worth reading only
+# beside `fastdetect_crit_falcon_7b`, which carries a real one.
 fastdetect_baseline:
   enabled: true
   columns:

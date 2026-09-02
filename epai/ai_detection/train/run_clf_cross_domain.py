@@ -23,8 +23,11 @@ METRICS
 -------
 Every cell is reported under several metrics, each with its own matrix and its
 own figure: accuracy and macro F1 from the predicted labels -- at a Youden's J
-threshold fit on the calibration slice, not an algorithm's default 0.5 -- and
-AUROC plus TPR at 1% and 5% FPR from the continuous score behind them.
+threshold fit on the calibration slice for a trained variant, at the declared
+cutoff for a ❄ baseline -- and AUROC plus TPR at 1% and 5% FPR from the
+continuous score behind them. A baseline reports no ``*_at_srcfpr_*``: that
+operating point can only be placed using human rows from a training corpus,
+which is the one thing a zero-shot row must not do.
 Accusing a human is the expensive error, so the low-FPR operating point is the
 one a deployed detector is actually graded on.
 
@@ -205,7 +208,7 @@ and is scored on identical rows).
 BASELINES
 ---------
 Optional zero-shot score baselines, each one more matrix, whose row on every
-comparison figure carries a ★ on its label and draws in the baseline colour. Two
+comparison figure carries a ❄ on its label and draws in the baseline colour. Two
 families, configured by ``binoculars_baseline`` and ``llm_judge_baseline``, each
 contributing one variant per score column it is given -- ``column:`` for one,
 ``columns:`` for several -- at the ``threshold`` that column names, fit to
@@ -454,7 +457,7 @@ def preflight_config(cfg: dict, report: Report) -> None:
     because they are declared once; the data is then checked once per dataset,
     with every message tagged by the dataset it belongs to. A baseline column
     missing from one dataset's parquet is an error here rather than a dropped
-    row later: a comparison whose ★ row silently covers two of four datasets is
+    row later: a comparison whose ❄ row silently covers two of four datasets is
     worse than one that refuses to start.
     """
     print("\n[1/3] config")

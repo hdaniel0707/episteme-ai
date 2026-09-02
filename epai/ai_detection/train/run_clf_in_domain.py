@@ -88,8 +88,8 @@ binomial error of a single test set and understates the real uncertainty.
 METRICS
 -------
 Accuracy and macro F1 from the labels -- at a Youden's J threshold fit on the
-calibration slice, not an algorithm's default 0.5, exactly as in
-``run_clf_cross_domain.py``; AUROC and TPR at 1% and 5% FPR from the continuous
+calibration slice for a trained variant, at the declared cutoff for a ❄
+baseline, exactly as in ``run_clf_cross_domain.py``; AUROC and TPR at 1% and 5% FPR from the continuous
 score behind them, on both row sets. The gap is not the same size for all of
 them: a model can lose almost nothing in accuracy across the split and a large
 share of its TPR at 1% FPR, because that operating point lives in the tail of
@@ -192,7 +192,9 @@ from epai.utils.cd_core import (
     metrics_dict,
     oriented_scores,
     print_headline_ranking,
+    print_row_mark_legend,
     print_split_composition,
+    row_mark_pad,
     score_metric_keys,
     split_composition,
     youden_threshold,
@@ -947,7 +949,7 @@ def print_ranking(alg_label: str, rows: list[dict], noun: str = "variant") -> No
     )
     print("-" * RULE)
     for r in order:
-        mark = "★ " if r.get("baseline") else ("◆ " if r.get("hybrid") else "  ")
+        mark = row_mark_pad(r)
         print(
             f"{mark + r['label']:<{width}}{r['feature_dim']:>6}"
             f"{r['train_accuracy_mean']*100:>9.1f}%{r['accuracy_mean']*100:>9.1f}%"
@@ -972,15 +974,7 @@ def print_ranking(alg_label: str, rows: list[dict], noun: str = "variant") -> No
             "  matrix run uses. See cd_core.carve_calibration."
         ),
     )
-    if any(r.get("baseline") for r in order):
-        print("  ★ zero-shot baseline: no classifier trained")
-    hybrids = [r for r in order if r.get("hybrid")]
-    if hybrids:
-        cols = sorted({r.get("aux_column", "?") for r in hybrids})
-        print(
-            f"  ◆ hybrid: trained on the shared features PLUS {', '.join(cols)}, so "
-            f"it is not ranked on equal information"
-        )
+    print_row_mark_legend(order)
 
 
 def run_config(cfg_path: Path, cfg: dict, alg_dir: Path) -> None:
@@ -1146,7 +1140,7 @@ def print_corpus_ranking(
     print(header)
     print("-" * max(RULE, len(header)))
     for r in order:
-        mark = "★ " if r.get("baseline") else ("◆ " if r.get("hybrid") else "  ")
+        mark = row_mark_pad(r)
         line = f"{mark + r['label']:<{width}}"
         for n in names:
             value = _num(r["per_corpus"].get(n, {}).get("accuracy_mean"))
@@ -1167,14 +1161,7 @@ def print_corpus_ranking(
     print("  mean     = unweighted over the columns; ±corpora is their spread,")
     print("             which is 'do the corpora agree', not a seed error bar.")
     print("  Chance is 50%. These are upper bounds on a deployed detector.")
-    if any(r.get("baseline") for r in order):
-        print("  ★ zero-shot baseline: no classifier trained")
-    if any(r.get("hybrid") for r in order):
-        cols = sorted({r.get("aux_column", "?") for r in order if r.get("hybrid")})
-        print(
-            f"  ◆ hybrid: trained on the shared features PLUS {', '.join(cols)}, "
-            f"so it is not ranked on equal information"
-        )
+    print_row_mark_legend(order)
 
     # The same rows under every headline metric, each one meaned over the same
     # corpora. Ranking on accuracy alone is how a variant that separates well but

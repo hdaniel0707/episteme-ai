@@ -1,0 +1,375 @@
+# Science-domain AI-detection corpus — one config for the whole pipeline.
+#
+# Unlike the other pipelines (which use one config directory per stage), every
+# stage here reads this single file. That is deliberate: the fetch stage's
+# stop-condition and the filter stage's admission test MUST agree, or the
+# "exactly N per domain after filtering" guarantee is void. One file, one set
+# of thresholds, no drift.
+#
+# Run the whole pipeline with one command:
+#   uv run python epai/science_data/run_pipeline.py --yes
+#
+# ...or a stage at a time. --cfg defaults to this file, so it can be left off
+# entirely unless you are running a different config:
+#   uv run python epai/science_data/fetch/oa_fetch.py
+#   uv run python epai/science_data/filter/filter.py
+#   uv run python epai/science_data/prompt/make_prompts.py
+#   uv run python epai/science_data/generate/generate_ai.py
+#
+# Every stage reads and writes inside data/science/. The generate stage's
+# output is the only artifact meant to leave it — move that to data/parquet/
+# by hand once the run is good.
+
+# =========================================================================
+# THE RULE: `dataset_id` names the PAPER SET. `prompt_config` names the ARM.
+# =========================================================================
+# Every path in data/science/ derives from these two, and each answers a
+# different question, so neither is a substitute for the other:
+#
+#   Different papers?  -> new dataset_id.   Same papers, different prompts?
+#   -> same dataset_id, new prompt_config.
+#
+# Follow it and the destructive cases below cannot arise, because a run that
+# changes the paper set writes to different files by construction. That is
+# worth more than any confirm-prompt: a prompt you always say yes to trains
+# you to say yes.
+#
+# WHAT COUNTS AS A DIFFERENT PAPER SET: a changed domain list, changed fetch
+# or filter thresholds, a changed `target_per_domain` — and a re-fetch under
+# ANY settings, because OpenAlex's relevance ranking drifts between runs. That
+# last one is the trap: re-running fetch changes the paper set even when you
+# changed nothing at all.
+#
+# WHAT DOES NOT: a different prompt config, a different mode, a different
+# generator model. Those are arms over one paper set, and the artifacts that
+# hold them (<id>_prompts_<prompt_config>.parquet, the generate shard key
+# <paper_id>|<model>:<prompt_config>, the output <id>_<model>_<prompt_config>
+# .parquet) all carry the arm in their name already.
+#
+# ---------------------------------------------------------------------------
+# science_v3 is the three-domain corpus behind the ICLR findings — 1000 each of
+# computer_science, mathematics and sociology (queries_3domain.yaml), fetched,
+# filtered and generated with gpt-5.6-luna under prompt config 0811A (title-only).
+# Its intermediates are already on disk: science_v3_{raw,human,prompts_0811A}
+# .parquet and science_v3_generate.jsonl (3000 gpt56luna calls, all ok).
+#
+# THIS CONFIG ADDS OPEN-WEIGHT GENERATORS TO THAT SAME PAPER SET — the plan's
+# "one open-weight generator" de-confound. Same dataset_id, same prompt_config,
+# so the generate shard is reused: the 3000 gpt56luna calls are skipped and only
+# the new generators' calls are issued. The output is
+# science_v3_multi_0811A.parquet (human + one row per generator per paper).
+#
+# ONLY the generate stage may run under this config. fetch and filter both
+# rewrite science_v3_{raw,human}.parquet, and OpenAlex's ranking drifts, so a
+# re-fetch hands back a DIFFERENT 3000 papers and strands the paid generations.
+# Run generate_ai.py directly, or run_pipeline.py --science-from prompts /
+# run_full_pipeline.py --from ...; never a full run, and never --yes on fetch.
+dataset_id: "science_v3"
+
+# Which file in cfg/science_data/prompts/ holds the prompts (without .yaml).
+# It carries every prompt the pipeline sends, and its id is stamped into each
+# generated row as `generated_by` = "<model_slug>:<prompt_config>", e.g.
+# gpt56luna:0807A. So a row names the exact prompts behind it.
+#
+# NEVER edit a prompt file that has already produced a corpus — copy it to a
+# new id and point this at the copy. Editing in place makes every existing
+# row's label a lie, undetectably.
+#
+# 0811A is the title-only ablation of 0807A: same five prompt strings, but its
+# `mode: title_only` drops the spec block, so the generator sees the title and
+# nothing derived from the abstract. The mode is a key inside the prompt file
+# itself, so choosing the id here chooses the mode with it — there is no second
+# setting to keep in step. See the header of prompts/0811A.yaml.
+#
+# Switching this id is what keeps the 0807A run intact, and it now covers all
+# three artifacts: the output (<dataset_id>_gpt56luna_0811A.parquet), the
+# generate checkpoint key (<paper_id>|gpt56luna:0811A) and the stage-3
+# intermediate (<dataset_id>_prompts_0811A.parquet) each carry it. Nothing of
+# 0807A's is overwritten and no 0807A text is reused.
+prompt_config: "0811A"
+
+# ---------------------------------------------------------------- fetch ----
+fetch:
+  # Kept per domain. The fetcher stops a domain as soon as it has this many
+  # admissible records, so raising it costs API calls but never a re-scrape.
+  #
+  # 1000 is what built the science_v1 corpus on disk (3 domains x 1000 = the
+  # 3000 rows in <id>_generate.jsonl). It sat at 10 here — a debug value left
+  # behind — so this line simply lied about the corpus it describes.
+  #
+  # Be clear about what fixing it does and does not buy. It is NOT what makes an
+  # accidental full run under this dataset_id safe: such a run re-scrapes
+  # OpenAlex, and OpenAlex's relevance ranking drifts, so <id>_human.parquet
+  # comes back holding DIFFERENT papers. The generate shard is keyed by paper
+  # id, so the 3000 paid generations would then be stranded against a corpus
+  # they no longer match. 1000 vs 10 changes that accident from catastrophic to
+  # merely expensive; it does not prevent it.
+  #
+  # What actually prevents it, in order of reliability:
+  #   1. starting the run at the prompt stage (--science-from prompts), which
+  #      never opens the fetch or filter stage at all;
+  #   2. the fetch stage's own guard — it sees <id>_raw.parquet already there
+  #      and refuses to overwrite without an interactive yes (or --yes, which
+  #      run_full_pipeline.py's --yes passes straight through: do not use it on
+  #      an id whose corpus you want to keep);
+  #   3. giving a genuinely new corpus a new dataset_id, which is the only thing
+  #      that makes the question moot.
+  #
+  # Note that the filter stage has NO such guard: it rewrites <id>_human.parquet
+  # in place. Re-filtering an unchanged <id>_raw.parquet is deterministic and so
+  # harmless, but re-filtering it under changed thresholds silently replaces the
+  # human corpus the existing generations were paired with.
+  target_per_domain: 1000
+
+  # Fetch this multiple of `target_per_domain` before stopping. 1.0 is exact
+  # and correct; the default 1.2 buys ~200 spare rows per domain as insurance
+  # against a filter rule you add later, at negligible cost.
+  overfetch: 1.2
+
+  # "relevance" (page-based, relevance-ranked) or "bulk" (cursor paging).
+  # Relevance caps at 10,000 hits per query; bulk lifts that cap and nothing
+  # else — same query, same ordering — but keeps a server-side position, so it
+  # costs OpenAlex more. With 5 queries per domain and a target of 1000,
+  # relevance has ample headroom; switch to bulk only on a reported shortfall.
+  search_mode: "relevance"
+
+  # Seconds to sleep between queries, on top of the per-page delay in the API
+  # client (epai/utils/oa_utils.py).
+  query_delay: 1.5
+
+# --------------------------------------------------------------- filter ----
+# Absolute thresholds only — see the module docstring of
+# epai/science_data/rules.py for why corpus-relative rules are forbidden here.
+filter:
+  year_min: 1900
+  year_max: 2020          # pre-ChatGPT: keeps LLM-written text out of the human class
+  min_words: 80
+  max_words: 400
+  min_title_words: 3
+  require_citation_count: true   # drops null cited_by_count, keeps genuine zeros
+
+  # Field-Weighted Citation Impact must be present. Null means OpenAlex could
+  # not place the work in a field, so there is no expectation to normalise
+  # against. Like the citation count, a genuine 0.0 is kept — most works have
+  # exactly that, and dropping them would bias the corpus toward cited work.
+  require_fwci: true
+
+  # OpenAlex's own language label must equal this. "" disables the check.
+  # Costs roughly nothing at fetch time: oa_fetch mirrors both this and
+  # require_fwci into server-side filters, so non-matching works are never
+  # fetched in the first place. The rule still re-tests every record, because
+  # correctness here never depends on the API honouring a filter.
+  require_language: "en"
+
+  # Independent English check over the abstract prose itself, so a record
+  # mislabelled "en" upstream is still caught.
+  min_english_stopwords: 4
+  max_non_latin_ratio: 0.10
+
+  # How the surplus from `overfetch` is trimmed back to target_per_domain.
+  # "head" keeps fetch order (fully deterministic); "sample" draws at random
+  # using `seed`.
+  trim_mode: "head"
+  seed: 42
+
+# --------------------------------------------------------------- prompt ----
+prompt:
+  # `mode` USED TO LIVE HERE and now lives in the prompt config, beside the
+  # prompts it selects between — cfg/science_data/prompts/<prompt_config>.yaml
+  # carries `mode: llm_spec` or `mode: title_only`. The mode decides what the
+  # prompt says, and the prompt id is the corpus's only record of what the
+  # prompt said (`generated_by` is <model_slug>:<prompt_config>), so keeping it
+  # here made it the one input to a generated row that the row's label did not
+  # name: 0811A run under llm_spec produced rows labelled gpt56luna:0811A whose
+  # prompts carried a spec, and nothing afterwards could tell them apart.
+  #
+  # You may still write `mode:` here, but only if it AGREES with the prompt
+  # config; a mismatch is a hard error at load, before anything is spent. The
+  # honest thing is to leave it out and read the mode off `prompt_config`.
+  #
+  # For the record, since this config selects 0811A (title_only): stage 3 skips
+  # the spec stage entirely, so this arm issues ZERO spec calls (the `model`
+  # below goes unused) and only the 3000 generation calls cost anything. The
+  # existing <id>_spec.jsonl is left untouched, so switching back to 0807A later
+  # costs nothing either.
+
+  # The spec model is NOT recorded in `generated_by` — only the generator is —
+  # so nothing in a row says which model wrote the spec behind its prompt.
+  # `dataset_id` is what separates a corpus built with one spec model from a
+  # corpus built with another. Change this and change the id, or the two runs
+  # become indistinguishable after the fact.
+  #
+  # Related trap: the spec shard is keyed by paper id alone, not by model, so
+  # re-running an EXISTING dataset_id after changing this model reuses every
+  # spec the old model wrote and silently issues no new calls. A change here
+  # only takes effect on a fresh id (or after deleting the spec shard).
+  model: "gpt-5.6-luna"
+  max_workers: 8
+
+# ------------------------------------------------------------- generate ----
+generate:
+  # Concurrent in-flight calls, ACROSS all generators. Set it to the slowest
+  # provider's safe rate: the OpenAI default handles 8 easily, the shared
+  # GenAI4Science default endpoint does not. gpt56luna is already cached, so at
+  # runtime every call goes to GenAI4Science — keep this low until the
+  # performance endpoint is granted.
+  max_workers: 3
+
+  # Seconds to wait on one call before it counts as a failure (default 300).
+  # A cold open-weight model on a shared endpoint can take minutes to load;
+  # call_with_retry then retries it. Only raise this for a provider that needs it.
+  # request_timeout: 300
+
+  # Add entries here to bring in more generators later. Checkpoints are keyed
+  # by (id, label), so a new generator only issues the calls it is missing —
+  # the existing rows are never regenerated. This is how the open-weight AI
+  # class is added to an existing corpus: extend this list and re-run generate.
+  #
+  # The `generated_by` label is DERIVED, never typed: "<model_slug>:<prompt_config>",
+  # so gpt-5.6-luna under prompt config 0807A becomes "gpt56luna:0807A", and
+  # gpt-oss:120b becomes "gptoss120b:0807A". The whole point is that a label
+  # cannot disagree with what actually produced the row, which a hand-written
+  # one can. cfg/colors.yaml resolves it to a family by prefix.
+  #
+  # Each entry needs `model`. It reaches that model through an OpenAI-compatible
+  # endpoint; `provider` picks which host:
+  #   (omitted) / "openai"  — OpenAI itself, key from $OPENAI_API_KEY
+  #   "genai4science"        — HUN-REN SZTAKI, key from $GENAI4SCIENCE_API_KEY,
+  #                            base URL from $GENAI4SCIENCE_BASE_URL or the
+  #                            built-in default
+  # Any other OpenAI-compatible host: give `base_url` and `api_key_env` directly.
+  # Two generators must have distinct model slugs or they would share a label —
+  # the config check enforces that.
+  generators:
+    - model: "gpt-5.6-luna"                 # cached in science_v3_generate.jsonl
+    - model: "gpt-oss:120b"
+      provider: "genai4science"
+    - model: "llama3.3:70b"
+      provider: "genai4science"
+    # - model: "gemma4:31b"                 # add once the first two are in
+    #   provider: "genai4science"
+
+  # OFF here: on the shared endpoint a generator will drop a handful of papers to
+  # rate limits / cold starts, and requiring all three would then discard every
+  # other generator's row for that paper too. Re-run generate with --retry-failed
+  # to fill the gaps, then flip this to true for the final export.
+  require_all_generators: false
+
+# ---------------------------------------------------------------- clean ----
+# OPTIONAL. Transforms that remove WORDS, as opposed to the `standardize` stage
+# below, which only substitutes characters. Everything here defaults to false:
+# deleting text by keyword is the one class of change this codebase has been
+# bitten by, and it should be an explicit decision every time.
+clean:
+  # Remove structured-abstract section labels — "Background:", "Methods:",
+  # "Conclusions:" — from BOTH classes. One key, read by the fetch stage for the
+  # human abstracts (rules.clean_abstract) and by the generate stage for the
+  # machine ones (generate_ai.clean_generated), so the two cannot be cleaned
+  # differently.
+  #
+  # FALSE by default. What that means, both ways:
+  #   - OFF (default): no words are deleted. But the labels then survive in the
+  #     human class only, since the prompts forbid the generator from emitting
+  #     them, and that is a token a classifier can learn instantly. It is a real
+  #     asymmetry and nothing else here mitigates it.
+  #   - ON: the labels go, from both classes. The match REQUIRES a colon
+  #     ("Background:" yes, "Background radiation was measured" no), which is
+  #     what keeps it from mangling prose — at the cost of missing all-caps or
+  #     period-separated labels, and any label whose colon was carried by an
+  #     HTML tag that clean_abstract already replaced with a space.
+  #
+  # The cleaner answer for a corpus full of structured abstracts is to not build
+  # it from one: cfg/science_data/queries_3domain.yaml excludes Medicine for
+  # exactly this reason. Turn this on only if you know your domains carry them.
+  strip_structured_labels: false
+
+# ---------------------------------------------------------- standardize ----
+# OPTIONAL, and read only by run_full_pipeline.py's standardize step. It runs
+# epai/ai_detection/prepare/standardize_text.py over the PROMOTED corpus,
+# rewriting `text` in place for every row — human and generated alike — after
+# promote and before score, so the run in data/science/ keeps the text exactly
+# as it was generated.
+#
+# Mostly a backstop for this corpus, unlike the Ghostbuster one. The two classes
+# here are already symmetric by design: rules.clean_abstract and
+# generate_ai.clean_generated mirror each other on purpose (html entities, tags,
+# leading "Abstract:" labels, structured section labels, whitespace), and the
+# prompts forbid titles, headings, section labels and markdown. What this stage
+# adds is the character table — an OpenAlex abstract with a curly apostrophe
+# against a generated one with a straight apostrophe is a tell about the source,
+# not the author, and nothing upstream folds it.
+#
+# WHAT IT WILL NOT DO: remove text by keyword. It substitutes characters and
+# normalises whitespace, and verifies its own word count is unchanged before
+# writing. Word-level cleanup that must apply to both classes belongs upstream,
+# in rules.strip_structured_labels, which both cleaners now call.
+standardize:
+  # false leaves whatever typography OpenAlex and the generator produced.
+  enabled: true
+
+  # "flat" — the whole document becomes one line. Correct here: abstracts are
+  # single paragraphs and both cleaners already end in a \s+ -> " " collapse,
+  # so this agrees with what upstream produced rather than changing it. The
+  # Ghostbuster pipeline uses "lines" instead, because that corpus has real
+  # paragraph structure to keep.
+  whitespace: "flat"
+
+  # Keep the pre-standardisation text in a `text_raw` column, so the transform
+  # can be undone from the corpus alone. Written only when absent, so a second
+  # run never replaces the true original with an already-standardised copy.
+  # false saves a little space and makes the change irreversible.
+  keep_raw: true
+
+# ---------------------------------------------------------------- embed ----
+# OPTIONAL, and read only by run_full_pipeline.py's embed step — the four corpus
+# stages above ignore it, so a config without this block still works everywhere.
+# That step runs epai/ai_detection/embed/add_embeddings.py over the scored
+# corpus, filling every emb_* column in place.
+#
+# Command-line flags win over everything here: --embedders, --embed-batch-size,
+# --embed-limit, --embed-recompute, and --gpu / --cpu-threads / --text-column
+# (the last three are shared with the score step).
+embed:
+  # Which embedders to run; each one becomes an emb_<name> column. Names are
+  # checked in the preflight, so a typo fails before the fetch rather than after
+  # the corpus has been built and scored.
+  #
+  # null (or no `embedders` key) runs add_embeddings.py's own EMBEDDERS list —
+  # all fifteen, including openai_small and openai_large, which are BILLED PER
+  # ROW. Naming them here is the way to keep that deliberate.
+  #
+  # Available:
+  #   content    specter2  scincl  scibert
+  #   semantic   mpnet  minilm  e5  bge  qwen3
+  #   raw LM     roberta
+  #   style      styledistance  style_wegmann  luar  luar_crud
+  #   api        openai_small  openai_large        ← billed
+  #
+  # This list is every one of them EXCEPT the two OpenAI endpoints (billed per
+  # row) and qwen3 (a 4B-parameter encoder — far and away the heaviest of the
+  # local models, and the reason for the smaller batch size in
+  # BATCH_SIZE_OVERRIDE). Written out rather than left null so that adding an
+  # embedder to add_embeddings.py does not silently start billing this run.
+  embedders:
+    - "specter2"
+    - "scincl"
+    - "scibert"
+    - "mpnet"
+    - "minilm"
+    - "e5"
+    - "bge"
+    - "roberta"
+    - "styledistance"
+    - "style_wegmann"
+    - "luar"
+    - "luar_crud"
+
+  # null keeps the script's per-model batch sizes (128, with smaller values for
+  # qwen3/LUAR and larger for the OpenAI endpoints).
+  batch_size: null
+
+  # Embed only the first N rows, for debugging a model. null = the whole corpus.
+  limit: null
+
+  # Recompute embedders that already have values. false fills only the holes.
+  recompute: false
