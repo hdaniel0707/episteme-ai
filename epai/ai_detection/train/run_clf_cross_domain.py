@@ -399,6 +399,7 @@ from epai.utils.variant_utils import (
     score_alg,
     variant_columns,
 )
+from epai.utils.operating_point_viz import cd_panels, plot_operating_point
 from epai.utils.visualization_utils import (
     plot_clf_cd_comparison,
     plot_clf_cd_result,
@@ -1070,6 +1071,11 @@ def run_config(cfg_path: Path, cfg: dict, alg_dir: Path) -> None:
     )
     if PLOTS_ENABLED:
         plot_clf_cd_suite_comparison(alg_dir, comparison)
+        plot_operating_point(
+            cd_panels(comparison), alg_dir / "operating_point.png",
+            title=f"{cfg['alg_label']} — operating-point gap",
+            subtitle=comparison["subtitle"],
+        )
 
 
 def run_suite(cfg: dict, alg_dir: Path) -> dict:
@@ -1269,6 +1275,11 @@ def run_suite(cfg: dict, alg_dir: Path) -> dict:
     print_ranking(cfg["alg_label"], rows, noun=noun)
     if PLOTS_ENABLED:
         plot_clf_cd_comparison(alg_dir, comparison)
+        plot_operating_point(
+            cd_panels(comparison), alg_dir / "operating_point.png",
+            title=f"{cfg['alg_label']} — operating-point gap ({alg_dir.name})",
+            subtitle=comparison["subtitle"],
+        )
 
     write_holdout_comparisons(cfg, alg_dir, holdout_payloads, names, labels)
     return comparison

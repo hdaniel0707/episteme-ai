@@ -174,6 +174,7 @@ from epai.algs import build_algorithm
 from epai.utils.cd_core import (
     BINARY_CLASSES,
     CAL_FRAC_DEFAULT,
+    baseline_fits_threshold,
     baseline_specs,
     calibrate_thresholds,
     carve_calibration,
@@ -244,6 +245,7 @@ from epai.utils.variant_utils import (
     score_alg,
     variant_columns,
 )
+from epai.utils.operating_point_viz import id_panels, plot_operating_point
 from epai.utils.visualization_utils import (
     plot_clf_id_comparison,
     plot_clf_id_corpus_comparison,
@@ -769,11 +771,11 @@ def run_baseline(
     """One zero-shot score baseline on the held-out split. Nothing is fitted.
 
     Same split and seeds as the trained variants, so its row lands in the same
-    table. The declared cutoff never looks at the data at all and is still
-    recorded, but no longer drives accuracy/macro F1 -- those come from a
-    Youden's J threshold fit on the same calibration slice the trained
-    variant of this corpus uses, for the reasons ``cd_core.BaselineKind``
-    documents.
+    table. The operating point follows ``baseline_fit_threshold`` exactly as the
+    matrix runner's ``cd_core.run_score_baseline`` does: under the default
+    (false) the declared cutoff drives accuracy/macro F1 and no ``*_at_srcfpr_*``
+    is written, so a shared cell agrees with the matrix run's diagonal; set true
+    and both instead fit a Youden's J threshold on the calibration slice.
     """
     group_col: str = cfg["data"]["group_col"]
     human_label: str = cfg["data"]["human_label"]
@@ -796,16 +798,22 @@ def run_baseline(
         seed = cfg["seed"] + i
         train_idx, test_idx = grouped_split(y, groups, test_size, seed)
         # The calibration slice: carved from the training half exactly as the
-        # trained variant of this corpus carves it, same seed, so the two
-        # transport a threshold fit on identical rows. Nothing is fitted here,
-        # so this is unbiased in the same sense the old training-half
-        # calibration was -- a zero-shot score never saw the fit rows either --
-        # but it now sits on the same rows as every other row of the table.
+        # trained variant of this corpus carves it, same seed, so a threshold
+        # fit here (only when baseline_fit_threshold is on, below) sits on the
+        # same rows the matrix run would use. The carve happens either way, so
+        # the split lines up with the classifier's fit/cal split for this seed.
         _, cal_idx = carve_calibration(y[train_idx], groups[train_idx], cal_frac, seed)
         cal_idx = train_idx[cal_idx]
-        oriented_cal = oriented_scores(scores[cal_idx], machine_is_high)
-        cal_thresholds = calibrate_thresholds(y[cal_idx], oriented_cal)
-        label_threshold = youden_threshold(y[cal_idx], oriented_cal)
+        # Gated on the same switch, in the same way, as cd_core.run_score_baseline:
+        # under the default both stay None, which is what keeps a baseline row
+        # zero-shot all the way down -- declared cutoff for accuracy/macro F1, no
+        # *_at_srcfpr_* keys -- and what makes this runner's number match the
+        # matrix run's diagonal for the same baseline.
+        cal_thresholds = label_threshold = None
+        if baseline_fits_threshold(cfg):
+            oriented_cal = oriented_scores(scores[cal_idx], machine_is_high)
+            cal_thresholds = calibrate_thresholds(y[cal_idx], oriented_cal)
+            label_threshold = youden_threshold(y[cal_idx], oriented_cal)
         res = evaluate_score_rule(
             scores[test_idx], y[test_idx], threshold, machine_is_high,
             cal_thresholds=cal_thresholds, label_threshold=label_threshold,
@@ -1043,6 +1051,13 @@ def run_config(cfg_path: Path, cfg: dict, alg_dir: Path) -> None:
                          noun=comparison["noun"])
     if PLOTS_ENABLED:
         plot_clf_id_corpus_comparison(alg_dir, comparison)
+        # Figure 3: AUROC vs the deployable 1%-FPR operating point, one marker
+        # per detector. Reads the same pooled rows the ranking just printed.
+        plot_operating_point(
+            id_panels(comparison), alg_dir / "operating_point.png",
+            title=f"{cfg['alg_label']} — operating-point gap",
+            subtitle=comparison["subtitle"],
+        )
 
     # The eval-only table, at this level and only at this level: its columns are
     # the corpora that supplied the thresholds, and no single corpus's pass
