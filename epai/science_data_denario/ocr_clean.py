@@ -11,6 +11,8 @@ OpenAlex human class) never has:
     opening sentence — e.g. ``Understandingtheevolutionofdarkmatterhalo...``
   * lost ligatures (``efﬁciency`` -> ``eﬃciency`` or worse)
   * a space before ``.,;:`` and after ``(``
+  * ``*`` markdown emphasis and LaTeX macro residue (``\textit{X}`` /
+    ``textitX``) from the Denario source
 
 info/iclr27_plan.html finding 5 shows the judge's ``errors`` cue is already
 partly reading exactly this kind of damage — so left in place it is a class
@@ -84,6 +86,16 @@ LIGATURES = {
     "ﬀ": "ff", "ﬁ": "fi", "ﬂ": "fl",
     "ﬃ": "ffi", "ﬄ": "ffl", "ﬅ": "ft", "ﬆ": "st",
 }
+
+# LaTeX text/math macros that survive extraction. ``\textit{Rousettus}`` keeps
+# its delimiters (first pattern) or loses them, leaving ``textitRousettus``
+# (second). Either way the macro name goes and the argument stays.
+_LATEX_MACROS = (
+    "textit|textbf|texttt|textrm|textsc|textsf|emph|mathrm|mathbf|mathit"
+    "|mathcal|mathbb|boldsymbol|textnormal|mbox|hbox"
+)
+_LATEX_DELIM_RE = re.compile(rf"\\?(?:{_LATEX_MACROS})\{{([^}}]*)\}}")
+_LATEX_MACRO_RE = re.compile(rf"\b(?:{_LATEX_MACROS})(?=[A-Z])")
 
 _TOKEN_RE = re.compile(r"[a-z]+")
 _SEED_WORDS = (
@@ -233,7 +245,7 @@ def segment(run: str, vocab: Vocab) -> list[str]:
 
 
 def clean_ocr_text(
-    text: str, vocab: Vocab, min_run: int = 14
+    text: str, vocab: Vocab, min_run: int = 14, keep_words: frozenset[str] = frozenset()
 ) -> tuple[str, Counter, list[str], list[tuple[str, str]]]:
     """Return ``(repaired_text, fix_counts, unresolved_runs, applied_splits)``."""
     fixes: Counter = Counter()
@@ -248,6 +260,11 @@ def clean_ocr_text(
         if glyph in out:
             fixes["ligature"] += out.count(glyph)
             out = out.replace(glyph, repl)
+
+    delatexed = _LATEX_MACRO_RE.sub("", _LATEX_DELIM_RE.sub(r"\1", out))
+    if delatexed != out:
+        fixes["latex_macro"] += 1
+        out = delatexed
 
     # Markdown emphasis carried over from the Denario source ("*in vivo*",
     # "*Plasmodium falciparum*", sometimes glued: "of*Plasmodium"). The OpenAlex
@@ -287,7 +304,7 @@ def clean_ocr_text(
     def _split(m: re.Match) -> str:
         run = m.group(0)
         low = run.lower()
-        if vocab.known(run):
+        if low in keep_words or vocab.known(run):
             return run
         # <prefix><real word> is one derived word ("underestimation",
         # "nonlinear"), not a compound — the remainder must itself be a word,
@@ -365,6 +382,10 @@ def main() -> int:
     ap.add_argument("--min-run", type=int, default=14,
                     help="only alphabetic runs at least this long are considered "
                          "for splitting (default 14)")
+    ap.add_argument("--keep-word", action="append", default=[], metavar="WORD",
+                    help="a word the segmenter must never split — for a real "
+                         "term the dictionary is missing (repeatable, "
+                         "case-insensitive)")
     ap.add_argument("--system-dict", type=Path,
                     default=Path("/usr/share/dict/words"),
                     help="plain word list, one per line, added to the segmenter "
@@ -394,8 +415,9 @@ def main() -> int:
           f"{len(vocab_texts):,} texts"
           + (f" + {args.system_dict}" if args.system_dict.is_file() else ""))
 
+    keep_words = frozenset(w.lower() for w in args.keep_word)
     original = df[TEXT_COL].fillna("").astype(str)
-    results = [clean_ocr_text(t, vocab, args.min_run) for t in original]
+    results = [clean_ocr_text(t, vocab, args.min_run, keep_words) for t in original]
     repaired = [r[0] for r in results]
     fixes = [r[1] for r in results]
     unresolved = [r[2] for r in results]

@@ -117,12 +117,15 @@ queries — fix the queries or accept `--allow-shortfall`.
 #    -> results/denario_hc/match_report.csv   ← review: |len delta| and cosine per pair
 
 # ── 3. OCR / PDF-artifact repair (both classes) ───────────────────────────────
-#    DRY RUN FIRST — it prints every word-split it would make; eyeball them
-.venv/bin/python -m epai.science_data_denario.ocr_clean data/parquet/denario_hc_raw.parquet \
-    --extra-text-parquet data/science_denario/human_candidates.parquet --dry-run
-#    then write:
+#    DRY RUN FIRST — it prints every word-split it would make; eyeball them.
+#    Pin any real word it splits wrongly with --keep-word (repeatable).
 .venv/bin/python -m epai.science_data_denario.ocr_clean data/parquet/denario_hc_raw.parquet \
     --extra-text-parquet data/science_denario/human_candidates.parquet \
+    --keep-word transferability --dry-run
+#    then write (same flags, add -o):
+.venv/bin/python -m epai.science_data_denario.ocr_clean data/parquet/denario_hc_raw.parquet \
+    --extra-text-parquet data/science_denario/human_candidates.parquet \
+    --keep-word transferability \
     -o data/parquet/denario_hc_clean.parquet
 
 # ── 4. typographic standardisation (same stage/setting science_v3 used) ───────
@@ -166,8 +169,10 @@ queries — fix the queries or accept `--allow-shortfall`.
 * **`ocr_clean` word segmentation** — a run is split only when every piece is a
   real word and the run is not itself a real word / `<prefix>+word`; uses
   `/usr/share/dict/words` when present. Always `--dry-run` first and read the
-  split list. Genuine long words left whole show up under "spans left
-  unsegmented" — that is correct, not an error.
+  "word splits applied" list. A real term the dictionary is missing that gets
+  wrongly split (e.g. `transferability`) — pin it with `--keep-word
+  transferability` (repeatable). Genuine long words left whole show up under
+  "spans left unsegmented" — that is correct, not an error.
 * **Length control** — the per-row match already tracks Denario length. For an
   explicit fixed-length condition (Figure 6), truncate the finished holdout:
   `epai/ai_detection/prepare/truncate_text.py data/parquet/denario_hc.parquet
