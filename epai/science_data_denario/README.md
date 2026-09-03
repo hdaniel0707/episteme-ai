@@ -108,12 +108,13 @@ queries — fix the queries or accept `--allow-shortfall`.
 #    re-run with --pool-factor 80  or widen that domain in cfg/science_data_denario/queries.yaml
 
 # ── 2. match 80 humans 1:1 to the 80 Denario papers, assemble the parquet ──────
-#    SPECTER2 (downloads the model on first run), optimal length+topic assignment
-.venv/bin/python -m epai.science_data_denario.build_denario_hc --gpu 0
+#    SPECTER2 (downloads the model on first run), optimal length+topic assignment.
+#    --strip-structured-labels removes "Background:"/"Methods:" from both classes
+#    (a no-op on the Denario side); keep it on — the medicine/biomedical domains
+#    always carry a few, and the machine class never does.
+.venv/bin/python -m epai.science_data_denario.build_denario_hc --gpu 0 --strip-structured-labels
 #    -> data/parquet/denario_hc_raw.parquet
 #    -> results/denario_hc/match_report.csv   ← review: |len delta| and cosine per pair
-#    if it warns about structured-abstract labels:
-#      re-run step 1 with --strip-structured-labels, then step 2 again
 
 # ── 3. OCR / PDF-artifact repair (both classes) ───────────────────────────────
 #    DRY RUN FIRST — it prints every word-split it would make; eyeball them

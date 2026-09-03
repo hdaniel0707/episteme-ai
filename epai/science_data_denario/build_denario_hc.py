@@ -44,7 +44,7 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import linear_sum_assignment
 
-from epai.science_data.rules import _STRUCTURED_RE
+from epai.science_data.rules import _STRUCTURED_RE, strip_structured_labels
 from epai.science_data_denario.exclude import Exclusion, load_exclusion
 from epai.utils.embedding_utils import add_embedding
 from epai.utils.parquet_utils import load_parquet, save_parquet
@@ -104,6 +104,12 @@ def main() -> None:
                     help="training corpus the matched humans must NOT appear in "
                          "(repeatable; default: science_v3)")
     ap.add_argument("--no-exclude-check", action="store_true")
+    ap.add_argument("--strip-structured-labels", action="store_true",
+                    help="remove 'Background:'/'Methods:' section labels from the "
+                         "text of BOTH classes (rules.strip_structured_labels — "
+                         "colon-required, keeps the prose). The Denario class has "
+                         "no labels, so this only touches the human rows; use it "
+                         "when the run below warns about them.")
     args = ap.parse_args()
 
     if args.gpu is not None:
@@ -185,6 +191,11 @@ def main() -> None:
 
     out = pd.DataFrame(rows, columns=OUT_COLUMNS)
     out["year"] = out["year"].astype("Int64")
+
+    if args.strip_structured_labels:
+        before = out["text"].apply(lambda t: bool(_STRUCTURED_RE.search(str(t)))).sum()
+        out["text"] = out["text"].apply(lambda t: strip_structured_labels(str(t)))
+        print(f"stripped structured-abstract labels from {before} row(s)")
 
     # Final gate: not one human row may be in a training corpus.
     leaked = [
