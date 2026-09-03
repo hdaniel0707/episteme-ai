@@ -1060,6 +1060,41 @@ def parse_probability(text: str) -> float:
     raise ValueError(f"no probability in answer: {text.strip()[:80]!r}")
 
 
+_PROB_NUM = r"(\d{1,3}\s*%|(?:0?\.\d+)|[01](?:\.\d+)?)"
+_MARKED_PROB_RE = re.compile(
+    r"(?:probabilit(?:y|ies)|p\s*\(\s*human\s*\)|human[_ ]?prob\w*|answer|verdict|"
+    r"score)\D{0,25}" + _PROB_NUM,
+    re.IGNORECASE,
+)
+_BARE_PROB_RE = re.compile(r"(?<![\w.])" + _PROB_NUM)
+
+
+def parse_judge_probability(text: str) -> float:
+    """P(human) from a free-text answer — for a chatty open-weight judge.
+
+    Unlike :func:`parse_probability` (first number, fine for a terse small
+    model), this prefers the number right after a ``probability`` / ``answer`` /
+    ``P(human)`` marker, and otherwise takes the LAST number in [0, 1]: a model
+    that reasons out loud states its verdict at the end, and the first number in
+    "the text is ~0.3 formal, so P(human) = 0.8" is the wrong one. ``<think>``
+    blocks are stripped first.
+    """
+    text = _THINK_RE.sub("", text)
+
+    def _to_unit(raw: str) -> float | None:
+        raw = raw.strip()
+        v = float(raw.rstrip(" %")) / (100.0 if raw.endswith("%") else 1.0)
+        return v if 0.0 <= v <= 1.0 else None
+
+    m = _MARKED_PROB_RE.search(text)
+    if m and (v := _to_unit(m.group(1))) is not None:
+        return v
+    hits = [v for raw in _BARE_PROB_RE.findall(text) if (v := _to_unit(raw)) is not None]
+    if hits:
+        return hits[-1]
+    raise ValueError(f"no probability in answer: {text.strip()[:100]!r}")
+
+
 class Judge:
     """One judge model under one system prompt and one scoring mode.
 
@@ -1115,6 +1150,13 @@ class ApiJudge(Judge):
                  mode: str = MODE_PARSED, system_prompt: str | None = None) -> None:
         super().__init__(spec, prompt_id, mode, system_prompt)
         self._client = self._build_client()
+        # genai4science only: how each score was actually obtained, so a run on
+        # the fragile free-text path is visible in the summary. Guarded by a
+        # lock because one instance serves every worker thread.
+        self._g4s_lock = threading.Lock()
+        self._g4s_structured = 0
+        self._g4s_fallback = 0
+        self._g4s_parsefail = 0
 
     def _build_client(self):
         # Imported here rather than at module level so a missing optional SDK
@@ -1151,9 +1193,9 @@ class ApiJudge(Judge):
 
     def _score_genai4science(self, text: str) -> float:
         """OpenAI-compatible endpoint, open-weight model. Structured output
-        first; plain completion + ``parse_probability`` if the server does not
-        honour ``response_format`` (many vLLM/Ollama deployments do not for
-        every model)."""
+        first; plain completion + :func:`parse_judge_probability` if the server
+        does not honour ``response_format`` (many vLLM/Ollama deployments do not
+        for every model). Which path each row took is counted for the summary."""
         messages = [
             {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": USER_TEMPLATE.format(text=text)},
@@ -1164,13 +1206,45 @@ class ApiJudge(Judge):
             )
             parsed = response.choices[0].message.parsed
             if parsed is not None:
+                with self._g4s_lock:
+                    self._g4s_structured += 1
                 return float(parsed.human_probability)
         except Exception:
             pass
+        with self._g4s_lock:
+            self._g4s_fallback += 1
         answer = self._client.chat.completions.create(
             model=self.model_id, messages=messages, max_tokens=2048,
         ).choices[0].message.content or ""
-        return parse_probability(_THINK_RE.sub("", answer))
+        try:
+            return parse_judge_probability(answer)
+        except ValueError:
+            with self._g4s_lock:
+                self._g4s_parsefail += 1
+            raise
+
+    def diagnostics(self) -> list[str]:
+        if self.provider != "genai4science":
+            return []
+        n = self._g4s_structured + self._g4s_fallback
+        if not n:
+            return []
+        lines = [
+            f"    genai4science: {self._g4s_structured} row(s) via structured "
+            f"output, {self._g4s_fallback} via free-text fallback"
+        ]
+        if self._g4s_fallback and not self._g4s_structured:
+            lines.append(
+                "    the endpoint never honoured response_format — every score "
+                "came from parsing free text; read the AUROC and distinct-value "
+                "count in the checks below before trusting this column"
+            )
+        if self._g4s_parsefail:
+            lines.append(
+                f"    {self._g4s_parsefail} free-text parse failure(s) (retried) "
+                f"— the model is not answering with a probability"
+            )
+        return lines
 
     def _score_openai(self, text: str) -> float:
         # No temperature: the reasoning-capable models reject anything but the

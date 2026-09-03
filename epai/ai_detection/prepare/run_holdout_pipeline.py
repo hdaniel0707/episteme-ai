@@ -54,6 +54,17 @@ a rate-limited endpoint to drain), then fails the pipeline. ``--fill-retries 0``
 fails on the first gap. If the corpus DOES carry blank text, the runner falls
 back to the lenient reading and neither retries nor fails on those rows.
 
+A full column is checked once more: a numeric score column
+(``llm_judge_score_*``, ``binoculars_score*``, ``fastdetect_crit_*``,
+``detector_score_*``) that came out constant or with 99% of its rows on one
+value is a scorer that fell back to a default -- the run fails on that too,
+without retrying (the same prompts give the same non-answer).
+
+NOT JUST FOR HOLDOUTS. ``--from embed`` on a corpus that is already standardised
+runs the detector suite over anything -- a training corpus included. Pair it
+with ``carry_suite_columns.py``, which copies the columns a sibling corpus
+already scored, so only the new rows are computed.
+
 **Stages are separate processes**, exactly as ``epai/science_data/run_pipeline.py``
 runs its own: each is a CLI with its own argument parsing, its own progress bars
 and its own exit codes, and a stage that dies takes nothing with it.
@@ -272,6 +283,18 @@ def build_stages(args: argparse.Namespace) -> list[Stage]:
     # be an unrecognised argument rather than a no-op.
     cpu = ["--cpu-threads", str(args.cpu_threads)] if args.cpu_threads else []
 
+    # `--select all` explains at most `--per-band` rows; below the corpus size it
+    # leaves rows with no cue vector, which the training loader drops together
+    # with their whole group. Raise it to the row count when the file is already
+    # there (always true for `--from embed`).
+    per_band = args.per_band
+    if Path(out).is_file():
+        try:
+            import pyarrow.parquet as _pq
+            per_band = max(per_band, _pq.ParquetFile(out).metadata.num_rows)
+        except Exception:
+            pass
+
     judge_cols = [
         f"llm_judge_score_{judge_stem(j)}_{PROMPT_VERSION}" for j in args.judges
     ]
@@ -389,7 +412,7 @@ def build_stages(args: argparse.Namespace) -> list[Stage]:
             "judge-reasons",
             f"{SCORE_DIR}/add_llm_judge_reasons.py",
             [out, "--model", args.cue_judge, "--prompt", PROMPT_VERSION,
-             "--select", "all", "--per-band", str(args.per_band), *cpu, *yes],
+             "--select", "all", "--per-band", str(per_band), *cpu, *yes],
             # The RATIONALE column, not the cue lists. Coverage is decided by
             # whether the judge answered at all: an explained row whose two cue
             # lists are empty is a real observation (the judge found nothing)
@@ -475,6 +498,45 @@ def blank_text_count(out: Path) -> int:
     return sum(1 for v in values if v is None or not str(v).strip())
 
 
+#: Numeric score columns whose values carry a per-row meaning — a constant or
+#: near-constant one is a scorer that fell back to a default for every row (the
+#: GenAI4Science-judge failure mode: the column is "filled", but with noise).
+#: Not emb_* (a constant embedding is caught as all-zero, separately) and not
+#: the string/list produced columns.
+DEGENERATE_CHECK_PREFIXES = (
+    "binoculars_score", "fastdetect_crit_", "detector_score_", "llm_judge_score_",
+)
+
+#: Share of a score column's rows on one value above which the run FAILS. Set
+#: high on purpose — no real judge or detector clumps this hard, so a false
+#: positive is not a concern. The softer "worth a look" band (80%) lives in
+#: epai/scripts/check_parquet_completeness.py, which is the place for judgement
+#: calls; this one only catches the unambiguous "wrote a default everywhere".
+DEGENERATE_FRAC = 0.97
+
+
+def degenerate_score_column(out: Path, column: str) -> str | None:
+    """A message if ``column`` came out (near-)constant, else None."""
+    import pyarrow.parquet as pq
+    from collections import Counter
+
+    vals = pq.read_table(out, columns=[column]).column(0).to_pylist()
+    finite = [v for v in vals if isinstance(v, (int, float)) and v == v]
+    if len(finite) < 10:
+        return None
+    counts = Counter(finite)
+    top = counts.most_common(1)[0][1]
+    frac = top / len(finite)
+    if len(counts) == 1:
+        return (f"{column}: CONSTANT — every one of {len(finite)} rows is "
+                f"{finite[0]:g}. The scorer wrote one value into all of them.")
+    if frac >= DEGENERATE_FRAC:
+        return (f"{column}: {frac:.0%} of {len(finite)} rows on a single value "
+                f"({len(counts)} distinct) — the scorer is not producing real "
+                f"scores.")
+    return None
+
+
 def already_filled(stage: Stage, out: Path) -> bool:
     """True when every column this stage produces is already present and filled."""
     if not out.is_file() or not stage.produces:
@@ -498,8 +560,9 @@ def verify(stage: Stage, out: Path, n_blank_text: int) -> tuple[bool, list[str],
     ``gap``       rows still unfilled with no blank text to explain them. > 0
                   means re-running the stage is worth a try — the scorers skip
                   rows already done — before the pipeline gives up. ``gap == 0``
-                  with ``complete`` False means the output file is missing:
-                  nothing to retry.
+                  with ``complete`` False means the failure is not a missing row
+                  (the file is absent, or a score column came out degenerate):
+                  nothing a retry would fix, so fail now.
     """
     if not stage.produces:
         return True, [], 0
@@ -519,12 +582,23 @@ def verify(stage: Stage, out: Path, n_blank_text: int) -> tuple[bool, list[str],
         )
         gap += missing
 
-    if not messages:
-        return True, [], 0
-    if n_blank_text > 0:
-        return True, [f"{m}  (corpus has {n_blank_text} blank-text row(s) — "
-                      f"tolerated)" for m in messages], 0
-    return False, messages, gap
+    if messages:
+        if n_blank_text > 0:
+            return True, [f"{m}  (corpus has {n_blank_text} blank-text row(s) — "
+                          f"tolerated)" for m in messages], 0
+        return False, messages, gap
+
+    # Every produced column is FULL. Now the check a null count misses: a score
+    # column that got filled with one value for every row. A retry re-runs the
+    # same prompts and gets the same result, so this fails immediately (gap 0).
+    degenerate = [
+        m for column in stage.produces
+        if column.startswith(DEGENERATE_CHECK_PREFIXES)
+        and (m := degenerate_score_column(out, column))
+    ]
+    if degenerate:
+        return False, degenerate, 0
+    return True, [], 0
 
 
 def run(stage: Stage, dry_run: bool) -> tuple[int, float]:
@@ -593,9 +667,11 @@ def parse_args() -> argparse.Namespace:
                         "column name carries it, so this is not cosmetic.")
     p.add_argument("--per-band", type=int, default=DEFAULT_PER_BAND,
                    metavar="N",
-                   help="Rows to explain, passed with --select all. Must be at "
-                        "least the corpus size: an unexplained row gets no cue "
-                        "vector and the training loader drops it and its group.")
+                   help="Floor on the rows the cue-reasons stage explains "
+                        "(--select all). Automatically raised to the corpus size "
+                        "when the file is present, so every row gets a cue "
+                        "vector — an unexplained row is dropped, with its whole "
+                        "group, by the training loader.")
     p.add_argument("--from", dest="start_from", metavar="STAGE",
                    help="Start here instead of at the beginning, e.g. --from binox")
     p.add_argument("--only", nargs="+", metavar="STAGE",
@@ -693,11 +769,14 @@ def main() -> None:
             if gap == 0 or attempt >= args.fill_retries:
                 code = 1
                 note = "; ".join(messages) or f"{gap} row(s) unfilled"
+                headline = (
+                    f"exited 0 but its column(s) are not usable" if gap == 0
+                    else f"could not fill every row after {args.fill_retries} retr"
+                         f"{'y' if args.fill_retries == 1 else 'ies'}"
+                )
                 print(
-                    f"\n{RED}{stage.key} exited 0 but did not fill every row"
-                    + (f" after {args.fill_retries} retr"
-                       f"{'y' if args.fill_retries == 1 else 'ies'}" if gap else "")
-                    + f":{RESET}\n    " + "\n    ".join(messages)
+                    f"\n{RED}{stage.key} {headline}:{RESET}\n    "
+                    + "\n    ".join(messages)
                 )
                 break
             print(

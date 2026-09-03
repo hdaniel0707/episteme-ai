@@ -10,7 +10,8 @@ comparable with a number from another.
 
 | consumer | uses |
 |---|---|
-| `epai/ai_detection/prepare/run_holdout_pipeline.py` | all five groups, as its `--embedders` / `--binox-pairs` / `--fastdetect-pairs` / `--detectors` / `--judges` defaults + `judge_prompt_version`, `cue_judge` |
+| `epai/ai_detection/prepare/run_holdout_pipeline.py` | all five groups, as its `--embedders` / `--binox-pairs` / `--fastdetect-pairs` / `--detectors` / `--judges` defaults + `judge_prompt_version`, `cue_judge`. `--from embed` on an already-standardised corpus makes it a general suite scorer, not just a holdout one |
+| `epai/ai_detection/prepare/carry_suite_columns.py` | the exact output-column names, to copy from a sibling corpus that already scored them (so only new rows are computed) |
 | `cfg/science_data/*.yaml` `embed.embedders` | must equal `embedders` here (kept in sync by hand for now) |
 | `cfg/ai_detection/train/**/*.yaml` baseline blocks | choose *which* of these columns become rows in a given figure — a per-experiment call — but never a model outside this file |
 
@@ -80,7 +81,7 @@ runs, so adding it to one when the other already has it is nearly free.
 Pretrained supervised detectors, `detector_score_<name>`. `radar` only —
 `pangram_roberta` is gated on the Hub and access is pending.
 
-### judges (5)
+### judges (4)
 
 `llm_judge_score_<model>_<prompt>`, one scoring process each, in capability-ladder
 order:
@@ -91,23 +92,26 @@ order:
 - **`gptoss-120b`** — GenAI4Science, the top open-weight rung. gpt-oss and
   llama3.3 are also the Track-1/2 open-weight *generators*, so a judge and a
   generator here can be the exact same weights.
-- **`sonnet5`** — API, frontier, cross-family control. It agreeing with
-  `gpt56luna` to within ~0.02 AUROC is the answer to "one of your judges is the
-  generator judging itself".
 - **`gpt56luna`** — API, same model family as the generator. Listed **first** in
   the YAML (not by capability) because the cue vector
   (`llm_judge_cuevec_gpt56luna_v3`) is built from its rationales and the
   cue-feature stage must run after it.
 
+**`sonnet5` was removed (2026-09-03)** — the cross-vendor control ("one of your
+judges is the generator judging itself"), but too expensive to run on every
+corpus. `llm_judge_score_sonnet5_v3` stays in the files that already carry it
+(`science_v3_gpt56luna_0811A`, `denario_hc`) and is not recomputed elsewhere.
 `haiku45` and `opus-5` are the planned frontier additions (experiment 8).
 
 The two GenAI4Science judges reach an **OpenAI-compatible endpoint** —
 `GENAI4SCIENCE_API_KEY` (and optionally `GENAI4SCIENCE_BASE_URL`) in the
 environment. `add_llm_judge_scores.py` tries structured output first and falls
 back to a plain completion parsed with `parse_probability` (stripping any
-`<think>…</think>`), so it works whether or not the served model honours
-`response_format`. The endpoint is rate-limited and slower than the frontier
-APIs — fine for a 160-row holdout, budget for it on a full corpus.
+`<think>…</think>` and preferring the number after an "answer"/"probability"
+marker). It prints a per-run breakdown of structured vs fallback vs
+parse-retry rows, so a run on the fragile free-text path is visible. The
+endpoint is rate-limited and drops a large fraction of calls under batch load —
+budget several retry passes on a full corpus.
 
 `judge_prompt_version: v3` and `cue_judge: gpt56luna` are part of the column
 names — changing either changes which columns every config reads.
