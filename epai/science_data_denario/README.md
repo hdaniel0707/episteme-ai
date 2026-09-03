@@ -145,11 +145,22 @@ so `denario_hc` numbers are comparable with `science_v3` / `ghostbuster_*`.
 #    First run downloads ~13 local models; GPU-bound; ~$3-5 frontier judge API.
 #    Env: HF_TOKEN (Llama licence accepted) for llama3.1-8b binox+fastdetect;
 #    GENAI4SCIENCE_API_KEY for the gpt-oss / llama3.3 judges (rate-limited, slow).
+#    holdout has no blank text, so ANY Null in a scored column is a real gap:
+#    the runner re-runs that stage (skipping filled rows) up to --fill-retries
+#    times with a --fill-cooldown pause, then fails. Bump --fill-retries for the
+#    flaky GenAI4Science endpoint.
 .venv/bin/python epai/ai_detection/prepare/run_holdout_pipeline.py \
     --in data/parquet/denario_hc.parquet -o data/parquet/denario_hc.parquet \
-    --from embed --yes --gpu 1 --cpu-threads 16
-#    a stage that dies (e.g. a judge with null rows) → resume: --from <stage-name>
-#    (embed / binox / fastdetect / detectors / judge-sonnet5 / …)
+    --from embed --yes --gpu 1 --cpu-threads 16 --fill-retries 4
+#    a stage that dies → resume:  --from <stage>   (embed / binox / fastdetect / …)
+#    just the two flaky judges:   --only judge-gptoss-120b judge-llama33-70b --fill-retries 6
+
+# ── 5b. sanity-check the scored file ─────────────────────────────────────────
+#    catches nulls, out-of-range scores, and DEGENERATE columns — a judge that
+#    "filled" every row with 0.5. --reference flags any column science_v3 has
+#    that denario_hc lacks.  RUN AS ONE LINE (a broken \ splits the args).
+.venv/bin/python epai/scripts/check_parquet_completeness.py data/parquet/denario_hc.parquet --reference data/parquet/science_v3_gpt56luna_0811A.parquet
+#    look hardest at llm_judge_score_gptoss_120b_v3 / _llama33_70b_v3
 
 # ── 6. wire into the config ──────────────────────────────────────────────────
 #    cfg/ai_detection/train/clf_id/clf_id_science_v3.yaml, under data.eval_only.datasets

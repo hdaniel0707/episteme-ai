@@ -39,12 +39,20 @@ hand and is a default in the stage list below:
 
 WHAT IT PRODUCES, AND HOW IT KNOWS
 -----------------------------------
-Every stage declares the columns it is supposed to fill, and the runner checks
-them afterwards with ``parquet_utils.check_column_filled``. An exit code says
-the subprocess ran; it does not say the column got written -- several of these
-scripts catch per-row failures and finish successfully having scored nothing.
-A stage whose columns are still empty is reported as a failure whatever it
-returned.
+Every stage declares the columns it is supposed to fill, and the runner counts
+the filled rows of each afterwards (``parquet_utils.column_fill``). An exit code
+says the subprocess ran; it does not say every row got a value -- several of
+these scripts catch per-row failures and finish successfully having scored some,
+none, or most of the corpus.
+
+A holdout has no blank-text rows (``prepare_denario_detect.py`` drops empty
+abstracts), so **any** Null in a produced column is a real gap, not an expected
+consequence of a blank document. When a stage leaves one, the runner re-runs it
+-- the scoring scripts skip rows already done, so each pass retries only the
+failures -- up to ``--fill-retries`` times with a ``--fill-cooldown`` pause (for
+a rate-limited endpoint to drain), then fails the pipeline. ``--fill-retries 0``
+fails on the first gap. If the corpus DOES carry blank text, the runner falls
+back to the lenient reading and neither retries nor fails on those rows.
 
 **Stages are separate processes**, exactly as ``epai/science_data/run_pipeline.py``
 runs its own: each is a CLI with its own argument parsing, its own progress bars
@@ -63,8 +71,10 @@ different model pairs. Use ``--only`` / ``--from`` to resume deliberately.
 RESUMING
 
     --from binox             skip the stages before Binoculars
-    --only judge-sonnet5     run exactly this one
+    --only judge-sonnet5     run exactly this one (retries its Null rows too)
     --skip-existing          skip stages whose columns are already filled
+    --fill-retries 4         a flaky endpoint: give a stage more attempts
+    --fill-retries 0         fail on the first unfilled row instead of retrying
 
 COST. 82 rows. Every GPU stage here is dominated by model loading rather than by
 scoring -- nine models to score 82 documents each -- and the three judges are
@@ -105,7 +115,7 @@ from pathlib import Path
 import yaml
 
 from epai.utils import notify_utils
-from epai.utils.parquet_utils import check_column_filled, column_fill
+from epai.utils.parquet_utils import column_fill
 
 RED = "\033[91m"
 YELLOW = "\033[93m"
@@ -444,6 +454,27 @@ def select(stages: list[Stage], args: argparse.Namespace) -> list[Stage]:
     return stages
 
 
+#: The text column every scoring/embedding stage reads. A row whose text is
+#: blank is never scored and legitimately keeps a Null — see :func:`blank_text_count`.
+TEXT_COL = "text"
+
+
+def blank_text_count(out: Path) -> int:
+    """Rows with no usable text — None, empty, or whitespace only.
+
+    On an eval-only holdout this is normally 0 (``prepare_denario_detect.py``
+    drops empty abstracts), which is what lets :func:`verify` treat ANY Null
+    score as a real gap. When it is >0 the pipeline falls back to the lenient
+    reading: those rows are expected to be Null and are not its job to fill.
+    """
+    import pyarrow.parquet as pq
+
+    if not out.is_file() or TEXT_COL not in pq.ParquetFile(out).schema_arrow.names:
+        return 0
+    values = pq.read_table(out, columns=[TEXT_COL]).column(0).to_pylist()
+    return sum(1 for v in values if v is None or not str(v).strip())
+
+
 def already_filled(stage: Stage, out: Path) -> bool:
     """True when every column this stage produces is already present and filled."""
     if not out.is_file() or not stage.produces:
@@ -455,23 +486,45 @@ def already_filled(stage: Stage, out: Path) -> bool:
     return True
 
 
-def verify(stage: Stage, out: Path) -> tuple[bool, list[str]]:
-    """Did the stage actually fill what it said it would?
+def verify(stage: Stage, out: Path, n_blank_text: int) -> tuple[bool, list[str], int]:
+    """Did the stage fill what it said it would? ``(complete, messages, gap)``.
 
-    The check an exit code cannot make. Several of these scripts deliberately
-    catch per-row failures and exit 0 having scored nothing, which is the right
-    behaviour for them and the wrong thing for a pipeline to trust.
+    The check an exit code cannot make: several of these scripts catch per-row
+    failures and exit 0 having scored nothing.
+
+    ``complete``  every produced column is filled — or the corpus carries
+                  blank-text rows, which keep a Null score by design and are not
+                  this pipeline's to chase (``n_blank_text > 0``, the lenient path).
+    ``gap``       rows still unfilled with no blank text to explain them. > 0
+                  means re-running the stage is worth a try — the scorers skip
+                  rows already done — before the pipeline gives up. ``gap == 0``
+                  with ``complete`` False means the output file is missing:
+                  nothing to retry.
     """
     if not stage.produces:
-        return True, []
+        return True, [], 0
     if not out.is_file():
-        return False, [f"{out.name} was not written"]
-    problems = []
+        return False, [f"{out.name} was not written"], 0
+
+    messages: list[str] = []
+    gap = 0
     for column in stage.produces:
-        ok, message = check_column_filled(out, column)
-        if not ok:
-            problems.append(f"{column}: {message}")
-    return not problems, problems
+        present, filled, rows = column_fill(out, column)
+        if present and filled == rows:
+            continue
+        missing = rows - filled
+        messages.append(
+            f"{column}: not written" if not present
+            else f"{column}: {filled}/{rows} filled ({missing} Null)"
+        )
+        gap += missing
+
+    if not messages:
+        return True, [], 0
+    if n_blank_text > 0:
+        return True, [f"{m}  (corpus has {n_blank_text} blank-text row(s) — "
+                      f"tolerated)" for m in messages], 0
+    return False, messages, gap
 
 
 def run(stage: Stage, dry_run: bool) -> tuple[int, float]:
@@ -556,6 +609,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--yes", action="store_true",
                    help="Answer yes to the scoring stages' confirmation "
                         "prompts. Needed for an unattended run.")
+    p.add_argument("--fill-retries", type=int, default=2, metavar="N",
+                   help="When a stage exits 0 but leaves score/embedding rows "
+                        "Null (and the corpus has no blank text to explain "
+                        "them), re-run it up to N times — the scorers skip rows "
+                        "already done, so each pass only retries the failures. "
+                        "0 fails on the first gap. Default: 2.")
+    p.add_argument("--fill-cooldown", type=float, default=60.0, metavar="SECONDS",
+                   help="Pause before a fill retry (default: 60), long enough "
+                        "for a queued API/endpoint to drain rather than be hit "
+                        "again immediately.")
     p.add_argument("--dry-run", action="store_true",
                    help="Print the commands without running anything.")
     return p.parse_args()
@@ -597,6 +660,7 @@ def main() -> None:
 
     results: list[tuple[Stage, int, float, str]] = []
     failed = None
+    n_blank_text: int | None = None  # computed once, after the file exists
 
     for stage in stages:
         if args.skip_existing and not args.dry_run and already_filled(stage, args.out):
@@ -607,25 +671,48 @@ def main() -> None:
             results.append((stage, 0, 0.0, "skipped"))
             continue
 
-        try:
-            code, seconds = run(stage, args.dry_run)
-        except KeyboardInterrupt:
-            print(f"\n{YELLOW}Interrupted during {stage.key}.{RESET}")
-            code, seconds = INTERRUPTED, 0.0
+        code, note, stage_seconds = 0, "", 0.0
+        for attempt in range(args.fill_retries + 1):
+            try:
+                code, seconds = run(stage, args.dry_run)
+            except KeyboardInterrupt:
+                print(f"\n{YELLOW}Interrupted during {stage.key}.{RESET}")
+                code, seconds = INTERRUPTED, 0.0
+            stage_seconds += seconds
 
-        note = ""
-        if code == 0 and not args.dry_run:
+            if code != 0 or args.dry_run:
+                break
+
             # An exit code says the subprocess ran. This says it did the work.
-            ok, problems = verify(stage, args.out)
-            if not ok:
-                code, note = 1, "; ".join(problems)
+            if n_blank_text is None:
+                n_blank_text = blank_text_count(args.out)
+            complete, messages, gap = verify(stage, args.out, n_blank_text)
+            if complete:
+                note = "; ".join(messages)
+                break
+            if gap == 0 or attempt >= args.fill_retries:
+                code = 1
+                note = "; ".join(messages) or f"{gap} row(s) unfilled"
                 print(
-                    f"\n{RED}{stage.key} exited 0 but its column(s) are not "
-                    f"filled:{RESET}\n    " + "\n    ".join(problems)
+                    f"\n{RED}{stage.key} exited 0 but did not fill every row"
+                    + (f" after {args.fill_retries} retr"
+                       f"{'y' if args.fill_retries == 1 else 'ies'}" if gap else "")
+                    + f":{RESET}\n    " + "\n    ".join(messages)
                 )
+                break
+            print(
+                f"\n{YELLOW}{stage.key}: {gap} row(s) still Null — "
+                f"{'; '.join(messages)}\n  retry {attempt + 1}/{args.fill_retries} "
+                f"in {args.fill_cooldown:.0f}s (only the Null rows are re-scored)"
+                f"{RESET}",
+                flush=True,
+            )
+            notify.stage(f"{stage.key} retry {attempt + 1}/{args.fill_retries}",
+                         0, seconds, critical=False)
+            time.sleep(args.fill_cooldown)
 
-        results.append((stage, code, seconds, note))
-        notify.stage(stage.key, code, seconds, critical=True)
+        results.append((stage, code, stage_seconds, note))
+        notify.stage(stage.key, code, stage_seconds, critical=True)
 
         if code != 0:
             failed = stage
