@@ -7,6 +7,13 @@ that came out constant, near-constant, all-zero, or ragged. That is the shape a
 flaky scoring endpoint leaves behind (every row "filled" with 0.5), and nothing
 downstream notices until a figure comes out at AUROC 0.5.
 
+The other thing a null count misses is a **failed call written as content**: an
+API error body, a refused completion, or leaked model scaffolding (``<think>``,
+``<|channel|>``) saved into a ``text`` / ``abstract`` column. That row is not
+null and not empty, so only its wording gives it away. Every ``TEXTISH`` column
+is scanned for those signatures and for byte-identical duplicate documents (one
+error string repeated across N rows is the classic tell).
+
 Not tied to the training schema (that is ``epai/ai_detection/analyse/audit_corpus.py``,
 which also checks pairing, balance and text quality). This one answers the
 narrower question: did every stage that was supposed to write a column actually
@@ -34,6 +41,7 @@ import argparse
 import json
 import math
 import sys
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -77,6 +85,31 @@ SUSPICIOUS_FRAC = 0.80
 # distribution.
 TEXTISH = ("text", "text_raw", "text_preclean", "abstract", "abstract_raw")
 TITLEISH = ("title",)
+
+# A failed API call is sometimes written into a text column as content — an
+# error body, a refusal, or leaked model scaffolding. Not null, not empty; only
+# the wording gives it away. Three tiers, all matched case-insensitively:
+#
+#   STRUCTURAL   things a real document never contains, anywhere       -> ERROR
+#   LEADING      a refusal / error phrase in the first ~80 chars       -> ERROR
+#                (a document that *starts* "I'm sorry, but I can't" is
+#                 a refused call, not prose that mentions one)
+#   the same refusal / error phrases anywhere else in the document     -> WARN
+TEXT_ERROR_SIGNATURES_STRUCTURAL = (
+    '"error":', "'error':", "<!doctype html", "<html", "<think>", "</think>",
+    "<|channel|>", "<|start|>", "<|message|>", "<|end|>", "assistantfinal",
+)
+TEXT_ERROR_SIGNATURES_PHRASE = (
+    "as an ai language model", "i cannot assist", "i can't help with that",
+    "i'm sorry, but i can", "i am sorry, but i can", "i am unable to",
+    "i apologize, but i cannot", "i'm not able to", "sorry, but i can",
+    "internal server error", "bad gateway", "service unavailable",
+    "gateway time-out", "gateway timeout", "upstream connect error",
+    "too many requests", "rate limit exceeded", "rate_limit_exceeded",
+    "insufficient_quota", "context_length_exceeded", "model_not_found",
+    "an error occurred", "request timed out", "please try again later",
+)
+LEADING_WINDOW = 80
 
 # Columns where a partial null is a real gap. Everywhere else a partial null is
 # an expected consequence of the two classes carrying different metadata (only
@@ -212,6 +245,82 @@ def _top_value_fraction(non_null: pa.ChunkedArray) -> float:
     return float(counts.max() / counts.sum()) if counts.size else 0.0
 
 
+def _looks_like_error(doc: str) -> bool:
+    low = doc.lower()
+    lead = low[:LEADING_WINDOW]
+    return (
+        any(s in low for s in TEXT_ERROR_SIGNATURES_STRUCTURAL)
+        or any(s in lead for s in TEXT_ERROR_SIGNATURES_PHRASE)
+        or doc.lstrip()[:1] in ("{", "<")
+    )
+
+
+def _scan_text_errors(name: str, docs: list[str], rep: Report, info: dict) -> None:
+    """Flag documents that look like a failed API call rather than real text:
+    an error / refusal signature, or one document repeated byte-for-byte across
+    many rows (one error string written into every failed row is the tell)."""
+    low = [d.lower() for d in docs]
+
+    def _hits(test) -> list[tuple[int, str]]:
+        out: list[tuple[int, str]] = []
+        for i, d in enumerate(low):
+            if (sig := test(d)) is not None:
+                out.append((i, sig))
+        return out
+
+    def _first(sigs, hay):
+        return next((s for s in sigs if s in hay), None)
+
+    structural = _hits(lambda d: _first(TEXT_ERROR_SIGNATURES_STRUCTURAL, d))
+    leading = _hits(lambda d: _first(TEXT_ERROR_SIGNATURES_PHRASE, d[:LEADING_WINDOW]))
+    mid = _hits(lambda d: _first(TEXT_ERROR_SIGNATURES_PHRASE, d))
+    mid = [h for h in mid if h[0] not in {i for i, _ in leading}]
+
+    tiers = (
+        ("structural", structural, rep.error),
+        ("leading refusal / error", leading, rep.error),
+        ("mid-document refusal / error phrase", mid, rep.warn),
+    )
+    for label, hits, emit in tiers:
+        info.setdefault("error_signature_hits", {})[label] = len(hits)
+        if not hits:
+            continue
+        by_sig = Counter(sig for _, sig in hits)
+        emit(f"{name}: {len(hits)} document(s) — {label} — likely a failed call "
+             f"saved as content: "
+             + ", ".join(f"{s!r}x{c}" for s, c in by_sig.most_common(4)))
+        for i, sig in hits[:3]:
+            rep.detail(f"[{sig!r}] {docs[i][:140]!r}")
+    if not any(hits for _, hits, _ in tiers):
+        rep.ok(f"{name}: {len(docs)} doc(s) scanned, no error / refusal signatures")
+
+    counts = Counter(docs)
+    dups = {d: c for d, c in counts.items() if c > 1}
+    if not dups:
+        return
+    n_dup_rows = sum(dups.values())
+    top_doc, top_c = max(dups.items(), key=lambda x: x[1])
+    err_groups = {d: c for d, c in dups.items() if _looks_like_error(d)}
+    info["duplicate_docs"] = {
+        "groups": len(dups), "rows": n_dup_rows, "largest_group": top_c,
+        "error_like_groups": len(err_groups),
+    }
+    threshold = max(5, round(0.005 * len(docs)))
+    if err_groups:
+        d, c = max(err_groups.items(), key=lambda x: x[1])
+        rep.error(f"{name}: an error-like document is repeated across {c} row(s) "
+                  f"({len(err_groups)} such group(s)) — a failed call written "
+                  f"into every row it hit")
+        rep.detail(f"{c}x: {d[:140]!r}")
+    elif top_c >= threshold:
+        rep.warn(f"{name}: one document appears in {top_c} rows "
+                 f"(threshold {threshold}) — check it is real text")
+        rep.detail(f"{top_c}x: {top_doc[:140]!r}")
+    else:
+        rep.detail(f"{name}: {n_dup_rows} row(s) in {len(dups)} duplicate group(s), "
+                   f"largest {top_c} — expected in a paired / multi-generator corpus")
+
+
 def _check_string(name: str, non_null, n: int, n_distinct: int,
                   rep: Report, info: dict) -> None:
     s = non_null.to_pylist()
@@ -231,6 +340,7 @@ def _check_string(name: str, non_null, n: int, n_distinct: int,
             rep.warn(f"{name}: {short} document(s) under 20 words")
         if truncated:
             rep.warn(f"{name}: {truncated} document(s) end in an ellipsis (truncated?)")
+        _scan_text_errors(name, s, rep, info)
         rep.detail(f"{name}: {info['words_med']} words median, "
                    f"chars [{info['len_min']}, {info['len_max']}], {n_distinct} distinct")
     elif name in TITLEISH:
