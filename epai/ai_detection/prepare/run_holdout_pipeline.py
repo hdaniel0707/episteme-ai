@@ -82,7 +82,7 @@ different model pairs. Use ``--only`` / ``--from`` to resume deliberately.
 RESUMING
 
     --from binox             skip the stages before Binoculars
-    --only judge-sonnet5     run exactly this one (retries its Null rows too)
+    --only judge-gpt56luna    run exactly this one (retries its Null rows too)
     --skip-existing          skip stages whose columns are already filled
     --fill-retries 4         a flaky endpoint: give a stage more attempts
     --fill-retries 0         fail on the first unfilled row instead of retrying
@@ -168,6 +168,17 @@ def _suite_keys(group: str, fallback: tuple[str, ...]) -> tuple[str, ...]:
     if not items:
         return fallback
     return tuple(i["key"] if isinstance(i, dict) else str(i) for i in items)
+
+
+def _suite_judge_kinds() -> dict[str, set[str]]:
+    """``{kind: {judge alias, ...}}`` from the suite's ``judges`` block, so the
+    runner can cap concurrency for the ``genai4science`` ones. Fallback maps the
+    two known GenAI4Science judges."""
+    out: dict[str, set[str]] = {}
+    for entry in _SUITE.get("judges") or []:
+        if isinstance(entry, dict) and "kind" in entry:
+            out.setdefault(entry["kind"], set()).add(entry["key"])
+    return out or {"genai4science": {"gptoss-120b", "llama33-70b"}}
 
 
 #: Embedders to score. From cfg/detector_suite.yaml `embedders` — the full set,
@@ -383,12 +394,19 @@ def build_stages(args: argparse.Namespace) -> list[Stage]:
     #    models on separate providers -- two of these are API calls and one is
     #    a local 14B on the GPU -- and because a judge that fails should not
     #    take the other two with it.
+    # API judges are threaded; --workers is how many rows are in flight at once
+    # (a local judge ignores it and batches). The GenAI4Science endpoint sheds
+    # load under concurrency, so those get a lower cap.
+    workers = ["--workers", str(args.api_workers)]
+    g4s_workers = ["--workers", str(min(args.api_workers, args.g4s_workers))]
+    g4s_judges = _suite_judge_kinds().get("genai4science", set())
     for judge, column in zip(args.judges, judge_cols):
+        w = g4s_workers if judge in g4s_judges else workers
         stages.append(
             Stage(
                 f"judge-{judge}",
                 f"{SCORE_DIR}/add_llm_judge_scores.py",
-                [out, "--model", judge, "--prompt", PROMPT_VERSION, *cpu, *yes],
+                [out, "--model", judge, "--prompt", PROMPT_VERSION, *w, *cpu, *yes],
                 produces=[column],
             )
         )
@@ -412,7 +430,9 @@ def build_stages(args: argparse.Namespace) -> list[Stage]:
             "judge-reasons",
             f"{SCORE_DIR}/add_llm_judge_reasons.py",
             [out, "--model", args.cue_judge, "--prompt", PROMPT_VERSION,
-             "--select", "all", "--per-band", str(per_band), *cpu, *yes],
+             "--select", "all", "--per-band", str(per_band),
+             *(g4s_workers if args.cue_judge in g4s_judges else workers),
+             *cpu, *yes],
             # The RATIONALE column, not the cue lists. Coverage is decided by
             # whether the judge answered at all: an explained row whose two cue
             # lists are empty is a real observation (the judge found nothing)
@@ -672,6 +692,19 @@ def parse_args() -> argparse.Namespace:
                         "when the file is present, so every row gets a cue "
                         "vector — an unexplained row is dropped, with its whole "
                         "group, by the training loader.")
+    p.add_argument("--api-workers", type=int, default=8, metavar="N",
+                   help="Concurrent requests for every API-based stage — the "
+                        "OpenAI/Anthropic judge scores AND the cue-reasons pass "
+                        "(default: 8; 24 is fine for OpenAI/Anthropic). The "
+                        "local judge (qwen3-14b) ignores this and batches on the "
+                        "GPU; GenAI4Science judges are further capped by "
+                        "--g4s-workers.")
+    p.add_argument("--g4s-workers", type=int, default=6, metavar="N",
+                   help="Concurrency cap for the GenAI4Science judges only "
+                        "(default: 6). That endpoint sheds load under "
+                        "concurrency and is a shared cluster, so more in-flight "
+                        "requests do not buy throughput. Effective value: "
+                        "min(this, --api-workers).")
     p.add_argument("--from", dest="start_from", metavar="STAGE",
                    help="Start here instead of at the beginning, e.g. --from binox")
     p.add_argument("--only", nargs="+", metavar="STAGE",
