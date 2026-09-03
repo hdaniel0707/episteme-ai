@@ -47,12 +47,15 @@ none, or most of the corpus.
 
 A holdout has no blank-text rows (``prepare_denario_detect.py`` drops empty
 abstracts), so **any** Null in a produced column is a real gap, not an expected
-consequence of a blank document. When a stage leaves one, the runner re-runs it
--- the scoring scripts skip rows already done, so each pass retries only the
-failures -- up to ``--fill-retries`` times with a ``--fill-cooldown`` pause (for
-a rate-limited endpoint to drain), then fails the pipeline. ``--fill-retries 0``
-fails on the first gap. If the corpus DOES carry blank text, the runner falls
-back to the lenient reading and neither retries nor fails on those rows.
+consequence of a blank document. When a stage leaves one -- OR exits non-zero
+(a crash, a CUDA OOM on a contended box) -- the runner re-runs it, up to
+``--fill-retries`` times with a ``--fill-cooldown`` pause, then fails the
+pipeline. The scoring scripts skip rows already done, so a fill retry only
+re-does the failures; a hard-exit retry is worth it because the other GPU job
+that caused the OOM may have finished (raise ``--fill-cooldown`` if it takes a
+while). ``--fill-retries 0`` fails on the first problem. If the corpus DOES
+carry blank text, the runner falls back to the lenient reading and neither
+retries nor fails on Null rows (a hard exit still retries).
 
 A full column is checked once more: a numeric score column
 (``llm_judge_score_*``, ``binoculars_score*``, ``fastdetect_crit_*``,
@@ -789,8 +792,30 @@ def main() -> None:
                 code, seconds = INTERRUPTED, 0.0
             stage_seconds += seconds
 
-            if code != 0 or args.dry_run:
+            if args.dry_run or code == INTERRUPTED:
                 break
+            if code != 0:
+                # A non-zero exit is a hard failure — a crash, an OOM on a
+                # contended box, a model that would not load. Retrying an OOM
+                # after the other GPU job finishes is a real recovery path, so
+                # it gets the same budget as a Null gap; a genuine bug just
+                # fails fast N times and then stops.
+                if attempt >= args.fill_retries:
+                    note = f"exit {code}"
+                    print(f"\n{RED}{stage.key} exited {code} after "
+                          f"{args.fill_retries} retr"
+                          f"{'y' if args.fill_retries == 1 else 'ies'}.{RESET}")
+                    break
+                print(
+                    f"\n{YELLOW}{stage.key} exited {code} — retry "
+                    f"{attempt + 1}/{args.fill_retries} in {args.fill_cooldown:.0f}s "
+                    f"(raise --fill-cooldown for a busy GPU; Ctrl-C to stop){RESET}",
+                    flush=True,
+                )
+                notify.stage(f"{stage.key} retry {attempt + 1}/{args.fill_retries} "
+                             f"(exit {code})", code, seconds, critical=False)
+                time.sleep(args.fill_cooldown)
+                continue
 
             # An exit code says the subprocess ran. This says it did the work.
             if n_blank_text is None:
@@ -854,12 +879,20 @@ def main() -> None:
     print(f"\n  total {total:.1f}s")
 
     if failed is not None:
-        resume = (
-            f"uv run python epai/ai_detection/prepare/run_holdout_pipeline.py "
-            f"--from {failed.key}"
-            + (f" --gpu {args.gpu}" if args.gpu is not None else "")
-            + (f" --cpu-threads {args.cpu_threads}" if args.cpu_threads else "")
-        )
+        # Carry the non-default paths and flags, so the resume line is
+        # copy-pasteable rather than a template — a corpus other than the
+        # Denario default needs --in / -o or it resumes on the wrong file.
+        resume = " ".join([
+            "uv run python epai/ai_detection/prepare/run_holdout_pipeline.py",
+            f"--from {failed.key}",
+            *([] if args.src == DEFAULT_IN else [f"--in {rel(args.src)}"]),
+            *([] if args.out == DEFAULT_OUT else [f"-o {rel(args.out)}"]),
+            *([f"--gpu {args.gpu}"] if args.gpu is not None else []),
+            *([f"--cpu-threads {args.cpu_threads}"] if args.cpu_threads else []),
+            *([f"--api-workers {args.api_workers}"] if args.api_workers != 8 else []),
+            *([f"--fill-retries {args.fill_retries}"] if args.fill_retries != 2 else []),
+            *(["--yes"] if args.yes else []),
+        ])
         notify.failed(failed.key, results[-1][1], results[-1][2], resume=resume)
         print(
             f"\n{RED}Pipeline stopped at '{failed.key}'.{RESET}\n"
