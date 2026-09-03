@@ -98,12 +98,13 @@ _WS_RE = re.compile(r"\s+")
 # empty-response check in call_with_retry and is recorded as a failed call.
 _THINK_RE = re.compile(r"<think\b[^>]*>.*?</think>", re.IGNORECASE | re.DOTALL)
 
-# A shared open-weight endpoint (GenAI4Science / SZTAKI) sheds load by rejecting
-# a fraction of calls with a transient 400, and `call_with_retry`'s in-call
-# retries — four attempts over ~15s — do not always outlast a busy spell. After
-# the first generation sweep, `generate` re-runs just the failures a few more
-# times; this is the pause between those passes, long enough for a queued
-# endpoint to drain rather than be hit again immediately.
+# The GenAI4Science (SZTAKI) endpoint fails calls under load: the shared one
+# sheds with transient 400s, the performance one rate-limits and blocks the key
+# for ~1 minute once more than 4 calls are in flight (keep max_workers <= 4).
+# Either way `call_with_retry`'s in-call retries — four attempts over ~15s — do
+# not always outlast it. After the first generation sweep, `generate` re-runs
+# just the failures a few more times; this is the pause between those passes,
+# long enough for a blocked key to clear or a queue to drain.
 _RETRY_PASS_COOLDOWN = 60
 
 # `uid` is unique per row, `id` is the PAIR key shared by a paper's human row

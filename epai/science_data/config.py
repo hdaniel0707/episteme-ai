@@ -14,7 +14,6 @@ things live outside it, each so it can be swapped independently:
 
 from __future__ import annotations
 
-import os
 import re
 from pathlib import Path
 
@@ -424,7 +423,6 @@ def generated_by_label(model: str, cfg: dict) -> str:
 # OpenAI-compatible endpoint serves. ``provider`` is a shorthand for the two
 # hosts this project uses; a bare ``base_url`` + ``api_key_env`` covers any
 # other. Absent both, a generator is plain OpenAI, exactly as before.
-GENAI4SCIENCE_BASE_URL_DEFAULT = "https://genai.science-cloud.hu/api"
 
 
 def generator_endpoint(g: dict) -> tuple[str | None, str]:
@@ -449,11 +447,10 @@ def generator_endpoint(g: dict) -> tuple[str | None, str]:
     if provider == "openai":
         return base_url, api_key_env or "OPENAI_API_KEY"
     if provider == "genai4science":
-        return (
-            base_url
-            or os.environ.get("GENAI4SCIENCE_BASE_URL", GENAI4SCIENCE_BASE_URL_DEFAULT),
-            api_key_env or "GENAI4SCIENCE_API_KEY",
-        )
+        from epai.utils.env_utils import genai4science_endpoint
+
+        default_base_url, default_key_env = genai4science_endpoint()
+        return (base_url or default_base_url, api_key_env or default_key_env)
     raise ValueError(
         f"generator {g.get('model')!r}: unknown provider {provider!r}; use "
         "'openai', 'genai4science', or set base_url + api_key_env directly"

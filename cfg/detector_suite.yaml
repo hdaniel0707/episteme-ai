@@ -103,9 +103,9 @@ judges:
     kind: api
   - key: qwen3-14b         # local, bf16 on GPU. the low / inverted rung.
     kind: local
-  - key: gptoss-120b       # GenAI4Science endpoint (needs GENAI4SCIENCE_API_KEY).
-    kind: genai4science    # top open-weight rung; slower, rate-limited.
-  - key: llama33-70b       # GenAI4Science endpoint. second open-weight family.
+  - key: gptoss-120b       # GenAI4Science (perf key preferred, else GENAI4SCIENCE_API_KEY).
+    kind: genai4science    # top open-weight rung; max 4 concurrent on the perf endpoint.
+  - key: llama33-70b       # GenAI4Science. second open-weight family; downgraded, slow to load.
     kind: genai4science
   # - key: sonnet5         # removed 2026-09-03: cross-vendor control, but too
   #                          expensive to run on every corpus. Columns already in

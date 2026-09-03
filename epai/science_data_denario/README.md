@@ -144,7 +144,8 @@ so `denario_hc` numbers are comparable with `science_v3` / `ghostbuster_*`.
 #    sonnet5 / gpt-oss:120b / llama3.3:70b → judge-reasons → cue-features.
 #    First run downloads ~13 local models; GPU-bound; ~$3-5 frontier judge API.
 #    Env: HF_TOKEN (Llama licence accepted) for llama3.1-8b binox+fastdetect;
-#    GENAI4SCIENCE_API_KEY for the gpt-oss / llama3.3 judges (rate-limited, slow).
+#    GENAI4SCIENCE_PERFORMANCE_API_KEY (else GENAI4SCIENCE_API_KEY) for the
+#    gpt-oss / llama3.3 judges — keep --g4s-workers <= 4 on the perf endpoint.
 #    holdout has no blank text, so ANY Null in a scored column is a real gap:
 #    the runner re-runs that stage (skipping filled rows) up to --fill-retries
 #    times with a --fill-cooldown pause, then fails. Bump --fill-retries for the

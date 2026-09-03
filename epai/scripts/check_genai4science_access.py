@@ -9,15 +9,22 @@ Nothing here writes to the corpus or spends meaningful tokens. Run it before
 building anything on top of this provider, and paste the output into the access
 / performance-endpoint request e-mail if a model is missing.
 
-    python -m epai.scripts.check_genai4science_access
+    python -m epai.scripts.check_genai4science_access            # whichever key is set
+    python -m epai.scripts.check_genai4science_access --default  # force the shared endpoint
 
-Config (env):
-    GENAI4SCIENCE_API_KEY    bearer token from Portal > Settings > Account
-    GENAI4SCIENCE_BASE_URL   default https://genai.science-cloud.hu/api
+Config (env). The performance endpoint is used automatically when its key is
+set (see epai/utils/env_utils.py :: genai4science_endpoint); --default forces
+the shared one.
+    GENAI4SCIENCE_PERFORMANCE_API_KEY   bearer token, performance endpoint
+                                       (dedicated capacity, max 4 concurrent —
+                                       a 5th call trips a ~1-minute key block)
+    GENAI4SCIENCE_API_KEY              bearer token, shared endpoint (trials, light use)
+    GENAI4SCIENCE_*_BASE_URL           override either base URL
 """
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 import time
@@ -25,22 +32,27 @@ import time
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from epai.utils.env_utils import doublecheck_env, doublecheck_pkgs
+from epai.utils.env_utils import (
+    GENAI4SCIENCE_BASE_URL,
+    doublecheck_env,
+    doublecheck_pkgs,
+    genai4science_endpoint,
+)
 
 load_dotenv()
 doublecheck_env(".env")
 doublecheck_pkgs(pyproject_path="pyproject.toml", verbose=True)
 
-DEFAULT_BASE_URL = "https://genai.science-cloud.hu/api"
-
-# Models the ICLR plan needs: judge rungs + open-weight generators. Edit freely.
+# Models the performance key is entitled to (SZTAKI, 2026-09). The first three
+# take several concurrent threads; llama3.3 / mistral-small were moved off
+# dedicated GPUs, so expect a cold-start wait on the first call. The shared
+# endpoint additionally serves llama3.1:8b and others — see the docs.
 TARGET_MODELS = [
-    "qwen3.8:27b",           # judge rung + mid generator
-    "gemma4:31b",            # judge rung (256k ctx)
     "gpt-oss:120b",          # top open-weight judge rung + capable generator
-    "llama3.3:70b",          # extra judge rung / generator
-    "mistral-small3.2:24b",  # extra judge rung
-    "llama3.1:8b",           # sanity — small, widely provisioned
+    "gemma4:31b",            # judge rung (256k ctx)
+    "qwen3.8:27b",           # judge rung + mid generator
+    "llama3.3:70b",          # extra judge rung / generator — downgraded, slow to load
+    "mistral-small3.2:24b",  # extra judge rung — downgraded, slow to load
 ]
 
 # The default endpoint rate-limits and queues; without this a probe hangs.
@@ -49,15 +61,27 @@ REQUEST_TIMEOUT = 90.0
 
 
 def main() -> None:
-    api_key = os.environ.get("GENAI4SCIENCE_API_KEY")
-    if not api_key:
-        sys.exit("GENAI4SCIENCE_API_KEY is not set (checked env and .env).")
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--default", action="store_true",
+                    help="probe the shared endpoint even if a performance key is set")
+    args = ap.parse_args()
 
-    base_url = os.environ.get("GENAI4SCIENCE_BASE_URL", DEFAULT_BASE_URL)
+    if args.default:
+        base_url = os.environ.get("GENAI4SCIENCE_BASE_URL", GENAI4SCIENCE_BASE_URL)
+        api_key_env = "GENAI4SCIENCE_API_KEY"
+    else:
+        base_url, api_key_env = genai4science_endpoint()
+
+    api_key = os.environ.get(api_key_env)
+    if not api_key:
+        sys.exit(f"{api_key_env} is not set (checked env and .env).")
+
     client = OpenAI(
         api_key=api_key, base_url=base_url, timeout=REQUEST_TIMEOUT, max_retries=0
     )
-    print(f"\nbase_url: {base_url}\n", flush=True)
+    endpoint = "performance" if "performance" in base_url else "shared/default"
+    print(f"\nendpoint: {endpoint}   key: {api_key_env}   base_url: {base_url}\n",
+          flush=True)
 
     print("== entitled models (GET /models) ==")
     entitled: set[str] = set()

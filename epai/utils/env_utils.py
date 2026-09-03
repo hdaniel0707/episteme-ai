@@ -2,6 +2,39 @@
 import os
 from dotenv import dotenv_values
 
+# GenAI4Science (HUN-REN SZTAKI) — an OpenAI-compatible endpoint for open-weight
+# models. Two deployments:
+#   - the shared default endpoint: rate-limited, sheds load, kept for model
+#     trials and light use;
+#   - the performance endpoint: dedicated capacity, up to 4 concurrent calls
+#     (a 5th trips a ~1-minute key block), reached at a different base URL.
+GENAI4SCIENCE_BASE_URL = "https://genai.science-cloud.hu/api"
+GENAI4SCIENCE_PERFORMANCE_BASE_URL = "https://genai.science-cloud.hu/performance-api/"
+
+
+def genai4science_endpoint() -> tuple[str, str]:
+    """``(base_url, api_key_env)`` for the GenAI4Science endpoint.
+
+    Prefers the **performance** endpoint whenever
+    ``GENAI4SCIENCE_PERFORMANCE_API_KEY`` is set, and falls back to the shared
+    default endpoint otherwise. The key and the base URL always move together,
+    so a performance key is never sent to the default host or the reverse.
+    Either base URL can still be overridden by its own ``*_BASE_URL`` env var.
+
+    ``api_key_env`` is a variable *name*, not a value — the caller reads it from
+    the environment when it builds its client.
+    """
+    if os.environ.get("GENAI4SCIENCE_PERFORMANCE_API_KEY"):
+        return (
+            os.environ.get("GENAI4SCIENCE_PERFORMANCE_BASE_URL",
+                           GENAI4SCIENCE_PERFORMANCE_BASE_URL),
+            "GENAI4SCIENCE_PERFORMANCE_API_KEY",
+        )
+    return (
+        os.environ.get("GENAI4SCIENCE_BASE_URL", GENAI4SCIENCE_BASE_URL),
+        "GENAI4SCIENCE_API_KEY",
+    )
+
 
 def summarize_value(value: str) -> str:
     """Return masked form: ****last4 or boolean string."""

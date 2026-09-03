@@ -103,9 +103,13 @@ corpus. `llm_judge_score_sonnet5_v3` stays in the files that already carry it
 (`science_v3_gpt56luna_0811A`, `denario_hc`) and is not recomputed elsewhere.
 `haiku45` and `opus-5` are the planned frontier additions (experiment 8).
 
-The two GenAI4Science judges reach an **OpenAI-compatible endpoint** —
-`GENAI4SCIENCE_API_KEY` (and optionally `GENAI4SCIENCE_BASE_URL`) in the
-environment. `add_llm_judge_scores.py` tries structured output first and falls
+The two GenAI4Science judges reach an **OpenAI-compatible endpoint**. Set
+`GENAI4SCIENCE_PERFORMANCE_API_KEY` (dedicated capacity, max 4 concurrent — a
+5th call trips a ~1-minute key block) and the code uses the performance
+endpoint automatically; otherwise it falls back to `GENAI4SCIENCE_API_KEY` on
+the shared endpoint. Either base URL is overridable
+(`GENAI4SCIENCE_*_BASE_URL`); see `epai/utils/env_utils.py :: genai4science_endpoint`.
+Keep `--g4s-workers` at 4 or below. `add_llm_judge_scores.py` tries structured output first and falls
 back to a plain completion parsed with `parse_probability` (stripping any
 `<think>…</think>` and preferring the number after an "answer"/"probability"
 marker). It prints a per-run breakdown of structured vs fallback vs

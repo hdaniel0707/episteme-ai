@@ -354,7 +354,8 @@ MODELS: dict[str, JudgeModel] = {
         model="gpt-oss:120b",
         column="gptoss_120b",
         note="GenAI4Science (HUN-REN SZTAKI) open-weight endpoint. Needs "
-             "GENAI4SCIENCE_API_KEY. The largest open-weight judge reachable "
+             "GENAI4SCIENCE_PERFORMANCE_API_KEY (or GENAI4SCIENCE_API_KEY for "
+             "the shared endpoint). The largest open-weight judge reachable "
              "there and the top open-weight rung of the capability ladder; the "
              "same models are Track-1/2 generators, so a judge and a generator "
              "here can be the same weights.",
@@ -483,18 +484,14 @@ ALL_GENERATORS = "all"
 DOMAIN_COL = "domain"
 
 # Environment variable each provider needs, checked up front so a long run does
-# not die on the first call.
+# not die on the first call. GenAI4Science is resolved separately
+# (:func:`genai4science_endpoint` — the var name depends on whether a
+# performance key is set), so it is not listed here.
 _REQUIRED_ENV = {
     "openai": "OPENAI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
     "gemini": "GOOGLE_API_KEY",
-    "genai4science": "GENAI4SCIENCE_API_KEY",
 }
-
-# GenAI4Science (HUN-REN SZTAKI) — an OpenAI-compatible endpoint serving
-# open-weight models. Same default as epai/science_data/config.py; the base URL
-# is overridable per environment, the key is always read from the env var above.
-GENAI4SCIENCE_BASE_URL = "https://genai.science-cloud.hu/api"
 
 # A served reasoning model (gpt-oss) can wrap its chain of thought in <think>…
 # </think> before the answer; strip it so parse_probability reads the verdict,
@@ -1168,10 +1165,10 @@ class ApiJudge(Judge):
         if self.provider == "genai4science":
             from openai import OpenAI
 
-            return OpenAI(
-                base_url=os.environ.get("GENAI4SCIENCE_BASE_URL", GENAI4SCIENCE_BASE_URL),
-                api_key=os.environ["GENAI4SCIENCE_API_KEY"],
-            )
+            from epai.utils.env_utils import genai4science_endpoint
+
+            base_url, api_key_env = genai4science_endpoint()
+            return OpenAI(base_url=base_url, api_key=os.environ[api_key_env])
         if self.provider == "anthropic":
             import anthropic
 
@@ -1861,7 +1858,12 @@ _QUANT_PACKAGES = {
 def blocking_reason(spec: JudgeModel, device: str = DEFAULT_DEVICE) -> str | None:
     """Why this judge cannot run here, or None if it can."""
     if not spec.is_local:
-        env_var = _REQUIRED_ENV[spec.provider]
+        if spec.provider == "genai4science":
+            from epai.utils.env_utils import genai4science_endpoint
+
+            _, env_var = genai4science_endpoint()
+        else:
+            env_var = _REQUIRED_ENV[spec.provider]
         return None if os.environ.get(env_var) else f"needs {env_var}"
 
     for package in ("torch", "transformers"):

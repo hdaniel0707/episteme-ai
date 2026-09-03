@@ -209,11 +209,11 @@ prompt:
 # ------------------------------------------------------------- generate ----
 generate:
   # Concurrent in-flight calls, ACROSS all generators. Set it to the slowest
-  # provider's safe rate: the OpenAI default handles 8 easily, the shared
-  # GenAI4Science default endpoint does not. gpt56luna is already cached, so at
-  # runtime every call goes to GenAI4Science — keep this low until the
-  # performance endpoint is granted.
-  max_workers: 3
+  # provider's safe rate: the OpenAI default handles 8 easily. gpt56luna is
+  # already cached, so at runtime every call goes to GenAI4Science — and the
+  # performance endpoint allows at most 4 concurrent (a 5th trips a ~1-minute
+  # key block). Drop to 3 if rate-limit errors persist.
+  max_workers: 4
 
   # Seconds to wait on one call before it counts as a failure (default 300).
   # A cold open-weight model on a shared endpoint can take minutes to load;
@@ -243,9 +243,10 @@ generate:
   # Each entry needs `model`. It reaches that model through an OpenAI-compatible
   # endpoint; `provider` picks which host:
   #   (omitted) / "openai"  — OpenAI itself, key from $OPENAI_API_KEY
-  #   "genai4science"        — HUN-REN SZTAKI, key from $GENAI4SCIENCE_API_KEY,
-  #                            base URL from $GENAI4SCIENCE_BASE_URL or the
-  #                            built-in default
+  #   "genai4science"        — HUN-REN SZTAKI. Uses $GENAI4SCIENCE_PERFORMANCE_API_KEY
+  #                            and the performance base URL when that key is set,
+  #                            else $GENAI4SCIENCE_API_KEY and the shared endpoint
+  #                            (epai/utils/env_utils.py :: genai4science_endpoint).
   # Any other OpenAI-compatible host: give `base_url` and `api_key_env` directly.
   # Two generators must have distinct model slugs or they would share a label —
   # the config check enforces that.

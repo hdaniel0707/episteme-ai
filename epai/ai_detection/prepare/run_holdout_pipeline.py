@@ -398,8 +398,9 @@ def build_stages(args: argparse.Namespace) -> list[Stage]:
     #    a local 14B on the GPU -- and because a judge that fails should not
     #    take the other two with it.
     # API judges are threaded; --workers is how many rows are in flight at once
-    # (a local judge ignores it and batches). The GenAI4Science endpoint sheds
-    # load under concurrency, so those get a lower cap.
+    # (a local judge ignores it and batches). The GenAI4Science performance
+    # endpoint allows at most 4 concurrent calls -- a 5th trips a ~1-minute key
+    # block -- so those get a lower cap (--g4s-workers).
     workers = ["--workers", str(args.api_workers)]
     g4s_workers = ["--workers", str(min(args.api_workers, args.g4s_workers))]
     g4s_judges = _suite_judge_kinds().get("genai4science", set())
@@ -702,12 +703,12 @@ def parse_args() -> argparse.Namespace:
                         "local judge (qwen3-14b) ignores this and batches on the "
                         "GPU; GenAI4Science judges are further capped by "
                         "--g4s-workers.")
-    p.add_argument("--g4s-workers", type=int, default=6, metavar="N",
+    p.add_argument("--g4s-workers", type=int, default=4, metavar="N",
                    help="Concurrency cap for the GenAI4Science judges only "
-                        "(default: 6). That endpoint sheds load under "
-                        "concurrency and is a shared cluster, so more in-flight "
-                        "requests do not buy throughput. Effective value: "
-                        "min(this, --api-workers).")
+                        "(default: 4 — the performance endpoint's hard limit; a "
+                        "5th concurrent call trips a ~1-minute key block). Drop "
+                        "to 3 if you still see rate-limit errors. Effective "
+                        "value: min(this, --api-workers).")
     p.add_argument("--from", dest="start_from", metavar="STAGE",
                    help="Start here instead of at the beginning, e.g. --from binox")
     p.add_argument("--only", nargs="+", metavar="STAGE",
