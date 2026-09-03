@@ -57,6 +57,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -96,6 +97,14 @@ _WS_RE = re.compile(r"\s+")
 # <think>…</think> is removed; a malformed unclosed one falls through to the
 # empty-response check in call_with_retry and is recorded as a failed call.
 _THINK_RE = re.compile(r"<think\b[^>]*>.*?</think>", re.IGNORECASE | re.DOTALL)
+
+# A shared open-weight endpoint (GenAI4Science / SZTAKI) sheds load by rejecting
+# a fraction of calls with a transient 400, and `call_with_retry`'s in-call
+# retries — four attempts over ~15s — do not always outlast a busy spell. After
+# the first generation sweep, `generate` re-runs just the failures a few more
+# times; this is the pause between those passes, long enough for a queued
+# endpoint to drain rather than be hit again immediately.
+_RETRY_PASS_COOLDOWN = 60
 
 # `uid` is unique per row, `id` is the PAIR key shared by a paper's human row
 # and every generated row derived from it. Both are needed and they do
@@ -219,16 +228,46 @@ def generate(df: pd.DataFrame, cfg: dict, prompts: dict, retry_failed: bool) -> 
                 )
             )
 
-    run_resumable(
-        tasks,
-        shard,
-        max_workers=cfg["generate"].get("max_workers", 8),
-        desc="generating abstracts",
-        retry_failed=retry_failed,
-        payload_of=lambda _k, text: {
-            "abstract": clean_generated(text, strip_labels=strip_labels)
-        },
-    )
+    def sweep(retry: bool) -> None:
+        run_resumable(
+            tasks,
+            shard,
+            max_workers=cfg["generate"].get("max_workers", 8),
+            desc="generating abstracts",
+            retry_failed=retry,
+            payload_of=lambda _k, text: {
+                "abstract": clean_generated(text, strip_labels=strip_labels)
+            },
+        )
+
+    def n_failed() -> int:
+        return sum(1 for r in shard.records.values() if not r.get("ok"))
+
+    sweep(retry_failed)
+
+    # Whole-corpus retry sweeps over the failures only, so a transient endpoint
+    # error does not need a manual --retry-failed re-run. Stop as soon as a pass
+    # converts nothing (the rest are failing deterministically — a content
+    # filter, an over-length prompt) or no failures remain. Failure counts only
+    # ever decrease across passes, since a retried call either succeeds or stays
+    # failed, so `now >= prev` is an exact "made no progress" test.
+    retry_passes = cfg["generate"].get("retry_passes", 3)
+    prev = n_failed()
+    for i in range(retry_passes):
+        if prev == 0:
+            break
+        print(
+            f"\n  Auto-retry {i + 1}/{retry_passes}: {prev} failure(s) left; "
+            f"pausing {_RETRY_PASS_COOLDOWN}s for the endpoint to recover"
+        )
+        time.sleep(_RETRY_PASS_COOLDOWN)
+        sweep(True)
+        now = n_failed()
+        if now >= prev:
+            print(f"  Auto-retry made no progress ({now} still failing) — stopping.")
+            break
+        prev = now
+
     return shard
 
 

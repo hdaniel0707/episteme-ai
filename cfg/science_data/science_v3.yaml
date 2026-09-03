@@ -220,6 +220,15 @@ generate:
   # call_with_retry then retries it. Only raise this for a provider that needs it.
   # request_timeout: 300
 
+  # Extra whole-corpus retry sweeps after the first pass, over the failures only
+  # — the automatic equivalent of re-running with --retry-failed. The shared
+  # GenAI4Science endpoint sheds load as transient 400s, and the four in-call
+  # retries in call_with_retry do not always outlast a busy spell. Each sweep
+  # pauses 60s first (_RETRY_PASS_COOLDOWN in generate_ai.py) to let the endpoint
+  # drain, and the loop stops early once a sweep converts nothing or no failures
+  # remain. 0 disables it. Default 3.
+  retry_passes: 3
+
   # Add entries here to bring in more generators later. Checkpoints are keyed
   # by (id, label), so a new generator only issues the calls it is missing —
   # the existing rows are never regenerated. This is how the open-weight AI
