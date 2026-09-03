@@ -8,12 +8,21 @@ embedding does with it. Two outputs, and the second is the point:
               class, printed and written to results/analyse_domain_pca/<run>/
   pictures    PCA in 2D and 3D, each as a PNG and an interactive HTML
 
-Every group -- one (domain, class) combination -- gets its own colour, warm for
-human and cold for machine, so the two questions the plot can answer stay
-visually separate:
+Colour and marker share the work so the two questions the plot can answer stay
+visually separate. There are two schemes:
 
-    does the embedding separate HUMAN from MACHINE?   warm vs cold
-    does it separate the DOMAINS?                     hue within each temperature
+    binary (one AI generator, or --binary): every (domain, class) group gets
+        its own colour, warm for human and cold for machine.
+            does the embedding separate HUMAN from MACHINE?   warm vs cold
+            does it separate the DOMAINS?                      hue within a temperature
+
+    by-generator (the default once a file has >1 generator, or --by-generator):
+        colour is the author -- blue for human, one fixed colour per AI
+        generator, the same across every domain -- and marker SHAPE is the
+        domain.
+            does the embedding separate HUMAN from AI?         blue vs the rest
+            do the AI generators cluster apart?                colour
+            does it separate the DOMAINS?                      marker shape
 
 A star marks each group's centroid, drawn above the cloud, and a line joins the
 centroids belonging to one domain. That line is the thing to look at. If the
@@ -77,9 +86,14 @@ Usage:
     uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
         data/parquet/ghostbuster_gpt35t.parquet --normalize l2
 
-    # one colour per generator instead of the binary human/machine view
+    # force the per-generator view (blue human, one colour per AI generator,
+    # marker shape per domain) -- automatic when the file has >1 generator
     uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
-        data/parquet/ghostbuster_gpt35t.parquet --by-generator
+        data/parquet/ghostbuster_multi.parquet --by-generator
+
+    # force the binary warm/cold view on a multi-generator file
+    uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
+        data/parquet/ghostbuster_multi.parquet --binary
 
     # tables only, no figures
     uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
@@ -110,7 +124,12 @@ Usage:
     uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
       data/parquet/science_v3_gpt56luna_0811A.parquet \
       --feature llm_judge_cuevec_gpt56luna_v3 --jitter
-
+    
+    uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
+        data/parquet/ghostbuster_multi.parquet
+    
+    uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
+        data/science/science_v3_multi_0811A.parquet
 
 """
 
@@ -156,6 +175,30 @@ COLD_CMAPS = ("Blues", "GnBu", "Purples", "PuBu", "BuGn", "winter")
 # Where in each colormap to sample. A single machine label per domain takes the
 # midpoint; several generators spread over the range, dark to light.
 SHADE_RANGE = (0.75, 0.45)
+
+# --- by-generator scheme ---------------------------------------------------
+# Colour is the author, marker shape is the domain. Human is always this blue;
+# the AI generators take the qualitative palette (no blues) in sorted order, so
+# a generator keeps its colour across domains and across files. Marker shape is
+# assigned by the domain's position in sorted order, cycled if a file has more
+# domains than shapes.
+HUMAN_COLOR = "#4e79a7"
+GENERATOR_COLORS = (
+    "#e15759", "#f28e2b", "#59a14f", "#b07aa1", "#edc948",
+    "#9c755f", "#ff9da7", "#bab0ac",
+)
+# (matplotlib marker, plotly 2D symbol, plotly 3D symbol) — the 3D set is the
+# limiter, plotly's scatter3d has no triangles.
+DOMAIN_MARKERS = (
+    ("o", "circle", "circle"),
+    ("s", "square", "square"),
+    ("D", "diamond", "diamond"),
+    ("^", "triangle-up", "cross"),
+    ("X", "x", "x"),
+    ("v", "triangle-down", "circle-open"),
+    ("P", "cross", "square-open"),
+    ("*", "star", "diamond-open"),
+)
 
 # The pair kind that answers "how far is human from machine, inside one domain".
 # Named because both the distance table and its interpretation key off it.
@@ -203,6 +246,9 @@ class Group:
     color: str
     mask: np.ndarray
     is_human: bool
+    marker: str = "o"          # matplotlib marker (binary scheme: always "o")
+    symbol2d: str = "circle"   # plotly 2D symbol
+    symbol3d: str = "circle"   # plotly 3D symbol
     centroid_pc: np.ndarray = field(default_factory=lambda: np.zeros(3))
     centroid_full: np.ndarray = field(default_factory=lambda: np.zeros(1))
 
@@ -225,14 +271,22 @@ def shade(cmap_name: str, index: int, total: int) -> str:
 def build_groups(df: pd.DataFrame, by_generator: bool) -> list[Group]:
     """Machine groups first, human last, so the human cloud draws on top.
 
-    Colour carries two facts at once: temperature is the class (warm human,
-    cold machine) and the family within a temperature is the domain. That is
-    the only way a single scatter can be read for both questions -- a palette
-    keyed on the 6 groups alone would answer neither at a glance.
+    Binary scheme: colour carries two facts at once -- temperature is the class
+    (warm human, cold machine) and the family within a temperature is the
+    domain. By-generator scheme: colour is the author (blue human, one fixed
+    colour per AI generator across every domain) and marker shape is the domain.
     """
     domains = sorted(df[DOMAIN_COL].astype(str).unique())
     labels = df[CLF_TARGET_COL].astype(str).to_numpy()
     domain_values = df[DOMAIN_COL].astype(str).to_numpy()
+
+    # One colour per AI generator, fixed over the whole file so a generator's
+    # colour does not depend on which domains it happens to appear in.
+    ai_generators = sorted(set(labels) - {HUMAN_LABEL})
+    gen_color = {HUMAN_LABEL: HUMAN_COLOR} | {
+        g: GENERATOR_COLORS[i % len(GENERATOR_COLORS)]
+        for i, g in enumerate(ai_generators)
+    }
 
     machine_groups: list[Group] = []
     human_groups: list[Group] = []
@@ -241,13 +295,20 @@ def build_groups(df: pd.DataFrame, by_generator: bool) -> list[Group]:
         in_domain = domain_values == domain
         warm = WARM_CMAPS[d_index % len(WARM_CMAPS)]
         cold = COLD_CMAPS[d_index % len(COLD_CMAPS)]
+        mk = DOMAIN_MARKERS[d_index % len(DOMAIN_MARKERS)]
+
+        machine_labels = sorted(set(labels[in_domain & (labels != HUMAN_LABEL)]))
+
+        # Binary groups keep the default "o" marker; only the by-generator
+        # scheme puts the domain on the marker shape.
+        shape = mk if by_generator else ()
 
         human_mask = in_domain & (labels == HUMAN_LABEL)
         if human_mask.any():
-            human_groups.append(Group(domain, HUMAN_LABEL, shade(warm, 0, 1),
-                                      human_mask, True))
+            color = gen_color[HUMAN_LABEL] if by_generator else shade(warm, 0, 1)
+            human_groups.append(Group(domain, HUMAN_LABEL, color, human_mask,
+                                      True, *shape))
 
-        machine_labels = sorted(set(labels[in_domain & (labels != HUMAN_LABEL)]))
         if not by_generator:
             machine_mask = in_domain & (labels != HUMAN_LABEL)
             if machine_mask.any():
@@ -255,13 +316,31 @@ def build_groups(df: pd.DataFrame, by_generator: bool) -> list[Group]:
                 machine_groups.append(Group(domain, name, shade(cold, 0, 1),
                                             machine_mask, False))
             continue
-        for g_index, generator in enumerate(machine_labels):
+        for generator in machine_labels:
             machine_groups.append(Group(
-                domain, generator, shade(cold, g_index, len(machine_labels)),
-                in_domain & (labels == generator), False,
+                domain, generator, gen_color[generator],
+                in_domain & (labels == generator), False, *shape,
             ))
 
     return machine_groups + human_groups
+
+
+def author_summary(groups: list[Group]) -> list[tuple[str, int, str]]:
+    """(author label, total rows, colour) — human first, then AI sorted."""
+    order = sorted({g.label for g in groups},
+                   key=lambda label: (label != HUMAN_LABEL, label))
+    return [(label,
+             sum(g.n for g in groups if g.label == label),
+             next(g.color for g in groups if g.label == label))
+            for label in order]
+
+
+def domain_summary(groups: list[Group]) -> dict[str, tuple[str, str, str]]:
+    """domain -> (matplotlib marker, plotly 2D symbol, plotly 3D symbol)."""
+    out: dict[str, tuple[str, str, str]] = {}
+    for g in groups:
+        out.setdefault(g.domain, (g.marker, g.symbol2d, g.symbol3d))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -658,7 +737,7 @@ def domain_links(groups: list[Group]) -> list[tuple[str, Group, Group]]:
 
 def plot_static(
     Z: np.ndarray, groups: list[Group], links, labels: list[str],
-    title: str, out: Path, three_d: bool,
+    title: str, out: Path, by_generator: bool, three_d: bool,
 ) -> None:
     """Matplotlib PNG, 2D or 3D: clouds, link lines, then centroid stars on top."""
     fig = plt.figure(figsize=(11, 9) if three_d else (10.5, 8))
@@ -666,7 +745,8 @@ def plot_static(
 
     for group in groups:
         coords = [Z[group.mask, i] for i in range(3 if three_d else 2)]
-        kwargs = dict(c=group.color, s=7, alpha=0.35, linewidths=0)
+        kwargs = dict(c=group.color, s=7, alpha=0.35, linewidths=0,
+                      marker=group.marker)
         if three_d:
             ax.scatter(*coords, depthshade=False, **kwargs)
         else:
@@ -682,23 +762,10 @@ def plot_static(
 
     for group in groups:
         coords = [[group.centroid_pc[i]] for i in range(3 if three_d else 2)]
-        ax.scatter(*coords, marker="*", s=520, c=group.color,
+        ax.scatter(*coords, marker=group.marker if by_generator else "*",
+                   s=240 if by_generator else 520, c=group.color,
                    edgecolors="white", linewidths=1.4, zorder=6,
                    **({"depthshade": False} if three_d else {}))
-
-    handles = [
-        plt.Line2D([], [], linestyle="none", marker="o", markersize=7,
-                   markerfacecolor=group.color, markeredgecolor="none",
-                   label=f"{group.name} (n={group.n})")
-        for group in groups
-    ]
-    handles += [
-        plt.Line2D([], [], linestyle="none", marker="*", markersize=15,
-                   markerfacecolor="#9ca3af", markeredgecolor="white",
-                   markeredgewidth=1.0, label="group centroid"),
-        plt.Line2D([], [], linestyle="--", color=LINK_COLOR, linewidth=1.6,
-                   label="human ↔ machine, same domain"),
-    ]
 
     ax.set_title(title, fontsize=12)
     ax.set_xlabel(labels[0])
@@ -708,9 +775,47 @@ def plot_static(
         ax.view_init(elev=18, azim=-60)
     else:
         ax.spines[["top", "right"]].set_visible(False)
-    # 'best' does a layout search the 3D axes do not support well; pin it there.
-    ax.legend(handles=handles, loc="upper left" if three_d else "best",
-              frameon=True, fontsize=8.5, labelspacing=0.6)
+
+    if by_generator:
+        # Two keys: colour is the author, marker shape is the domain.
+        color_handles = [
+            plt.Line2D([], [], linestyle="none", marker="o", markersize=8,
+                       markerfacecolor=color, markeredgecolor="none",
+                       label=f"{author} (n={n})")
+            for author, n, color in author_summary(groups)
+        ]
+        shape_handles = [
+            plt.Line2D([], [], linestyle="none", marker=markers[0], markersize=8,
+                       markerfacecolor="#9ca3af", markeredgecolor=LINK_COLOR,
+                       label=domain)
+            for domain, markers in domain_summary(groups).items()
+        ]
+        shape_handles.append(
+            plt.Line2D([], [], linestyle="--", color=LINK_COLOR, linewidth=1.6,
+                       label="human ↔ AI, same domain")
+        )
+        ax.add_artist(ax.legend(handles=color_handles, title="author",
+                                loc="upper left", frameon=True, fontsize=8.5,
+                                labelspacing=0.6))
+        ax.legend(handles=shape_handles, title="domain", loc="upper right",
+                  frameon=True, fontsize=8.5, labelspacing=0.6)
+    else:
+        handles = [
+            plt.Line2D([], [], linestyle="none", marker="o", markersize=7,
+                       markerfacecolor=group.color, markeredgecolor="none",
+                       label=f"{group.name} (n={group.n})")
+            for group in groups
+        ]
+        handles += [
+            plt.Line2D([], [], linestyle="none", marker="*", markersize=15,
+                       markerfacecolor="#9ca3af", markeredgecolor="white",
+                       markeredgewidth=1.0, label="group centroid"),
+            plt.Line2D([], [], linestyle="--", color=LINK_COLOR, linewidth=1.6,
+                       label="human ↔ machine, same domain"),
+        ]
+        # 'best' does a layout search the 3D axes do not support well; pin it there.
+        ax.legend(handles=handles, loc="upper left" if three_d else "best",
+                  frameon=True, fontsize=8.5, labelspacing=0.6)
     fig.tight_layout()
     fig.savefig(out, dpi=200)
     plt.close(fig)
@@ -750,7 +855,7 @@ def hover_text(df: pd.DataFrame) -> np.ndarray:
 
 def plot_interactive(
     Z: np.ndarray, groups: list[Group], links, labels: list[str],
-    hovers: np.ndarray, title: str, out: Path, three_d: bool,
+    hovers: np.ndarray, title: str, out: Path, by_generator: bool, three_d: bool,
     plotly_js: object = True,
 ) -> None:
     """Plotly HTML: same figure, but every layer can be switched off.
@@ -758,8 +863,11 @@ def plot_interactive(
     Two ways to switch, because they answer different questions. Clicking a
     legend entry hides one group (its points and its star together, via
     legendgroup) -- for looking at two clouds without the others in the way.
-    The buttons hide a whole LAYER: 'centroids only' strips the clouds and
-    leaves the skeleton of stars and links, which is where the domain-vs-class
+    In the by-generator scheme the legend is split into an author key and a
+    domain key; clicking an author hides that author across every domain, and
+    the domain-key entries are shape swatches only (nothing to toggle). The
+    buttons hide a whole LAYER: 'centroids only' strips the clouds and leaves
+    the skeleton of stars and links, which is where the domain-vs-class
     geometry is actually readable.
     """
     fig = go.Figure()
@@ -772,13 +880,20 @@ def plot_interactive(
     Scatter = go.Scatter3d if three_d else go.Scattergl
     marker_kwargs = dict(size=2.5 if three_d else 5, opacity=0.55)
 
+    def symbol(group: Group) -> str:
+        return group.symbol3d if three_d else group.symbol2d
+
     for group in groups:
+        marker = dict(color=group.color, **marker_kwargs)
+        if by_generator:
+            marker["symbol"] = symbol(group)
         fig.add_trace(Scatter(
             **coords(Z[group.mask]),
             mode="markers",
             name=f"{group.name} (n={group.n})",
-            legendgroup=group.name,
-            marker=dict(color=group.color, **marker_kwargs),
+            legendgroup=f"author:{group.label}" if by_generator else group.name,
+            showlegend=not by_generator,
+            marker=marker,
             text=hovers[group.mask],
             hovertemplate="%{text}<extra></extra>",
         ))
@@ -803,14 +918,16 @@ def plot_interactive(
     # Added last so they render above every cloud.
     for group in groups:
         point = group.centroid_pc[None, :]
+        centroid_symbol = (symbol(group) if by_generator
+                           else "diamond" if three_d else "star")
         fig.add_trace(Scatter(
             **coords(point),
             mode="markers",
             name=f"{group.name} centroid",
-            legendgroup=group.name,
+            legendgroup=f"author:{group.label}" if by_generator else group.name,
             showlegend=False,
             marker=dict(
-                color=group.color, symbol="diamond" if three_d else "star",
+                color=group.color, symbol=centroid_symbol,
                 size=12 if three_d else 20,
                 line=dict(color="white", width=1.5),
             ),
@@ -821,8 +938,31 @@ def plot_interactive(
         ))
         kinds.append("centroids")
 
+    if by_generator:
+        # Legend-only swatches: one colour key for authors, one shape key for
+        # domains. Off-canvas coordinates so they never draw a point; tagged
+        # 'legend' so the layer buttons leave them alone.
+        blank = {k: [None] for k in (("x", "y", "z") if three_d else ("x", "y"))}
+        for i, (author, n, color) in enumerate(author_summary(groups)):
+            fig.add_trace(Scatter(
+                **blank, mode="markers", name=f"{author} (n={n})",
+                legendgroup=f"author:{author}", hoverinfo="skip",
+                legendgrouptitle_text="author" if i == 0 else None,
+                marker=dict(color=color, symbol="circle", size=9),
+            ))
+            kinds.append("legend")
+        for i, (domain, markers) in enumerate(domain_summary(groups).items()):
+            fig.add_trace(Scatter(
+                **blank, mode="markers", name=domain,
+                legendgroup=f"domain:{domain}", hoverinfo="skip",
+                legendgrouptitle_text="domain" if i == 0 else None,
+                marker=dict(color="#9ca3af",
+                            symbol=markers[2] if three_d else markers[1], size=9),
+            ))
+            kinds.append("legend")
+
     def visibility(*keep: str) -> list[bool]:
-        return [k in keep for k in kinds]
+        return [k in keep or k == "legend" for k in kinds]
 
     buttons = [
         dict(label="Everything", method="restyle",
@@ -841,7 +981,7 @@ def plot_interactive(
         template="plotly_white",
         hovermode="closest",
         width=1200, height=850,
-        legend=dict(itemsizing="constant"),
+        legend=dict(itemsizing="constant", groupclick="togglegroup"),
         updatemenus=[dict(type="buttons", direction="right", showactive=True,
                           x=0, y=1.09, xanchor="left", buttons=buttons)],
     )
@@ -874,8 +1014,13 @@ def parse_args() -> argparse.Namespace:
                    help="Vector preprocessing before PCA. 'l2' for embeddings "
                    "meant to be compared by cosine.")
     p.add_argument("--by-generator", action="store_true",
-                   help="One colour per generator instead of one per domain and "
-                   "class (still cold for machine, warm for human).")
+                   help="Force the per-generator view (blue = human, one colour "
+                   "per AI generator, marker shape per domain). Automatic when "
+                   "the file has more than one generator.")
+    p.add_argument("--binary", action="store_true",
+                   help="Force the warm-human / cold-machine view even on a file "
+                   "with several generators: all AI collapses to one 'machine' "
+                   "group per domain.")
     p.add_argument("--drop-classes", nargs="*", default=[], metavar="CLS",
                    help="generated_by labels to exclude before analysing.")
     p.add_argument("--sample", type=int, default=None, metavar="N",
@@ -977,7 +1122,15 @@ def main() -> None:
     # --- embedding ---------------------------------------------------------
     report.rule(f"EMBEDDING — {args.feature}")
     X = normalize(X, args.normalize, report)
-    groups = build_groups(df, args.by_generator)
+
+    n_generators = int(df.loc[df[CLF_TARGET_COL] != HUMAN_LABEL,
+                              CLF_TARGET_COL].nunique())
+    by_generator = args.by_generator or (n_generators > 1 and not args.binary)
+    report(f"  Scheme  : "
+           + ("by-generator (colour = author, marker = domain)" if by_generator
+              else "binary (warm human, cold machine)")
+           + f"  [{n_generators} AI generator(s)]")
+    groups = build_groups(df, by_generator)
     report(f"  Groups: {len(groups)} — " + ", ".join(f"{g.name} ({g.n})" for g in groups))
 
     norms = norm_table(X, groups)
@@ -1055,7 +1208,7 @@ def main() -> None:
     summary.update({
         "parquet": str(parquet_path), "feature": args.feature,
         "normalize": args.normalize, "rows": int(len(df)),
-        "dim": int(X.shape[1]),
+        "dim": int(X.shape[1]), "by_generator": by_generator,
         "explained_variance_3": float(pca.explained_variance_ratio_[:3].sum()),
         "groups": {g.name: g.n for g in groups},
     })
@@ -1078,7 +1231,8 @@ def main() -> None:
             Z_plot = (jitter_coincident(Z, dims, args.jitter_scale, args.seed)[0]
                       if args.jitter else Z)
             png = out_dir / f"{tag}.png"
-            plot_static(Z_plot, groups, links, pc_labels, title, png, three_d)
+            plot_static(Z_plot, groups, links, pc_labels, title, png,
+                        by_generator, three_d)
             report(f"  {png}")
             if args.no_html:
                 continue
@@ -1086,7 +1240,7 @@ def main() -> None:
                 hovers = hover_text(df)
             html_out = out_dir / f"{tag}.html"
             plot_interactive(Z_plot, groups, links, pc_labels, hovers, title,
-                             html_out, three_d,
+                             html_out, by_generator, three_d,
                              plotly_js="cdn" if args.plotly_cdn else True)
             report(f"  {html_out}")
 
