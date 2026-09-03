@@ -348,6 +348,25 @@ MODELS: dict[str, JudgeModel] = {
              "capability axis instead: the cheap API judge to set beside the "
              "local 8B/14B/32B ladder.",
     ),
+    "gptoss-120b": JudgeModel(
+        key="gptoss-120b",
+        provider="genai4science",
+        model="gpt-oss:120b",
+        column="gptoss_120b",
+        note="GenAI4Science (HUN-REN SZTAKI) open-weight endpoint. Needs "
+             "GENAI4SCIENCE_API_KEY. The largest open-weight judge reachable "
+             "there and the top open-weight rung of the capability ladder; the "
+             "same models are Track-1/2 generators, so a judge and a generator "
+             "here can be the same weights.",
+    ),
+    "llama33-70b": JudgeModel(
+        key="llama33-70b",
+        provider="genai4science",
+        model="llama3.3:70b",
+        column="llama33_70b",
+        note="GenAI4Science open-weight endpoint. A second open-weight family "
+             "beside gpt-oss:120b, one rung below it.",
+    ),
     "qwen3-8b": JudgeModel(
         key="qwen3-8b",
         provider=LOCAL_PROVIDER,
@@ -469,7 +488,18 @@ _REQUIRED_ENV = {
     "openai": "OPENAI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
     "gemini": "GOOGLE_API_KEY",
+    "genai4science": "GENAI4SCIENCE_API_KEY",
 }
+
+# GenAI4Science (HUN-REN SZTAKI) — an OpenAI-compatible endpoint serving
+# open-weight models. Same default as epai/science_data/config.py; the base URL
+# is overridable per environment, the key is always read from the env var above.
+GENAI4SCIENCE_BASE_URL = "https://genai.science-cloud.hu/api"
+
+# A served reasoning model (gpt-oss) can wrap its chain of thought in <think>…
+# </think> before the answer; strip it so parse_probability reads the verdict,
+# not a number from the reasoning.
+_THINK_RE = re.compile(r"<think\b[^>]*>.*?</think>", re.IGNORECASE | re.DOTALL)
 
 # Rows scored between two writes of the Parquet.
 SAVE_EVERY = 200
@@ -972,13 +1002,13 @@ def resolve_mode(spec: JudgeModel, requested: str | None) -> str:
 
 def print_models() -> None:
     """The registry, with what each local judge costs to hold in memory."""
-    print(f"{'alias':<16}{'provider':<10}{'model':<38}{'column stem':<18}{'weights':>9}")
-    print("-" * 91)
+    print(f"{'alias':<16}{'provider':<14}{'model':<38}{'column stem':<18}{'weights':>9}")
+    print("-" * 95)
     for spec in MODELS.values():
         weights = spec.weights_gib
         size = f"{weights:.1f} GiB" if weights else "-"
         print(
-            f"{spec.key:<16}{spec.provider:<10}{spec.model:<38}"
+            f"{spec.key:<16}{spec.provider:<14}{spec.model:<38}"
             f"{spec.column:<18}{size:>9}"
         )
     print()
@@ -1093,6 +1123,13 @@ class ApiJudge(Judge):
             from openai import OpenAI
 
             return OpenAI()
+        if self.provider == "genai4science":
+            from openai import OpenAI
+
+            return OpenAI(
+                base_url=os.environ.get("GENAI4SCIENCE_BASE_URL", GENAI4SCIENCE_BASE_URL),
+                api_key=os.environ["GENAI4SCIENCE_API_KEY"],
+            )
         if self.provider == "anthropic":
             import anthropic
 
@@ -1106,9 +1143,34 @@ class ApiJudge(Judge):
     def __call__(self, text: str) -> float:
         if self.provider == "openai":
             return self._score_openai(text)
+        if self.provider == "genai4science":
+            return self._score_genai4science(text)
         if self.provider == "anthropic":
             return self._score_anthropic(text)
         return self._score_gemini(text)
+
+    def _score_genai4science(self, text: str) -> float:
+        """OpenAI-compatible endpoint, open-weight model. Structured output
+        first; plain completion + ``parse_probability`` if the server does not
+        honour ``response_format`` (many vLLM/Ollama deployments do not for
+        every model)."""
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": USER_TEMPLATE.format(text=text)},
+        ]
+        try:
+            response = self._client.chat.completions.parse(
+                model=self.model_id, messages=messages, response_format=JudgeVerdict,
+            )
+            parsed = response.choices[0].message.parsed
+            if parsed is not None:
+                return float(parsed.human_probability)
+        except Exception:
+            pass
+        answer = self._client.chat.completions.create(
+            model=self.model_id, messages=messages, max_tokens=2048,
+        ).choices[0].message.content or ""
+        return parse_probability(_THINK_RE.sub("", answer))
 
     def _score_openai(self, text: str) -> float:
         # No temperature: the reasoning-capable models reject anything but the

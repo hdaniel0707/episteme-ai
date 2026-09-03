@@ -96,6 +96,10 @@ queries — fix the queries or accept `--allow-shortfall`.
 | `ocr_clean.py` | repair PDF-extraction artifacts in both classes |
 | `exclude.py` | training-overlap guard (work id / DOI / title) |
 
+Step 5 scores with the shared **detector suite** — `cfg/detector_suite.yaml`
+(models) / `cfg/detector_suite.md` (rationale). Every dataset uses the same set,
+so `denario_hc` numbers are comparable with `science_v3` / `ghostbuster_*`.
+
 ## Run
 
 ```bash
@@ -133,11 +137,19 @@ queries — fix the queries or accept `--allow-shortfall`.
     data/parquet/denario_hc_clean.parquet --whitespace flat \
     -o data/parquet/denario_hc.parquet
 
-# ── 5. embed + score with every detector / judge the config reads ─────────────
-#    GPU + ~$3-5 of judge API on 160 rows
+# ── 5. embed + score with the full detector suite ────────────────────────────
+#    --from embed runs, in order: embed (12 embedders from cfg/detector_suite.yaml)
+#    → binoculars ×5 (falcon-7b, falcon3-7b, qwen2.5-7b, mistral-v0.3, llama3.1-8b)
+#    → fast-detectgpt ×5 (same pairs) → radar → judges gpt56luna / qwen3-14b /
+#    sonnet5 / gpt-oss:120b / llama3.3:70b → judge-reasons → cue-features.
+#    First run downloads ~13 local models; GPU-bound; ~$3-5 frontier judge API.
+#    Env: HF_TOKEN (Llama licence accepted) for llama3.1-8b binox+fastdetect;
+#    GENAI4SCIENCE_API_KEY for the gpt-oss / llama3.3 judges (rate-limited, slow).
 .venv/bin/python epai/ai_detection/prepare/run_holdout_pipeline.py \
     --in data/parquet/denario_hc.parquet -o data/parquet/denario_hc.parquet \
-    --from embed --yes --gpu 0 --cpu-threads 16
+    --from embed --yes --gpu 1 --cpu-threads 16
+#    a stage that dies (e.g. a judge with null rows) → resume: --from <stage-name>
+#    (embed / binox / fastdetect / detectors / judge-sonnet5 / …)
 
 # ── 6. wire into the config ──────────────────────────────────────────────────
 #    cfg/ai_detection/train/clf_id/clf_id_science_v3.yaml, under data.eval_only.datasets

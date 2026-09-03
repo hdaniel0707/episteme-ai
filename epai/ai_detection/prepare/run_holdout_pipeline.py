@@ -102,6 +102,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import yaml
+
 from epai.utils import notify_utils
 from epai.utils.parquet_utils import check_column_filled, column_fill
 
@@ -123,16 +125,43 @@ PREPARE_DIR = "epai/ai_detection/prepare"
 EMBED_DIR = "epai/ai_detection/embed"
 SCORE_DIR = "epai/ai_detection/score"
 
-#: The embedding the training configs' feature sets read. One, not all fifteen:
-#: `add_embeddings.py` will happily write every embedder in its registry, and
-#: fourteen of them would be gigabytes of columns no config in this repo reads.
-DEFAULT_EMBEDDERS = ("luar_crud",)
+#: The canonical model set, shared with every other dataset — see
+#: cfg/detector_suite.md. The DEFAULT_* below come from it; the literals in this
+#: file are the fallback for a checkout that does not have the YAML.
+SUITE_PATH = BASE_DIR / "cfg" / "detector_suite.yaml"
+
+
+def _load_suite() -> dict:
+    try:
+        return yaml.safe_load(SUITE_PATH.read_text()) or {}
+    except Exception:
+        return {}
+
+
+_SUITE = _load_suite()
+
+
+def _suite_keys(group: str, fallback: tuple[str, ...]) -> tuple[str, ...]:
+    """The ``key`` (or bare string) of each entry in one suite group."""
+    items = _SUITE.get(group)
+    if not items:
+        return fallback
+    return tuple(i["key"] if isinstance(i, dict) else str(i) for i in items)
+
+
+#: Embedders to score. From cfg/detector_suite.yaml `embedders` — the full set,
+#: the same one cfg/science_data/*.yaml carries, so a holdout matches the
+#: training corpora column-for-column. The training configs still only read
+#: emb_luar_crud; the rest are there so the feature axis can widen without a
+#: re-score. Override with --embedders for a quick run.
+DEFAULT_EMBEDDERS = _suite_keys("embedders", ("luar_crud",))
 
 #: Binoculars pairs. `falcon-7b` FIRST and explicitly: it writes the legacy
 #: `binoculars_score` column, it is the only pair with a calibrated threshold in
 #: the configs, and it is absent from run_binox_pairs.py's own defaults.
-DEFAULT_BINOX_PAIRS = (
-    "falcon-7b", "qwen25-7b", "falcon3-7b", "mistral-v03", "llama31-8b",
+DEFAULT_BINOX_PAIRS = _suite_keys(
+    "binoculars_pairs",
+    ("falcon-7b", "qwen25-7b", "falcon3-7b", "mistral-v03", "llama31-8b"),
 )
 
 #: Pairs whose base and instruct tokenizers are "extended" -- same vocabulary
@@ -152,27 +181,29 @@ DEFAULT_BINOX_PAIRS = (
 #:   uv run --project external/Binoculars python external/Binoculars/check_pairs.py
 BINOX_EXTENDED_TOKENIZER = ("falcon3-7b", "falcon3-1b")
 
-#: Fast-DetectGPT pairs -- the same four the `fastdetect_baseline` block lists,
-#: which are also that script's own defaults. Named anyway so this file says
-#: what it produces without anyone opening the other one.
-DEFAULT_FASTDETECT_PAIRS = ("falcon-7b", "qwen25-7b", "falcon3-7b", "mistral-v03")
+#: Fast-DetectGPT pairs -- kept identical to DEFAULT_BINOX_PAIRS by the suite, so
+#: every binoculars__<pair> row has a fastdetect__<pair> twin (see
+#: cfg/detector_suite.md). All but falcon-7b carry a placeholder threshold.
+DEFAULT_FASTDETECT_PAIRS = _suite_keys(
+    "fastdetect_pairs", ("falcon-7b", "qwen25-7b", "falcon3-7b", "mistral-v03"),
+)
 
 #: Pretrained detectors. NOT the script's default (`radar pangram_roberta`):
 #: the Pangram repo is gated on the Hub and access is still pending, so asking
 #: for it fails the stage on an access error rather than a missing model.
-DEFAULT_DETECTORS = ("radar",)
+DEFAULT_DETECTORS = _suite_keys("detectors", ("radar",))
 
 #: One process per judge, in the order the `llm_judge_baseline` block lists them.
 #: gpt56luna leads because the cue-vector chain hangs off it.
-DEFAULT_JUDGES = ("gpt56luna", "qwen3-14b", "sonnet5")
+DEFAULT_JUDGES = _suite_keys("judges", ("gpt56luna", "qwen3-14b", "sonnet5"))
 
 #: The judge whose rationales become the cue vector. The column name carries the
 #: judge, so this choice is not cosmetic: `llm_judge_cuevec_gpt56luna_v3` is the
 #: column the configs' `cuevec` feature set names.
-CUE_JUDGE = "gpt56luna"
+CUE_JUDGE = _SUITE.get("cue_judge", "gpt56luna")
 
 #: Prompt version, in every judge column name. Changing it changes the columns.
-PROMPT_VERSION = "v3"
+PROMPT_VERSION = _SUITE.get("judge_prompt_version", "v3")
 
 #: Rows to explain for the cue vector, with ``--select all``. Comfortably above
 #: the 82 Denario papers: the reasons script caps at this per band, and a row it
@@ -259,7 +290,7 @@ def build_stages(args: argparse.Namespace) -> list[Stage]:
             reads_text=False,
         ),
 
-        # 3. The feature column. One embedder; see DEFAULT_EMBEDDERS.
+        # 3. The feature columns. The suite's embedders; see DEFAULT_EMBEDDERS.
         Stage(
             "embed",
             f"{EMBED_DIR}/add_embeddings.py",
@@ -485,8 +516,8 @@ def parse_args() -> argparse.Namespace:
                         "see.")
     p.add_argument("--embedders", nargs="+", default=list(DEFAULT_EMBEDDERS),
                    metavar="NAME",
-                   help="Embedders to compute. Only the ones a feature set "
-                        "names are needed; the rest are gigabytes nothing reads.")
+                   help="Embedders to compute (default: the cfg/detector_suite.yaml "
+                        "set). Pass a short list for a quick run.")
     p.add_argument("--binox-pairs", nargs="+", default=list(DEFAULT_BINOX_PAIRS),
                    metavar="PAIR",
                    help="Binoculars model pairs. Keep 'falcon-7b': it writes "

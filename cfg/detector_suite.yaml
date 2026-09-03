@@ -1,0 +1,116 @@
+# The canonical detector-model set — score every dataset with the same models.
+#
+# Consumed by epai/ai_detection/prepare/run_holdout_pipeline.py as its default
+# --embedders / --binox-pairs / --fastdetect-pairs / --detectors / --judges.
+# The training configs (cfg/ai_detection/train/**/*.yaml) list which of these
+# columns become baseline rows in a given experiment — that is a per-experiment
+# choice — but they must draw from this set, never beyond it.
+#
+# See cfg/detector_suite.md for why these models, the capability ordering the
+# figures depend on, which carry real calibration constants, and the procedure
+# for adding one.
+
+# --- embeddings --------------------------------------------------------------
+# emb_<name> columns. Grouped by what the model was trained to encode; the order
+# is not load-bearing. This is the same list as cfg/science_data/*.yaml
+# `embed.embedders` and must stay in sync with it.
+embedders:
+  - specter2        # content (citation-graph)
+  - scincl
+  - scibert
+  - mpnet           # general semantic
+  - minilm
+  - e5
+  - bge
+  - roberta         # raw LM features
+  - styledistance   # authorship / style
+  - style_wegmann
+  - luar
+  - luar_crud       # the one the current training configs read
+
+# --- Binoculars pairs -------------------------------------------------------
+# Binoculars scores with TWO models — observer (base) + performer (instruct) of
+# one family, sharing a tokenizer. Fills binoculars_score* columns, listed in
+# detector-reference-model capability order (the axis Figures 1-2 walk).
+# `falcon-7b` MUST stay first: it writes the legacy `binoculars_score` column
+# and is the only pair with a real threshold. The exact HF ids live in
+# external/Binoculars/model_pairs.py; `models` here is a copy for reading, not
+# the source of truth.
+binoculars_pairs:
+  - key: falcon-7b        # -> binoculars_score
+    models: [tiiuae/falcon-7b, tiiuae/falcon-7b-instruct]
+    year: 2023
+    calibrated: true      # 0.9015 accuracy mode / 0.8536 at 1% FPR
+  - key: falcon3-7b
+    models: [tiiuae/Falcon3-7B-Base, tiiuae/Falcon3-7B-Instruct]
+    year: 2024
+    calibrated: false     # placeholder 0.95 in the configs
+    extended_tokenizer: true   # base + instruct tokenizers differ by added
+                               # control tokens — same vocab, not byte-identical.
+                               # Needs --allow-token-mismatch; run_holdout_pipeline
+                               # gives it its own stage so the flag does not also
+                               # cover the pairs that match exactly.
+  - key: qwen25-7b
+    models: [Qwen/Qwen2.5-7B, Qwen/Qwen2.5-7B-Instruct]
+    year: 2024
+    calibrated: false
+  - key: mistral-v03
+    models: [mistralai/Mistral-7B-v0.3, mistralai/Mistral-7B-Instruct-v0.3]
+    year: 2024
+    calibrated: false
+  - key: llama31-8b
+    models: [meta-llama/Llama-3.1-8B, meta-llama/Llama-3.1-8B-Instruct]
+    year: 2024
+    calibrated: false
+    gated: true           # HF_TOKEN with an accepted Llama licence
+
+# --- Fast-DetectGPT pairs --------------------------------------------------
+# Fills fastdetect_crit_* columns — the SAME model pairs as binoculars_pairs,
+# one statistic swapped. Keep this list identical to binoculars_pairs so every
+# binoculars__<pair> row has a fastdetect__<pair> twin (the comparison Leg 1
+# rests on).
+fastdetect_pairs:
+  - key: falcon-7b
+    models: [tiiuae/falcon-7b, tiiuae/falcon-7b-instruct]
+    calibrated: true       # crit threshold 1.43
+  - key: falcon3-7b
+    models: [tiiuae/Falcon3-7B-Base, tiiuae/Falcon3-7B-Instruct]
+    calibrated: false      # placeholder 1.2; extended tokenizer, as above
+  - key: qwen25-7b
+    models: [Qwen/Qwen2.5-7B, Qwen/Qwen2.5-7B-Instruct]
+    calibrated: false
+  - key: mistral-v03
+    models: [mistralai/Mistral-7B-v0.3, mistralai/Mistral-7B-Instruct-v0.3]
+    calibrated: false
+  - key: llama31-8b
+    models: [meta-llama/Llama-3.1-8B, meta-llama/Llama-3.1-8B-Instruct]
+    calibrated: false      # the shipped constants were measured on Llama-3,
+                           # NOT Llama-3.1 — the threshold is borrowed, so this
+                           # row's declared operating point is doubly a placeholder
+    gated: true
+
+# --- pretrained supervised detectors -------------------------------------
+# detector_score_<name> columns.
+detectors:
+  - radar
+  # - pangram_roberta      # gated on the Hub, access pending
+
+# --- LLM judges ----------------------------------------------------------
+# llm_judge_score_<model>_<prompt> columns, one scoring process each. In
+# capability-ladder order; gpt56luna first because the cue vector hangs off it.
+judges:
+  - key: gpt56luna         # API. same family as the generator. -> cue vector.
+    kind: api
+  - key: qwen3-14b         # local, bf16 on GPU. the low / inverted rung.
+    kind: local
+  - key: sonnet5           # API. cross-family control.
+    kind: api
+  - key: gptoss-120b       # GenAI4Science endpoint (needs GENAI4SCIENCE_API_KEY).
+    kind: genai4science    # top open-weight rung; slower, rate-limited.
+  - key: llama33-70b       # GenAI4Science endpoint. second open-weight family.
+    kind: genai4science
+  # - key: haiku45         # planned — experiment 8, to fill the judge rung
+  # - key: opus-5          # planned — experiment 8, budget permitting
+
+judge_prompt_version: v3
+cue_judge: gpt56luna       # whose rationales become llm_judge_cuevec_<judge>_v3
