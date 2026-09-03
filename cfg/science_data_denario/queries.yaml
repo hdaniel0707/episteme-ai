@@ -1,0 +1,78 @@
+# OpenAlex topic queries for the Denario human-control class, one list per
+# Denario domain slug (epai/ai_detection/prepare/prepare_denario_detect.py's
+# slugify_domain output — see `denario_detect.parquet.domain`).
+#
+# These are used ONLY to build the candidate pool. The final 1:1 match to each
+# Denario paper is made on SPECTER2 topic similarity + abstract length inside
+# build_denario_hc.py, so a query only has to put the pool in the right
+# neighbourhood, not pick the paper.
+#
+# The queries are deliberately generic and timeless: the human class is fetched
+# pre-2021 (FilterConfig.year_max — abstracts after that may be LLM-polished and
+# would poison the "human" label), so a query naming a 2024 instrument would
+# return nothing usable. Topic drift between a 2015 paper and its 2025 Denario
+# counterpart is expected and is what the SPECTER2 term in the match absorbs.
+
+queries_domains:
+  cosmology_astrophysics:
+    - "dark matter halo galaxy formation"
+    - "cosmic microwave background cosmological parameters"
+    - "large scale structure galaxy clustering"
+    - "gravitational waves binary black hole merger"
+    - "stellar populations galaxy evolution"
+
+  neuroscience:
+    - "functional connectivity resting state fMRI"
+    - "spatial memory hippocampus place cells"
+    - "cortical circuits synaptic plasticity"
+    - "neural correlates decision making cognition"
+    - "diffusion tensor imaging white matter"
+
+  planetary_science:
+    - "exoplanet atmosphere transit spectroscopy"
+    - "planet formation protoplanetary disk"
+    - "Mars surface geology water"
+    - "asteroid orbital dynamics evolution"
+    - "planetary interior thermal evolution"
+
+  physics:
+    - "quantum many body systems"
+    - "condensed matter phase transitions"
+    - "nonequilibrium statistical mechanics"
+    - "particle physics standard model"
+    - "nonlinear dynamics chaos"
+
+  biomedical_informatics:
+    - "electronic health records predictive modeling"
+    - "gene expression microarray classification"
+    - "clinical decision support machine learning"
+    - "protein structure prediction"
+    - "biomedical text mining"
+
+  quantum_physics_cosmology:
+    - "quantum gravity early universe"
+    - "cosmic inflation primordial perturbations"
+    - "quantum field theory curved spacetime"
+    - "black hole thermodynamics entropy"
+    - "quantum cosmology wave function of the universe"
+
+  medicine:
+    - "randomized controlled trial treatment outcomes"
+    - "cancer prognosis biomarkers survival"
+    - "cardiovascular disease risk factors cohort"
+    - "disease incidence epidemiology population"
+    - "diagnostic accuracy medical imaging"
+
+  biology:
+    - "gene regulatory networks transcription"
+    - "single cell RNA sequencing differentiation"
+    - "protein interaction signaling pathways"
+    - "evolutionary genomics population genetics"
+    - "cell cycle regulation"
+
+  chemistry:
+    - "reaction mechanism catalysis"
+    - "molecular dynamics simulation"
+    - "organic synthesis"
+    - "electrochemistry energy storage materials"
+    - "spectroscopy molecular structure"
