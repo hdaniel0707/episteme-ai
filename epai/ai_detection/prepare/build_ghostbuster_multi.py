@@ -104,10 +104,31 @@ def main() -> None:
                     default=PARQUET_DIR / "ghostbuster_multi.parquet")
     ap.add_argument("--parquet-dir", type=Path, default=PARQUET_DIR,
                     help="where the ghostbuster_<gen>.parquet sources live")
+    ap.add_argument("--source", action="append", nargs="+", metavar="ARG",
+                    help="Override the hardcoded SOURCES list above. Repeatable: "
+                         "--source STEM WHICH [RELABEL], e.g. "
+                         "--source ghostbuster_gptoss120b ai. STEM is a "
+                         "data/parquet/<stem>.parquet file (no extension), WHICH "
+                         "is 'human' or 'ai', RELABEL (optional) renames "
+                         "generated_by for that source's rows. Given at all, this "
+                         "replaces SOURCES entirely rather than adding to it.")
     args = ap.parse_args()
 
+    if args.source:
+        sources = []
+        for parts in args.source:
+            if len(parts) not in (2, 3):
+                ap.error(f"--source takes 2 or 3 values (stem, which[, relabel]), "
+                         f"got {parts}")
+            stem, which, *rest = parts
+            if which not in ("human", "ai"):
+                ap.error(f"--source {stem}: WHICH must be 'human' or 'ai', got {which!r}")
+            sources.append((stem, which, rest[0] if rest else None))
+    else:
+        sources = SOURCES
+
     frames: list[pd.DataFrame] = []
-    for stem, which, relabel in SOURCES:
+    for stem, which, relabel in sources:
         path = args.parquet_dir / f"{stem}.parquet"
         if not path.is_file():
             raise SystemExit(f"{RED}not found: {path}{RESET}")

@@ -35,10 +35,14 @@ from pathlib import Path
 
 import yaml
 
-# The one thing worth sharing with the science pipeline: how a model name
-# becomes a filename token. Two pipelines spelling `gpt-5.4-mini` differently
-# would put the same generator under two names in data/parquet/.
-from epai.science_data.config import model_slug
+# The two things worth sharing with the science pipeline: how a model name
+# becomes a filename token, and how a generator's endpoint (OpenAI itself, or
+# an OpenAI-compatible host such as GenAI4Science) is resolved from config. Two
+# pipelines spelling `gpt-5.4-mini` differently would put the same generator
+# under two names in data/parquet/, and two pipelines resolving `provider:
+# genai4science` differently would send calls for the same corpus to two
+# different endpoints.
+from epai.science_data.config import generator_endpoint, model_slug
 from epai.utils.embed_select import validate_embedders
 from epai.utils.label_utils import PROMPT_ID_HINT, check_prompt_id, generator_dir_name
 from epai.utils.text_standardize import WHITESPACE_MODES
@@ -189,6 +193,15 @@ def load_pipeline_config(path: Path) -> dict:
             f"{path}: generate.gpt_model is required — generate.types includes "
             f"{[t for t in types if t in GPT_TYPES]}"
         )
+
+    # Optional: which host serves gpt_model. Reuses the science pipeline's own
+    # resolver (epai/science_data/config.py::generator_endpoint) so the two
+    # pipelines cannot disagree about what "provider: genai4science" means.
+    # Absent means plain OpenAI, exactly as before this existed.
+    try:
+        generator_endpoint(gen)
+    except ValueError as exc:
+        raise ValueError(f"{path}: generate: {exc}") from exc
     if "claude" in types and not str(gen.get("claude_model") or "").strip():
         raise ValueError(
             f"{path}: generate.claude_model is required — generate.types includes 'claude'"
@@ -247,6 +260,12 @@ def load_pipeline_config(path: Path) -> dict:
         raise ValueError(f"{path}: generate.max_workers must be an integer >= 1")
     if not isinstance(gen.get("fix_empty", True), bool):
         raise ValueError(f"{path}: generate.fix_empty must be true or false")
+    retry_passes = gen.get("retry_passes", 3)
+    if not isinstance(retry_passes, int) or retry_passes < 0:
+        raise ValueError(f"{path}: generate.retry_passes must be an integer >= 0")
+    cooldown = gen.get("retry_cooldown", 60)
+    if not isinstance(cooldown, (int, float)) or cooldown < 0:
+        raise ValueError(f"{path}: generate.retry_cooldown must be a number >= 0")
     if not isinstance(gen.get("strip_boilerplate", False), bool):
         raise ValueError(f"{path}: generate.strip_boilerplate must be true or false")
 
@@ -377,6 +396,31 @@ def type_model(cfg: dict, gen_type: str) -> str:
     """The model that produces one type's rows."""
     gen = cfg["generate"]
     return gen["claude_model"] if gen_type == "claude" else gen["gpt_model"]
+
+
+def gpt_endpoint(cfg: dict) -> tuple[str | None, str]:
+    """``(base_url, api_key_env)`` for ``generate.gpt_model``, applied to every
+    gpt-type generator this run selects. Claude has no equivalent -- the fork's
+    Claude client always talks to Anthropic directly."""
+    return generator_endpoint(cfg["generate"])
+
+
+def retry_passes(cfg: dict) -> int:
+    """Extra generate/fix-empty sweeps after the first, over the shortfall only.
+
+    The automatic equivalent of re-running ``--only generate`` by hand: the
+    fork's own file already skips whatever exists, so a re-run costs only the
+    calls that failed. Worth having on by default for GenAI4Science, which
+    sheds load under concurrency (see ``max_workers`` in the example config)
+    -- the in-call retry in generate.py's ``@retry`` does not always outlast a
+    busy spell, and a whole extra sweep after a cooldown does.
+    """
+    return cfg["generate"].get("retry_passes", 3)
+
+
+def retry_cooldown(cfg: dict) -> float:
+    """Seconds to wait before each extra sweep in :func:`retry_passes`."""
+    return cfg["generate"].get("retry_cooldown", 60)
 
 
 def prompt_id(cfg: dict, gen_type: str) -> str:

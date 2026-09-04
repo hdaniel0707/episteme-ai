@@ -2,7 +2,7 @@ r"""Build a Ghostbuster corpus with a newer generator and score it, end to end.
 
     uv run python epai/ghostbuster/run_full_pipeline.py --yes --gpu 0
 
-Eight stages, in order:
+Nine stages, in order:
 
   1. **generate**  — ``external/ghostbuster/generate.py``, once per (domain,
      type), in the fork's own environment. Writes
@@ -31,7 +31,12 @@ Eight stages, in order:
      corpus, nothing downstream reads them, and a leftover
      ``essay_<variant>.parquet`` is a corpus-shaped file waiting to be trained
      on by mistake. ``combine.remove_domain_parquets: false`` keeps them.
-  6. **standardize** — ``prepare/standardize_text.py`` over the combined file,
+  6. **verify**    — ``check_parquet_completeness.py`` over the combined file,
+     scanning ``text`` for a refusal or an API error body saved as content
+     (the same failure ``scrub_bad_generations.py`` catches earlier, on disk,
+     during generate). Blocks the run on any ERROR-level finding before the
+     GPU stages spend time on a corpus that holds one.
+  7. **standardize** — ``prepare/standardize_text.py`` over the combined file,
      rewriting ``text`` in place for every row, human and generated alike:
      typographic characters folded to ASCII, layout put on one convention. The
      two classes reach the parquet by different routes — the human side through
@@ -43,10 +48,10 @@ Eight stages, in order:
      which is what sends cross-domain transfer below chance. It removes no text
      — it checks its own word count and refuses to write if it changed.
      Skipped when ``standardize.enabled`` is false.
-  7. **score**     — ``external/Binoculars/score_parquets.py`` over that file,
+  8. **score**     — ``external/Binoculars/score_parquets.py`` over that file,
      filling ``binoculars_score`` **in place**. No second ``_binox0`` file: a
      scored corpus is what that script re-scores from anyway.
-  8. **embed**     — ``embed/add_embeddings.py`` over the same file, filling
+  9. **embed**     — ``embed/add_embeddings.py`` over the same file, filling
      every ``emb_*`` column in place. The corpus is then ready for training.
 
 **Three environments, and stages 1–2 and 7 run outside this one.** This repo
@@ -165,6 +170,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 from epai.ghostbuster.config import (
     BASE_DIR,
     BINOCULARS_PROJECT,
@@ -189,17 +196,30 @@ from epai.ghostbuster.config import (
     expected_documents,
     generate_flag,
     generated_by_label,
+    gpt_endpoint,
     load_pipeline_config,
     missing_seeds,
     output_dir_name,
     output_dir_names,
+    retry_cooldown,
+    retry_passes,
     scored_path,
     types,
     variant,
 )
+from epai.ghostbuster.scrub_bad_generations import scrub as scrub_bad_generations
 from epai.utils import notify_utils
 from epai.utils.embed_select import check_embedder_names
 from epai.utils.parquet_utils import BINOX_COLUMN, check_column_filled
+
+# Loaded here, not left to an inherited shell environment: GENAI4SCIENCE_*_API_KEY
+# lives in THIS repo's .env (see .env_sample), and submodule_env() below copies
+# os.environ wholesale into the fork's subprocess -- so the key has to be in
+# THIS process's environment before that copy happens, same as the science
+# pipeline's generate_ai.py already does for its own load_dotenv() call.
+load_dotenv()
+
+COMPLETENESS_SCRIPT = "epai/scripts/check_parquet_completeness.py"
 
 # Defined here rather than imported from another pipeline's runner: these are
 # six terminal escapes, and importing a sibling entry point to get them would
@@ -216,8 +236,8 @@ RESET = "\033[0m"
 INTERRUPTED = 130
 
 STEP_KEYS = (
-    "generate", "fix-empty", "collect", "prepare", "combine", "standardize",
-    "score", "embed"
+    "generate", "fix-empty", "collect", "prepare", "combine", "verify",
+    "standardize", "score", "embed"
 )
 
 EMBED_SCRIPT = "epai/ai_detection/embed/add_embeddings.py"
@@ -342,6 +362,25 @@ def model_args(cfg: dict, gen_type: str | None = None) -> list[str]:
     return out
 
 
+def endpoint_args(cfg: dict, gen_type: str) -> list[str]:
+    """``--base_url``/``--api_key_env`` for a gpt-type call, else ``[]``.
+
+    Empty for ``claude`` (its client always talks to Anthropic directly) and
+    for plain OpenAI (``gpt_endpoint`` resolves to ``base_url=None``, and a
+    call with neither flag behaves exactly as it did before this routing
+    existed). Resolved once here, from THIS repo's config, rather than passed
+    through as ``--provider`` for the fork to re-resolve: that keeps the
+    performance-vs-shared GenAI4Science preference a decision this process
+    makes and prints, not one repeated silently inside the subprocess.
+    """
+    if gen_type == "claude":
+        return []
+    base_url, api_key_env = gpt_endpoint(cfg)
+    if base_url is None:
+        return []
+    return ["--base_url", base_url, "--api_key_env", api_key_env]
+
+
 def boilerplate_args(cfg: dict) -> list[str]:
     """``--strip_boilerplate`` for the fork, only when the config asks for it.
 
@@ -394,6 +433,16 @@ def preflight(cfg: dict, args: argparse.Namespace, steps: list[str]) -> None:
                 f"yet. 'uv run --project' will create and sync it on the "
                 f"generate stage, which can take a while (torch).{RESET}"
             )
+        if any(t in GPT_TYPES for t in types(cfg)) and not args.debug:
+            base_url, api_key_env = gpt_endpoint(cfg)
+            if not os.environ.get(api_key_env):
+                raise SystemExit(
+                    f"{RED}{api_key_env} is not set.{RESET}\n"
+                    f"  generate.gpt_model {cfg['generate']['gpt_model']!r} needs "
+                    f"it{' (' + base_url + ')' if base_url else ''}. It must be in "
+                    f"THIS repo's .env (see .env_sample) — this process's "
+                    f"environment is what gets copied into the fork's subprocess."
+                )
 
     if needs_seeds:
         gaps = missing_seeds(cfg)
@@ -413,6 +462,9 @@ def preflight(cfg: dict, args: argparse.Namespace, steps: list[str]) -> None:
             script = BASE_DIR / PREPARE_SCRIPTS[domain]
             if not script.is_file():
                 raise SystemExit(f"{RED}{rel(script)} not found.{RESET}")
+
+    if "verify" in steps and not (BASE_DIR / COMPLETENESS_SCRIPT).is_file():
+        raise SystemExit(f"{RED}{COMPLETENESS_SCRIPT} not found.{RESET}")
 
     if "embed" in steps:
         if not (BASE_DIR / EMBED_SCRIPT).is_file():
@@ -451,7 +503,7 @@ def preflight(cfg: dict, args: argparse.Namespace, steps: list[str]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def step_generate(cfg: dict, args: argparse.Namespace) -> int:
+def _generate_once(cfg: dict, args: argparse.Namespace) -> int:
     """One subprocess per (domain, type), in the fork's environment and directory.
 
     Per (domain, type) rather than one call with every flag, for two reasons: a
@@ -464,11 +516,6 @@ def step_generate(cfg: dict, args: argparse.Namespace) -> int:
     limit = args.gen_limit if args.gen_limit is not None else gen.get("limit")
     workers = args.workers if args.workers is not None else gen.get("max_workers", 8)
 
-    banner("generate", f"{rel(GHOSTBUSTER_PROJECT)}/{GENERATE_SCRIPT}")
-    if args.debug:
-        print(f"{YELLOW}--debug: the fork mocks every LLM call. The files it "
-              f"writes are placeholders, not a corpus.{RESET}\n")
-
     for domain in domains(cfg):
         for gen_type in types(cfg):
             out_name = output_dir_name(cfg, gen_type)
@@ -480,6 +527,7 @@ def step_generate(cfg: dict, args: argparse.Namespace) -> int:
                 # skips every file and generates nothing.
                 "--out_name", out_name,
                 *model_args(cfg, gen_type),
+                *endpoint_args(cfg, gen_type),
                 "--seed", str(gen.get("seed", 0)),
                 # The fork calls one document at a time per worker, and the
                 # domains here run as separate subprocesses, so this is the only
@@ -508,6 +556,67 @@ def step_generate(cfg: dict, args: argparse.Namespace) -> int:
     return 0
 
 
+def _shortfall(cfg: dict, args: argparse.Namespace) -> int:
+    """Missing documents across every (domain, type) this run selects.
+
+    Silent counterpart of ``audit()``'s table -- used by the retry-pass loop
+    below to decide whether another sweep is worth the cooldown, without
+    reprinting the full audit on every pass.
+    """
+    gen_limit = args.gen_limit if args.gen_limit is not None else cfg["generate"].get("limit")
+    total = 0
+    for domain in domains(cfg):
+        expected = expected_documents(cfg, domain, gen_limit)
+        for gen_type in types(cfg):
+            files, _ = count_txt(GB_DATA_DIR / domain / output_dir_name(cfg, gen_type))
+            total += max(expected - files, 0)
+    return total
+
+
+def step_generate(cfg: dict, args: argparse.Namespace) -> int:
+    """``_generate_once`` plus automatic retry sweeps over what it left short.
+
+    Two different kinds of gap feed the same loop: an outright API failure
+    (recorded, output file simply absent) and a refusal or error body that came
+    back *as* content, which ``scrub_bad_generations`` deletes so it looks like
+    the first kind too. Either way the fork's own skip-if-exists logic means a
+    re-run only pays for what is actually missing.
+
+    Worth having on by default: GenAI4Science sheds load under concurrency (see
+    ``max_workers`` in the example config), and the in-call retry inside
+    generate.py's ``@retry`` does not always outlast a busy spell. Configure via
+    ``generate.retry_passes`` / ``generate.retry_cooldown`` (defaults 3 / 60s);
+    0 passes disables this and restores the previous one-shot behaviour.
+    """
+    banner("generate", f"{rel(GHOSTBUSTER_PROJECT)}/{GENERATE_SCRIPT}")
+    if args.debug:
+        print(f"{YELLOW}--debug: the fork mocks every LLM call. The files it "
+              f"writes are placeholders, not a corpus.{RESET}\n")
+
+    code = _generate_once(cfg, args)
+    if code != 0 or args.dry_run or args.debug:
+        return code
+
+    passes = retry_passes(cfg)
+    cooldown = retry_cooldown(cfg)
+    for i in range(passes):
+        deleted = scrub_bad_generations(cfg)
+        if deleted:
+            print(f"{YELLOW}  generate: scrubbed {deleted} file(s) that looked "
+                  f"like a failed call — they will be regenerated.{RESET}")
+        missing = _shortfall(cfg, args)
+        if not missing:
+            break
+        print(f"\n{YELLOW}  generate: {missing} document(s) still missing after "
+              f"pass {i + 1}/{passes}; retrying after {cooldown}s cooldown "
+              f"(lets a rate-limited or overloaded endpoint drain).{RESET}")
+        time.sleep(cooldown)
+        code = _generate_once(cfg, args)
+        if code != 0:
+            return code
+    return 0
+
+
 def step_fix_empty(cfg: dict, args: argparse.Namespace) -> int:
     """Refill blank generations, one (domain, type) at a time.
 
@@ -533,6 +642,7 @@ def step_fix_empty(cfg: dict, args: argparse.Namespace) -> int:
                 # neighbours got.
                 "--out_name", output_dir_name(cfg, gen_type),
                 *model_args(cfg, gen_type),
+                *endpoint_args(cfg, gen_type),
                 # Same setting the generate stage ran under, for the same
                 # reason --out_name is repeated here.
                 *boilerplate_args(cfg),
@@ -975,6 +1085,32 @@ def step_combine(cfg: dict, args: argparse.Namespace, var: str) -> int:
     return 0
 
 
+def step_verify(cfg: dict, args: argparse.Namespace, var: str) -> int:
+    """Scan the combined corpus for a failed call written as content, before
+    the GPU stages spend time on it.
+
+    ``check_parquet_completeness.py`` is schema-agnostic and already exists —
+    it is what a refusal or an API error body saved into ``text`` looks like
+    once it has reached a parquet, the same class of failure
+    ``scrub_bad_generations.py`` catches earlier, on disk, during generate.
+    This is the backstop for whatever gets past that: a refusal that only
+    became one after ``strip_boilerplate`` line-dropping, say, or a generator
+    added without the retry-pass loop. Gating here, before standardize and
+    score, means a bad corpus is never scored and embedded first.
+    """
+    out = combined_path(cfg, var)
+    banner("verify", f"{COMPLETENESS_SCRIPT} → {rel(out)}")
+
+    if not args.dry_run and not out.is_file():
+        print(f"{RED}Not found: {rel(out)}{RESET}\n"
+              f"  The combine stage writes it. Run that first.")
+        return 1
+
+    cmd = [sys.executable, str(BASE_DIR / COMPLETENESS_SCRIPT), rel(out),
+           "--fail-on", "error"]
+    return run_cmd(cmd, args.dry_run)
+
+
 def step_standardize(cfg: dict, args: argparse.Namespace, var: str) -> int:
     """Fold typographic characters and layout to one convention, both classes.
 
@@ -1311,6 +1447,7 @@ def main() -> None:
         "collect": lambda: step_collect(cfg, args, var),
         "prepare": lambda: step_prepare(cfg, args, var),
         "combine": lambda: step_combine(cfg, args, var),
+        "verify": lambda: step_verify(cfg, args, var),
         "standardize": lambda: step_standardize(cfg, args, var),
         "score": lambda: step_score(cfg, args, var),
         "embed": lambda: step_embed(cfg, args, var),

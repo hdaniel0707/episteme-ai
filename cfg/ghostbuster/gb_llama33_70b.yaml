@@ -1,0 +1,123 @@
+# Ghostbuster corpus, llama3.3:70b via GenAI4Science — one of the three
+# science-pipeline generators (see cfg/science_data/science_v3.yaml), applied
+# to the Ghostbuster essay/wp/reuter prompts instead of the science abstracts.
+#
+# Same arrangement as gb_cfg_example.yaml: every stage reads this single file.
+# See that file for the fully annotated template; this one only calls out what
+# is different for a GenAI4Science-hosted generator.
+#
+# Run the whole pipeline with one command:
+#   uv run python epai/ghostbuster/run_full_pipeline.py --cfg cfg/ghostbuster/gb_llama33_70b.yaml --yes --gpu 0
+#
+# BEFORE THE FIRST RUN: GENAI4SCIENCE_API_KEY (or GENAI4SCIENCE_PERFORMANCE_API_KEY)
+# must be set in THIS repo's .env — see .env_sample. run_full_pipeline.py loads
+# it and passes it through to the fork's subprocess; the fork's own .env is not
+# read for this key.
+#
+# The seeded inputs (human/, prompts/, reuter's gpt/<author>/headlines/) must
+# already exist under external/ghostbuster/data/ — see "Ghostbuster
+# (new-generator corpus)" in the README. Shared with every other model variant,
+# including this one.
+
+# Real dataset_id (not the "x_ghostbuster" placeholder in the example config):
+# this run is meant to land in data/parquet/ghostbuster_llama3370b.parquet
+# alongside the existing ghostbuster_gpt56luna.parquet etc.
+dataset_id: "ghostbuster"
+
+# ------------------------------------------------------------- generate ----
+generate:
+  gpt_model: "llama3.3:70b"
+
+  # Routes every gpt-type call through HUN-REN SZTAKI's OpenAI-compatible
+  # endpoint instead of OpenAI's own. Resolved by
+  # epai/science_data/config.py::generator_endpoint — the same resolver the
+  # science pipeline uses, so "genai4science" cannot mean something different
+  # here. Prefers GENAI4SCIENCE_PERFORMANCE_API_KEY when it is set.
+  provider: "genai4science"
+
+  # gpt_plain is the Ghostbuster generator built for detector datasets: no
+  # markdown, no formatting tells. The only type this corpus needs.
+  types: ["gpt_plain"]
+
+  # SAME prompt id as ghostbuster_gpt56luna / ghostbuster_gpt54mini — same
+  # prompts, different model, so the three corpora are directly comparable.
+  # Do not change this unless the prompts in utils/prompt_utils.py themselves
+  # change (and then only to a NEW id — see gb_cfg_example.yaml's warning).
+  prompt_ids:
+    gpt_plain: "0701A"
+
+  domains: ["essay", "wp", "reuter"]
+
+  # null = the full ~1000 items/domain. Test with --gen-limit on the command
+  # line first, not by editing this.
+  limit: null
+
+  seed: 0
+
+  # GenAI4Science's shared endpoint sheds load under concurrency, and its
+  # performance endpoint caps at 4 concurrent calls (a 5th trips a ~1-minute
+  # key block) — see cfg/science_data/science_v3.yaml's own note on this same
+  # endpoint. Lower than the OpenAI-direct default of 8.
+  max_workers: 4
+
+  fix_empty: true
+  strip_boilerplate: false
+
+  # Extra generate+fix-empty sweeps after the first, over whatever is still
+  # missing (an outright failure, or a refusal/error body
+  # scrub_bad_generations.py deleted). Each pass first scrubs, then re-runs
+  # generate, which only pays for the gap. 0 disables this and restores a
+  # one-shot run.
+  retry_passes: 3
+  retry_cooldown: 60
+
+# -------------------------------------------------------------- prepare ----
+prepare:
+  embeddings: false
+
+# -------------------------------------------------------------- combine ----
+combine:
+  drop_generated_by: []
+  drop_incomplete: "none"
+  max_drop_frac: 0.05
+  remove_domain_parquets: true
+
+# ---------------------------------------------------------- standardize ----
+standardize:
+  enabled: true
+  whitespace: "lines"
+  keep_raw: true
+
+# ---------------------------------------------------------------- score ----
+score:
+  text_column: "text"
+  batch_size: 1
+  gpu: null
+  cpu_threads: null
+  observer: null
+  performer: null
+  limit: null
+
+# ---------------------------------------------------------------- embed ----
+# Same embedder list as cfg/science_data/science_v3.yaml, so "all the
+# embeddings and scores are the same type" holds across both pipelines.
+embed:
+  embedders:
+    - "specter2"
+    - "scincl"
+    - "scibert"
+    - "mpnet"
+    - "minilm"
+    - "e5"
+    - "bge"
+    - "roberta"
+    - "styledistance"
+    - "style_wegmann"
+    - "luar"
+    - "luar_crud"
+  text_col: "text"
+  batch_size: null
+  gpu: null
+  cpu_threads: null
+  limit: null
+  recompute: false
