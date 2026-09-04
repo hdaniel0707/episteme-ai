@@ -12,8 +12,9 @@ Colour and marker share the work so the two questions the plot can answer stay
 visually separate. There are two schemes:
 
     binary (one AI generator, or --binary): every (domain, class) group gets
-        its own colour, warm for human and cold for machine.
-            does the embedding separate HUMAN from MACHINE?   warm vs cold
+        its own colour, cold (blue) for human and warm for machine -- so human
+        stays blue here just as it is in the by-generator scheme.
+            does the embedding separate HUMAN from MACHINE?   cold vs warm
             does it separate the DOMAINS?                      hue within a temperature
 
     by-generator (the default once a file has >1 generator, or --by-generator):
@@ -62,74 +63,18 @@ Jitter touches the FIGURES ONLY. Centroids, the distance and direction tables,
 every CSV and summary.json are computed from the exact coordinates.
 
 Usage:
-    # defaults: emb_luar_crud, every plot and table
-    uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
-        data/parquet/ghostbuster_gpt35t.parquet
-    
-    uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
-        data/parquet/ghostbuster_gpt54mini.parquet
-    
-    uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
-        data/parquet/ghostbuster_gpt54mini_10w.parquet
-    
-    uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
-        data/parquet/ghostbuster_gpt56luna.parquet
-    
-    uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
-        data/parquet/science_v3_gpt56luna_0811A.parquet
-
-    # another embedding
-    uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
-        data/parquet/ghostbuster_gpt54mini.parquet --feature emb_openai_large
-
-    # cosine-style embeddings: put every vector on the unit sphere first
-    uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
-        data/parquet/ghostbuster_gpt35t.parquet --normalize l2
-
-    # force the per-generator view (blue human, one colour per AI generator,
-    # marker shape per domain) -- automatic when the file has >1 generator
-    uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
-        data/parquet/ghostbuster_multi.parquet --by-generator
-
-    # force the binary warm/cold view on a multi-generator file
-    uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
-        data/parquet/ghostbuster_multi.parquet --binary
-
-    # tables only, no figures
-    uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
-        data/parquet/ghostbuster_gpt35t.parquet --no-plots
-
-    # a low-cardinality feature: spread the rows that share a point
-    uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
-        data/parquet/ghostbuster_gpt56luna.parquet \
-        --feature llm_judge_cuevec_gpt56luna_v3 --jitter
-
-    # tighter blobs, if they run together
-    uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
-        data/parquet/ghostbuster_gpt56luna.parquet \
-        --feature llm_judge_cuevec_gpt56luna_v3 --jitter --jitter-scale 0.6
-
-    uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
-      data/parquet/ghostbuster_gpt56luna.parquet \
-      --feature llm_judge_cuevec_gpt56luna_v3
-    
-    uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
-      data/parquet/ghostbuster_gpt56luna.parquet \
-      --feature llm_judge_cuevec_gpt56luna_v3 --normalize standard
-    
-    uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
-      data/parquet/ghostbuster_gpt56luna.parquet \
-      --feature llm_judge_cuevec_gpt56luna_v3 --jitter
-    
-    uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
-      data/parquet/science_v3_gpt56luna_0811A.parquet \
-      --feature llm_judge_cuevec_gpt56luna_v3 --jitter
-    
     uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
         data/parquet/ghostbuster_multi.parquet
     
     uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
-        data/science/science_v3_multi_0811A.parquet
+        data/parquet/science_v3_multi_0811A.parquet
+    
+    uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
+        data/parquet/denario_hc.parquet
+    
+    uv run python epai/ai_detection/analyse/analyse_domain_pca.py \
+      data/parquet/science_v3_multi_0811A.parquet \
+      --feature llm_judge_cuevec_gpt56luna_v3 --jitter
 
 """
 
@@ -167,9 +112,10 @@ SCORE_PREFIXES = ("binoculars_score", "llm_judge_score")
 
 DEFAULT_FEATURE = "emb_luar_crud"
 
-# One sequential colormap per domain, sampled near its dark end. Warm families
-# for human, cold for machine, indexed by the domain's position in sorted order
-# so the pairing is stable across runs and across files.
+# One sequential colormap per domain, sampled near its dark end. Cold families
+# for human (blue, to match the by-generator scheme), warm for machine, indexed
+# by the domain's position in sorted order so the pairing is stable across runs
+# and across files.
 WARM_CMAPS = ("Reds", "Oranges", "YlOrBr", "RdPu", "spring", "copper")
 COLD_CMAPS = ("Blues", "GnBu", "Purples", "PuBu", "BuGn", "winter")
 # Where in each colormap to sample. A single machine label per domain takes the
@@ -272,7 +218,7 @@ def build_groups(df: pd.DataFrame, by_generator: bool) -> list[Group]:
     """Machine groups first, human last, so the human cloud draws on top.
 
     Binary scheme: colour carries two facts at once -- temperature is the class
-    (warm human, cold machine) and the family within a temperature is the
+    (cold/blue human, warm machine) and the family within a temperature is the
     domain. By-generator scheme: colour is the author (blue human, one fixed
     colour per AI generator across every domain) and marker shape is the domain.
     """
@@ -305,7 +251,7 @@ def build_groups(df: pd.DataFrame, by_generator: bool) -> list[Group]:
 
         human_mask = in_domain & (labels == HUMAN_LABEL)
         if human_mask.any():
-            color = gen_color[HUMAN_LABEL] if by_generator else shade(warm, 0, 1)
+            color = gen_color[HUMAN_LABEL] if by_generator else shade(cold, 0, 1)
             human_groups.append(Group(domain, HUMAN_LABEL, color, human_mask,
                                       True, *shape))
 
@@ -313,7 +259,7 @@ def build_groups(df: pd.DataFrame, by_generator: bool) -> list[Group]:
             machine_mask = in_domain & (labels != HUMAN_LABEL)
             if machine_mask.any():
                 name = machine_labels[0] if len(machine_labels) == 1 else "machine"
-                machine_groups.append(Group(domain, name, shade(cold, 0, 1),
+                machine_groups.append(Group(domain, name, shade(warm, 0, 1),
                                             machine_mask, False))
             continue
         for generator in machine_labels:
@@ -1018,7 +964,7 @@ def parse_args() -> argparse.Namespace:
                    "per AI generator, marker shape per domain). Automatic when "
                    "the file has more than one generator.")
     p.add_argument("--binary", action="store_true",
-                   help="Force the warm-human / cold-machine view even on a file "
+                   help="Force the cold-human / warm-machine view even on a file "
                    "with several generators: all AI collapses to one 'machine' "
                    "group per domain.")
     p.add_argument("--drop-classes", nargs="*", default=[], metavar="CLS",
@@ -1128,7 +1074,7 @@ def main() -> None:
     by_generator = args.by_generator or (n_generators > 1 and not args.binary)
     report(f"  Scheme  : "
            + ("by-generator (colour = author, marker = domain)" if by_generator
-              else "binary (warm human, cold machine)")
+              else "binary (cold/blue human, warm machine)")
            + f"  [{n_generators} AI generator(s)]")
     groups = build_groups(df, by_generator)
     report(f"  Groups: {len(groups)} — " + ", ".join(f"{g.name} ({g.n})" for g in groups))
