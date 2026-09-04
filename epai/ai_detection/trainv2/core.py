@@ -1,0 +1,221 @@
+"""The primitives every trainv2 experiment shares: the split, the two metrics,
+the variant grid, and seed aggregation.
+
+Deliberately tiny and dependency-free (numpy + sklearn only). The metric
+conventions match the old ``epai/utils/cd_core`` so a trainv2 number can be laid
+beside a legacy one:
+
+  * AUROC with machine (``y == 1``) positive, NOT orientation-corrected — a
+    score that runs backwards reads below 0.5 and should.
+  * TPR@FPR is the *achievable* point at the largest FPR <= the level (the ROC
+    grid only steps at an observed human score), i.e. a threshold you could
+    actually set, not an interpolated one.
+"""
+
+from __future__ import annotations
+
+import csv
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import numpy as np
+from sklearn.metrics import roc_auc_score, roc_curve
+from sklearn.model_selection import GroupShuffleSplit
+
+from epai.algs import build_algorithm
+
+POOLED = "all"  #: domain-slice name for "every domain at once"
+
+
+# ---------------------------------------------------------------------------
+# The variant grid: embedding x algorithm
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Variant:
+    """One cell of the grid: one embedding column, one algorithm.
+
+    ``key`` names the results-directory / figure-panel slot; ``label`` is what a
+    reader sees ("luar_crud · logistic").
+    """
+
+    embedding: str
+    alg_name: str
+    alg_label: str = ""
+    alg_params: dict = field(default_factory=dict)
+
+    @property
+    def key(self) -> str:
+        return f"{self.embedding}__{self.alg_name}"
+
+    @property
+    def label(self) -> str:
+        emb = self.embedding[4:] if self.embedding.startswith("emb_") else self.embedding
+        return f"{emb} · {self.alg_label or self.alg_name}"
+
+
+def build_variants(embeddings: list[str], algorithms: list[dict]) -> list[Variant]:
+    """The full cross product, in ``embeddings`` x ``algorithms`` order.
+
+    ``algorithms`` entries are ``{name, label?, params?}`` mappings (already
+    normalised by :mod:`config`).
+    """
+    return [
+        Variant(
+            embedding=emb,
+            alg_name=alg["name"],
+            alg_label=alg.get("label", alg["name"]),
+            alg_params=alg.get("params", {}),
+        )
+        for emb in embeddings
+        for alg in algorithms
+    ]
+
+
+# ---------------------------------------------------------------------------
+# The split
+# ---------------------------------------------------------------------------
+
+
+def grouped_split(
+    y: np.ndarray, groups: np.ndarray, test_size: float, seed: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """One grouped train/test split. A group never straddles the cut.
+
+    Returns ``(train_idx, test_idx)`` into the arrays passed in. The splitter
+    only reads the row count, so a dummy stands in for the design matrix.
+    """
+    splitter = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=seed)
+    return next(splitter.split(np.zeros((len(y), 1)), y, groups))
+
+
+# ---------------------------------------------------------------------------
+# The two metrics
+# ---------------------------------------------------------------------------
+
+
+def auroc(y: np.ndarray, scores: np.ndarray) -> float:
+    """AUROC, machine positive. NaN on a single-class set. Not flipped."""
+    y = np.asarray(y)
+    if np.unique(y).size < 2:
+        return float("nan")
+    return float(roc_auc_score(y, np.asarray(scores, dtype=float)))
+
+
+def tpr_at_fpr(y: np.ndarray, scores: np.ndarray, level: float) -> float:
+    """Oracle TPR at the largest achievable FPR <= ``level``.
+
+    The threshold is fit on these very rows — an upper bound on what the
+    operating point delivers, and the only reading that needs no calibration
+    slice. NaN on a single-class set.
+    """
+    y = np.asarray(y)
+    if np.unique(y).size < 2:
+        return float("nan")
+    fpr, tpr, _ = roc_curve(y, np.asarray(scores, dtype=float))
+    idx = int(np.flatnonzero(fpr <= level)[-1])  # fpr starts at 0, never empty
+    return float(tpr[idx])
+
+
+# ---------------------------------------------------------------------------
+# Fit + evaluate one variant, over every seed — shared by every runner
+# ---------------------------------------------------------------------------
+
+#: The two metrics every experiment reports, in the order they're computed.
+METRIC_KEYS = ("auroc", "tpr_at_fpr")
+
+
+def score_alg(alg, X: np.ndarray) -> np.ndarray | None:
+    """The continuous machine-ness score, or None for a label-only algorithm."""
+    try:
+        return alg.decision_score(X)
+    except NotImplementedError:
+        return None
+
+
+def train_eval(
+    variant: Variant,
+    X: np.ndarray,
+    y: np.ndarray,
+    groups: np.ndarray,
+    seeds: list[int],
+    test_size: float,
+    fpr: float,
+) -> list[dict]:
+    """Fit ``variant`` and score it on the held-out split, once per seed.
+
+    One grouped train/test split per seed (never a calibration slice — both
+    metrics are oracle, fit on the evaluation rows themselves). Returns one row
+    per seed with the split sizes and the two metrics.
+    """
+    rows: list[dict] = []
+    for seed in seeds:
+        train_idx, test_idx = grouped_split(y, groups, test_size, seed)
+        alg = build_algorithm(variant.alg_name, seed, **variant.alg_params)
+        alg.set_fit_groups(groups[train_idx])
+        alg.fit(X[train_idx], y[train_idx])
+
+        scores = score_alg(alg, X[test_idx])
+        y_test = y[test_idx]
+        rows.append(
+            {
+                "seed": seed,
+                "n_train": int(len(train_idx)),
+                "n_test": int(len(test_idx)),
+                "n_test_human": int((y_test == 0).sum()),
+                "n_groups": int(len(set(groups))),
+                "auroc": auroc(y_test, scores) if scores is not None else float("nan"),
+                "tpr_at_fpr": (
+                    tpr_at_fpr(y_test, scores, fpr) if scores is not None else float("nan")
+                ),
+            }
+        )
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Seed aggregation
+# ---------------------------------------------------------------------------
+
+
+def aggregate_seeds(per_seed: list[dict], keys: tuple[str, ...]) -> dict:
+    """``{key}_mean`` / ``{key}_std`` over seeds, NaN-tolerant.
+
+    A single degenerate seed (single-class test half) is averaged out with
+    ``nanmean`` rather than erasing the others. Constant fields (row counts) are
+    taken from the first seed.
+    """
+    out: dict = {"n_seeds": len(per_seed)}
+    for key in keys:
+        vals = np.asarray([r[key] for r in per_seed], dtype=float)
+        if np.isfinite(vals).any():
+            out[f"{key}_mean"] = float(np.nanmean(vals))
+            out[f"{key}_std"] = float(np.nanstd(vals))
+        else:
+            out[f"{key}_mean"] = float("nan")
+            out[f"{key}_std"] = float("nan")
+    for const in ("n_train", "n_test", "n_test_human", "n_groups"):
+        if const in per_seed[0]:
+            out[const] = per_seed[0][const]
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
+
+
+def write_csv(rows: list[dict], path: Path) -> None:
+    """The same rows written as ``.jsonl``, as a CSV — for opening in a
+    spreadsheet rather than parsing. Columns follow the first row's key order;
+    every row in a trainv2 summary/ranking list shares one schema, so that's
+    the whole file.
+    """
+    if not rows:
+        path.write_text("")
+        return
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)

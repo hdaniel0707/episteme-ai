@@ -206,13 +206,19 @@ data:
     #     - {name: "reuter_gpt54mini", label: "reuter", where: {domain: "reuter"}}
     #     - {name: "wp_gpt54mini",     label: "wp",     where: {domain: "wp"}}
     #
-    - name: "science_v3"
-      label: "science_v3 (gpt-5.6-luna)"
-      parquet_path: "data/parquet/science_v3_gpt56luna_0811A.parquet"
-      datasets:
-        - {name: "computer_science", label: "comp. sci.", where: {domain: "computer_science"}}
-        - {name: "mathematics",      label: "maths",      where: {domain: "mathematics"}}
-        - {name: "sociology",        label: "sociology",  where: {domain: "sociology"}}
+    # science_v3 moved to its own file: cfg/ai_detection/train/clf_cd/clf_cd_science_v3f.yaml
+    # (the multi-generator science_v3f_multi_0811A parquet + the four judge rungs
+    # that only it and denario_hc carry). It cannot be a suite here — this config's
+    # ghostbuster suite carries the Sonnet-5 judge column, which science_v3f does
+    # not, and the reverse for the two open-weight judges. Run the two configs
+    # side by side under one experiment id, as with the two in-domain configs.
+    # - name: "science_v3"
+    #   label: "science_v3 (gpt-5.6-luna)"
+    #   parquet_path: "data/parquet/science_v3_gpt56luna_0811A.parquet"
+    #   datasets:
+    #     - {name: "computer_science", label: "comp. sci.", where: {domain: "computer_science"}}
+    #     - {name: "mathematics",      label: "maths",      where: {domain: "mathematics"}}
+    #     - {name: "sociology",        label: "sociology",  where: {domain: "sociology"}}
 
   # -------------------------------------------------------------------------
   # Eval-only corpora — the extra evaluation, never part of the results above

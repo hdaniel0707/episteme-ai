@@ -1,0 +1,45 @@
+# trainv2 · experiment 2 — embedding effectiveness (in-domain)
+#
+# Which embedding is best for human-vs-machine detection? Logistic regression
+# is enough to compare representations, so the algorithm is fixed and every
+# embedding column in the parquet is swept instead. For each embedding, every
+# generator is trained on SEPARATELY (own binary training, own split), per
+# domain and pooled — same slices as run_in_domain.py — and the results are
+# then combined across generators into one ranking.
+#
+# Run:
+#   uv run python epai/ai_detection/trainv2/run_embedding_effectiveness.py
+#   uv run python epai/ai_detection/trainv2/run_embedding_effectiveness.py --dry-run
+
+name: emb_effectiveness_science_v3f
+
+parquet: data/parquet/science_v3f_multi_0811A.parquet
+
+group_col: id          # human abstract + every rewrite of it share this
+human_label: human     # -> y = 0; any generator -> y = 1
+domain_col: domain     # each domain sliced on its own, plus a pooled slice
+
+# The embedding axis under test — every emb_* column this parquet carries.
+embeddings:
+  - emb_specter2
+  - emb_scincl
+  - emb_scibert
+  - emb_mpnet
+  - emb_minilm
+  - emb_e5
+  - emb_bge
+  - emb_roberta
+  - emb_styledistance
+  - emb_style_wegmann
+  - emb_luar
+  - emb_luar_crud
+
+# Exactly ONE algorithm. Comparing embeddings under several algorithms at once
+# would confound "which embedding" with "which algorithm" — run_in_domain.py is
+# the config shape for that question.
+algorithms:
+  - {name: logistic, label: "Logistic Regression", params: {C: 1.0, max_iter: 1000}}
+
+seeds: [0, 1, 2]
+test_size: 0.30
+fpr: 0.01              # the FPR the TPR is read at

@@ -152,13 +152,16 @@ data:
     #     - {name: "reuter_gpt54mini", label: "reuter", where: {domain: "reuter"}}
     #     - {name: "wp_gpt54mini",     label: "wp",     where: {domain: "wp"}}
     #
-    - name: "science_v3"
-      label: "science_v3 (gpt-5.6-luna)"
-      parquet_path: "data/parquet/science_v3_gpt56luna_0811A.parquet"
-      datasets:
-        - {name: "computer_science", label: "comp. sci.", where: {domain: "computer_science"}}
-        - {name: "mathematics",      label: "maths",      where: {domain: "mathematics"}}
-        - {name: "sociology",        label: "sociology",  where: {domain: "sociology"}}
+    # science_v3 moved to its own file:
+    # cfg/ai_detection/train/clf_lodo/clf_lodo_science_v3f.yaml — see the note in
+    # cfg/ai_detection/train/clf_cd/clf_cd_suites_all.yaml.
+    # - name: "science_v3"
+    #   label: "science_v3 (gpt-5.6-luna)"
+    #   parquet_path: "data/parquet/science_v3_gpt56luna_0811A.parquet"
+    #   datasets:
+    #     - {name: "computer_science", label: "comp. sci.", where: {domain: "computer_science"}}
+    #     - {name: "mathematics",      label: "maths",      where: {domain: "mathematics"}}
+    #     - {name: "sociology",        label: "sociology",  where: {domain: "sociology"}}
 
   # -------------------------------------------------------------------------
   # Eval-only corpora — the extra evaluation, never part of the results above

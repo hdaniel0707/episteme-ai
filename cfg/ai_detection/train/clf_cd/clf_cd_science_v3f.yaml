@@ -1,0 +1,681 @@
+# Cross-DATASET comparison — the suite shape, currently asking a FEATURE question.
+#
+# The sibling configs in this folder each run ONE dataset: three domains, one
+# source x target matrix per variant, one ranking. This one holds the level above
+# them — several datasets in a single config, with the algorithms, the features
+# and the baselines declared once and used unchanged on each.
+#
+# WHAT IT IS ASKING RIGHT NOW. Three feature sets — the LUAR embedding, the LLM
+# judge's eleven cue bits, and the two stacked — across five algorithms, on the
+# one corpus that carries cues on every row. The grid is RAGGED: `fusion_mlp` and
+# `gated_mlp` are pinned to `emb_luar_crud` (they take the cue column as their
+# own second input, so a set that already holds it would feed them the same bits
+# twice), which makes 3x5 minus 4 = 11 cells per dataset rather than 15. It is
+# not the one-row algorithm comparison this file used to run, and it is why only
+# `ghostbuster_gpt56luna` is uncommented under `suites` below: the cue column is
+# the constraint, and the block there says exactly how to get the other three
+# datasets back.
+#
+# THE TWO QUESTIONS ON THE ALGORITHM AXIS. `logistic` / `svm` / `simple_mlp` are
+# the same model on three different inputs — the feature question. The two
+# fusion entries ask a second one: given the SAME two inputs, does it matter
+# WHERE the cue vector enters the network? Their control is not the embedding
+# row, it is `luar_crud+cuevec__simple_mlp` — the same pair concatenated at the
+# input instead of joined after the embedding is compressed.
+#
+# WHAT IS SHARED AND WHAT IS NOT. `feature_sets`, `algorithms`, the baselines,
+# `model` and `seed` are declared once here and used unchanged for every dataset:
+# that is what makes the transfer numbers a variant produces comparable across
+# datasets at all. What differs per dataset is only its parquet and the corpora
+# cut out of it, which is exactly what a suite entry holds.
+#
+# WHAT THIS RUN IS NOT. No model is ever trained on `essay` and tested on
+# `sociology`. Each dataset keeps its own in-domain/transfer split, computed
+# exactly as its single-dataset config computes it, and what crosses datasets is
+# only the pair of summary numbers each matrix produces. A pooled 12x12 matrix
+# over all twelve corpora would invent cells nobody trained for.
+#
+# THE TWO FACTORS, once the other three suites are back. Those four datasets do
+# not vary along one axis. ghostbuster_gpt35t / gpt54mini / gpt56luna are the
+# SAME three domains (essay, reuter, wp) built from the same human sources by
+# three different generators, so they are a controlled generator sweep.
+# science_v3 is a different corpus AND different domains, so it is a separate
+# arm. A variant that degrades monotonically across the three Ghostbuster columns
+# is telling you something about generators; one that only falls on science_v3 is
+# telling you something about the corpus.
+#
+# COST. 1 dataset x 3 sources x 3 seeds x 11 variants = 99 fits, plus 8 baseline
+# rows per source x seed — the 5 Binoculars versions under `binoculars_baseline`
+# and the 3 LLM judges under `llm_judge_baseline` at the bottom. The baseline
+# rows are cheap: no model is fitted, each is a fixed cutoff on a column already
+# in the parquet, and none of them touches `feature_sets`, so widening either
+# axis did not multiply them. Uncommenting the other three suites takes the
+# training cost to 396 fits.
+#
+# Run:
+#   uv run python epai/ai_detection/train/run_clf_cross_domain.py \
+#       --cfg cfg/ai_detection/train/clf_cd/clf_cd_suites_all.yaml
+#   uv run python epai/ai_detection/train/run_clf_cross_domain.py \
+#       --cfg cfg/ai_detection/train/clf_cd/clf_cd_suites_all.yaml --dry-run
+#
+# The cue column has to exist in every parquet named below before this will
+# start; build it from the rationales add_llm_judge_reasons.py already wrote:
+#   uv run python epai/ai_detection/score/add_cue_features.py \
+#       data/parquet/ghostbuster_gpt56luna.parquet
+#
+# Output — note the directory names: with BOTH axes varying, a variant is named
+# `<feature set>__<algorithm>` rather than by the algorithm alone, so these paths
+# are not the ones the previous one-feature-set runs wrote.
+#   results/clf_cd/<experiment_id>/all_datasets/
+#       ghostbuster_gpt56luna/       ← exactly what a single-dataset run writes
+#           emb_luar_crud__logistic/            ← the 11 trained variants
+#           emb_luar_crud__svm/
+#           emb_luar_crud__simple_mlp/
+#           emb_luar_crud__fusion_cuevec/       ← ◆ the two pinned fusion cells;
+#           emb_luar_crud__gated_cuevec/          no cuevec__* twins by design
+#           cuevec__logistic/                   ← the 11 readable coefficients
+#           cuevec__svm/  cuevec__simple_mlp/
+#           luar_crud+cuevec__logistic/         ← the early-fusion control row
+#           luar_crud+cuevec__svm/  luar_crud+cuevec__simple_mlp/
+#           binoculars/                         ← ★ falcon-7b (the paper's pair)
+#           binoculars__qwen25_7b/              ← ★ one directory per version
+#           binoculars__falcon3_7b/               listed in `binoculars_baseline`
+#           binoculars__mistral_v03/
+#           binoculars__llama31_8b/
+#           llm_judge__gpt56luna_v3/            ← ★ one directory per judge
+#           llm_judge__qwen3_14b_v3/              listed in `llm_judge_baseline`
+#           llm_judge__sonnet5_v3/
+#           variant_comparison.json, variant_comparison_*.png
+#       suite_comparison.json        ← the cross-dataset level; one column while
+#       suite_comparison_auroc.png     only one suite is active
+#       suite_comparison_tpr_at_srcfpr_0.01.png
+#       other_figures/               ← every other metric, plus the all-metric grid
+
+# `alg_id` names the output directory and is deliberately unchanged: it is the
+# suite-shaped run, whichever axes it happens to vary, and renaming it would
+# orphan every path already written under it. The label is what moved.
+alg_id: "science_v3f"
+alg_label: "science_v3f — domain transfer, 3 generators"
+
+seed: 42
+
+# ---------------------------------------------------------------------------
+# THE TRAINING DESIGN — how many corpora each model sees
+# ---------------------------------------------------------------------------
+
+# `cross` is what this file has always run and the default when the key is
+# absent: each model trains on ONE corpus and is evaluated on all of them, so
+# the diagonal of every matrix is in-domain and everything off it is transfer.
+# It is deliberately the harshest reading — a single-source model has every
+# incentive to memorise corpus artifacts — and it is the design that produced
+# the ~98% in-domain / at-or-below-chance transfer this whole folder exists to
+# explain.
+#
+# The other two designs run the SAME feature sets, the SAME algorithms, the SAME
+# seeds and the SAME splits on the SAME corpora, so their numbers sit beside
+# these ones directly:
+#
+#   train on two domains, test on the third   (leave-one-domain-out)
+#     mode: lodo   — cfg/ai_detection/train/clf_lodo/clf_lodo_suites_all.yaml
+#     Same runner, same output layout, same cost. The in-domain mask is the
+#     inverse of this one's: the DIAGONAL becomes the transfer cell.
+#
+#   train and test on one domain, no matrix   (in-domain)
+#     cfg/ai_detection/train/clf_id/clf_id_domains_all.yaml, run with
+#     epai/ai_detection/train/run_clf_in_domain.py — a separate script because
+#     with no transfer cells there is no transfer mean, no gap and no ranking.
+#     That config also adds the whole-parquet row.
+#
+# Changing this one key changes the meaning of every number the run produces, so
+# it is stated rather than defaulted.
+mode: cross
+
+data:
+  # Shared by every dataset: they describe the question, not the corpus. A suite
+  # that set them would be running a different experiment rather than the same
+  # one on different data, and its matrix would not belong in this comparison.
+  human_label: "human"
+  group_col: "id"
+
+  # Each entry is one DATASET: a parquet, and the corpora its own transfer matrix
+  # runs between. `parquet_path`, `where` and `drop_classes` may be set here, on
+  # a suite, or on a dataset — innermost wins, the same defaulting the datasets
+  # already had, one level out.
+  #
+  #   name      short key; names the output directory and the figure columns
+  #   label     optional, shown on the figures (defaults to `name`)
+  #   datasets  the corpora — unchanged in meaning from a single-dataset config
+  #
+  # ONLY ONE SUITE IS ACTIVE, AND THE FEATURE AXIS IS WHY.
+  # -------------------------------------------------------
+  # The `cuevec` feature sets below need a cue vector on EVERY row they train
+  # on, and a row nobody asked the judge about has none. add_llm_judge_reasons.py
+  # explains a SAMPLE by default (three bands, 100 rows each), so of the four
+  # parquets only ghostbuster_gpt56luna is explained end to end:
+  #
+  #   ghostbuster_gpt56luna    5994 of 6000 rows explained   ← runs
+  #   ghostbuster_gpt35t        355 of 5994                  ← commented out
+  #   ghostbuster_gpt54mini     400 of 5994                  ← commented out
+  #   science_v3                400 of 6000                  ← commented out
+  #
+  # Those ~6% are worse than they look. The loader's missing-value drop is
+  # group-aware — a row with no cue vector takes its whole `id` group with it —
+  # and the bands were sampled per row, not per group, so both halves of nearly
+  # every pair go. What is left is under min_rows and the preflight ABORTS the
+  # whole run rather than train a `cuevec` cell on the remnant, which would take
+  # the `emb_luar_crud` cells down with it for no reason.
+  #
+  # TO GET THE FOUR-WAY COMPARISON BACK: explain the other three files, then
+  # uncomment their suites here. Nothing else in this config changes.
+  #
+  #   uv run python epai/ai_detection/score/add_llm_judge_reasons.py \
+  #       data/parquet/ghostbuster_gpt35t.parquet --bands all
+  #   uv run python epai/ai_detection/score/add_cue_features.py \
+  #       data/parquet/ghostbuster_gpt35t.parquet
+  #
+  # TO GET IT BACK WITHOUT THAT: delete the two `cuevec` entries from
+  # `feature_sets` and uncomment all four suites — that is the config exactly as
+  # it stood before, an algorithm comparison on emb_luar_crud alone.
+  #
+  # Check coverage before uncommenting anything; --dry-run reports it per file:
+  #   uv run python epai/ai_detection/score/add_cue_features.py \
+  #       data/parquet/<file>.parquet --dry-run
+  # THE science_v3f MULTI-GENERATOR FILE. One suite, the domain transfer matrix
+  # over human-vs-any-of-three-machine (`where: {domain: X}` keeps all four
+  # classes). The transfer axis is the DOMAIN — "left out always means a topic,
+  # never a model", as in the ghostbuster suites — and the generator diversity
+  # is inside every cell, which is the point: a detector that collapses in
+  # transfer here cannot blame a single generator's idiosyncrasy.
+  #
+  # The three commented per-generator suites below give the same matrix once per
+  # generator (does the transfer collapse depend on which model wrote the text).
+  # They 3x the cost; uncomment when the pooled run has been read.
+  suites:
+    - name: "science_v3f"
+      label: "science_v3f (3 generators)"
+      parquet_path: "data/parquet/science_v3f_multi_0811A.parquet"
+      datasets:
+        - {name: "computer_science", label: "comp. sci.", where: {domain: "computer_science"}}
+        - {name: "mathematics",      label: "maths",      where: {domain: "mathematics"}}
+        - {name: "sociology",        label: "sociology",  where: {domain: "sociology"}}
+
+    # - name: "science_v3f_luna"
+    #   label: "science_v3f (gpt-5.6-luna)"
+    #   parquet_path: "data/parquet/science_v3f_multi_0811A.parquet"
+    #   datasets:
+    #     - {name: "cs_luna",   where: {domain: "computer_science", generated_by: ["human", "gpt56luna:0811A"]}}
+    #     - {name: "math_luna", where: {domain: "mathematics",      generated_by: ["human", "gpt56luna:0811A"]}}
+    #     - {name: "soc_luna",  where: {domain: "sociology",        generated_by: ["human", "gpt56luna:0811A"]}}
+    #
+    # - name: "science_v3f_gptoss"    ... generated_by: ["human", "gptoss120b:0811A"]
+    # - name: "science_v3f_llama33"   ... generated_by: ["human", "llama3370b:0811A"]
+
+  # -------------------------------------------------------------------------
+  # Eval-only corpora — the extra evaluation, never part of the results above
+  # -------------------------------------------------------------------------
+  #
+  # Corpora that are EVALUATED on but never trained on. Nothing here takes a row
+  # from a split, contributes a cell to a matrix, a row to a ranking or a bar to
+  # any figure produced above. Every threshold applied here was fitted on the
+  # training corpora and carried over unchanged. Turn the block off and this
+  # config produces byte-identical output to the one that predates it.
+  #
+  # Output is entirely its own:
+  #   holdout_<name>.json            the table
+  #   holdout_<name>_<metric>.png    one figure per reportable metric
+  # written beside the main comparison, never into it. This is supplementary
+  # material — an extra page in the paper, not a column of the main result.
+  #
+  # WHY IT EXISTS. The Denario papers are LLM-written research papers, end to
+  # end: 82 rows, all machine, no human counterpart in the file. As a `datasets`
+  # entry it is an error and rightly so — there is nothing to train on, nothing
+  # to split and no ROC to read. The question it CAN answer needs none of that:
+  #
+  #     "a detector calibrated at 1% FPR on essays — how many of these does it
+  #      catch?"
+  #
+  # WHAT GETS REPORTED, AND WHAT CANNOT BE.
+  #   tpr_at_srcfpr_0.01 / _0.05   the headline, TRAINED ROWS ONLY. Threshold
+  #                                fitted to that FPR on the SOURCE's
+  #                                calibration slice and applied here unchanged
+  #                                — the deployable reading. A ❄ row does not
+  #                                report it: placing that threshold needs human
+  #                                rows from a training corpus, and a zero-shot
+  #                                row does not touch them.
+  #   accuracy                     at the source's Youden's J for a trained row,
+  #                                at the DECLARED cutoff below for a ❄ one. On
+  #                                an all-machine corpus this IS recall, and a
+  #                                detector that answers "machine" to everything
+  #                                scores 100%. The figures draw that ceiling.
+  #   declared_accuracy            baselines only: the same share at the
+  #                                DECLARED cutoff, which saw no data. Equal to
+  #                                `accuracy` above unless the run turned
+  #                                `baseline_fit_threshold` on.
+  #
+  #   NOT reported, because there is no human row to define them on: AUROC,
+  #   macro F1, TPR at this corpus's own FPR, and the realized FPR. They are
+  #   OMITTED, not zeroed. The last one is the real limit: nothing says what a
+  #   detection cost here, so these rates cannot be ranked against each other on
+  #   their own — read a row beside the same detector's transfer cells.
+  #
+  # THE CONFOUND, stated on every figure: these documents are also a different
+  # GENRE from every training corpus. A low rate is not separable into "missed
+  # this generator" and "reads scientific prose as human".
+  #
+  # ERROR BARS are the Wilson interval on n, not the spread over seeds — the
+  # seeds refit the source's threshold, they do not resample these 82 rows.
+  #
+  # BEFORE ENABLING IT. A holdout must carry every column every variant and
+  # every enabled baseline in this config reads — the preflight aborts naming
+  # the ones it lacks, which is correct: a Denario figure covering three
+  # detectors out of twelve with nothing saying which nine are missing is worse
+  # than a run that refuses to start. The raw denario_papers.parquet carries
+  # none of them; it has to go through the detection-schema bridge and then the
+  # same scoring chain as any other corpus:
+  #
+  #   uv run python epai/ai_detection/prepare/prepare_denario_detect.py
+  #   uv run python epai/ai_detection/prepare/standardize_text.py \
+  #       data/parquet/denario_detect.parquet
+  #   uv run python epai/ai_detection/embed/add_embeddings.py \
+  #       data/parquet/denario_detect.parquet --gpu 0
+  #   uv run python epai/ai_detection/score/run_binox_pairs.py \
+  #       data/parquet/denario_detect.parquet --gpu 0
+  #   uv run python epai/ai_detection/score/run_fastdetect_pairs.py \
+  #       data/parquet/denario_detect.parquet --gpu 0
+  #   uv run python epai/ai_detection/score/add_detector_scores.py \
+  #       data/parquet/denario_detect.parquet --gpu 0
+  #   uv run python epai/ai_detection/score/add_llm_judge_scores.py \
+  #       data/parquet/denario_detect.parquet --model <judge>
+  #   uv run python epai/ai_detection/score/add_llm_judge_reasons.py \
+  #       data/parquet/denario_detect.parquet --model gpt56luna
+  #   uv run python epai/ai_detection/score/add_cue_features.py \
+  #       data/parquet/denario_detect.parquet
+  #
+  # A LENGTH CAVEAT worth checking before believing a number: Denario abstracts
+  # are not the ~200 words the ghostbuster corpora were cut to. Compare them
+  # with epai/ai_detection/analyse/analyse_text_lengths.py and truncate if they
+  # do not match, or length becomes the confound instead of genre.
+  #
+  # Ignored by run_sweep_cross_domain.py, which fits throwaway candidates.
+  # denario_hc has a human class (80 machine + 80 matched human), so the holdout
+  # gives a real ROC / AUROC / FPR. It carries all four judge rungs and every
+  # suite column the baselines below read. The all-machine `denario`
+  # (denario_detect.parquet) is not listed — it lacks the two open-weight judge
+  # columns and fastdetect_crit_llama31_8b, so the preflight would abort.
+  eval_only:
+    enabled: true
+    datasets:
+      - name: "denario_hc"
+        label: "Denario (AI papers + matched human)"
+        parquet_path: "data/parquet/denario_hc.parquet"
+
+# ---------------------------------------------------------------------------
+# The feature axis — three entries: embedding, judge cues, and both
+# ---------------------------------------------------------------------------
+
+# This axis used to be held at one entry so that every difference in the ranking
+# was the algorithm's. It now carries three, which makes the run genuinely
+# two-dimensional (results land under `<feature set>__<algorithm>/`) and asks a
+# question the one-entry version could not:
+#
+#   emb_luar_crud   the representation everything so far was measured on. ~98%
+#                   in-domain, at or below chance in transfer — the finding this
+#                   whole comparison exists to explain.
+#
+#   cuevec          eleven bits per document: which of the judge's closed-
+#                   vocabulary cues it cited for that row, built by
+#                   epai/ai_detection/score/add_cue_features.py out of the
+#                   `llm_judge_cues_*` lists add_llm_judge_reasons.py wrote.
+#                   No text, no embedding, no score — the judge's EVIDENCE with
+#                   its verdict removed.
+#
+#   both            stacked, in that order.
+#
+# WHAT THE THREE ROWS ARE FOR. Eleven bits will not match a 512-dim embedding
+# in-domain; nothing with eleven bits could, and the in-domain column is not the
+# reason to run this. TRANSFER is. A cue vector cannot encode a punctuation
+# habit or a domain's house style, so if `cuevec` transfers flat where
+# `emb_luar_crud` collapses, the cues are carrying something the embedding is
+# not — and a flat 70% is worth more here than a 98% that inverts off-domain.
+# The `both` row then says whether the two are complementary or whether the
+# embedding simply swamps eleven bits.
+#
+# READ THE COEFFICIENTS, NOT ONLY THE MATRIX. `cuevec` under `logistic` is the
+# one variant in this config whose fitted model can be read back as a sentence:
+# eleven weights on named cues, in the fixed order add_cue_features.py declares
+# (5 human-side, then 6 machine-side). The run pickles every fit, so they are
+# already on disk —
+#   cuevec__logistic/models/<seed>/<source>.joblib
+# — and the estimator is a StandardScaler + LogisticRegression pipeline, so the
+# weights are in standardised units: a rare cue is scaled up, and the numbers
+# compare to each other but not to a raw log-odds per citation.
+#
+# THE COLUMN NAME CARRIES THE JUDGE. `llm_judge_cuevec_gpt56luna_v3` is
+# gpt-5.6-luna's cues under prompt v3. Cues from a second judge are a second
+# column and a second entry here, never a rename — two judges' evidence is no
+# more on one scale than two judges' scores are.
+feature_sets:
+  - emb_luar_crud
+
+  - columns: [llm_judge_cuevec_gpt56luna_v3]
+    id: "cuevec"
+    label: "judge cues (11-dim)"
+
+  # - columns: [emb_luar_crud, llm_judge_cuevec_gpt56luna_v3]
+  #   id: "luar_crud+cuevec"
+  #   label: "luar_crud + judge cues"
+
+extra_features: []
+extra_binary_text: []
+
+# ---------------------------------------------------------------------------
+# The algorithm axis — identical across every dataset AND every feature set
+# ---------------------------------------------------------------------------
+
+# ONE CAVEAT NOW THAT THE FEATURE AXIS VARIES. The first three are applied
+# unchanged to an 11-dim input as well as a 512-dim one, which is what keeps
+# those nine cells comparable — but `simple_mlp` was tuned on the embedding, and
+# a [256] hidden layer with mixup over eleven binary dimensions is far more
+# capacity than the input has. Expect its `cuevec` row to be the noisiest of the
+# three and read `logistic` as the honest reading of what the cues alone can do.
+#
+# The last two are NOT applied to every set: they carry `feature_sets` and run on
+# the embedding only. See the block above them for why, and for what they are to
+# be read against.
+algorithms:
+  - name: logistic
+    label: "Logistic Regression"
+    params: {C: 1.0, max_iter: 1000}
+
+  - name: svm
+    label: "SVM (RBF)"
+    params: {C: 1.0, kernel: "rbf", gamma: "scale"}
+
+  # The untuned MLP, kept as the control: it is the only honest reference for
+  # what the sweep below actually bought.
+  # Best trial of the luar_mlp_reg sweep. The sweep searched on the essay/reuter
+  # cells of ONE dataset, so three of the four columns this config produces are
+  # the first honest look it gets — expect them to be worse than the dev cells,
+  # and treat what survives across all four as the result.
+  - name: simple_mlp
+    id: simple_mlp
+    label: "Simple MLP"
+    params:
+      hidden_dims: [256]
+      normalize: "standard"
+      norm_layer: "layernorm"
+      val_frac: 0.0
+      val_metric: "loss"
+      dropout: 0.21662856624267898
+      input_dropout: 0.061218972697383835
+      weight_decay: 0.0054492461553935344
+      label_smoothing: 0.05
+      mixup_alpha: 0.4
+      lr: 0.00010208333947051273
+      batch_size: 128
+      epochs: 200
+      patience: 15
+
+  # - name: binox_mlp
+  #   id: binox_mlp_8
+  #   label: "MLP + Binoculars (upscale 8)"
+  #   binoculars: "binoculars_score"
+  #   params:
+  #     pre_dims: [256, 64]
+  #     post_dims: [16]
+  #     score_hidden: 8
+  #     dropout: 0.1
+  #     epochs: 100
+  #     batch_size: 64
+  #     lr: 0.001
+  #     weight_decay: 0.0001
+  #     patience: 10
+
+  # THE TWO FUSION ENTRIES ARE PINNED TO `emb_luar_crud`, AND MUST BE.
+  # Both name the cue column as their SECOND input (`aux`), so on the `cuevec`
+  # or `luar_crud+cuevec` sets the grid would hand them the same eleven bits a
+  # second time as X — a cell that trains, lands in the ranking, and carries a ◆
+  # claiming it saw an extra input it did not. `feature_sets` drops those cells
+  # instead of producing them; the figures show them as holes, which is honest.
+  #
+  # THE CONTROL FOR BOTH IS `luar_crud+cuevec` UNDER `simple_mlp`: the same two
+  # inputs, concatenated at the front instead of joined late. Read
+  # emb_luar_crud__fusion_cuevec against that cell, not against
+  # emb_luar_crud__simple_mlp — the embedding-only row answers a different
+  # question.
+  #
+  # ONE CONFOUND, STATED SO IT IS NOT MISTAKEN FOR ARCHITECTURE. simple_mlp above
+  # runs with `val_frac: 0.0` (it early-stops on the TRAINING loss and trains on
+  # all of its rows); fusion_mlp and gated_mlp default to a real grouped 15%
+  # validation split early-stopped on AUROC. A gap between them is architecture
+  # AND stopping rule. To isolate the architecture, either add
+  # `val_frac: 0.15, val_metric: auroc` to a second simple_mlp entry, or set
+  # `val_frac: 0.0, val_metric: loss` on these two.
+  - name: fusion_mlp
+    id: fusion_cuevec
+    label: "LUAR ⊕ judge cues (late fusion)"
+    feature_sets: [emb_luar_crud]
+    aux: llm_judge_cuevec_gpt56luna_v3
+    params: {pre_dims: [256, 16], post_dims: [32], aux_dims: [32]}
+
+  # The gate is the reason to run this one: after the fit, `alg.gate_` says how
+  # much of the embedding branch the model chose to use, and
+  # `alg.branch_scores(X, Z)` splits any corpus's score into the cue term and the
+  # gated embedding term. Both are on the pickled model —
+  #   emb_luar_crud__gated_cuevec/models/<seed>/<source>.joblib
+  - name: gated_mlp
+    id: gated_cuevec
+    label: "judge cues + gated LUAR"
+    feature_sets: [emb_luar_crud]
+    aux: llm_judge_cuevec_gpt56luna_v3
+    params: {emb_dims: [256, 64], aux_dims: [32], gate: sigmoid}
+
+
+model:
+  n_runs: 3           # seeds; each dataset's matrix is the mean over them
+  test_size: 0.30
+  # Share of the training pool carved off for threshold calibration
+  # (Youden's J, TPR@FPR transport) -- never the fit rows, never the eval
+  # rows. See cd_core.carve_calibration.
+  cal_frac: 0.15
+
+# ---------------------------------------------------------------------------
+# Optional zero-shot score baselines
+# ---------------------------------------------------------------------------
+
+# WHERE A BASELINE'S OPERATING POINT COMES FROM. Off, and it should stay off:
+# every ❄ row below is then read at the cutoff its entry declares, which is the
+# only reading that is actually zero-shot and the only one that can show a
+# published operating point landing in the wrong place on a new corpus.
+#
+# Set it true and each baseline instead gets a Youden's J threshold fit on the
+# same calibration slice, from the same seed, as the trained variants, plus the
+# transported tpr_at_srcfpr_* / fpr_at_srcfpr_* metrics that only exist once a
+# threshold has been placed on human rows. That buys comparability — accuracy
+# and macro F1 stop depending on whatever number a config happened to carry —
+# at the price of the failure mode the ❄ rows exist to expose, and it makes the
+# ❄ mark on every figure a lie. Use it to answer "how good is this SCORE",
+# never "how good is this DETECTOR". See cd_core.baseline_fits_threshold.
+baseline_fit_threshold: false
+
+# A baseline runs on every dataset or on none: its column must exist in all four
+# parquets, or the preflight refuses to start. That is deliberate — a ★ row whose
+# mean silently covered two of four datasets would sit in the same ranking as
+# rows that covered all four.
+#
+# These are the rows worth watching here. Each cutoff is applied unchanged to
+# every source and every target, so a row's four dataset columns are a direct
+# read of how that detector holds up as the generator changes — and on this data
+# it does not hold up uniformly.
+#
+# WHICH BINOCULARS VERSIONS ARE PLOTTED — this list, and nothing else.
+# ------------------------------------------------------------------
+# `columns` is the switch. Every entry becomes one more ★ row in the ranking and
+# one more row on every comparison figure, with its own source x target matrix
+# under all_datasets/<dataset>/binoculars__<pair>/. Comment an entry out to drop
+# it from the run; add one to bring a new pair in. The rows are the SAME detector
+# read off different model pairs, so they keep the family's colour and hatch and
+# are told apart by the label below.
+#
+# `binoculars_score` is Falcon-7B (the pair the paper shipped and the column
+# score_parquets.py wrote first); every other pair writes its own
+# binoculars_score_<pair> column beside it — see
+# epai/ai_detection/score/run_binox_pairs.py. All five columns below are present
+# and filled in all four parquets of this suite (6 of 6000 rows are Null in
+# ghostbuster_gpt56luna, the same 6 rows in every column, so all five rows still
+# stand on identical evidence).
+#
+# A threshold belongs to a COLUMN, not to the family: the five pairs put the
+# score on five different scales, so the paper's constant says nothing about a
+# pair it was never calibrated on. Only `binoculars_score` carries a real cutoff
+# below (0.9015310749276843, the paper's accuracy mode; the low-FPR mode is
+# 0.8536432310785527). The other four carry a PLACEHOLDER 0.95 — a declared
+# operating point so the run is reproducible, not a calibrated one.
+#
+# THE CUTOFF ABOVE IS THE WHOLE RULE. Accuracy, macro F1 and the confusion
+# matrix all come from it, so a ❄ row is what an off-the-shelf deployment of
+# that detector would get on these rows and nothing on it was fitted to
+# anything. The `*_at_srcfpr_*` metrics are NOT reported for these rows: placing
+# a threshold at a nominal FPR needs human rows from the training pool to place
+# it on, and a row that did that is not zero-shot however it is labelled. AUROC
+# and tpr_at_fpr_* survive — both are read off the evaluation cell's own ROC,
+# which no training corpus ever touches.
+#
+# WHICH MEANS A PLACEHOLDER CUTOFF IS NOW VISIBLE IN THE BARS, where it used to
+# be washed out by a refit. That is the intended behaviour and not a reason to
+# switch the refit back on: a detector whose published operating point lands in
+# the wrong place on a new corpus IS broken there. Fix it by calibrating the
+# cutoff or by dropping the column — see `baseline_fit_threshold` at the top of
+# this file for the escape hatch and for the argument against using it.
+binoculars_baseline:
+  enabled: true
+  columns:
+    - {column: "binoculars_score", threshold: 0.9015, label: "binoculars falcon-7b"}
+    - {column: "binoculars_score_qwen25_7b",   threshold: 0.9015, label: "binoculars qwen2.5-7b"}
+    - {column: "binoculars_score_falcon3_7b",  threshold: 0.9015, label: "binoculars falcon3-7b"}
+    - {column: "binoculars_score_mistral_v03", threshold: 0.9015, label: "binoculars mistral-v0.3"}
+    - {column: "binoculars_score_llama31_8b",  threshold: 0.9015, label: "binoculars llama3.1-8b"}
+
+# The judge rows work exactly like the Binoculars rows above: `columns` is the
+# switch, each entry becomes one ★ row in the ranking and one source x target
+# matrix under all_datasets/<dataset>/llm_judge__<judge>/. They are the SAME
+# detector read off different judges, so they keep the family's colour and hatch
+# and are told apart by the label.
+#
+# A column is named after the judge AND its system prompt (`<model>_<prompt>`),
+# because scores from two models, or from two prompt versions, are not on the
+# same scale -- so a new judge is a new entry here, never a rename of an existing
+# one. Both columns below are P(human) from the same v3 prompt in `parsed` mode
+# (epai/ai_detection/score/add_llm_judge_scores.py), which is what makes them
+# directly comparable.
+#
+# THE CUTOFF IS REAL HERE, unlike several of the Binoculars and Fast-DetectGPT
+# rows above: 0.5 is the judge's own neutral point, not a stand-in, and it means
+# the same thing to every judge. So these rows are the cleanest read on the
+# figure of what a declared operating point actually delivers.
+#
+# WHAT TO WATCH. gpt56luna is the API control. qwen3-14b is the local judge
+# (`--model qwen3-14b`, bf16 on the A100) and it sits on the capability axis the
+# Binoculars pairs already showed moves these scores: expect it to hold up on
+# gpt35t and to drift toward chance on gpt56luna and science_v3. That is a
+# result, not a bug — it is only readable because the API column stayed in the
+# file beside it.
+#
+# Enabling a column before every dataset in `suites` carries it aborts the
+# preflight naming the ones that lack it; score those with
+# add_llm_judge_scores.py first.
+llm_judge_baseline:
+  enabled: true
+  threshold: 0.5
+  columns:
+    # The four judge rungs, in capability order. All four are in science_v3f_multi
+    # and in denario_hc; none is Sonnet 5. The two open-weight rungs are a
+    # different vendor from the gpt-5.6-luna generator and are themselves
+    # generators in this file — the own-family control.
+    - {column: "llm_judge_score_qwen3_14b_v3",  label: "llm judge qwen3-14b"}
+    - {column: "llm_judge_score_llama33_70b_v3", label: "llm judge llama3.3-70b"}
+    - {column: "llm_judge_score_gptoss_120b_v3", label: "llm judge gpt-oss-120b"}
+    - {column: "llm_judge_score_gpt56luna_v3",   label: "llm judge gpt-5.6-luna"}
+
+# THE TWO FAMILIES BELOW READ THE OPPOSITE WAY TO THE TWO ABOVE.
+# ---------------------------------------------------------------------------
+# Binoculars and the judge both score LOW for machine. Fast-DetectGPT and the
+# pretrained detectors score HIGH for machine. That is not a config setting —
+# the direction belongs to the detector and lives in
+# `cd_core.BASELINE_KINDS[...].machine_is_high`, so a `columns` entry here
+# cannot get it wrong and there is deliberately no knob for it. It is called out
+# because every threshold below reads `score >= thr ⇒ machine`, the reverse of
+# the two blocks above, and a number copied between blocks would be silently
+# backwards.
+#
+# ENABLED, AND ONLY VALID WHILE `ghostbuster_gpt56luna` IS THE ONLY SUITE.
+# ---------------------------------------------------------------------------
+# That corpus carries these columns; the three commented-out suites do not yet.
+# Enabling a family before every ACTIVE dataset carries its columns aborts the
+# preflight naming the ones that lack it — correct behaviour, not something to
+# work around. So if you uncomment another suite, score it first:
+#     uv run python epai/ai_detection/score/run_fastdetect_pairs.py <parquet> --gpu 0
+#     uv run python epai/ai_detection/score/add_detector_scores.py <parquet> --gpu 0
+# or set `enabled: false` on these two blocks until you have.
+
+# Fast-DetectGPT — the conditional probability curvature, over the SAME four
+# model pairs as the Binoculars rows above. That pairing is the point: same
+# corpus, same two models, same 512-token cap, one statistic swapped, so a
+# difference between a `binoculars__<pair>` row and its `fastdetect__<pair>`
+# twin is a fact about the statistic rather than about the models.
+#
+# Only the `_crit_` columns appear here, and only they ever should. The
+# `fastdetect_prob_*` columns are Null for every pair upstream did not calibrate
+# (three of the four below), and where they do exist the mapping is non-monotone
+# in the left tail — it returns P(machine)→1 for emphatically human text, on 28%
+# of rows in the smoke test. `fastdetect_ntok_*` is a token count, not a score.
+#
+# THRESHOLDS. `fastdetect_crit_falcon_7b` gets 1.43, the midpoint of the two
+# class means upstream fitted for that pair (mu0 = -0.0707 human, mu1 = 2.9306
+# machine). The other three are uncalibrated and carry a PLACEHOLDER 1.2 — the
+# midpoints of the four pairs upstream *did* calibrate cluster between 0.83 and
+# 1.43, so 1.2 is in the right region of the scale without pretending to be
+# fitted for these pairs. As with every other family, that declared cutoff IS
+# what drives accuracy, macro F1 and the confusion matrix — so these three rows
+# measure the placeholder as much as the detector, and are worth reading only
+# beside `fastdetect_crit_falcon_7b`, which carries a real one.
+fastdetect_baseline:
+  enabled: true
+  columns:
+    - {column: "fastdetect_crit_falcon_7b",   threshold: 1.43, label: "fast-detectgpt falcon-7b"}
+    - {column: "fastdetect_crit_qwen25_7b",   threshold: 1.2,  label: "fast-detectgpt qwen2.5-7b"}
+    - {column: "fastdetect_crit_falcon3_7b",  threshold: 1.2,  label: "fast-detectgpt falcon3-7b"}
+    - {column: "fastdetect_crit_mistral_v03", threshold: 1.2,  label: "fast-detectgpt mistral-v0.3"}
+    - {column: "fastdetect_crit_llama31_8b",  threshold: 1.2,  label: "fast-detectgpt llama3.1-8b"}
+
+# Pretrained supervised detectors — the only baseline family here that is neither
+# zero-shot nor trained on this corpus. RADAR and Open Pangram were fitted by
+# other people on other data and have never seen these rows, which is what makes
+# them the external check on whether a deployed detector transfers here.
+#
+# Unlike the other three families these two are NOT the same detector read off
+# different machinery: RADAR emits P(AI) from a binary head, EditLens an expected
+# edit-bucket in [0, 1] from a 4-bucket ordinal head. They share a family because
+# they share a direction and a provenance, not because the numbers are
+# interchangeable — so read the two rows as two detectors, not as one detector
+# under two settings.
+#
+# 0.5 is a real neutral point for both, the same way it is for the judge, so the
+# family carries one threshold rather than one per column.
+#
+# `detector_score_pangram_roberta` is commented out: the Hub repo is gated and
+# access is pending, so no parquet carries the column yet. Uncomment once
+# `add_detector_scores.py --detectors pangram_roberta` has run on every dataset.
+detector_baseline:
+  enabled: true
+  threshold: 0.5
+  columns:
+    - {column: "detector_score_radar", label: "radar"}
+    # - {column: "detector_score_pangram_roberta", label: "open pangram"}
+
+# ---------------------------------------------------------------------------
+# Preflight guards
+# ---------------------------------------------------------------------------
+
+min_rows: 50
+min_class_share: 0.10
