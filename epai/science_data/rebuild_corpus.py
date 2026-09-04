@@ -55,14 +55,19 @@ never touched.
     # interactive, stops before the GPU stage
     .venv/bin/python epai/science_data/rebuild_corpus.py
 
-    # later, on the GPU box
+    # everything, on a GPU box (answer the ~10 duplicate-group prompts first)
+    .venv/bin/python epai/science_data/rebuild_corpus.py --gpu 0
+
+    # everything, no prompts: --keep fixes the one group whose default is wrong
+    # (its abstract belongs to the other paper); every other group's default is
+    # correct and the two EBSCO rows are dropped by the boilerplate filter anyway
+    .venv/bin/python epai/science_data/rebuild_corpus.py --gpu 0 --yes \
+        --keep W2141899406
+
+    # resume on the GPU box after an interactive run stopped at the score step
     .venv/bin/python epai/science_data/rebuild_corpus.py --from score --gpu 0
 
     .venv/bin/python epai/science_data/rebuild_corpus.py --dry-run
-
-    # Full interactive
-    .venv/bin/python epai/science_data/rebuild_corpus.py --gpu 0
-    
 """
 
 from __future__ import annotations
@@ -183,39 +188,60 @@ def _print_group(n: int, total: int, group: list[dict]) -> bool:
     return suspect
 
 
-def resolve_groups(groups: list[list[dict]], assume_yes: bool) -> dict:
-    """Interactive per-group resolution. Returns {'drop': [paper_id, ...]}."""
-    drop: list[str] = []
-    n_suspect = 0
-    for n, group in enumerate(groups, 1):
-        suspect = _print_group(n, len(groups), group)
-        n_suspect += suspect
+def resolve_groups(groups: list[list[dict]], *, assume_yes: bool,
+                   keep_ids: set[str], drop_group_ids: set[str]) -> dict:
+    """Per-group resolution. Returns ``{'drop': [paper_id, ...]}``.
 
-        if assume_yes:
-            choice = ""
-        else:
-            choice = input(
-                f"  {BOLD}Enter{RESET}=keep [1] · 1/2/…=keep that one · "
-                f"a=drop whole group · s=skip : "
-            ).strip().lower()
+    ``keep_ids`` / ``drop_group_ids`` are ``--keep`` / ``--drop-group`` from the
+    command line: a group is matched by *any* of its members' paper ids, and a
+    matched group is resolved with no prompt. Everything else is asked
+    interactively unless ``assume_yes``; answering ``g`` at any prompt accepts
+    the ``[1]`` default for that group and all the rest.
+    """
+    drop: list[str] = []
+    auto = assume_yes
+    auto_suspect = 0
+    for n, group in enumerate(groups, 1):
+        pids = [_paper_id(m["id"]) for m in group]
+        suspect = _print_group(n, len(groups), group)
+
+        if drop_group_ids & set(pids):
+            drop += pids
+            print(f"  {RED}--drop-group: dropping all {len(group)}{RESET}")
+            continue
+        if keep_ids & set(pids):
+            keep = next(p for p in pids if p in keep_ids)
+            drop += [p for p in pids if p != keep]
+            print(f"  --keep: keep {keep}, drop {len(group) - 1}")
+            continue
+
+        choice = "" if auto else input(
+            f"  {BOLD}Enter{RESET}=keep [1] · 1/2/…=keep that one · "
+            f"a=drop whole group · s=skip · g=keep [1] here and for the rest : "
+        ).strip().lower()
+        if choice == "g":
+            auto, choice = True, ""
 
         if choice == "s":
             print(f"  {DIM}skipped — both rows stay{RESET}")
             continue
         if choice == "a":
-            drop += [_paper_id(m["id"]) for m in group]
+            drop += pids
             print(f"  {RED}dropping all {len(group)}{RESET}")
             continue
-        keep_idx = 0
-        if choice.isdigit() and 1 <= int(choice) <= len(group):
-            keep_idx = int(choice) - 1
-        drop += [_paper_id(m["id"]) for i, m in enumerate(group) if i != keep_idx]
-        print(f"  keep {_paper_id(group[keep_idx]['id'])}, "
-              f"drop {len(group) - 1}")
+        keep_idx = (int(choice) - 1
+                    if choice.isdigit() and 1 <= int(choice) <= len(group)
+                    else 0)
+        drop += [p for i, p in enumerate(pids) if i != keep_idx]
+        auto_suspect += suspect and auto and keep_idx == 0
+        print(f"  keep {pids[keep_idx]}, drop {len(group) - 1}")
 
-    if assume_yes and n_suspect:
-        print(f"\n{YELLOW}--yes accepted {n_suspect} group(s) whose titles "
-              f"disagree — those are the ones worth a manual look.{RESET}")
+    if auto_suspect:
+        hint = ("" if "W2141899406" in keep_ids
+                else " (for science_v3 the one wrong default is group 6 — its "
+                     "abstract belongs to the other paper — use --keep W2141899406)")
+        print(f"\n{YELLOW}accepted the default for {auto_suspect} flagged "
+              f"group(s); pass --keep <paper_id> to override one{hint}.{RESET}")
     return {"drop": sorted(set(drop))}
 
 
@@ -406,8 +432,16 @@ def parse_args() -> argparse.Namespace:
                     help="run the score stage here on this GPU; without it the "
                          "score command is printed, not run")
     ap.add_argument("--yes", action="store_true",
-                    help="accept the keep-highest-citation default for every "
-                         "duplicate group (still prints them)")
+                    help="don't prompt: take the keep-highest-citation default "
+                         "for every duplicate group (still prints them). Combine "
+                         "with --keep / --drop-group to override individual groups")
+    ap.add_argument("--keep", action="append", default=[], metavar="PAPER_ID",
+                    help="in the duplicate group containing this paper id, keep "
+                         "this row instead of the highest-citation default "
+                         "(repeatable)")
+    ap.add_argument("--drop-group", action="append", default=[], metavar="PAPER_ID",
+                    help="drop every row of the duplicate group containing this "
+                         "paper id (repeatable)")
     ap.add_argument("--dry-run", action="store_true",
                     help="print every action and command, change nothing")
     return ap.parse_args()
@@ -430,7 +464,10 @@ def main() -> None:
         groups = find_duplicate_groups(args.in_parquet)
         print(f"\n{BOLD}{len(groups)} duplicate-abstract group(s) among the human "
               f"rows of {args.in_parquet.name}{RESET}")
-        plan = resolve_groups(groups, args.yes) if groups else {"drop": []}
+        plan = (resolve_groups(groups, assume_yes=args.yes,
+                               keep_ids=set(args.keep),
+                               drop_group_ids=set(args.drop_group))
+                if groups else {"drop": []})
 
         n = len(plan["drop"])
         print(f"\n{BOLD}plan{RESET}: drop {n} duplicate paper(s)"
