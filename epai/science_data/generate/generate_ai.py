@@ -185,7 +185,28 @@ def _key(paper_id: str, label: str) -> str:
     return f"{paper_id}|{label}"
 
 
-def generate(df: pd.DataFrame, cfg: dict, prompts: dict, retry_failed: bool) -> Shard:
+def _select_generators(cfg: dict, only: list[str] | None) -> list[dict]:
+    """The configured generators, optionally narrowed to those whose model or
+    ``generated_by`` label contains one of the ``--generator`` strings."""
+    gens = cfg["generate"]["generators"]
+    if not only:
+        return gens
+    want = [s.lower() for s in only]
+    picked = [
+        g for g in gens
+        if any(w in g["model"].lower()
+               or w in generated_by_label(g["model"], cfg).lower() for w in want)
+    ]
+    if not picked:
+        raise SystemExit(
+            f"--generator {only} matched none of "
+            f"{[g['model'] for g in gens]}"
+        )
+    return picked
+
+
+def generate(df: pd.DataFrame, cfg: dict, prompts: dict, retry_failed: bool,
+             only: list[str] | None = None) -> Shard:
     shard = Shard(shard_path(cfg, "generate"))
     # Same key oa_fetch reads for the human abstracts. Bound once here rather
     # than inside the lambda so the setting cannot differ between calls.
@@ -212,62 +233,61 @@ def generate(df: pd.DataFrame, cfg: dict, prompts: dict, retry_failed: bool) -> 
             )
         return clients[cache_key]
 
-    tasks = []
-    for gen in cfg["generate"]["generators"]:
+    rows = df.to_dict("records")
+    gens = _select_generators(cfg, only)
+    max_workers = cfg["generate"].get("max_workers", 8)
+    retry_passes = cfg["generate"].get("retry_passes", 3)
+
+    # One generator at a time — not for correctness (the shard key carries the
+    # label, so interleaving is safe) but so the progress bar names the model
+    # that is running. Its auto-retry sweeps run before the next model starts.
+    for gi, gen in enumerate(gens, 1):
         label = generated_by_label(gen["model"], cfg)
         client = client_for(gen)
-        for row in df.to_dict("records"):
-            tasks.append(
-                (
-                    _key(row["id"], label),
-                    openai_text_call(
-                        client,
-                        gen["model"],
-                        prompts["generation_system_prompt"],
-                        row["prompt"],
-                    ),
-                )
+        keys = [_key(r["id"], label) for r in rows]
+        keyset = set(keys)
+        tasks = [
+            (k, openai_text_call(client, gen["model"],
+                                 prompts["generation_system_prompt"], r["prompt"]))
+            for k, r in zip(keys, rows)
+        ]
+
+        def sweep(retry: bool, _tasks=tasks, _label=label, _gi=gi) -> None:
+            run_resumable(
+                _tasks, shard, max_workers=max_workers,
+                desc=f"[{_gi}/{len(gens)}] {_label}",
+                retry_failed=retry,
+                payload_of=lambda _k, text: {
+                    "abstract": clean_generated(text, strip_labels=strip_labels)
+                },
             )
 
-    def sweep(retry: bool) -> None:
-        run_resumable(
-            tasks,
-            shard,
-            max_workers=cfg["generate"].get("max_workers", 8),
-            desc="generating abstracts",
-            retry_failed=retry,
-            payload_of=lambda _k, text: {
-                "abstract": clean_generated(text, strip_labels=strip_labels)
-            },
-        )
+        def n_failed(_keyset=keyset) -> int:
+            return sum(1 for k, r in shard.records.items()
+                       if k in _keyset and not r.get("ok"))
 
-    def n_failed() -> int:
-        return sum(1 for r in shard.records.values() if not r.get("ok"))
+        print(f"\n{'=' * 64}\n  generator {gi}/{len(gens)}: "
+              f"{gen['model']}  ({label})\n{'=' * 64}")
+        sweep(retry_failed)
 
-    sweep(retry_failed)
-
-    # Whole-corpus retry sweeps over the failures only, so a transient endpoint
-    # error does not need a manual --retry-failed re-run. Stop as soon as a pass
-    # converts nothing (the rest are failing deterministically — a content
-    # filter, an over-length prompt) or no failures remain. Failure counts only
-    # ever decrease across passes, since a retried call either succeeds or stays
-    # failed, so `now >= prev` is an exact "made no progress" test.
-    retry_passes = cfg["generate"].get("retry_passes", 3)
-    prev = n_failed()
-    for i in range(retry_passes):
-        if prev == 0:
-            break
-        print(
-            f"\n  Auto-retry {i + 1}/{retry_passes}: {prev} failure(s) left; "
-            f"pausing {_RETRY_PASS_COOLDOWN}s for the endpoint to recover"
-        )
-        time.sleep(_RETRY_PASS_COOLDOWN)
-        sweep(True)
-        now = n_failed()
-        if now >= prev:
-            print(f"  Auto-retry made no progress ({now} still failing) — stopping.")
-            break
-        prev = now
+        # Whole-corpus retry sweeps over this model's failures only, so a
+        # transient endpoint error does not need a manual --retry-failed re-run.
+        # Stop as soon as a pass converts nothing (the rest fail deterministically
+        # — a content filter, an over-length prompt) or none remain.
+        prev = n_failed()
+        for i in range(retry_passes):
+            if prev == 0:
+                break
+            print(f"\n  [{label}] auto-retry {i + 1}/{retry_passes}: {prev} "
+                  f"failure(s) left; pausing {_RETRY_PASS_COOLDOWN}s")
+            time.sleep(_RETRY_PASS_COOLDOWN)
+            sweep(True)
+            now = n_failed()
+            if now >= prev:
+                print(f"  [{label}] auto-retry made no progress ({now} still "
+                      f"failing) — moving on.")
+                break
+            prev = now
 
     return shard
 
@@ -364,6 +384,16 @@ def main() -> None:
         "the ':' replaced (gpt54mini_0807A), or 'multi_<prompt_config>' when "
         "several are configured.",
     )
+    parser.add_argument(
+        "--generator",
+        action="append",
+        default=None,
+        metavar="MODEL",
+        help="only issue calls for generators whose model or label contains "
+        "this string (repeatable) — e.g. to run one model in its own pane or "
+        "to retry a single provider. The parquet is NOT rewritten in this "
+        "mode; finish with a plain run (no --generator) to export.",
+    )
     args = parser.parse_args()
 
     cfg = load_pipeline_config(args.cfg)
@@ -375,7 +405,13 @@ def main() -> None:
     print(f"Prompt config: {prompt_config_path(cfg).relative_to(BASE_DIR)}")
 
     df = load_parquet(prompts_path(cfg))
-    shard = generate(df, cfg, prompts, args.retry_failed)
+    shard = generate(df, cfg, prompts, args.retry_failed, only=args.generator)
+
+    if args.generator:
+        print(f"\n--generator {args.generator}: shard updated, parquet left "
+              f"alone. Run without --generator to export "
+              f"{final_path(cfg, variant).name}.")
+        return
 
     final = export(df, shard, cfg)
 

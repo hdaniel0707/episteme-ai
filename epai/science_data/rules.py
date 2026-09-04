@@ -85,6 +85,12 @@ class FilterConfig:
     min_english_stopwords: int = 4
     max_non_latin_ratio: float = 0.10
 
+    # Function-word share below which a 40+ word passage is not English prose —
+    # a wrong-language abstract that OpenAlex mislabelled "en", or raw LaTeX.
+    # Real English abstracts here sit at 0.15+; non-English ones at 0.06 and
+    # below, so the threshold has a wide margin either side.
+    min_english_fw_ratio: float = 0.12
+
     @classmethod
     def from_dict(cls, d: dict | None) -> "FilterConfig":
         d = d or {}
@@ -339,9 +345,12 @@ def normalise_abstract(abstract: str | None) -> str:
 def looks_english(text: str, cfg: FilterConfig) -> bool:
     """Heuristic English check (no language-detection dependency available).
 
-    Two signals: enough distinct English function words, and few non-Latin
-    characters. Deliberately permissive — it is aimed at obviously non-English
-    abstracts, not at borderline cases.
+    Three signals: few non-Latin characters, enough distinct English function
+    words, and — for a passage long enough to measure — a function-word *share*
+    in the English range. The share is what catches a French or Indonesian
+    abstract that OpenAlex mislabelled ``"en"``: it clears the distinct-word bar
+    on chance collisions (``a``, ``on``, ``or``) but its density of English
+    function words is a third of real English prose.
     """
     if not text:
         return False
@@ -352,8 +361,81 @@ def looks_english(text: str, cfg: FilterConfig) -> bool:
         if non_latin / len(letters) > cfg.max_non_latin_ratio:
             return False
 
-    words = set(_WORD_RE.findall(text.lower()))
-    return len(words & _ENGLISH_STOPWORDS) >= cfg.min_english_stopwords
+    tokens = _WORD_RE.findall(text.lower())
+    if len(set(tokens) & _ENGLISH_STOPWORDS) < cfg.min_english_stopwords:
+        return False
+    if len(tokens) >= 40:
+        return _function_word_ratio(text) >= cfg.min_english_fw_ratio
+    return True
+
+
+# Function words of the languages that turn up mislabelled "en" in OpenAlex —
+# French, German, Spanish, Italian, Dutch, Norwegian, Indonesian, Czech. Two or
+# more in a title, and more of them than English ones, means the title is not
+# English. One-character words are left out: they collide with maths notation
+# (``$Z_4$`` tokenises to ``z``) far more than they catch anything.
+_NON_ENGLISH_FUNCTION_WORDS = frozenset(
+    """les des du de un une et ou dans sur pour par aux avec sans cette
+    und der die das den ein eine von zu im mit für über auch
+    dan yang dalam pada untuk dengan dari ini adalah di ke
+    og på av som til med det
+    van een het op voor naar tussen zijn
+    los las una en con para por del
+    il per con che della delle nel
+    uma do da ao
+    ve se je při což""".split()
+)
+_LATEX_RE = re.compile(r"\$[^$]*\$|\\[a-zA-Z]+|[{}^_]")
+
+
+def title_looks_english(title: str, cfg: FilterConfig) -> bool:
+    """Is the title English? A title-only generation prompt hands the model
+    nothing else, so a French title yields a French abstract paired with the
+    paper's English one — a language artefact the classifier learns instantly.
+
+    A short string, so the abstract's function-word *ratio* is too noisy here;
+    instead: reject on a non-Latin script, on an accented-letter share a real
+    English title never reaches, or on non-English function words outnumbering
+    English ones (see :data:`_NON_ENGLISH_FUNCTION_WORDS`).
+    """
+    core = _TAG_RE.sub(" ", html.unescape(as_text(title)))
+    core = _LATEX_RE.sub(" ", core)
+    letters = [c for c in core if c.isalpha()]
+    if not letters:
+        return True  # nothing to judge — a symbol-only title is caught elsewhere
+
+    if sum(1 for c in letters if ord(c) > 0x24F) / len(letters) > 0.30:
+        return False
+
+    def _fold(c: str) -> str:
+        return "".join(x for x in unicodedata.normalize("NFKD", c)
+                       if not unicodedata.combining(x))
+
+    accented = sum(1 for c in letters
+                   if ord(c) < 0x250 and c.lower() != _fold(c).lower()) / len(letters)
+
+    # `van der Waals`, `de Rham`, `von Neumann` — a foreign particle next to a
+    # capitalised word (not the title's first) is part of a name, not prose.
+    cased = re.findall(r"[^\W\d_]+", core, re.UNICODE)
+    _NAME_PARTICLES = {"van", "der", "von", "de", "del", "da", "di", "la", "le"}
+    name_pos = {
+        i for i, t in enumerate(cased)
+        if t.lower() in _NAME_PARTICLES
+        and ((i > 1 and cased[i - 1][:1].isupper())
+             or (i + 1 < len(cased) and cased[i + 1][:1].isupper()))
+    }
+    tokens = [t.lower() for i, t in enumerate(cased) if i not in name_pos
+              and len(t) >= 2]
+    ne = sum(t in _NON_ENGLISH_FUNCTION_WORDS for t in tokens)
+    en = sum(t in _ENGLISH_STOPWORDS for t in tokens)
+
+    if ne >= 2 and ne > en:
+        return False
+    if ne >= 1 and en == 0 and accented > 0.02:
+        return False
+    if accented > 0.12 and en == 0:
+        return False
+    return True
 
 
 def _function_word_ratio(text: str) -> float:
@@ -372,13 +454,14 @@ def _function_word_ratio(text: str) -> float:
 
 def abstract_is_boilerplate(text: str) -> bool:
     """True when *text* is not an abstract at all: a scrape of the publisher's
-    page (site chrome, an article-nav strip, a paywall), a book's table of
-    contents / front matter, or something that is not English prose (a
-    reference list, raw LaTeX, a wrong-language dump).
+    page (site chrome, an article-nav strip, a paywall) or a book's table of
+    contents / front matter.
 
     Every trigger is something a real abstract never contains, because
     :func:`check_record` drops on this and a false positive silently loses a
-    genuine paper. The looser "reads oddly" cases are left to the corpus audit.
+    genuine paper. Wrong-language and raw-LaTeX text is *not* judged here — it
+    fails :func:`looks_english` instead; keeping the two apart is what lets the
+    drop report say which it was.
     """
     if not text:
         return False
@@ -386,8 +469,6 @@ def abstract_is_boilerplate(text: str) -> bool:
     if any(s in low for s in _NON_ABSTRACT_SIGNATURES):
         return True
     if _FRONT_MATTER_OPENER.match(text.lstrip()):
-        return True
-    if len(text.split()) >= 50 and _function_word_ratio(text) < 0.11:
         return True
     return False
 
@@ -459,6 +540,7 @@ DROP_REASONS = (
     "truncated_abstract",
     "abstract_too_short",
     "abstract_too_long",
+    "non_english_title",
     "not_english",
     "boilerplate_abstract",
     "duplicate",
@@ -480,6 +562,8 @@ def check_record(record: dict, cfg: FilterConfig) -> str | None:
         return "missing_title"
     if len(title.split()) < cfg.min_title_words:
         return "short_title"
+    if not title_looks_english(title, cfg):
+        return "non_english_title"
 
     abstract = as_text(record.get("abstract"))
     if not abstract:
@@ -511,13 +595,14 @@ def check_record(record: dict, cfg: FilterConfig) -> str | None:
     if n_words > cfg.max_words:
         return "abstract_too_long"
 
-    if not looks_english(abstract, cfg):
-        return "not_english"
-
-    # A scrape of the publisher's page, a book's contents page, a reference
-    # list — not null, not short, not foreign, but not an abstract either.
+    # A scrape of the publisher's page or a book's contents page — checked
+    # before the language rule so an English one is not mislabelled
+    # ``not_english`` (a nav dump has almost no function words either).
     if abstract_is_boilerplate(abstract):
         return "boilerplate_abstract"
+
+    if not looks_english(abstract, cfg):
+        return "not_english"
 
     return None
 

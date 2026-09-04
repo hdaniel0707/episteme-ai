@@ -12,10 +12,12 @@ API error body, a refused completion, or leaked model scaffolding (``<think>``,
 ``<|channel|>``) saved into a ``text`` / ``abstract`` column. That row is not
 null and not empty, so only its wording gives it away. Every ``TEXTISH`` column
 is scanned for those signatures, for byte-identical duplicate documents (one
-error string repeated across N rows is the classic tell), and for text that is
+error string repeated across N rows is the classic tell), for text that is
 **not an abstract at all** — a scrape of the publisher's page, a book's table of
 contents, a reference list (``rules.abstract_is_boilerplate``, the same test the
-fetch/filter stages reject on).
+fetch/filter stages reject on) — and for text that is **not English** (a
+wrong-language abstract, or a generator that answered in a non-English title's
+language, leaving an English human row paired with a non-English machine one).
 
 When both ``domain`` and ``generated_by`` are present it also prints the
 domain × generated_by count matrix and the rows-per-``id`` count, and warns if a
@@ -32,7 +34,7 @@ a time (~0.8 GB, ~20 s on a 320 MB / 6000-row corpus).
 
     .venv/bin/python epai/scripts/check_parquet_completeness.py data/parquet/denario_hc.parquet
 
-    .venv/bin/python epai/scripts/check_parquet_completeness.py data/parquet/science_v3_multi_0811A.parquet
+    .venv/bin/python epai/scripts/check_parquet_completeness.py data/parquet/science_v3d_multi_0811A.parquet
 
     # does this file have every column science_v3 has?
     .venv/bin/python epai/scripts/check_parquet_completeness.py data/parquet/denario_hc.parquet \
@@ -59,9 +61,21 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 try:
-    from epai.science_data.rules import abstract_is_boilerplate
+    from epai.science_data.rules import (
+        FilterConfig,
+        _function_word_ratio,
+        abstract_is_boilerplate,
+        title_looks_english,
+    )
+    _TITLE_CFG = FilterConfig()
 except Exception:  # keep the checker runnable outside the package
-    abstract_is_boilerplate = None
+    abstract_is_boilerplate = _function_word_ratio = title_looks_english = None
+
+# Below this share of English function words a document is not English prose —
+# a wrong-language abstract, or a generator that answered in the title's
+# language. Real English abstracts here sit at 0.13+, the non-English ones at
+# 0.06 and below, so the threshold has a wide margin either side.
+NON_ENGLISH_FW_RATIO = 0.12
 
 RED = "\033[91m"
 YELLOW = "\033[93m"
@@ -154,6 +168,7 @@ class Report:
         self.warns: list[str] = []
         self.verbose = verbose
         self.ids: dict[str, list] = {}  # identifier columns, for --verbose row refs
+        self.gen: list | None = None    # generated_by per row, when the column exists
 
     def rowref(self, i: int) -> str:
         """One offending row, tagged with whatever identifier columns exist."""
@@ -355,13 +370,39 @@ def _scan_text_errors(name: str, docs: list[str], rep: Report, info: dict) -> No
             rep.detail(f"       {d[:200]!r}")
 
 
+def _low_fw(doc: str) -> bool:
+    return (_function_word_ratio is not None and len(doc.split()) >= 30
+            and _function_word_ratio(doc) < NON_ENGLISH_FW_RATIO)
+
+
+def _scan_language(name: str, docs: list[str], rep: Report, info: dict) -> None:
+    """Documents that are not English prose — a wrong-language abstract, or (the
+    common one here) a generator that answered in a non-English title's
+    language, leaving the human row English and its machine row not. Detected by
+    a very low English function-word ratio; see ``NON_ENGLISH_FW_RATIO``."""
+    if _function_word_ratio is None:
+        return
+    hits = [i for i, d in enumerate(docs) if _low_fw(d)]
+    info["non_english_docs"] = len(hits)
+    if not hits:
+        return
+    by_kind = (Counter(rep.gen[i] for i in hits)
+               if rep.gen is not None and len(rep.gen) == len(docs) else None)
+    tail = f" — {dict(by_kind)}" if by_kind else ""
+    rep.warn(f"{name}: {len(hits)} document(s) are not English prose{tail}")
+    for i in (hits if rep.verbose else hits[:3]):
+        rep.detail(f"{rep.rowref(i)}  {' '.join(docs[i].split())[:140]!r}")
+
+
 def _scan_non_prose(name: str, docs: list[str], rep: Report, info: dict) -> None:
     """Flag documents that are not an abstract at all — a scrape of the
     publisher's page, a book's contents / front matter, a reference list. Same
-    test the fetch/filter stages now reject on (``rules.abstract_is_boilerplate``)."""
+    test the fetch/filter stages reject on (``rules.abstract_is_boilerplate``);
+    non-English text (also caught by that test) is reported by _scan_language."""
     if abstract_is_boilerplate is None:
         return
-    hits = [i for i, d in enumerate(docs) if abstract_is_boilerplate(d)]
+    hits = [i for i, d in enumerate(docs)
+            if abstract_is_boilerplate(d) and not _low_fw(d)]
     info["non_prose_docs"] = len(hits)
     if not hits:
         return
@@ -392,11 +433,24 @@ def _check_string(name: str, non_null, n: int, n_distinct: int,
             rep.warn(f"{name}: {truncated} document(s) end in an ellipsis (truncated?)")
         _scan_text_errors(name, s, rep, info)
         _scan_non_prose(name, s, rep, info)
+        _scan_language(name, s, rep, info)
         rep.detail(f"{name}: {info['words_med']} words median, "
                    f"chars [{info['len_min']}, {info['len_max']}], {n_distinct} distinct")
     elif name in TITLEISH:
         if empty:
             rep.warn(f"{name}: {empty} empty title(s)")
+        if title_looks_english is not None:
+            seen_t: set[str] = set()
+            ne = []
+            for i, x in enumerate(s):
+                if x and x not in seen_t and not title_looks_english(x, _TITLE_CFG):
+                    seen_t.add(x)
+                    ne.append(i)
+            if ne:
+                rep.warn(f"{name}: {len(ne)} distinct title(s) are not English "
+                         f"(a title-only prompt then generates non-English text)")
+                for i in (ne if rep.verbose else ne[:3]):
+                    rep.detail(f"{rep.rowref(i)}  {s[i][:110]!r}")
         rep.detail(f"{name}: {n_distinct} distinct")
     elif name == "uid":
         dupes = len(s) - n_distinct
@@ -581,6 +635,8 @@ def check_file(path: Path, reference_cols: set[str] | None,
         if idcols:
             t = pq.read_table(path, columns=idcols)
             rep.ids = {c: t.column(c).to_pylist() for c in idcols}
+    if "generated_by" in schema.names:
+        rep.gen = pq.read_table(path, columns=["generated_by"]).column(0).to_pylist()
 
     col_info: dict[str, dict] = {}
     print(f"\n  {BOLD}columns{RESET}")

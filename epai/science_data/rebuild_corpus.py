@@ -1,44 +1,49 @@
 #!/usr/bin/env python3
 r"""Rebuild a science multi-generator corpus with its bad human rows removed.
 
-``check_parquet_completeness.py -v`` on ``science_v3_multi_0811A`` finds two
+``check_parquet_completeness.py -v`` on ``science_v3_multi_0811A`` finds three
 kinds of bad ``human`` row:
 
-  - **duplicate abstracts** — 10 pairs whose abstract is byte-identical to
-    another row's. Eight are the same paper deposited twice in OpenAlex under
-    two work ids; two are different papers that ended up with the same abstract
-    text. Either way the pair leaks across a train/test or LODO split, and every
-    ``emb_*`` warning in that report is the same 10 pairs echoed — the embedders
-    are deterministic.
-  - **not an abstract at all** — ~37 rows whose "abstract" is a scrape of the
-    publisher's page (an EBSCO nav dump, a journal's article-nav strip), a
-    book's table of contents, or raw LaTeX. ``rules.abstract_is_boilerplate``.
+  - **duplicate abstracts** — pairs whose abstract is byte-identical to another
+    row's. Mostly the same paper deposited twice in OpenAlex under two work ids;
+    a few are different papers that ended up with the same abstract text. Either
+    way the pair leaks across a train/test or LODO split.
+  - **not an abstract at all** — the "abstract" is a scrape of the publisher's
+    page (an EBSCO nav dump, an article-nav strip) or a book's table of contents
+    (``rules.abstract_is_boilerplate``).
+  - **not English** — the abstract, or (via a title-only prompt) the title, is
+    French / Indonesian / Norwegian / …, so the generator answers in that
+    language and an English human row is paired with a non-English machine one
+    (``rules.looks_english`` / ``rules.title_looks_english``).
 
-Both are on the HUMAN side only: a generated row is written from a title-only
-prompt, so it is never a scraped page and never a second deposit of anything.
-When a human paper is dropped its whole ``id`` goes — the human row **and** its
-three generated rows are simply never built for the new corpus, because the
-rebuild starts from the human set and works forward.
+The duplicate case needs a keeper decision, so those pairs are shown one by one.
+The other two are unambiguous rejections: ``check_record`` now drops them, and
+the ``detect`` stage just lists them so the swap is visible before you confirm.
+Every one is on the HUMAN side — a generated row inherits nothing from a scrape
+or a second deposit — and dropping a human paper drops its whole ``id``: the
+human row and its three generated rows are never built for the new corpus,
+because the rebuild starts from the human set and works forward.
 
 This rebuilds the corpus at its original size:
 
-  1. **detect**  — list the non-abstract rows (filter drops these on its own),
-     then group the human rows by folded abstract (``normalise_abstract``), show
-     every collision and ask per group what to keep. Default: keep the highest
-     ``citation_count`` deposit, drop the rest. Groups whose titles disagree are
-     flagged — those want a look, not the default.
+  1. **detect**  — list the rows ``filter`` will drop (non-abstract, non-English
+     title/abstract), then group the remaining human rows by folded abstract
+     (``normalise_abstract``), show every collision and ask per group what to
+     keep. Default: keep the highest ``citation_count`` deposit, drop the rest.
+     Groups whose titles disagree are flagged — those want a look.
   2. **raw**     — write ``data/science/<new-id>_raw.parquet`` = the original raw
      fetch minus the dropped duplicate papers, and ``cfg/science_data/<new-id>.yaml``.
      No new OpenAlex call: the fetch overfetched 1.2x, so the filter stage
      backfills the freed slots from the **same Aug-12 fetch** — same ranking,
      no drift. Every backfilled paper goes through the same ``filter.py`` gate,
      so it cannot be a dropped id, an id / title / abstract duplicate of a kept
-     row, or itself a non-abstract — the defect cannot recur.
+     row, a non-abstract, or non-English — the defects cannot recur.
   3. **filter → prompts → generate** — the science_data stages under the new id.
-     ``filter`` re-tests every row with the current rules, so the non-abstract
-     and near-duplicate rows are dropped here and the trim backfills past them.
-     ``generate`` reuses the old generate checkpoint verbatim, so only the
-     handful of backfilled papers' AI rows are actually generated.
+     ``filter`` re-tests every row with the current rules, so the non-abstract,
+     non-English and near-duplicate rows are dropped here and the trim backfills
+     past them. ``generate`` reuses the old generate checkpoint verbatim, so
+     only the handful of backfilled papers' AI rows are actually generated, one
+     model at a time so the progress bar names the model that is running.
   4. **promote → standardize → carry** — copy to ``data/parquet/``, fold the
      text the same way, then ``carry_suite_columns.py`` copies every already
      computed embedding / score / judge column across by ``uid`` for every
@@ -48,32 +53,38 @@ This rebuilds the corpus at its original size:
      suite (needs a GPU box + the Binoculars sub-venv; printed, not run, unless
      ``--gpu`` is given).
 
-The result is a NEW dataset id — ``science_v3d`` — because a changed paper set
-gets a new id (see ``cfg/science_data/science_v3.yaml``). The source corpus is
-never touched.
+The result is a NEW dataset id — a changed paper set gets a new id (see
+``cfg/science_data/science_v3.yaml``). The source corpus is never touched.
 
-    # interactive, stops before the GPU stage
-    .venv/bin/python epai/science_data/rebuild_corpus.py
+``--source-id`` picks what to rebuild from (its ``_raw.parquet`` /
+``_generate.jsonl`` / config); ``--new-id`` names the output; ``--in`` overrides
+the parquet scanned for duplicates and carried from. Defaults rebuild
+``science_v3`` into ``science_v3d``.
 
-    # everything, on a GPU box (answer the ~10 duplicate-group prompts first)
-    .venv/bin/python epai/science_data/rebuild_corpus.py --gpu 0
-
-    # everything, no prompts: --keep fixes the one group whose default is wrong
-    # (its abstract belongs to the other paper); every other group's default is
-    # correct and the two EBSCO rows are dropped by the boilerplate filter anyway
+    # science_v3 -> science_v3d, on a GPU box (answer the duplicate-group
+    # prompts first; --keep fixes group 6, whose default keeper has the wrong
+    # abstract)
     .venv/bin/python epai/science_data/rebuild_corpus.py --gpu 0 --yes \
         --keep W2141899406
+
+    # rebuild the already-rebuilt corpus: science_v3d -> science_v3e
+    .venv/bin/python epai/science_data/rebuild_corpus.py \
+        --source-id science_v3d --new-id science_v3e --gpu 0 --yes
 
     # resume on the GPU box after an interactive run stopped at the score step
     .venv/bin/python epai/science_data/rebuild_corpus.py --from score --gpu 0
 
     .venv/bin/python epai/science_data/rebuild_corpus.py --dry-run
+
+    .venv/bin/python epai/science_data/rebuild_corpus.py \
+      --source-id science_v3d --new-id science_v3e --gpu 2 
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -82,10 +93,15 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 
-from epai.science_data.config import BASE_DIR, SCIENCE_DIR, load_pipeline_config
+from epai.science_data.config import (
+    BASE_DIR,
+    SCIENCE_DIR,
+    filter_config,
+    load_pipeline_config,
+)
 from epai.science_data.filter.filter import apply_rules
 from epai.science_data.rules import (
-    abstract_is_boilerplate,
+    check_record,
     normalise_abstract,
     normalise_title,
 )
@@ -100,10 +116,19 @@ RESET = "\033[0m"
 PARQUET_DIR = BASE_DIR / "data" / "parquet"
 PY = sys.executable  # the interpreter running this script — reused for subprocesses
 
-SOURCE_CFG = BASE_DIR / "cfg" / "science_data" / "science_v3.yaml"
-SOURCE_DATASET_ID = "science_v3"
 PROMPT_CONFIG = "0811A"
 VARIANT = f"multi_{PROMPT_CONFIG}"
+
+# The corpus the rebuild reads from — its `_raw.parquet`, `_generate.jsonl` and
+# pipeline config are the basis for the new one. `main()` overrides these from
+# `--source-id` (default science_v3); everything downstream reads them at call
+# time, so reassigning here is enough.
+SOURCE_DATASET_ID = "science_v3"
+SOURCE_CFG = BASE_DIR / "cfg" / "science_data" / f"{SOURCE_DATASET_ID}.yaml"
+
+# The admission thresholds filter.py will apply — used to preview which human
+# rows it will drop (non-abstract, non-English) before anything is written.
+RULES_CFG = filter_config(load_pipeline_config(SOURCE_CFG))
 
 STAGES = ("detect", "raw", "filter", "prompts", "generate",
           "promote", "carry", "score")
@@ -151,24 +176,44 @@ def find_duplicate_groups(in_parquet: Path) -> list[list[dict]]:
     return out
 
 
-def report_boilerplate(in_parquet: Path) -> None:
-    """List the human rows whose abstract is a page scrape / contents page /
-    reference list. Not a decision — filter.py drops these on its own now
-    (rules.abstract_is_boilerplate); this is just so the removal is visible."""
+_DROP_LABEL = {
+    "boilerplate_abstract": "abstract is a page scrape / contents page",
+    "non_english_title": "title is not English",
+    "not_english": "abstract is not English",
+}
+
+
+def report_filter_drops(in_parquet: Path) -> None:
+    """List the human rows ``filter.py`` will drop when it re-runs with the
+    current rules — a non-abstract, a non-English title or abstract, etc. Not a
+    decision: ``check_record`` rejects these and the trim backfills past them,
+    exactly as for the duplicate losers. Shown so the swap is visible before
+    you confirm."""
     tbl = pq.read_table(in_parquet, columns=["id", "domain", "generated_by",
                                              "title", "text"])
-    junk = [r for r in tbl.to_pylist()
-            if r["generated_by"] == "human" and abstract_is_boilerplate(r["text"])]
-    if not junk:
+    drops: dict[str, list[dict]] = {}
+    for r in tbl.to_pylist():
+        if r["generated_by"] != "human":
+            continue
+        rec = {"paper_id": _paper_id(r["id"]), "title": r["title"],
+               "abstract": r["text"], "year": 2000, "citation_count": 0,
+               "fwci": 0.0, "language": "en"}
+        reason = check_record(rec, RULES_CFG)
+        if reason in _DROP_LABEL:
+            drops.setdefault(reason, []).append(r)
+    total = sum(len(v) for v in drops.values())
+    if not total:
         return
-    by_dom = Counter(r["domain"] for r in junk)
-    print(f"\n{BOLD}{len(junk)} non-abstract human row(s){RESET} "
-          f"({', '.join(f'{d}:{n}' for d, n in sorted(by_dom.items()))}) — "
-          f"the filter stage drops these automatically:")
-    for r in junk:
-        print(f"  {_paper_id(r['id']):12} [{r['domain'][:4]}] "
-              f"{DIM}{(r['title'] or '')[:60]}{RESET}")
-        print(f"      {DIM}{' '.join((r['text'] or '').split())[:105]}…{RESET}")
+    print(f"\n{BOLD}{total} human row(s) the filter stage will drop{RESET} "
+          f"(backfilled from the fetch surplus, same as the duplicates):")
+    for reason, rows in drops.items():
+        by_dom = Counter(r["domain"] for r in rows)
+        dd = ', '.join(f'{d}:{n}' for d, n in sorted(by_dom.items()))
+        print(f"\n  {YELLOW}{_DROP_LABEL[reason]}{RESET} — {len(rows)} ({dd})")
+        for r in rows:
+            print(f"    {_paper_id(r['id']):12} [{r['domain'][:4]}] "
+                  f"{DIM}{(r['title'] or '')[:62]}{RESET}")
+            print(f"        {DIM}{' '.join((r['text'] or '').split())[:100]}…{RESET}")
 
 
 def _print_group(n: int, total: int, group: list[dict]) -> bool:
@@ -179,8 +224,12 @@ def _print_group(n: int, total: int, group: list[dict]) -> bool:
     print(f"\n{BOLD}── group {n}/{total} ── {group[0]['domain']} ──{RESET}{flag}")
     for i, m in enumerate(group, 1):
         mark = f"{GREEN}keep{RESET}" if i == 1 else f"{RED}drop{RESET}"
-        junk = (f"  {YELLOW}← not a real abstract{RESET}"
-                if abstract_is_boilerplate(m["text"] or "") else "")
+        bad = check_record({"paper_id": _paper_id(m["id"]), "title": m["title"],
+                            "abstract": m["text"] or "", "year": 2000,
+                            "citation_count": 0, "fwci": 0.0, "language": "en"},
+                           RULES_CFG)
+        junk = (f"  {YELLOW}← {_DROP_LABEL.get(bad, bad)}{RESET}"
+                if bad in _DROP_LABEL else "")
         print(f"  [{i}] {mark}  {_paper_id(m['id']):12}  "
               f"cit {m['citation_count'] or 0:>6}  fwci {m['fwci']}{junk}")
         print(f"      {DIM}{(m['title'] or '')[:88]}{RESET}")
@@ -256,11 +305,17 @@ def build_new_raw(new_id: str, drop_ids: list[str], *, dry_run: bool) -> None:
 
     src_raw = SCIENCE_DIR / f"{SOURCE_DATASET_ID}_raw.parquet"
     dst_raw = SCIENCE_DIR / f"{new_id}_raw.parquet"
+    if not src_raw.is_file():
+        raise SystemExit(f"{RED}not found: {src_raw} — --source-id {SOURCE_DATASET_ID!r} "
+                         f"has no raw fetch to rebuild from{RESET}")
     tbl = pq.read_table(src_raw)
 
-    keep_mask = pc.invert(pc.is_in(tbl.column("paper_id"),
-                                   value_set=pa.array(drop_ids)))
-    kept = tbl.filter(keep_mask)
+    if drop_ids:
+        keep_mask = pc.invert(pc.is_in(tbl.column("paper_id"),
+                                       value_set=pa.array(drop_ids, type=pa.string())))
+        kept = tbl.filter(keep_mask)
+    else:
+        kept = tbl
 
     # What filter.py will actually keep per domain — run its own apply_rules
     # (current rules: boilerplate + abstract-dedup both reject now) so the
@@ -304,6 +359,10 @@ def build_new_raw(new_id: str, drop_ids: list[str], *, dry_run: bool) -> None:
 def write_new_cfg(new_id: str, drop_ids: list[str], *, dry_run: bool) -> None:
     dst = BASE_DIR / "cfg" / "science_data" / f"{new_id}.yaml"
     text = SOURCE_CFG.read_text()
+    # a config a previous rebuild generated already carries our header — drop it
+    # so the lineage does not stack up.
+    text = re.sub(r"\A(?:#.*\n)+", "", text, count=1) if text.startswith(
+        "# GENERATED by epai/science_data/rebuild_corpus.py") else text
     old_line = f'dataset_id: "{SOURCE_DATASET_ID}"'
     new_line = f'dataset_id: "{new_id}"'
     if text.count(old_line) != 1:
@@ -312,12 +371,13 @@ def write_new_cfg(new_id: str, drop_ids: list[str], *, dry_run: bool) -> None:
     header = (
         f"# GENERATED by epai/science_data/rebuild_corpus.py — do not hand-edit.\n"
         f"#\n"
-        f"# {new_id} is {SOURCE_DATASET_ID} with {len(drop_ids)} duplicate-abstract\n"
-        f"# human papers removed and the freed slots backfilled from the same\n"
-        f"# fetch's overfetch surplus. Only the paper set changed; every fetch and\n"
-        f"# filter threshold below is identical to {SOURCE_DATASET_ID}.yaml.\n"
+        f"# {new_id} is {SOURCE_DATASET_ID} with its non-abstract, non-English and\n"
+        f"# {len(drop_ids)} duplicate-abstract human papers removed and the freed\n"
+        f"# slots backfilled from the same fetch's overfetch surplus. Only the\n"
+        f"# paper set changed; every fetch and filter threshold below is identical\n"
+        f"# to {SOURCE_DATASET_ID}.yaml.\n"
         f"#\n"
-        f"# Dropped paper ids: {', '.join(drop_ids)}\n"
+        f"# Duplicate paper ids removed: {', '.join(drop_ids) or '(none)'}\n"
         f"#\n"
     )
     out = header + text.replace(old_line, new_line, 1)
@@ -421,11 +481,17 @@ def stage_score(new_id: str, gpu: str | None, *, dry_run: bool) -> None:
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--in", dest="in_parquet", type=Path,
-                    default=PARQUET_DIR / f"{SOURCE_DATASET_ID}_{VARIANT}.parquet",
-                    help="the scored corpus to rebuild (default: science_v3_multi_0811A)")
+    ap.add_argument("--source-id", default="science_v3",
+                    help="dataset_id to rebuild FROM — its data/science/<id>_raw.parquet, "
+                         "<id>_generate.jsonl and cfg/science_data/<id>.yaml are the "
+                         "basis (default: science_v3)")
+    ap.add_argument("--in", dest="in_parquet", type=Path, default=None,
+                    help="the scored corpus to scan for duplicates / non-English "
+                         "and to carry scores from (default: "
+                         "data/parquet/<source-id>_multi_0811A.parquet)")
     ap.add_argument("--new-id", default="science_v3d",
-                    help="dataset_id for the rebuilt corpus (default: science_v3d)")
+                    help="dataset_id for the rebuilt corpus, i.e. the output is "
+                         "data/parquet/<new-id>_multi_0811A.parquet (default: science_v3d)")
     ap.add_argument("--from", dest="start", choices=STAGES, default="detect",
                     help="resume from this stage (default: detect)")
     ap.add_argument("--gpu", default=None, metavar="ID",
@@ -449,6 +515,20 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+
+    global SOURCE_DATASET_ID, SOURCE_CFG, RULES_CFG
+    SOURCE_DATASET_ID = args.source_id
+    SOURCE_CFG = BASE_DIR / "cfg" / "science_data" / f"{SOURCE_DATASET_ID}.yaml"
+    if not SOURCE_CFG.is_file():
+        raise SystemExit(f"{RED}no config for --source-id {SOURCE_DATASET_ID!r}: "
+                         f"{SOURCE_CFG} not found{RESET}")
+    RULES_CFG = filter_config(load_pipeline_config(SOURCE_CFG))
+    if args.in_parquet is None:
+        args.in_parquet = PARQUET_DIR / f"{SOURCE_DATASET_ID}_{VARIANT}.parquet"
+    if args.new_id == SOURCE_DATASET_ID:
+        raise SystemExit(f"{RED}--new-id must differ from --source-id "
+                         f"({SOURCE_DATASET_ID}){RESET}")
+
     new_id = args.new_id
     new_cfg = BASE_DIR / "cfg" / "science_data" / f"{new_id}.yaml"
     plan_path = SCIENCE_DIR / f"{new_id}_dedupe_plan.json"
@@ -460,7 +540,7 @@ def main() -> None:
     if active("detect"):
         if not args.in_parquet.is_file():
             raise SystemExit(f"{RED}not found: {args.in_parquet}{RESET}")
-        report_boilerplate(args.in_parquet)
+        report_filter_drops(args.in_parquet)
         groups = find_duplicate_groups(args.in_parquet)
         print(f"\n{BOLD}{len(groups)} duplicate-abstract group(s) among the human "
               f"rows of {args.in_parquet.name}{RESET}")
