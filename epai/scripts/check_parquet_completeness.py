@@ -11,11 +11,19 @@ The other thing a null count misses is a **failed call written as content**: an
 API error body, a refused completion, or leaked model scaffolding (``<think>``,
 ``<|channel|>``) saved into a ``text`` / ``abstract`` column. That row is not
 null and not empty, so only its wording gives it away. Every ``TEXTISH`` column
-is scanned for those signatures and for byte-identical duplicate documents (one
-error string repeated across N rows is the classic tell).
+is scanned for those signatures, for byte-identical duplicate documents (one
+error string repeated across N rows is the classic tell), and for text that is
+**not an abstract at all** — a scrape of the publisher's page, a book's table of
+contents, a reference list (``rules.abstract_is_boilerplate``, the same test the
+fetch/filter stages reject on).
+
+When both ``domain`` and ``generated_by`` are present it also prints the
+domain × generated_by count matrix and the rows-per-``id`` count, and warns if a
+training corpus (more than one ``generated_by`` class) is uneven across those —
+a generator that dropped papers, a domain that came up short.
 
 Not tied to the training schema (that is ``epai/ai_detection/analyse/audit_corpus.py``,
-which also checks pairing, balance and text quality). This one answers the
+which checks pairing, balance and text quality in full). This one answers the
 narrower question: did every stage that was supposed to write a column actually
 write a real value into every row.
 
@@ -23,6 +31,8 @@ Runs on the repo interpreter — ``pyarrow`` + ``numpy``, one column in memory a
 a time (~0.8 GB, ~20 s on a 320 MB / 6000-row corpus).
 
     .venv/bin/python epai/scripts/check_parquet_completeness.py data/parquet/denario_hc.parquet
+
+    .venv/bin/python epai/scripts/check_parquet_completeness.py data/parquet/science_v3_multi_0811A.parquet
 
     # does this file have every column science_v3 has?
     .venv/bin/python epai/scripts/check_parquet_completeness.py data/parquet/denario_hc.parquet \
@@ -476,6 +486,69 @@ def check_list(name: str, arr: pa.ChunkedArray, n: int, rep: Report) -> dict:
     return info
 
 
+def check_class_balance(path: Path, schema, rep: Report) -> dict:
+    """The domain × generated_by count matrix, printed, plus a balance check.
+
+    A paired multi-generator corpus should carry the same row count in every
+    (domain, generated_by) cell — one human abstract and one row per generator
+    for each source paper — and a constant number of rows per source ``id``.
+    An uneven column is a generator that dropped papers or a domain that came
+    up short. Full pairing/balance analysis is ``audit_corpus.py``'s job; this
+    is the quick read on the way past.
+    """
+    names = set(schema.names)
+    if "generated_by" not in names or "domain" not in names:
+        return {}
+
+    key = next((c for c in ("id", "group") if c in names), None)
+    cols = ["domain", "generated_by"] + ([key] if key else [])
+    t = pq.read_table(path, columns=cols)
+    dom = [str(x) for x in t.column("domain").to_pylist()]
+    gen = [str(x) for x in t.column("generated_by").to_pylist()]
+
+    domains = sorted(set(dom))
+    gens = sorted(set(gen))
+    cell = Counter(zip(dom, gen))
+    w = max(8, max(len(g) for g in gens)) + 2
+    lab = max(10, max(len(d) for d in domains)) + 2
+
+    print(f"\n  {BOLD}class balance{RESET}{DIM}  domain × generated_by{RESET}")
+    print("    " + " " * lab + "".join(f"{g:>{w}}" for g in gens) + f"{'total':>{w}}")
+    for d in domains:
+        row = [cell[(d, g)] for g in gens]
+        print(f"    {d:<{lab}}" + "".join(f"{c:>{w}}" for c in row)
+              + f"{sum(row):>{w}}")
+    tot = [sum(cell[(d, g)] for d in domains) for g in gens]
+    print(f"    {'total':<{lab}}" + "".join(f"{c:>{w}}" for c in tot)
+          + f"{sum(tot):>{w}}")
+
+    dom_tot = {d: sum(cell[(d, g)] for g in gens) for d in domains}
+    info: dict = {"matrix": {d: {g: cell[(d, g)] for g in gens} for d in domains}}
+    # Balance only means something for a training corpus (>1 generated_by class);
+    # an eval-only holdout is one class and legitimately uneven across domains.
+    if len(gens) > 1:
+        if len(domains) > 1 and len(set(dom_tot.values())) > 1:
+            rep.warn(f"domain totals are uneven: {dom_tot}")
+        for d in domains:
+            counts = {g: cell[(d, g)] for g in gens}
+            if len(set(counts.values())) > 1:
+                rep.warn(f"{d}: generated_by classes uneven — {counts}")
+
+    if key:
+        per = Counter(str(x) for x in t.column(key).to_pylist())
+        sizes = Counter(per.values())
+        info["groups"] = {"count": len(per), "rows_per_group": dict(sizes)}
+        if len(sizes) > 1:
+            top = sizes.most_common(1)[0][0]
+            odd = sorted(g for g, c in per.items() if c != top)
+            rep.warn(f"{key}: rows per group vary — {dict(sizes)}; "
+                     f"{len(odd)} group(s) not {top}"
+                     + (f" (e.g. {odd[:5]})" if rep.verbose else ""))
+        else:
+            rep.ok(f"{key}: {next(iter(sizes))} rows/group, {len(per)} groups")
+    return info
+
+
 def check_file(path: Path, reference_cols: set[str] | None,
                args: argparse.Namespace) -> Report:
     rep = Report(args.verbose)
@@ -517,6 +590,10 @@ def check_file(path: Path, reference_cols: set[str] | None,
             col_info[field.name] = check_list(field.name, arr, n, rep)
         else:
             col_info[field.name] = check_scalar(field.name, arr, n, rep)
+
+    balance = check_class_balance(path, schema, rep)
+    if balance:
+        col_info["_class_balance"] = balance
 
     # verdict
     ne, nw = len(rep.errors), len(rep.warns)
