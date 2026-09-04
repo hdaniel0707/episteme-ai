@@ -87,6 +87,7 @@ from epai.science_data.rules import (
     OPTIONAL_NUMERIC_COLUMNS,
     SeenIndex,
     check_record,
+    normalise_abstract,
     normalise_record_oa,
     normalise_title,
 )
@@ -382,7 +383,11 @@ def fetch_domain(
         seen_total += 1
         row = normalise_record_oa(work, domain, query, strip_labels=strip_labels)
 
-        prior = seen.lookup(row["paper_id"], normalise_title(row["title"]))
+        prior = seen.lookup(
+            row["paper_id"],
+            normalise_title(row["title"]),
+            normalise_abstract(row["abstract"]),
+        )
         if prior is not None:
             # Already claimed — record the cross-domain match for auditing and
             # move on. Only worth noting when the domains actually differ.
@@ -405,7 +410,12 @@ def fetch_domain(
         if reason is None:
             # Claim only admissible records: a rejected paper should not block
             # a later, cleaner record of the same work from a different query.
-            seen.claim(row["paper_id"], normalise_title(row["title"]), len(records) - 1)
+            seen.claim(
+                row["paper_id"],
+                normalise_title(row["title"]),
+                len(records) - 1,
+                normalise_abstract(row["abstract"]),
+            )
             kept += 1
             bar.update(1)
             if kept >= quota:

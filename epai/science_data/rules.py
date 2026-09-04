@@ -13,7 +13,8 @@ Two consequences worth keeping in mind if you add a rule:
     on a record in isolation, and adding such a rule would silently break the
     exactness guarantee. Use absolute bounds instead (see ``FilterConfig``).
   - Deduplication is the one non-row-local check, and it is made row-local by
-    threading a caller-owned ``SeenIndex`` of already-claimed ids and titles.
+    threading a caller-owned ``SeenIndex`` of already-claimed ids, titles and
+    abstracts.
 
 The filter stage re-runs the identical rules over the raw parquet, so the two
 stages cannot drift: there is one implementation, imported twice.
@@ -163,6 +164,31 @@ _ENGLISH_STOPWORDS = frozenset(
     more than when using used such other into between both during each""".split()
 )
 
+# A scrape that grabbed the publisher's *page* instead of the abstract leaves
+# fragments a real abstract never contains: a journal's article-nav strip, a
+# database's chrome, a paywall. Matched anywhere, case-folded.
+_NON_ABSTRACT_SIGNATURES = (
+    "previous article next article", "close ebsco",
+    "research databases, ebooks", "discovery service contact",
+    "sign in librarians", "pdfbibtexsection", "this website uses cookies",
+    "accept all cookies", "skip to main content", "institutional login",
+    "purchase access", "add to cart", "javascript is disabled",
+    "enable javascript to",
+)
+# Book front matter — a table of contents or acknowledgements page in place of
+# an abstract. Only ever at the very start, so anchored there: a real abstract
+# may *mention* a preface, it does not *open* with the word.
+_FRONT_MATTER_OPENER = re.compile(
+    r"^[\s*.\-–]*(?:"
+    r"previous article|next article|"
+    r"table of contents|brief table of contents|contents\b|"
+    r"list of (?:figures|tables|contributors|illustrations|abbreviations|boxes|plates)|"
+    r"acknowledge?ments|notes on contributors|about the (?:author|editor|contributor)s?|"
+    r"preface\b|foreword\b"
+    r")",
+    re.IGNORECASE,
+)
+
 
 def is_missing(value) -> bool:
     """True for ``None`` and for NaN.
@@ -270,21 +296,44 @@ def clean_abstract(
     return collapsed, fixes
 
 
+def _fold_key(text: str) -> str:
+    """Accent-fold, lowercase, drop punctuation, collapse whitespace.
+
+    The shared reduction behind both dedupe keys below: two strings that differ
+    only in casing, accents, punctuation or spacing fold to the same key.
+    """
+    if not text:
+        return ""
+    folded = unicodedata.normalize("NFKD", text)
+    folded = "".join(c for c in folded if not unicodedata.combining(c))
+    folded = folded.lower()
+    folded = re.sub(r"[^a-z0-9\s]", " ", folded)
+    return _WS_RE.sub(" ", folded).strip()
+
+
 def normalise_title(title: str | None) -> str:
     """Fold a title to a dedupe key.
 
     Preprint and published versions of the same paper carry different
     ``paperId``s but near-identical titles, so id-only deduplication is not
-    enough. Accents are folded, punctuation dropped, whitespace collapsed.
+    enough.
     """
-    title = as_text(title)
-    if not title:
-        return ""
-    folded = unicodedata.normalize("NFKD", title)
-    folded = "".join(c for c in folded if not unicodedata.combining(c))
-    folded = folded.lower()
-    folded = re.sub(r"[^a-z0-9\s]", " ", folded)
-    return _WS_RE.sub(" ", folded).strip()
+    return _fold_key(as_text(title))
+
+
+def normalise_abstract(abstract: str | None) -> str:
+    """Fold a cleaned abstract to a dedupe key.
+
+    The same article deposited twice (preprint plus published, or two
+    aggregator feeds) can carry different ``paperId``s *and* titles divergent
+    enough to survive :func:`normalise_title` — an added subtitle, a reworded
+    translation — while the abstract text is identical bar casing and
+    punctuation. Keying on the folded abstract as well catches those; the text
+    is the training signal, so a collision here is exactly the leak that
+    matters. Expects the *cleaned* abstract, so publisher boilerplate and HTML
+    are already gone.
+    """
+    return _fold_key(as_text(abstract))
 
 
 def looks_english(text: str, cfg: FilterConfig) -> bool:
@@ -307,13 +356,50 @@ def looks_english(text: str, cfg: FilterConfig) -> bool:
     return len(words & _ENGLISH_STOPWORDS) >= cfg.min_english_stopwords
 
 
+def _function_word_ratio(text: str) -> float:
+    """Share of tokens that are common English function words.
+
+    Running prose sits near 0.15-0.4; a menu, a reference list or LaTeX source
+    is content-word (or symbol) heavy and falls well below that. Uses the same
+    word list as :func:`looks_english`, as a *ratio* rather than a distinct
+    count — a 300-word nav dump clears the distinct-word bar easily.
+    """
+    tokens = _WORD_RE.findall(text.lower())
+    if not tokens:
+        return 0.0
+    return sum(t in _ENGLISH_STOPWORDS for t in tokens) / len(tokens)
+
+
+def abstract_is_boilerplate(text: str) -> bool:
+    """True when *text* is not an abstract at all: a scrape of the publisher's
+    page (site chrome, an article-nav strip, a paywall), a book's table of
+    contents / front matter, or something that is not English prose (a
+    reference list, raw LaTeX, a wrong-language dump).
+
+    Every trigger is something a real abstract never contains, because
+    :func:`check_record` drops on this and a false positive silently loses a
+    genuine paper. The looser "reads oddly" cases are left to the corpus audit.
+    """
+    if not text:
+        return False
+    low = text.lower()
+    if any(s in low for s in _NON_ABSTRACT_SIGNATURES):
+        return True
+    if _FRONT_MATTER_OPENER.match(text.lstrip()):
+        return True
+    if len(text.split()) >= 50 and _function_word_ratio(text) < 0.11:
+        return True
+    return False
+
+
 # --------------------------------------------------------------------------
 # Deduplication state
 # --------------------------------------------------------------------------
 
 
 class SeenIndex:
-    """Caller-owned set of already-claimed paper ids and normalised titles.
+    """Caller-owned set of already-claimed paper ids, normalised titles and
+    normalised abstracts.
 
     Shared across *all* domains on purpose. A paper matching queries in two
     domains would otherwise land in two per-domain datasets, and the same text
@@ -321,25 +407,38 @@ class SeenIndex:
     domain wins (domains are processed in config order, so the outcome is
     deterministic) and the loser is recorded on the winning row's
     ``also_matched_domains`` for auditing.
+
+    The abstract key catches the case id and title both miss: the same article
+    deposited twice under different ``paperId``s and titles, but with identical
+    abstract text (see :func:`normalise_abstract`). ``norm_abstract`` is
+    optional so callers that have no cleaned abstract to hand can still use the
+    id/title keys alone.
     """
 
     def __init__(self) -> None:
         self.by_paper_id: dict[str, int] = {}
         self.by_title: dict[str, int] = {}
+        self.by_abstract: dict[str, int] = {}
 
-    def lookup(self, paper_id: str, norm_title: str) -> int | None:
+    def lookup(self, paper_id: str, norm_title: str,
+               norm_abstract: str = "") -> int | None:
         """Return the row index that already claimed this paper, if any."""
         if paper_id and paper_id in self.by_paper_id:
             return self.by_paper_id[paper_id]
         if norm_title and norm_title in self.by_title:
             return self.by_title[norm_title]
+        if norm_abstract and norm_abstract in self.by_abstract:
+            return self.by_abstract[norm_abstract]
         return None
 
-    def claim(self, paper_id: str, norm_title: str, row_index: int) -> None:
+    def claim(self, paper_id: str, norm_title: str, row_index: int,
+              norm_abstract: str = "") -> None:
         if paper_id:
             self.by_paper_id[paper_id] = row_index
         if norm_title:
             self.by_title[norm_title] = row_index
+        if norm_abstract:
+            self.by_abstract[norm_abstract] = row_index
 
 
 # --------------------------------------------------------------------------
@@ -361,6 +460,7 @@ DROP_REASONS = (
     "abstract_too_short",
     "abstract_too_long",
     "not_english",
+    "boilerplate_abstract",
     "duplicate",
 )
 
@@ -413,6 +513,11 @@ def check_record(record: dict, cfg: FilterConfig) -> str | None:
 
     if not looks_english(abstract, cfg):
         return "not_english"
+
+    # A scrape of the publisher's page, a book's contents page, a reference
+    # list — not null, not short, not foreign, but not an abstract either.
+    if abstract_is_boilerplate(abstract):
+        return "boilerplate_abstract"
 
     return None
 

@@ -79,6 +79,7 @@ from epai.science_data.rules import (
     OPTIONAL_NUMERIC_COLUMNS,
     SeenIndex,
     check_record,
+    normalise_abstract,
     normalise_title,
 )
 from epai.utils.parquet_utils import coerce_dtypes, load_parquet, save_parquet
@@ -165,10 +166,11 @@ def apply_rules(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
         reason = check_record(row, rules_cfg)
         if reason is None:
             norm = normalise_title(row.get("title"))
-            if seen.lookup(row.get("paper_id") or "", norm) is not None:
+            norm_abs = normalise_abstract(row.get("abstract"))
+            if seen.lookup(row.get("paper_id") or "", norm, norm_abs) is not None:
                 reason = "duplicate"
             else:
-                seen.claim(row.get("paper_id") or "", norm, i)
+                seen.claim(row.get("paper_id") or "", norm, i, norm_abs)
         reasons.append(reason or "")
 
     out = df.copy()

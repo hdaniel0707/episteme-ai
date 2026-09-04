@@ -43,6 +43,7 @@ from epai.science_data.rules import (
     FilterConfig,
     SeenIndex,
     check_record,
+    normalise_abstract,
     normalise_record_oa,
     normalise_title,
 )
@@ -143,17 +144,19 @@ def fetch_domain(
                 del live[q]
                 continue
             row = normalise_record_oa(work, slug, q, strip_labels=strip_labels)
-            if seen.lookup(row["paper_id"], normalise_title(row["title"])) is not None:
+            norm_title = normalise_title(row["title"])
+            norm_abs = normalise_abstract(row["abstract"])
+            if seen.lookup(row["paper_id"], norm_title, norm_abs) is not None:
                 continue
             if check_record(row, cfg) is not None:
                 continue
             if excl.hit(row["paper_id"], row["doi"], row["title"]) is not None:
                 # In a training corpus — a detector would have seen it. Claim it
                 # so a later query cannot re-offer the same paper.
-                seen.claim(row["paper_id"], normalise_title(row["title"]), -1)
+                seen.claim(row["paper_id"], norm_title, -1, norm_abs)
                 excluded[0] += 1
                 continue
-            seen.claim(row["paper_id"], normalise_title(row["title"]), len(records))
+            seen.claim(row["paper_id"], norm_title, len(records), norm_abs)
             records.append({
                 "oa_id": row["paper_id"],
                 "doi": row["doi"],

@@ -48,6 +48,11 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+try:
+    from epai.science_data.rules import abstract_is_boilerplate
+except Exception:  # keep the checker runnable outside the package
+    abstract_is_boilerplate = None
+
 RED = "\033[91m"
 YELLOW = "\033[93m"
 GREEN = "\033[92m"
@@ -134,9 +139,18 @@ def _is_vector(name: str) -> bool:
 
 
 class Report:
-    def __init__(self) -> None:
+    def __init__(self, verbose: bool = False) -> None:
         self.errors: list[str] = []
         self.warns: list[str] = []
+        self.verbose = verbose
+        self.ids: dict[str, list] = {}  # identifier columns, for --verbose row refs
+
+    def rowref(self, i: int) -> str:
+        """One offending row, tagged with whatever identifier columns exist."""
+        if not self.ids:
+            return f"row {i}"
+        extra = "  ".join(f"{c}={self.ids[c][i]}" for c in self.ids)
+        return f"row {i}  {extra}"
 
     def error(self, msg: str) -> None:
         self.errors.append(msg)
@@ -289,8 +303,8 @@ def _scan_text_errors(name: str, docs: list[str], rep: Report, info: dict) -> No
         emit(f"{name}: {len(hits)} document(s) — {label} — likely a failed call "
              f"saved as content: "
              + ", ".join(f"{s!r}x{c}" for s, c in by_sig.most_common(4)))
-        for i, sig in hits[:3]:
-            rep.detail(f"[{sig!r}] {docs[i][:140]!r}")
+        for i, sig in (hits if rep.verbose else hits[:3]):
+            rep.detail(f"[{sig!r}] {rep.rowref(i)}  {docs[i][:140]!r}")
     if not any(hits for _, hits, _ in tiers):
         rep.ok(f"{name}: {len(docs)} doc(s) scanned, no error / refusal signatures")
 
@@ -320,6 +334,32 @@ def _scan_text_errors(name: str, docs: list[str], rep: Report, info: dict) -> No
         rep.detail(f"{name}: {n_dup_rows} row(s) in {len(dups)} duplicate group(s), "
                    f"largest {top_c} — expected in a paired / multi-generator corpus")
 
+    if rep.verbose:
+        pos: dict[str, list[int]] = {}
+        for i, d in enumerate(docs):
+            if d in dups:
+                pos.setdefault(d, []).append(i)
+        rep.detail(f"{name}: {len(dups)} duplicate group(s) —")
+        for d, idxs in sorted(pos.items(), key=lambda kv: -len(kv[1])):
+            rep.detail(f"  x{len(idxs)}: " + "  |  ".join(rep.rowref(i) for i in idxs))
+            rep.detail(f"       {d[:200]!r}")
+
+
+def _scan_non_prose(name: str, docs: list[str], rep: Report, info: dict) -> None:
+    """Flag documents that are not an abstract at all — a scrape of the
+    publisher's page, a book's contents / front matter, a reference list. Same
+    test the fetch/filter stages now reject on (``rules.abstract_is_boilerplate``)."""
+    if abstract_is_boilerplate is None:
+        return
+    hits = [i for i, d in enumerate(docs) if abstract_is_boilerplate(d)]
+    info["non_prose_docs"] = len(hits)
+    if not hits:
+        return
+    rep.warn(f"{name}: {len(hits)} document(s) are a page scrape / contents "
+             f"page / reference list, not prose")
+    for i in (hits if rep.verbose else hits[:3]):
+        rep.detail(f"{rep.rowref(i)}  {' '.join(docs[i].split())[:140]!r}")
+
 
 def _check_string(name: str, non_null, n: int, n_distinct: int,
                   rep: Report, info: dict) -> None:
@@ -341,6 +381,7 @@ def _check_string(name: str, non_null, n: int, n_distinct: int,
         if truncated:
             rep.warn(f"{name}: {truncated} document(s) end in an ellipsis (truncated?)")
         _scan_text_errors(name, s, rep, info)
+        _scan_non_prose(name, s, rep, info)
         rep.detail(f"{name}: {info['words_med']} words median, "
                    f"chars [{info['len_min']}, {info['len_max']}], {n_distinct} distinct")
     elif name in TITLEISH:
@@ -421,6 +462,15 @@ def check_list(name: str, arr: pa.ChunkedArray, n: int, rep: Report) -> dict:
         n_identical = M.shape[0] - len({m.tobytes() for m in M})
         if n_identical:
             rep.warn(f"{name}: {n_identical} vector(s) byte-identical to another row")
+            if rep.verbose:
+                groups: dict[bytes, list[int]] = {}
+                for j, m in enumerate(M):
+                    groups.setdefault(m.tobytes(), []).append(j)
+                ref = rep.rowref if (nulls == 0 and empty == 0) else (
+                    lambda j: f"non-null #{j}")
+                for idxs in sorted((v for v in groups.values() if len(v) > 1),
+                                   key=lambda v: -len(v)):
+                    rep.detail("  identical: " + "  |  ".join(ref(j) for j in idxs))
     rep.detail(f"{name}: dim {dim}, norm [{_fmt(info['norm_min'])}, "
                f"{_fmt(info['norm_max'])}]")
     return info
@@ -428,7 +478,7 @@ def check_list(name: str, arr: pa.ChunkedArray, n: int, rep: Report) -> dict:
 
 def check_file(path: Path, reference_cols: set[str] | None,
                args: argparse.Namespace) -> Report:
-    rep = Report()
+    rep = Report(args.verbose)
     print(f"\n{BOLD}{'=' * 78}{RESET}\n{BOLD}{path}{RESET}\n{'=' * 78}")
 
     if not path.is_file():
@@ -452,6 +502,12 @@ def check_file(path: Path, reference_cols: set[str] | None,
             rep.error(f"missing {len(missing)} column(s) the reference has: {missing}")
         if extra:
             rep.warn(f"has {len(extra)} column(s) the reference does not: {extra}")
+
+    if args.verbose:
+        idcols = [c for c in ("uid", "id", "generated_by") if c in schema.names]
+        if idcols:
+            t = pq.read_table(path, columns=idcols)
+            rep.ids = {c: t.column(c).to_pylist() for c in idcols}
 
     col_info: dict[str, dict] = {}
     print(f"\n  {BOLD}columns{RESET}")
@@ -493,6 +549,10 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--fail-on", choices=("error", "warn", "never"), default="error",
                     help="which findings set exit code 1 (default: error)")
     ap.add_argument("--strict", action="store_true", help="alias for --fail-on warn")
+    ap.add_argument("-v", "--verbose", action="store_true",
+                    help="print the offending rows — duplicate documents, "
+                         "byte-identical vectors, error signatures — each tagged "
+                         "with its uid / id / generated_by")
     ap.add_argument("--json", type=Path, default=None,
                     help="write the machine-readable report here (last file wins)")
     return ap.parse_args()
