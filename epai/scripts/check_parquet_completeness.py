@@ -34,7 +34,7 @@ a time (~0.8 GB, ~20 s on a 320 MB / 6000-row corpus).
 
     .venv/bin/python epai/scripts/check_parquet_completeness.py data/parquet/denario_hc.parquet
 
-    .venv/bin/python epai/scripts/check_parquet_completeness.py data/parquet/science_v3e_multi_0811A.parquet
+    .venv/bin/python epai/scripts/check_parquet_completeness.py data/parquet/science_v3f_multi_0811A.parquet
 
     # does this file have every column science_v3 has?
     .venv/bin/python epai/scripts/check_parquet_completeness.py data/parquet/denario_hc.parquet \
