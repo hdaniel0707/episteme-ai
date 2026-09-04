@@ -414,15 +414,22 @@ def title_looks_english(title: str, cfg: FilterConfig) -> bool:
     accented = sum(1 for c in letters
                    if ord(c) < 0x250 and c.lower() != _fold(c).lower()) / len(letters)
 
-    # `van der Waals`, `de Rham`, `von Neumann` — a foreign particle next to a
-    # capitalised word (not the title's first) is part of a name, not prose.
+    # `van der Waals`, `de Rham`, `von Neumann` — a *lower-case* foreign particle
+    # next to a Title-Case word (a capital then lower-case, so not an all-caps
+    # word) is part of a name, not prose. The case test matters: an ALL-CAPS
+    # Indonesian title ("... DAN STRUKTUR SOSIAL DI ...") would otherwise have
+    # every "di" written off as a name.
     cased = re.findall(r"[^\W\d_]+", core, re.UNICODE)
     _NAME_PARTICLES = {"van", "der", "von", "de", "del", "da", "di", "la", "le"}
+
+    def _titlecase(w: str) -> bool:
+        return len(w) > 1 and w[:1].isupper() and not w.isupper()
+
     name_pos = {
         i for i, t in enumerate(cased)
-        if t.lower() in _NAME_PARTICLES
-        and ((i > 1 and cased[i - 1][:1].isupper())
-             or (i + 1 < len(cased) and cased[i + 1][:1].isupper()))
+        if t.islower() and t in _NAME_PARTICLES
+        and ((i > 0 and _titlecase(cased[i - 1]))
+             or (i + 1 < len(cased) and _titlecase(cased[i + 1])))
     }
     tokens = [t.lower() for i, t in enumerate(cased) if i not in name_pos
               and len(t) >= 2]
