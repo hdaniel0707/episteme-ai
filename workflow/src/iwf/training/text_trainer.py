@@ -272,6 +272,7 @@ class TextTransformerTrainer:
                     val_extra["correct"] = int(round(float(val_m_full.get("accuracy", 0)) * n_val))
                 best_metrics = {
                     **test_m,
+                    **{f"train_{k}": v for k, v in train_m.items() if isinstance(v, (int, float))},
                     "best_val_metric": float(best_score),
                     "best_epoch": epoch + 1,
                     "effective_batch": eff_batch,
@@ -298,6 +299,7 @@ class TextTransformerTrainer:
                 model, tokens, y, masks["val"], out_dim, micro, return_preds=True)
             best_metrics = {
                 **test_m,
+                **{f"train_{k}": v for k, v in train_m.items() if isinstance(v, (int, float))},
                 "train": {**train_m, "y_true": y_train_arr.tolist(), "y_pred": y_pred_train_arr.tolist()},
                 "val": {**val_m, "y_true": y_val_arr.tolist(), "y_pred": y_pred_val_arr.tolist()},
                 "test": {**test_m, "y_true": y_test_arr.tolist(), "y_pred": y_pred_arr.tolist()},

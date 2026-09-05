@@ -13,6 +13,7 @@ Every workflow run writes to an auto-incremented folder ``results/<wf_type>_N/``
 
 from __future__ import annotations
 
+import itertools
 import json
 import re
 from pathlib import Path
@@ -26,6 +27,7 @@ import numpy as np  # noqa: E402
 from workflow.src.iwf import paths  # noqa: E402
 from workflow.src.iwf.config import WORKFLOWS  # noqa: E402
 from workflow.src.iwf.evaluation import palette  # noqa: E402
+from workflow.src.iwf.evaluation.metrics import test_correctness  # noqa: E402
 
 PRIMARY_METRIC = {"reg": "spearman", "clf": "macro_f1"}
 
@@ -136,7 +138,15 @@ def aggregate(wf_type: str, wf_dir: Path, settings=None) -> dict | None:
         from workflow.src.iwf.evaluation.plots import plot_seed_spread_figures
         plot_seed_spread_figures(wf_type, task, seeds, agg,
                                  list(getattr(settings, "class_names", []) or []),
-                                 list(getattr(settings, "class_thresholds", []) or []))
+                                 list(getattr(settings, "class_thresholds", []) or []),
+                                 target_label=getattr(settings, "target_kind",
+                                                      "field_year_percentile"),
+                                 seed_outlier_enabled=bool(getattr(
+                                     settings, "seed_outlier_enabled", True)),
+                                 seed_outlier_min_n=int(getattr(
+                                     settings, "seed_outlier_min_n", 5)),
+                                 seed_outlier_gap_pct=float(getattr(
+                                     settings, "seed_outlier_gap_pct", 15.0)))
     except Exception as e:
         print(f"[results] {wf_type} aggregate figures skipped ({e})")
     return summary
@@ -159,6 +169,74 @@ def _md_table(headers: list[str], rows: list[tuple]) -> str:
     for row in rows:
         lines.append("| " + " | ".join(_fmt_value(c) for c in row) + " |")
     return "\n".join(lines)
+
+
+def _embedding_rows(s: dict, task: str) -> list[tuple]:
+    """Describe the embedding actually used, including WHICH SPECTER2 adapter produced it.
+
+    Without this a description could not distinguish specter2 (proximity adapter) from
+    specter2_clf (classification adapter) — they differ only in the adapter, and that is
+    exactly the variable these runs compare."""
+    try:
+        from workflow.src.iwf.embedding.embedders import (
+            SPECTER2_ADAPTER_PURPOSE, SPECTER2_VARIANTS, TASK_MATCHED_EMBEDDER,
+        )
+    except Exception:
+        return [("Embedder(s)", s.get("embedders"))]
+
+    name = s.get("embed_for_encoder") or (s.get("embedders") or [None])[0]
+    rows: list[tuple] = [("Embedder(s)", s.get("embedders")),
+                        ("Embedder feeding the encoder", name)]
+    if name in SPECTER2_VARIANTS:
+        base_model, adapter = SPECTER2_VARIANTS[name]
+        rows += [
+            ("Base weights", base_model),
+            ("SPECTER2 adapter", adapter or "(none — plain base weights)"),
+            ("Adapter is designed for", SPECTER2_ADAPTER_PURPOSE.get(name, "(unknown)")),
+        ]
+        want = TASK_MATCHED_EMBEDDER.get(task)
+        if want and want in SPECTER2_VARIANTS:
+            match = ("yes" if name == want else
+                    f"NO — this is a **{task}** run; the task-matched adapter is `{want}` "
+                    f"({SPECTER2_VARIANTS[want][1]})")
+            rows.append(("Adapter matches the task format?", match))
+    return rows
+
+
+def _embedder_dim(s: dict):
+    """Width of the embedding the head sees when no encoder compresses it."""
+    try:
+        from workflow.src.iwf.embedding.embedders import DIMS
+    except Exception:
+        return "(unknown)"
+    name = s.get("embed_for_encoder") or (s.get("embedders") or [None])[0]
+    return DIMS.get(name, "(unknown)")
+
+
+def _split_rows(s: dict) -> list[tuple]:
+    """Report the split that was ACTUALLY applied. When the fixed-holdout knobs are set they
+    replace split_ratios entirely, so printing the ratios alone (as this file used to)
+    described a split the run never performed."""
+    val_n, test_n = s.get("holdout_val_n") or 0, s.get("holdout_test_n") or 0
+    rows: list[tuple] = [("Max papers (pool cap)", s.get("max_papers") or "(no cap)")]
+    if val_n and test_n:
+        rows += [
+            ("Split mode", "fixed holdout (split_ratios ignored)"),
+            ("Train rows (train_n)", s.get("train_n") or "(all remaining pool rows)"),
+            ("Validation rows", val_n),
+            ("Test rows", test_n),
+            ("Holdout seed (fixes WHICH rows are val/test)", s.get("holdout_seed")),
+            ("Train-selection seed (nested subset order)", s.get("train_select_seed")),
+        ]
+    else:
+        rows += [
+            ("Split mode", "ratio split"),
+            ("Split ratios (train/val/test)", s.get("split_ratios")),
+            ("Split seed", s.get("split_seed")),
+        ]
+    rows.append(("Year range", f"{s.get('year_from') or 'any'} .. {s.get('year_to') or 'any'}"))
+    rows.append(("Training sources", s.get("training_sources")))
+    return rows
 
 
 def _actual_network_shape(wf_dir: Path) -> list[int] | None:
@@ -223,18 +301,45 @@ def write_model_description(wf_type: str, task: str, settings, wf_dir: Path, agg
     mean_std = (f"{mean:.4g} ± {std:.4g}"
                 if isinstance(mean, (int, float)) and isinstance(std, (int, float)) else "n/a")
 
+    _n = itertools.count(1)
+
+    def sec(title: str) -> str:
+        """Number sections as they are emitted, so skipped sections leave no gap."""
+        return f"## {next(_n)}. {title}"
+
+    # headline identity of the run: model + embedding + how much data, in one line
+    emb_name = s.get("embed_for_encoder") or (s.get("embedders") or [None])[0]
+    arch = s.get("text_transformer_arch") if is_tfm else s.get("model_arch")
+    trained_on = (f"{s.get('train_n')} train / {s.get('holdout_val_n')} val / "
+                 f"{s.get('holdout_test_n')} test rows"
+                 if (s.get("holdout_val_n") and s.get("holdout_test_n"))
+                 else f"{s.get('max_papers') or 'all'} papers, ratio split")
+
     lines = [
-        f"# Model Description — {wf_type}",
+        f"# {wf_type} — `{arch}` on `{emb_name}`",
+        "",
+        f"> **{primary} = {mean_std}** (best {_fmt_value(best)}) over {n_seeds} seed(s) · "
+        f"target `{s.get('target_kind')}` · {trained_on}",
         "",
         f"Auto-generated from this run's `config.yaml` parameters and "
         f"`aggregate/metrics_summary.json` — do not hand-edit, it is regenerated every run. "
-        f"This is a **{task.upper()}** workflow ({what}) trained on dataset "
-        f"`{s.get('dataset_id')}` against target `{s.get('target_kind')}`. Primary metric "
-        f"**{primary}**: best={_fmt_value(best)}, mean±std={mean_std}, across {n_seeds} seed(s). "
+        f"This is a **{task.upper()}** workflow ({what}) on dataset `{s.get('dataset_id')}`. "
         f"See `../../mathematical_documentation.md` for what every metric/target means.",
         "",
-        "## 1. Run Summary",
+        "**At a glance**",
+        "",
     ]
+    glance = [
+        ("Model", f"`{arch}`" + (f" {s.get('hidden')}" if s.get("hidden") and not is_tfm
+                                 and not is_judge else "")),
+        ("Embedding", f"`{emb_name}`"),
+        ("Trained on", trained_on),
+        ("Result", f"{primary} = {mean_std}"),
+    ]
+    lines.append(_md_table(["", ""], glance))
+    lines.append("")
+
+    lines.append(sec("Run Summary"))
     rows = [
         ("Workflow type", wf_type),
         ("Task", task),
@@ -259,24 +364,21 @@ def write_model_description(wf_type: str, task: str, settings, wf_dir: Path, agg
     lines.append(_md_table(["Parameter", "Value"], rows))
     lines.append("")
 
-    lines.append("## 2. Model")
+    lines.append(sec("Model"))
     if is_judge:
         from workflow.src.iwf import config as _config
+        from workflow.src.main_train_judge import RETRIEVAL_TOP_K
         rows = [
-            ("Kind", "RAG store + evolving notes, batched + error-gated learning, "
-                    "VAL-based early stopping (no trained network)"),
+            ("Kind", "RAG store built first from TRAIN's true values, then ONE LLM call "
+                    "per record (train/val/test alike), fixed rubric (no notes rewriting, "
+                    "no trained network)"),
             ("Retrieval embedding", s.get("embed_for_encoder") or "specter2"),
-            ("Batch size cap (papers/rewrite call)", s.get("judge_batch_max_papers")),
-            ("VAL-checkpoint interval (% of TRAIN)", s.get("judge_checkpoint_interval_pct")),
-            ("VAL eval start / max %", f"{s.get('judge_val_eval_start_pct')} / "
-                                       f"{s.get('judge_val_eval_max_pct')}"),
-            ("Early-stop margin", s.get("judge_early_stop_margin")),
-            ("Error-gate threshold", s.get("judge_error_gate_threshold")),
-            ("Good-paper replay-sample fraction", s.get("judge_good_sample_fraction")),
+            ("Max TRAIN papers used to build the RAG", s.get("judge_max_train_papers") or
+             "(all of TRAIN)"),
+            ("Retrieved precedents per call (top-k)", RETRIEVAL_TOP_K),
+            ("Exact-abstract-match precedents excluded", True),
             ("RAG token budget (.env.workflow)",
              _config.get_int("JUDGE_RAG_TOKEN_BUDGET", 3000)),
-            ("Notes token budget (.env.workflow)",
-             _config.get_int("JUDGE_NOTE_TOKENS", 500)),
             ("RAG chunk token budget (.env.workflow)",
              _config.get_int("JUDGE_RAG_CHUNK_TOKENS", 200)),
             ("LLM context window (.env.workflow, 0=unknown)",
@@ -312,37 +414,58 @@ def write_model_description(wf_type: str, task: str, settings, wf_dir: Path, agg
     if is_judge:
         lines.append(
             "Each `seed_<i>/model/` holds the artifact this run actually produced: "
-            "`notes.md` (the general, non-paper-specific principles the LLM rewrote after "
-            "every TRAIN example), `rag_chunks.parquet` (every TRAIN abstract + its true "
-            "impact, for audit), and `rag_index.joblib` (the same chunks as embeddings, for "
-            "fast retrieval during benchmark scoring). VAL/TEST predictions use the "
-            "end-of-TRAIN notes + RAG store only — no label ever leaks forward.")
+            "`notes.md` (the fixed judging rubric, identical for every paper in the run), "
+            "`rag_chunks.parquet` (every RAG-selected TRAIN abstract + its true impact, for "
+            "audit), and `rag_index.joblib` (the same chunks as embeddings, for fast "
+            "retrieval). The RAG store is built FIRST, deterministically, from TRAIN's true "
+            "values (no LLM call). TRAIN/VAL/TEST predictions are then each exactly one blind "
+            "LLM call against that one complete store — a TRAIN paper's own exact-abstract "
+            "match is excluded from its own retrieved precedents, so TRAIN/VAL/TEST are judged "
+            "on equal footing. No label ever leaks forward, and nothing is rewritten or "
+            "fine-tuned during the run.")
         lines.append("")
 
     if not is_tfm and not is_judge:
-        lines.append("## 3. Encoder / Dimensionality Reduction")
-        rows = [
-            ("Embedder(s)", s.get("embedders")),
-            ("Embedder feeding the encoder", s.get("embed_for_encoder")),
-            ("Encoder kind", s.get("encoder_kind")),
-            ("Candidate latent-dim grid", s.get("dim_grid")),
-            ("Reconstruction R² target", s.get("dim_recon_target")),
-            ("Dim-selection tolerance", s.get("dim_tolerance")),
-            ("Encoder max epochs", s.get("encoder_max_epochs")),
-            ("Encoder patience", s.get("encoder_patience")),
-        ]
-        enc_meta = _encoder_meta(s.get("dataset_id"))
-        if enc_meta:
+        lines.append(sec("Embedding / Encoder"))
+        rows = [*_embedding_rows(s, task), ("Encoder kind", s.get("encoder_kind"))]
+        if (s.get("encoder_kind") or "").lower() != "identity":
+            # the encoder search knobs only mean something when an encoder is actually trained
+            rows += [
+                ("Candidate latent-dim grid", s.get("dim_grid")),
+                ("Reconstruction R² target", s.get("dim_recon_target")),
+                ("Dim-selection tolerance", s.get("dim_tolerance")),
+                ("Encoder max epochs", s.get("encoder_max_epochs")),
+                ("Encoder patience", s.get("encoder_patience")),
+            ]
+        # models/<dataset_id>_encoder.json is keyed by DATASET only, so it belongs to
+        # whichever queue entry last trained an encoder on this dataset. Report it only when
+        # it actually describes THIS run — otherwise an identity run silently inherits the
+        # autoencoder entry's k*/reconstruction numbers and misreports its own input width.
+        enc_meta = _encoder_meta(s.get("dataset_id")) or {}
+        kind = (s.get("encoder_kind") or "").lower()
+        describes_this_run = (
+            (enc_meta.get("kind") or "").lower() == kind
+            and enc_meta.get("embed_for_encoder") == s.get("embed_for_encoder")
+        )
+        if kind == "identity":
+            rows.append(("Dimensionality reduction",
+                        "none — the head trains on the full embedding"))
+            rows.append(("Vector width fed to the head", _embedder_dim(s)))
+        elif describes_this_run:
             rows.append(("Selected latent dim k*", enc_meta.get("k_star")))
             rows.append(("Input dim (pre-encoder)", enc_meta.get("input_dim")))
             recon = enc_meta.get("reconstruction") or {}
             if recon:
                 rows.append(("Reconstruction MSE", recon.get("reconstruction_mse")))
                 rows.append(("Reconstruction R²", recon.get("reconstruction_r2")))
+        else:
+            rows.append(("Encoder metadata",
+                        "(not recorded for this run — the cached encoder on this dataset "
+                        "was trained by a different queue entry)"))
         lines.append(_md_table(["Parameter", "Value"], rows))
         lines.append("")
 
-    lines.append("## 4. Training Hyperparameters")
+    lines.append(sec("Training Hyperparameters"))
     if is_judge:
         from workflow.src.iwf import config as _config
         rows = [
@@ -379,18 +502,12 @@ def write_model_description(wf_type: str, task: str, settings, wf_dir: Path, agg
     lines.append(_md_table(["Parameter", "Value"], rows))
     lines.append("")
 
-    lines.append("## 5. Data / Split Configuration")
-    rows = [
-        ("Split seed", s.get("split_seed")),
-        ("Split ratios (train/val/test)", s.get("split_ratios")),
-        ("Year range", f"{s.get('year_from') or 'any'} .. {s.get('year_to') or 'any'}"),
-        ("Max papers (cap)", s.get("max_papers") or "(no cap)"),
-    ]
-    lines.append(_md_table(["Parameter", "Value"], rows))
+    lines.append(sec("Data / Split Configuration"))
+    lines.append(_md_table(["Parameter", "Value"], _split_rows(s)))
     lines.append("")
 
     if is_meta:
-        lines.append("## 6. Feature Configuration")
+        lines.append(sec("Feature Configuration"))
         rows = [
             ("Use metadata features", s.get("use_metadata")),
             ("Metadata fields", s.get("metadata_fields")),
@@ -402,10 +519,13 @@ def write_model_description(wf_type: str, task: str, settings, wf_dir: Path, agg
         lines.append(_md_table(["Parameter", "Value"], rows))
         lines.append("")
 
-    lines.append("## 7. Full Parameter Snapshot (reproducibility)")
-    lines.append("Every configuration field resolved for this run, least-curated but complete:")
+    lines.append(sec("Full Parameter Snapshot (reproducibility)"))
+    lines.append("<details><summary>Every configuration field resolved for this run — "
+                "least-curated but complete (click to expand)</summary>")
     lines.append("")
     lines.append(_md_table(["Field", "Value"], sorted(s.items(), key=lambda kv: kv[0])))
+    lines.append("")
+    lines.append("</details>")
     lines.append("")
 
     out_path = agg / f"description_{wf_type}.md"
@@ -491,6 +611,14 @@ def cross_workflow_comparison() -> dict:
             _plot_cross_workflow(comparison, summary_dir)
         except Exception as e:
             print(f"[results] cross-workflow figure skipped ({e})")
+        try:
+            _plot_algorithm_comparison(comparison, summary_dir)
+        except Exception as e:
+            print(f"[results] algorithm comparison figure skipped ({e})")
+        try:
+            _plot_correctness_comparisons(summary_dir)
+        except Exception as e:
+            print(f"[results] correctness comparison figures skipped ({e})")
     return comparison
 
 
@@ -565,6 +693,63 @@ def _panel(ax, wf_names, comparison, metric, title):
     ax.set_title(title)
 
 
+def _panel_train_vs_test(ax, wf_names, comparison, metric, title):
+    """Grouped horizontal bars: train vs test mean+-std of one metric per workflow."""
+    labels, train_m, train_s, test_m, test_s = [], [], [], [], []
+    for wf in wf_names:
+        c = comparison.get(wf)
+        if not c:
+            continue
+        te = c.get("metrics", {}).get(metric)
+        if not te:
+            continue
+        tr = c.get("metrics", {}).get(f"train_{metric}")
+        labels.append(wf)
+        train_m.append(tr["mean"] if tr else np.nan)
+        train_s.append(tr["std"] if tr else 0.0)
+        test_m.append(te["mean"])
+        test_s.append(te["std"])
+    if not labels:
+        ax.text(0.5, 0.5, "(no runs)", ha="center", va="center", transform=ax.transAxes,
+                fontsize=10, color=palette.GRAY)
+        ax.set_title(title)
+        return
+    y = np.arange(len(labels))
+    h = 0.35
+    ax.barh(y - h / 2, train_m, xerr=train_s, height=h, color=palette.DUSK_BLUE,
+           alpha=0.85, label="train", capsize=3)
+    ax.barh(y + h / 2, test_m, xerr=test_s, height=h, color=palette.OLIVE,
+           alpha=0.85, label="test", capsize=3)
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels, fontsize=max(6, 10 - len(labels) // 4))
+    ax.set_ylim(-0.6, len(labels) - 0.4)
+    finite = [v for v in (*train_m, *test_m) if np.isfinite(v)]
+    hi = max(finite) if finite else 1.0
+    ax.set_xlim(min(0.0, *finite, 0.0) if finite else 0.0, min(1.05, hi * 1.18 + 0.05))
+    ax.set_xlabel(metric)
+    ax.set_title(title)
+    ax.legend(fontsize=8)
+
+
+def _plot_algorithm_comparison(comparison: dict, summary_dir: Path) -> None:
+    """Train-vs-test figure across every trained algorithm (all model_arch/workflow types),
+    mean+-std across seeds — the 'all algorithms, train+test' comparison view."""
+    reg_wfs = sorted(k for k, v in comparison.items() if v.get("task") == "reg")
+    clf_wfs = sorted(k for k, v in comparison.items() if v.get("task") == "clf")
+    n_max = max(len(reg_wfs), len(clf_wfs), 1)
+    height = min(11.0, max(2.6, n_max * 0.6 + 1.6))
+    palette.apply_style()
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, height))
+    _panel_train_vs_test(ax1, reg_wfs, comparison, "spearman", "Regression (Spearman rho)")
+    _panel_train_vs_test(ax2, clf_wfs, comparison, "macro_f1", "Classification (macro-F1)")
+    fig.suptitle("All-algorithm comparison — train vs test (mean +- std across seeds)")
+    fig.tight_layout()
+    fig.savefig(summary_dir / "algorithm_comparison_train_test.png", dpi=120)
+    plt.close(fig)
+    print(f"[results] algorithm comparison -> "
+          f"{summary_dir / 'algorithm_comparison_train_test.png'}")
+
+
 def _plot_cross_workflow(comparison: dict, summary_dir: Path | None = None) -> None:
     if summary_dir is None:
         summary_dir = paths.RESULTS_DIR / "summary"
@@ -580,3 +765,194 @@ def _plot_cross_workflow(comparison: dict, summary_dir: Path | None = None) -> N
     fig.tight_layout()
     fig.savefig(summary_dir / "cross_workflow_comparison.png", dpi=120)
     plt.close(fig)
+
+
+# =============================================================== unified correctness bars
+# One "correctness" number per run, comparable across EVERY algorithm regardless of task:
+# classifiers report it directly (test accuracy); regressors/LLM-judge-reg report the
+# fraction of TEST predictions that land in the correct impact class once binned by that
+# SAME run's own resolved class_thresholds (see targets.resolve_settings_class_thresholds) -
+# so a regression model is only "100% correct" here if its predictions truly rank papers on
+# the right side of that run's actual, data-derived cut line, not by coincidence of scale.
+
+def _collect_correctness(results_dir: Path) -> dict[str, dict]:
+    """Per-run folder: mean+-std TEST and TRAIN correctness across ACCEPTED seeds (see
+    metrics.accepted_seeds - a catastrophically-failed seed is dropped the same way here as
+    in the per-run seed-spread plots), plus enough of run_config.json to categorize it
+    (task/workflow_type/embedder/encoder)."""
+    from workflow.src.iwf.evaluation.metrics import accepted_seeds
+    out: dict[str, dict] = {}
+    if not results_dir.is_dir():
+        return out
+    for d in sorted(results_dir.iterdir()):
+        if not d.is_dir():
+            continue
+        rc_path = d / "run_config.json"
+        if not rc_path.is_file():
+            continue
+        try:
+            rc = json.loads(rc_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        wf_type = str(rc.get("workflow_type") or "")
+        task = WORKFLOWS.get(wf_type, {}).get("task")
+        if task is None:
+            continue
+        thresholds = rc.get("class_thresholds") or []
+        results = []
+        for sd in sorted(d.glob("seed_*")):
+            rp = sd / "result.json"
+            if not rp.is_file():
+                continue
+            try:
+                results.append(json.loads(rp.read_text(encoding="utf-8")))
+            except (json.JSONDecodeError, OSError):
+                continue
+        if not results:
+            continue
+        accepted, excluded = accepted_seeds(
+            results, task, thresholds,
+            enabled=bool(rc.get("seed_outlier_enabled", True)),
+            min_n=int(rc.get("seed_outlier_min_n", 5)),
+            gap_pct=float(rc.get("seed_outlier_gap_pct", 15.0)))
+        if not accepted:
+            accepted, excluded = results, []
+        test_vals = [v for v in (test_correctness(r, task, thresholds) for r in accepted)
+                    if v is not None]
+        train_vals = [v for v in (test_correctness(r, task, thresholds, split="train")
+                                  for r in accepted) if v is not None]
+        if not test_vals:
+            continue
+        out[d.name] = {
+            "correctness_mean": float(np.mean(test_vals)),
+            "correctness_std": float(np.std(test_vals)),
+            "train_correctness_mean": float(np.mean(train_vals)) if train_vals else None,
+            "train_correctness_std": float(np.std(train_vals)) if train_vals else None,
+            "n_seeds": len(test_vals), "n_excluded": len(excluded),
+            "n_classes": len(thresholds) + 1, "task": task, "wf_type": wf_type,
+            "run_config": rc,
+        }
+    return out
+
+
+def _algo_category(wf_type: str, task: str) -> str:
+    """One of classifier/regressor/text_transformer/llm_judge for a workflow type."""
+    if wf_type.startswith("llm_"):
+        return "llm_judge"
+    if wf_type.startswith("tfm_"):
+        return "text_transformer"
+    return "classifier" if task == "clf" else "regressor"
+
+
+_ALGO_CATEGORY_COLORS = {
+    "classifier": palette.OLIVE, "regressor": palette.SAGE,
+    "text_transformer": palette.DUSK_BLUE, "llm_judge": palette.GOLD,
+}
+
+
+def _embedder_category(wf_type: str, rc: dict) -> str:
+    """Embedder/encoding group for a run — LLM judge and text-transformers have no fixed
+    embedder, so each gets its own category; embedding workflows group by
+    embedder + (identity | encoder_kind + latent size)."""
+    if wf_type.startswith("llm_"):
+        return "llm_judge (no embedder)"
+    if wf_type.startswith("tfm_"):
+        arch = rc.get("text_transformer_arch") or "text_transformer"
+        return f"text_transformer ({arch})"
+    embedders = rc.get("embedders") or []
+    embedder = rc.get("embed_for_encoder") or (embedders[0] if embedders else "specter2")
+    encoder_kind = str(rc.get("encoder_kind") or "identity").lower()
+    if encoder_kind == "identity":
+        return str(embedder)
+    dim_grid = rc.get("dim_grid") or []
+    size = dim_grid[0] if len(dim_grid) == 1 else "auto"
+    return f"{embedder}+{encoder_kind}{size}"
+
+
+_EMBEDDER_PALETTE = [palette.OLIVE, palette.SAGE, palette.GOLD, palette.DUSK_BLUE,
+                     palette.TERRACOTTA, palette.MAUVE, palette.BLUE_MID, palette.INK,
+                     "#93A9C4", palette.GRAY]
+
+
+def _embedder_color_map(categories: list[str]) -> dict[str, str]:
+    """Stable color per embedder/encoding category, LLM judge always first (fixed color)."""
+    ordered = sorted(set(categories), key=lambda c: (not c.startswith("llm_judge"), c))
+    return {c: _EMBEDDER_PALETTE[i % len(_EMBEDDER_PALETTE)] for i, c in enumerate(ordered)}
+
+
+def _plot_correctness_bars(entries: dict[str, dict], categories: dict[str, str],
+                           color_map: dict[str, str], title: str, out_path: Path) -> None:
+    """Horizontal bars: TRAIN (faded) + TEST (solid) correctness (%) per run, mean+-std
+    across ACCEPTED seeds (see metrics.accepted_seeds), colored by ``categories``.
+    Classifiers/regressors/text-transformers/LLM-judge all land on the same 0-100% scale,
+    so every trained algorithm is directly comparable in one figure."""
+    if not entries:
+        return
+    names = sorted(entries, key=lambda k: entries[k]["correctness_mean"])
+    test_m = [entries[k]["correctness_mean"] * 100 for k in names]
+    test_s = [entries[k]["correctness_std"] * 100 for k in names]
+    train_m = [(entries[k]["train_correctness_mean"] or 0.0) * 100 for k in names]
+    train_s = [(entries[k]["train_correctness_std"] or 0.0) * 100 for k in names]
+    colors = [color_map.get(categories[k], palette.GRAY) for k in names]
+    n_classes = next((entries[k]["n_classes"] for k in names), 2) or 2
+
+    palette.apply_style()
+    fig, ax = plt.subplots(figsize=(9.5, max(3.0, 0.6 * len(names) + 1.6)))
+    y = np.arange(len(names))
+    h = 0.35
+    ax.barh(y - h / 2, train_m, xerr=train_s, height=h, color=colors, alpha=0.4,
+           edgecolor=palette.INK, linewidth=0.5, capsize=3)
+    ax.barh(y + h / 2, test_m, xerr=test_s, height=h, color=colors, alpha=0.9,
+           edgecolor=palette.INK, linewidth=0.5, capsize=3)
+    for yi, (m, sd) in enumerate(zip(test_m, test_s)):
+        ax.text(m + sd + 1.0, yi + h / 2, f"{m:.0f}%", va="center", ha="left", fontsize=8,
+                color=palette.INK)
+    ax.set_yticks(y)
+    ax.set_yticklabels(names, fontsize=9)
+    ax.set_ylim(-0.6, len(names) - 0.4)
+    ax.set_xlim(0, 108)
+    chance = 100.0 / max(2, n_classes)
+    ax.axvline(chance, color=palette.GRAY, ls="--", lw=1, alpha=0.6,
+              label=f"chance ({n_classes} classes)")
+    ax.set_xlabel("correctness (%) — solid = test, faded = train; accuracy for classifiers, "
+                 "regression predictions binned by this run's own class cut-lines otherwise")
+    ax.set_title(title)
+    ax.grid(True, axis="x", alpha=0.3)
+
+    from matplotlib.patches import Patch
+    present = sorted({categories[k] for k in names})
+    handles = [Patch(facecolor=color_map.get(c, palette.GRAY), edgecolor=palette.INK,
+                     linewidth=0.5, label=c) for c in present]
+    handles.append(Patch(facecolor=palette.GRAY, alpha=0.9, edgecolor=palette.INK,
+                         linewidth=0.5, label="test"))
+    handles.append(Patch(facecolor=palette.GRAY, alpha=0.4, edgecolor=palette.INK,
+                         linewidth=0.5, label="train"))
+    handles.append(plt.Line2D([0], [0], color=palette.GRAY, ls="--", lw=1,
+                              label=f"chance ({n_classes} classes)"))
+    ax.legend(handles=handles, fontsize=8, loc="lower right")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=130)
+    plt.close(fig)
+    print(f"[results] correctness comparison -> {out_path}")
+
+
+def _plot_correctness_comparisons(summary_dir: Path) -> None:
+    """Both correctness-bar figures (by algorithm category, by embedder/encoding), same
+    underlying values, different coloring - see _plot_correctness_bars."""
+    entries = _collect_correctness(paths.RESULTS_DIR)
+    if not entries:
+        return
+
+    algo_cats = {k: _algo_category(v["wf_type"], v["task"]) for k, v in entries.items()}
+    _plot_correctness_bars(
+        entries, algo_cats, _ALGO_CATEGORY_COLORS,
+        "All-algorithm correctness — by category (classifier / regressor / "
+        "text-transformer / LLM judge)",
+        summary_dir / "correctness_by_category.png")
+
+    emb_cats = {k: _embedder_category(v["wf_type"], v["run_config"]) for k, v in entries.items()}
+    emb_colors = _embedder_color_map(list(emb_cats.values()))
+    _plot_correctness_bars(
+        entries, emb_cats, emb_colors,
+        "All-algorithm correctness — by embedder / encoding",
+        summary_dir / "correctness_by_embedder.png")

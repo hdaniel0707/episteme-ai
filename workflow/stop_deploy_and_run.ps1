@@ -15,28 +15,28 @@ $LogDir = Join-Path $ScriptDir "logs"
 $PidFile = Join-Path $LogDir "pipeline.pid"
 
 function Stop-ProcessTree {
-    param([int]$Pid)
+    param([int]$ProcId)
 
     $children = Get-CimInstance Win32_Process |
-        Where-Object { $_.ParentProcessId -eq $Pid } |
+        Where-Object { $_.ParentProcessId -eq $ProcId } |
         Select-Object -ExpandProperty ProcessId
     foreach ($child in $children) {
-        Stop-ProcessTree -Pid $child
+        Stop-ProcessTree -ProcId $child
     }
-    try { Stop-Process -Id $Pid -Force -ErrorAction Stop } catch {}
+    try { Stop-Process -Id $ProcId -Force -ErrorAction Stop } catch {}
 }
 
 if (Test-Path $PidFile) {
     $pidText = (Get-Content $PidFile -ErrorAction SilentlyContinue | Select-Object -First 1).Trim()
     if ($pidText -match '^[0-9]+$') {
-        Stop-ProcessTree -Pid ([int]$pidText)
+        Stop-ProcessTree -ProcId ([int]$pidText)
         Write-Host "[stop] killed pipeline pid $pidText"
     }
     Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
 }
 
 Get-CimInstance Win32_Process |
-    Where-Object { $_.CommandLine -and ($_.CommandLine -match 'workflow\\.(deploy_and_run|run_all_workflows|run_pipeline)|workflow\\.src\\.(main_extend_db|main_analyse_dataset)') } |
+    Where-Object { $_.CommandLine -and ($_.CommandLine -match 'workflow[\\./](deploy_and_run|run_all_workflows|run_pipeline)|workflow[\\./]src[\\./](main_extend_db|main_analyse_dataset|main_train)') } |
     ForEach-Object {
         try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop } catch {}
     }
@@ -46,8 +46,8 @@ if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
         ForEach-Object { $_.Trim() } |
         Where-Object { $_ -match '^[0-9]+$' } |
         Sort-Object -Unique
-    foreach ($pid in $gpuPids) {
-        try { Stop-Process -Id ([int]$pid) -Force -ErrorAction Stop } catch {}
+    foreach ($gpuPid in $gpuPids) {
+        try { Stop-Process -Id ([int]$gpuPid) -Force -ErrorAction Stop } catch {}
     }
 }
 

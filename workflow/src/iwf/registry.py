@@ -83,20 +83,9 @@ def get_module(slot: str, name: str) -> Any:
     return impls[key]
 
 
-def has_module(slot: str, name: str) -> bool:
-    _ensure_loaded(slot)
-    return (name or "").lower() in _MODULES.get(slot, {})
-
-
 def available_modules(slot: str) -> list[str]:
     _ensure_loaded(slot)
     return sorted(_MODULES.get(slot, {}))
-
-
-def all_modules() -> dict[str, list[str]]:
-    for s in SLOTS:
-        _ensure_loaded(s)
-    return {s: sorted(_MODULES.get(s, {})) for s in SLOTS}
 
 
 # --------------------------------------------------------------------------- builtin slots
@@ -129,8 +118,8 @@ def _register_builtin_slots() -> None:
             return add_embedding(df, name)
         return add
 
-    for name in ("specter2", "specter2_base", "specter2_adhoc",
-                 "scibert", "scincl", "e5", "openai"):
+    for name in ("specter2", "specter2_base", "specter2_clf", "specter2_reg",
+                 "specter2_adhoc", "scibert", "scincl", "e5", "openai"):
         _MODULES.setdefault("embedder", {}).setdefault(name, _embedder_factory(name))
 
     def _predictor_factory(arch: str):

@@ -153,6 +153,98 @@ def use_llm_abstracts_for_training() -> bool:
     return get_bool("USE_LLM_ABSTRACTS_FOR_TRAINING", False)
 
 
+# Raw `source` labels grouped into acquisition channels. The DB stores variants
+# ("s2_original_0512_A", "uefiscdi_journal"), so every lookup goes through this one table.
+SOURCE_ALIASES = {
+    "openalex": ("openalex", "uefiscdi_journal"),
+    "s2": ("s2",),
+    "crossref": ("crossref",),
+    "arxiv": ("arxiv",),
+    "pdf": ("pdf", "uefiscdi_pdf", "jcr"),
+    "llm": ("llm",),
+}
+
+
+def canonical_source(value) -> str:
+    """Acquisition channel of a raw source label ('unknown' when empty)."""
+    s = str(value or "").strip().lower()
+    if not s or s in ("none", "null"):
+        return "unknown"
+    for channel, prefixes in SOURCE_ALIASES.items():
+        if any(s.startswith(p) or p in s for p in prefixes):
+            return channel
+    return "other"
+
+
+def training_sources() -> list[str]:
+    """Channels allowed into training (config.yaml, empty/'any' = every source)."""
+    try:
+        cfg = load_config_yaml()
+    except Exception:
+        cfg = {}
+    raw = cfg.get("training_sources")
+    if raw is None or raw == "":
+        return []
+    if isinstance(raw, str):
+        raw = [raw]
+    wanted = [str(v).strip().lower() for v in raw if str(v).strip()]
+    if not wanted or "any" in wanted or "all" in wanted:
+        return []
+    unknown = [w for w in wanted if w not in SOURCE_ALIASES]
+    if unknown:
+        raise ValueError(f"training_sources has unknown channel(s) {unknown}; "
+                         f"valid: {sorted(SOURCE_ALIASES)} or 'any'.")
+    return wanted
+
+
+def analyse_sources() -> list[str]:
+    """Channels included in the dataset-analysis plots/CSVs (.env.workflow ANALYSE_SOURCES,
+    empty/'any' = every source). Independent of training_sources (config.yaml) — this only
+    filters what main_analyse_dataset describes, never what a run trains on."""
+    raw = _get("ANALYSE_SOURCES")
+    if not raw:
+        return []
+    wanted = [v.strip().lower() for v in raw.split(",") if v.strip()]
+    if not wanted or "any" in wanted or "all" in wanted:
+        return []
+    unknown = [w for w in wanted if w not in SOURCE_ALIASES]
+    if unknown:
+        raise ValueError(f"ANALYSE_SOURCES has unknown channel(s) {unknown}; "
+                         f"valid: {sorted(SOURCE_ALIASES)} or 'any'.")
+    return wanted
+
+
+def max_abstract_chars() -> int:
+    """Longest abstract kept for training in characters (config.yaml, 0 = no limit)."""
+    try:
+        cfg = load_config_yaml()
+    except Exception:
+        cfg = {}
+    if cfg.get("max_abstract_chars") is not None:
+        return max(0, _coerce("max_abstract_chars", "int", cfg["max_abstract_chars"]))
+    return max(0, get_int("MAX_ABSTRACT_CHARS", 0))
+
+
+def target_kind() -> str:
+    """Active impact-target kind (config.yaml, default field_year_percentile)."""
+    try:
+        cfg = load_config_yaml()
+    except Exception:
+        cfg = {}
+    return str(cfg.get("target_kind") or "field_year_percentile").lower()
+
+
+def target_min_refset() -> int:
+    """Min (field x year) cell size before pooling up a level (config.yaml, default 30)."""
+    try:
+        cfg = load_config_yaml()
+    except Exception:
+        cfg = {}
+    if cfg.get("target_min_refset") is not None:
+        return max(1, _coerce("target_min_refset", "int", cfg["target_min_refset"]))
+    return 30
+
+
 def require_known_domain_for_training() -> bool:
     """Whether rows without a domain are dropped from training (config.yaml, default False)."""
     try:
@@ -222,16 +314,28 @@ class Settings:
     year_from: int | None = None
     year_to: int | None = None
     max_papers: int | None = None        # cap corpus size for quick tests (None = all)
+    max_abstract_chars: int = 0          # drop longer abstracts (0 = keep every length)
+    # acquisition channels allowed into training; empty = every collected source
+    training_sources: list[str] = field(default_factory=list)
 
     # shared split (ONE split for ALL stages)
     split_seed: int = 42
     split_ratios: list[float] = field(default_factory=lambda: [0.70, 0.15, 0.15])
     domain_holdout: str = ""  # leave-one-domain-out: domain name to exclude from training
 
+    # fixed-holdout split (data-size sweep): when holdout_val_n/holdout_test_n are both > 0,
+    # this REPLACES split_ratios — val/test are a fixed-size holdout picked once and stay
+    # identical across every train_n step; train is a seeded, nested prefix of the rest.
+    holdout_val_n: int = 0
+    holdout_test_n: int = 0
+    holdout_seed: int = 0        # 0 = reuse split_seed
+    train_n: int = 0             # 0 = use every row remaining after the holdout
+    train_select_seed: int = 0   # 0 = reuse split_seed
+
     # target
     target_kind: str = "field_year_percentile"
     target_min_refset: int = 30             # min (field x year) cell before pooling
-    class_scheme: str = "percentile"        # percentile | css
+    class_scheme: str = "percentile"        # percentile | css | quantile
     class_thresholds: list[float] = field(default_factory=lambda: [0.25, 0.50, 0.75])
     # ordinal class names, ascending impact; empty -> auto Q_n..Q1
     class_names: list[str] = field(default_factory=list)
@@ -273,6 +377,11 @@ class Settings:
     batch_size: int = 128
     n_runs: int = 5
     model_seed: int = 42
+    # outlier-seed exclusion for seed-averaged plots (accuracy-by-split, confusion matrix,
+    # train/test correctness bars) — never triggers below seed_outlier_min_n seeds in a run:
+    seed_outlier_enabled: bool = True
+    seed_outlier_min_n: int = 5
+    seed_outlier_gap_pct: float = 15.0
     # classifier-only loss knobs (ignored by the regressor):
     class_weight: str = "effective"          # none | balanced | effective (Cui 2019)
     effective_beta: float = 0.999
@@ -296,18 +405,11 @@ class Settings:
     text_transformer_freeze_layers: int = 0   # freeze first N encoder layers (0 = train all)
     text_transformer_n_runs: int = 2
 
-    # LLM-as-judge workflow settings (llm_clf / llm_reg only) — these are per-run "science"
-    # knobs (they change what the judge actually learns/produces), so they live here in
-    # Settings/config.yaml like every other training parameter, NOT in .env.workflow.
-    # Machine-level LLM connection settings (endpoint, key, context window) stay in
-    # .env.workflow — see iwf/llm/client.py.
-    judge_batch_max_papers: int = 25       # hard cap on papers combined into one rewrite call
-    judge_checkpoint_interval_pct: float = 0.15   # VAL-checkpoint cadence, as % of TRAIN size
-    judge_val_eval_start_pct: float = 0.10        # initial (cheap) fraction of VAL evaluated
-    judge_val_eval_max_pct: float = 1.0           # ceiling for the escalating VAL subset
-    judge_early_stop_margin: float = 0.01         # min VAL-metric improvement to not "saturate"
-    judge_error_gate_threshold: float = 0.15      # |predicted-true| above this -> "bad" (learn)
-    judge_good_sample_fraction: float = 0.10      # random fraction of "good" papers kept as replay
+    # LLM-as-judge workflow (llm_clf / llm_reg): the LLM is called exactly once per record
+    # against a fixed rubric — see src/main_train_judge.py. Machine-level LLM connection
+    # settings (endpoint, key, context window) stay in .env.workflow — see iwf/llm/client.py.
+    judge_max_train_papers: int = 0   # cap how many TRAIN papers build the RAG store and get
+                                       # judged for train metrics (0 = use every TRAIN paper)
 
     def __post_init__(self) -> None:
         if not self.class_names:
@@ -355,6 +457,20 @@ class Settings:
                 f"target_kind={self.target_kind!r} is invalid; choose one of {ALL_TARGET_KINDS}."
             )
 
+        # Embedder names, checked here so a typo fails before fetch/prepare rather than deep
+        # in phase 2. Imported lazily: embedders pulls in torch/epai, config does not.
+        try:
+            from workflow.src.iwf.embedding.embedders import KNOWN_EMBEDDERS
+        except Exception:                       # torch/epai missing -> skip, phase 2 will say
+            KNOWN_EMBEDDERS = None
+        if KNOWN_EMBEDDERS:
+            for name in [*(self.embedders or []), self.embed_for_encoder]:
+                if name and name not in KNOWN_EMBEDDERS:
+                    errors.append(
+                        f"embedder={name!r} is unknown; choose from "
+                        f"{sorted(KNOWN_EMBEDDERS)}."
+                    )
+
         n_classes = len(self.class_thresholds) + 1
         if not (MIN_CLASSES <= n_classes <= MAX_CLASSES):
             errors.append(
@@ -369,14 +485,48 @@ class Settings:
 
         try:
             from workflow.src.iwf.models.architectures import available_archs
-            archs = available_archs()
-            if (self.model_arch or "").lower() not in archs:
-                errors.append(f"model_arch={self.model_arch!r} is not registered; choose from {archs}.")
+            valid_archs = [*available_archs(), "logreg", "linreg"]
+            arch = (self.model_arch or "").lower()
+            if arch not in valid_archs:
+                errors.append(f"model_arch={self.model_arch!r} is not registered; "
+                              f"choose from {valid_archs}.")
+            elif arch == "logreg" and WORKFLOWS.get(wt, {}).get("task") == "reg":
+                errors.append("model_arch='logreg' (scikit-learn baseline) only supports "
+                              "classification workflows, not regression.")
+            elif arch == "linreg" and WORKFLOWS.get(wt, {}).get("task") == "clf":
+                errors.append("model_arch='linreg' (scikit-learn baseline) only supports "
+                              "regression workflows, not classification.")
         except Exception as e:  # importing torch must never make validation unusable
             print(f"[config] (note) could not verify model_arch against the registry: {e}")
 
         if self.n_runs < 1:
             errors.append(f"n_runs must be >= 1 (got {self.n_runs}).")
+
+        holdout_active = self.holdout_val_n > 0 or self.holdout_test_n > 0
+        if holdout_active and (self.holdout_val_n <= 0 or self.holdout_test_n <= 0):
+            errors.append(
+                "holdout_val_n and holdout_test_n must both be > 0 to enable the "
+                f"fixed-holdout split (got holdout_val_n={self.holdout_val_n}, "
+                f"holdout_test_n={self.holdout_test_n}).")
+        if not holdout_active and self.train_n:
+            errors.append(
+                "train_n is only meaningful with the fixed-holdout split; set "
+                "holdout_val_n/holdout_test_n > 0, or leave train_n at 0.")
+        if holdout_active and self.max_papers is not None and \
+                self.holdout_val_n + self.holdout_test_n > self.max_papers:
+            errors.append(
+                f"holdout_val_n+holdout_test_n ({self.holdout_val_n + self.holdout_test_n}) "
+                f"exceeds max_papers ({self.max_papers}).")
+
+        if self.seed_outlier_min_n < 2:
+            errors.append(f"seed_outlier_min_n must be >= 2 (got {self.seed_outlier_min_n}).")
+        if self.seed_outlier_gap_pct <= 0:
+            errors.append(
+                f"seed_outlier_gap_pct must be > 0 (got {self.seed_outlier_gap_pct}).")
+
+        if (self.class_scheme or "").lower() not in ("percentile", "css", "quantile"):
+            errors.append(f"class_scheme={self.class_scheme!r} is invalid; choose "
+                          "percentile, css, or quantile.")
 
         if (self.novelty_kind or "").lower() not in ("spherical", "cosine_max"):
             errors.append(f"novelty_kind={self.novelty_kind!r} is invalid; choose "

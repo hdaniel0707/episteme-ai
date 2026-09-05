@@ -188,18 +188,18 @@ def plot_baseline_correlation(scores: pd.DataFrame, class_labels: np.ndarray | N
 
 # ------------------------------------------------------------------ per-run entry
 
-def _best_seed_result(wf_dir: Path) -> dict | None:
-    """The best seed's result.json (by test spearman/macro_f1)."""
-    best, best_metric = None, -np.inf
+def _best_seed_result(wf_dir: Path, task: str = "reg",
+                      class_thresholds: list[float] | None = None) -> dict | None:
+    """The best seed's result.json, by TEST correctness % - the same selection rule every
+    other "best seed" plot uses."""
+    from workflow.src.iwf.evaluation.plots import _pick_best_seed
+    seeds = []
     for sd in sorted(Path(wf_dir).glob("seed_*")):
         rj = sd / "result.json"
         if not rj.is_file():
             continue
-        r = json.loads(rj.read_text(encoding="utf-8"))
-        metric = r.get("spearman", r.get("macro_f1", 0.0)) or 0.0
-        if metric > best_metric:
-            best, best_metric = r, metric
-    return best
+        seeds.append(json.loads(rj.read_text(encoding="utf-8")))
+    return _pick_best_seed(seeds, task, class_thresholds)
 
 
 def _split_preds_from_result(best: dict | None, split: str
@@ -213,9 +213,11 @@ def _split_preds_from_result(best: dict | None, split: str
     return np.asarray(t["y_true"], dtype=float), np.asarray(t["y_pred"], dtype=float)
 
 
-def _best_seed_test_preds(wf_dir: Path) -> tuple[np.ndarray, np.ndarray] | None:
+def _best_seed_test_preds(wf_dir: Path, task: str = "reg",
+                          class_thresholds: list[float] | None = None
+                          ) -> tuple[np.ndarray, np.ndarray] | None:
     """(y_true, y_pred) on the test split from the best seed's result.json (reg scale)."""
-    return _split_preds_from_result(_best_seed_result(wf_dir), "test")
+    return _split_preds_from_result(_best_seed_result(wf_dir, task, class_thresholds), "test")
 
 
 BASELINE_COLS = ("naip", "specter2_knn", "llm_judge", "venue_ais",
@@ -260,7 +262,7 @@ def generate_baseline_plots(wf_type: str, task: str, wf_dir: Path, settings) -> 
     out = wf_dir / "aggregate" / "baselines"
     out.mkdir(parents=True, exist_ok=True)
 
-    best = _best_seed_result(wf_dir)
+    best = _best_seed_result(wf_dir, task, thresholds)
 
     # Per-split metrics table (train/val/test) → one CSV
     per_split_metrics: list[pd.DataFrame] = []

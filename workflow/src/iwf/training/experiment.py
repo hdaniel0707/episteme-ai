@@ -58,7 +58,15 @@ def _train_one_seed(payload: dict) -> dict:
                   patience=settings.patience, batch_size=settings.batch_size,
                   seed=settings.model_seed + i, activation=settings.activation,
                   arch=settings.model_arch)
-    if task == "clf":
+    if task == "clf" and (settings.model_arch or "").lower() == "logreg":
+        from workflow.src.iwf.models.sklearn_baseline import SklearnLogisticRegressionClassifier
+        model = SklearnLogisticRegressionClassifier(n_classes=len(class_names),
+                                                     seed=settings.model_seed + i,
+                                                     class_weight=settings.class_weight)
+    elif task == "reg" and (settings.model_arch or "").lower() == "linreg":
+        from workflow.src.iwf.models.sklearn_baseline import SklearnLinearRegressionBaseline
+        model = SklearnLinearRegressionBaseline(seed=settings.model_seed + i)
+    elif task == "clf":
         model = TorchMLPClassifier(n_classes=len(class_names),
                                    class_weight=settings.class_weight,
                                    effective_beta=settings.effective_beta,
@@ -87,6 +95,11 @@ def _train_one_seed(payload: dict) -> dict:
                            if k not in ("y_true", "y_pred")})
             if task == "clf":
                 result["proba_test"] = model.predict_proba(Xs[m]).tolist()
+        elif split == "train":
+            # train_<metric> flat copies at the root, so the train-vs-test comparison
+            # figure can read both splits without reloading result.json
+            result.update({f"train_{k}": v for k, v in metrics_d.items()
+                           if k not in ("y_true", "y_pred") and isinstance(v, (int, float))})
 
     # flat all-rows arrays so UMAP plots align predictions to the parquet without a reload
     result["y_all"] = y.tolist()

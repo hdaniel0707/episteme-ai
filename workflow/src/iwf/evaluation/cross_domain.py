@@ -6,7 +6,6 @@ v2: Leave-one-domain-out (LODO) via domain_holdout config.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import numpy as np
@@ -14,8 +13,7 @@ import pandas as pd
 
 from workflow.src.iwf import paths
 from workflow.src.iwf.evaluation.baseline_compare import _best_seed_test_preds
-from workflow.src.iwf.evaluation.metrics import regression_metrics, classification_metrics
-from workflow.src.iwf.evaluation import palette, plots
+from workflow.src.iwf.evaluation import plots
 
 # Per-run aggregate subfolder holding all model-benchmark artefacts (per-domain metrics,
 # cross-domain info, and the benchmark-suite outputs). Renamed from the old "cross_domain".
@@ -45,7 +43,7 @@ def per_domain_metrics(wf_dir: Path, settings, task: str) -> pd.DataFrame:
     "field_year_percentile") and is never equal to "reg"/"clf".
     """
     # Get best-seed test predictions
-    preds = _best_seed_test_preds(wf_dir)
+    preds = _best_seed_test_preds(wf_dir, task, getattr(settings, "class_thresholds", None))
     if preds is None:
         return pd.DataFrame()
 

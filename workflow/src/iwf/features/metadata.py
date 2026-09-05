@@ -10,7 +10,6 @@ label-free and therefore leakage-safe.
 
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
 
 META_COLUMNS = ["meta_year", "meta_h_index", "meta_author_count", "meta_venue_freq"]

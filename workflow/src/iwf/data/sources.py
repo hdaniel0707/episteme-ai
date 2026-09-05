@@ -155,6 +155,29 @@ def load_sqlite(path: str | Path, year_from: int | None = None,
             print(f"[sources] dropped {before - len(df)} unknown-domain rows "
                   "(require_known_domain_for_training=true)")
 
+    if "year" in df.columns:
+        before = len(df)
+        df = df[pd.to_numeric(df["year"], errors="coerce").notna()].reset_index(drop=True)
+        if len(df) < before:
+            print(f"[sources] dropped {before - len(df)} unknown-year rows")
+
+    wanted_sources = config.training_sources()
+    if wanted_sources and "source" in df.columns:
+        before = len(df)
+        keep = df["source"].map(lambda v: config.canonical_source(v) in wanted_sources)
+        df = df[keep].reset_index(drop=True)
+        if len(df) < before:
+            print(f"[sources] dropped {before - len(df)} rows outside "
+                  f"training_sources={wanted_sources}")
+
+    max_abs_chars = config.max_abstract_chars()
+    if max_abs_chars > 0 and "abstract" in df.columns:
+        before = len(df)
+        df = df[df["abstract"].astype(str).str.len() <= max_abs_chars].reset_index(drop=True)
+        if len(df) < before:
+            print(f"[sources] dropped {before - len(df)} rows with abstracts longer than "
+                  f"{max_abs_chars} chars (max_abstract_chars)")
+
     return df
 
 

@@ -10,13 +10,11 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
 
 import numpy as np
 import pandas as pd
 
 from workflow.src.iwf import paths
-from workflow.src.iwf.config import load_settings
 from workflow.src.iwf.evaluation import metrics
 from workflow.src.iwf.evaluation import plots
 
@@ -95,7 +93,9 @@ def available_benchmarks() -> list[BenchmarkSpec]:
 
 
 def build_holdout_benchmark(db_path: Path, out_path: Path | None = None,
-                            per_domain_n: int = 500, seed: int = 42) -> Path:
+                            per_domain_n: int = 500, seed: int = 42, *,
+                            target_kind: str = "field_year_percentile",
+                            target_min_refset: int = 30) -> Path:
     """Build holdout_extended benchmark from extended.db: stratified sample per domain."""
     from workflow.src.iwf.evaluation.data_analysis import load_papers_df, _domain_series
     from workflow.src.iwf.targets import compute_target
@@ -115,8 +115,8 @@ def build_holdout_benchmark(db_path: Path, out_path: Path | None = None,
         sampled.append(domain_df.sample(n=n_sample, random_state=seed))
     sample_df = pd.concat(sampled, ignore_index=True).reset_index(drop=True)
 
-    # Compute target within the sample
-    target_series = compute_target("field_year_percentile", sample_df, min_refset=30)
+    # Compute target within the sample, matching the run's configured target_kind
+    target_series = compute_target(target_kind, sample_df, min_refset=target_min_refset)
 
     # Keep columns of interest
     output_df = sample_df[["paper_id", "title", "abstract", "year"]].copy()
@@ -129,6 +129,7 @@ def build_holdout_benchmark(db_path: Path, out_path: Path | None = None,
         "built_from": str(db_path),
         "n_rows": len(output_df),
         "seed": seed,
+        "target_kind": target_kind,
         "created_at": str(pd.Timestamp.now()),
     }
     (out_path / "manifest.json").write_text(json.dumps(manifest, indent=2))
@@ -137,7 +138,9 @@ def build_holdout_benchmark(db_path: Path, out_path: Path | None = None,
 
 def build_temporal_holdout(db_path: Path, out_path: Path | None = None,
                            recent_years: int = 5, per_domain_n: int = 500,
-                           seed: int = 42) -> Path:
+                           seed: int = 42, *,
+                           target_kind: str = "field_year_percentile",
+                           target_min_refset: int = 30) -> Path:
     """Build the ``holdout_recent`` benchmark: restrict to the most recent ``recent_years``
     publication years, then stratified-sample per domain. A temporal counterpart to
     ``build_holdout_benchmark`` so models can be benchmarked on recent papers specifically."""
@@ -166,7 +169,7 @@ def build_temporal_holdout(db_path: Path, out_path: Path | None = None,
             sampled.append(domain_df.sample(n=n_sample, random_state=seed))
     sample_df = pd.concat(sampled, ignore_index=True).reset_index(drop=True)
 
-    target_series = compute_target("field_year_percentile", sample_df, min_refset=30)
+    target_series = compute_target(target_kind, sample_df, min_refset=target_min_refset)
     output_df = sample_df[["paper_id", "title", "abstract", "year"]].copy()
     output_df["domain"] = _domain_series(sample_df)
     output_df["target"] = target_series
@@ -177,6 +180,7 @@ def build_temporal_holdout(db_path: Path, out_path: Path | None = None,
         "n_rows": len(output_df),
         "recent_years": recent_years,
         "seed": seed,
+        "target_kind": target_kind,
         "created_at": str(pd.Timestamp.now()),
     }
     (out_path / "manifest.json").write_text(json.dumps(manifest, indent=2))
@@ -216,8 +220,8 @@ _MANUAL_DOWNLOAD_INSTRUCTIONS = {
 }
 
 
-def download_benchmark(name: str, yes: bool = False, max_rows: int | None = None) -> Path:
-    """Download benchmark from URL. Requires user confirmation for size > 200 MB.
+def download_benchmark(name: str) -> Path:
+    """Always raises: print where to download this benchmark by hand.
 
     None of the three network benchmarks have a stable, scriptable URL (verified by
     checking each source directly); this always raises with the real manual-download
@@ -318,22 +322,19 @@ def _score_with_judge_model(wf_dir: Path, settings, texts_df: pd.DataFrame,
     knowledge the same way retrieval does during training, just without the live LLM step.
     """
     import joblib
-    from workflow.src.iwf.workflow_results import PRIMARY_METRIC
+    from workflow.src.iwf.evaluation.plots import _pick_best_seed
     from workflow.src.iwf.embedding.embedders import emb_matrix
 
-    metric_key = PRIMARY_METRIC[task]
-    best_seed_dir, best_metric = None, -np.inf
+    seeds = []
     for seed_dir in sorted(wf_dir.glob("seed_*")):
         result_path = seed_dir / "result.json"
         if not result_path.is_file():
             continue
         result = json.loads(result_path.read_text())
-        metric_val = result.get(metric_key)
-        if metric_val is None and isinstance(result.get("test"), dict):
-            metric_val = result["test"].get(metric_key)
-        if isinstance(metric_val, (int, float)) and metric_val > best_metric:
-            best_metric = float(metric_val)
-            best_seed_dir = seed_dir
+        result["_seed_dir"] = str(seed_dir)
+        seeds.append(result)
+    best_seed_result = _pick_best_seed(seeds, task, getattr(settings, "class_thresholds", None))
+    best_seed_dir = Path(best_seed_result["_seed_dir"]) if best_seed_result else None
     if best_seed_dir is None:
         return None
 
@@ -381,7 +382,7 @@ def score_with_run_model(wf_dir: Path, settings, texts_df: pd.DataFrame,
     same frozen texts every time.
     """
     import joblib
-    from workflow.src.iwf.workflow_results import task_of, PRIMARY_METRIC
+    from workflow.src.iwf.workflow_results import task_of
     from workflow.src.iwf.encoder.base import load_saved_encoder
     from workflow.src.iwf.embedding.embedders import emb_matrix
     from workflow.src.iwf.config import is_judge_workflow, is_text_workflow
@@ -425,23 +426,19 @@ def score_with_run_model(wf_dir: Path, settings, texts_df: pd.DataFrame,
         X = emb_matrix(bench_df, embed_col)
         Z = enc.transform(X)
 
-        # Load best seed model. result.json stores the test primary metric at top level
-        # (e.g. "spearman"/"macro_f1"), sometimes also nested under "test" — read both,
-        # not the never-present flat "test.<metric>" key.
-        metric_key = PRIMARY_METRIC[task]
-        best_seed_dir = None
-        best_metric = -np.inf
+        # Load the best seed's model, by TEST correctness % - the same selection rule
+        # every other "best seed" plot/score uses.
+        from workflow.src.iwf.evaluation.plots import _pick_best_seed
+        seeds = []
         for seed_dir in sorted(wf_dir.glob("seed_*")):
             result_path = seed_dir / "result.json"
             if not result_path.is_file():
                 continue
             result = json.loads(result_path.read_text())
-            metric_val = result.get(metric_key)
-            if metric_val is None and isinstance(result.get("test"), dict):
-                metric_val = result["test"].get(metric_key)
-            if isinstance(metric_val, (int, float)) and metric_val > best_metric:
-                best_metric = float(metric_val)
-                best_seed_dir = seed_dir
+            result["_seed_dir"] = str(seed_dir)
+            seeds.append(result)
+        best_seed_result = _pick_best_seed(seeds, task, getattr(settings, "class_thresholds", None))
+        best_seed_dir = Path(best_seed_result["_seed_dir"]) if best_seed_result else None
 
         if best_seed_dir is None:
             return None

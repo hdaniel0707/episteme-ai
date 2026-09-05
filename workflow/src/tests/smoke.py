@@ -155,6 +155,38 @@ def t_split():
     make_split(6, 1, [0.7, 0.15, 0.15], stratify=np.array(list("AABBCC")))
 
 
+def t_fixed_holdout_split():
+    """Data-size sweep split: val/test stay IDENTICAL across train_n, train is nested."""
+    from workflow.src.iwf.data.dataset import add_split_column, split_masks
+    df = make_corpus(n=200)
+    df["strat_label"] = np.where(df["citation_normalized_percentile"] > 0.5, "Good", "Weak")
+
+    big = add_split_column(df, seed=0, ratios=[0.7, 0.15, 0.15], stratify_col="strat_label",
+                           val_n=30, test_n=30, train_n=100,
+                           holdout_seed=1, train_select_seed=2)
+    small = add_split_column(df, seed=0, ratios=[0.7, 0.15, 0.15], stratify_col="strat_label",
+                             val_n=30, test_n=30, train_n=50,
+                             holdout_seed=1, train_select_seed=2)
+    assert (big.loc[big["split"] == "val", "paper_id"].to_numpy()
+           == small.loc[small["split"] == "val", "paper_id"].to_numpy()).all()
+    assert (big.loc[big["split"] == "test", "paper_id"].to_numpy()
+           == small.loc[small["split"] == "test", "paper_id"].to_numpy()).all()
+    small_train = set(small.loc[small["split"] == "train", "paper_id"])
+    big_train = set(big.loc[big["split"] == "train", "paper_id"])
+    assert small_train <= big_train, "a smaller train_n must be a subset of a larger one"
+    assert len(small_train) == 50 and len(big_train) == 100
+
+    m = split_masks(small)
+    assert m["train"].sum() == 50 and m["val"].sum() == 30 and m["test"].sum() == 30
+    assert (small["split"] == "unused").sum() == len(df) - 50 - 30 - 30
+
+    other_seed = add_split_column(df, seed=0, ratios=[0.7, 0.15, 0.15],
+                                  stratify_col="strat_label", val_n=30, test_n=30,
+                                  train_n=100, holdout_seed=9, train_select_seed=2)
+    assert not (big.loc[big["split"] == "val", "paper_id"].to_numpy()
+               == other_seed.loc[other_seed["split"] == "val", "paper_id"].to_numpy()).all()
+
+
 def t_targets():
     from workflow.src.iwf.targets import ALL_TARGET_KINDS, compute_target
     df = make_corpus()
@@ -380,6 +412,63 @@ def t_experiment_meta_and_clf():
                    out_dir=paths.RESULTS_DIR / "emb_clf_1", label="z->class")
 
 
+def t_sklearn_logreg():
+    """model_arch='logreg' end-to-end through run_experiment (previously untested)."""
+    import json
+    from workflow.src.iwf import paths
+    from workflow.src.iwf.config import Settings
+    from workflow.src.iwf.training.experiment import run_experiment
+    df = _reduced_df()
+    s = Settings(n_runs=1, model_arch="logreg", class_thresholds=[0.5, 0.9],
+                 class_names=["Weak", "Average", "Good"])
+    out_dir = paths.RESULTS_DIR / "emb_clf_logreg_1"
+    run_experiment(df, "clf", settings=s, scalar_cols=[], out_dir=out_dir, label="z->logreg")
+    res = json.loads((out_dir / "seed_0" / "result.json").read_text())
+    assert {"accuracy", "macro_f1", "confusion"} <= res["test"].keys()
+    assert (out_dir / "seed_0" / "model" / "model.joblib").exists()
+
+
+def t_sklearn_linreg():
+    """model_arch='linreg' end-to-end through run_experiment (new baseline)."""
+    import json
+    from workflow.src.iwf import paths
+    from workflow.src.iwf.config import Settings
+    from workflow.src.iwf.training.experiment import run_experiment
+    df = _reduced_df()
+    s = Settings(n_runs=1, model_arch="linreg")
+    out_dir = paths.RESULTS_DIR / "emb_reg_linreg_1"
+    run_experiment(df, "reg", settings=s, scalar_cols=[], out_dir=out_dir, label="z->linreg")
+    res = json.loads((out_dir / "seed_0" / "result.json").read_text())
+    assert {"rmse", "r2", "spearman"} <= res["test"].keys()
+    assert (out_dir / "seed_0" / "model" / "model.joblib").exists()
+
+
+def t_accepted_seeds():
+    """metrics.accepted_seeds: below min_n keeps everyone, a clear outlier is dropped, and
+    seeds with no real outlier all stay in."""
+    from workflow.src.iwf.evaluation.metrics import accepted_seeds
+
+    def seed(acc):
+        return {"test": {"accuracy": acc}}
+
+    below_min_n = [seed(a) for a in (0.51, 0.49, 0.23)]
+    accepted, excluded = accepted_seeds(below_min_n, "clf", [], min_n=5, gap_pct=15.0)
+    assert len(accepted) == 3 and not excluded
+
+    with_outlier = [seed(a) for a in (0.51, 0.49, 0.47, 0.52, 0.23)]
+    accepted, excluded = accepted_seeds(with_outlier, "clf", [], min_n=5, gap_pct=15.0)
+    assert len(accepted) == 4 and len(excluded) == 1
+    assert excluded[0]["test"]["accuracy"] == 0.23
+
+    no_outlier = [seed(a) for a in (0.51, 0.49, 0.47, 0.52, 0.50)]
+    accepted, excluded = accepted_seeds(no_outlier, "clf", [], min_n=5, gap_pct=15.0)
+    assert len(accepted) == 5 and not excluded
+
+    disabled_accepted, disabled_excluded = accepted_seeds(
+        with_outlier, "clf", [], enabled=False, min_n=5, gap_pct=15.0)
+    assert len(disabled_accepted) == 5 and not disabled_excluded
+
+
 def t_saved_model_predicts():
     """Mirror predict_generated's scoring: find the latest reg model, predict on new z."""
     import joblib
@@ -452,8 +541,17 @@ def t_registry():
     assert {"specter2_ft", "scibert_ft", "specter2_lora", "scibert_lora"} <= set(
         available_modules("text_transformer"))
     assert "identity" in available_modules("encoder")
-    # SPECTER2 base + adapter flavours are selectable embedders (base vs citation adapter)
-    assert {"specter2", "specter2_base", "specter2_adhoc"} <= set(available_modules("embedder"))
+    # SPECTER2 base + every AllenAI task adapter is a selectable embedder. Each flavour must
+    # map to a DISTINCT adapter, otherwise two "different" embedders would silently produce
+    # the same vectors and any base-vs-adapter comparison would be meaningless.
+    from workflow.src.iwf.embedding.embedders import SPECTER2_VARIANTS
+    assert {"specter2", "specter2_base", "specter2_clf", "specter2_reg",
+            "specter2_adhoc"} <= set(available_modules("embedder"))
+    adapters = [a for _, a in SPECTER2_VARIANTS.values() if a]
+    assert len(adapters) == len(set(adapters)), f"duplicate adapter mapping: {adapters}"
+    assert SPECTER2_VARIANTS["specter2_clf"][1] == "allenai/specter2_classification"
+    assert SPECTER2_VARIANTS["specter2_reg"][1] == "allenai/specter2_regression"
+    assert SPECTER2_VARIANTS["specter2_base"][1] is None
     assert {"mlp", "resmlp", "ft_transformer"} <= set(available_modules("impact_predictor"))
     cls = get_module("text_transformer", "specter2_ft")
     assert cls.BACKBONE_NAME == "allenai/specter2_base"
@@ -1022,6 +1120,7 @@ def t_dedup_fuzzy() -> None:
 
     fd, p = tempfile.mkstemp(suffix=".db")
     os.close(fd)
+    conn = None
     try:
         conn = fbase.open_db(p)
         conn.execute("INSERT INTO papers (paper_id, title, year, citation_count, source) "
@@ -1039,8 +1138,14 @@ def t_dedup_fuzzy() -> None:
         row = conn.execute(
             "SELECT abstract, citation_count FROM papers WHERE paper_id='p1'").fetchone()
         assert row[0] == "A study." and row[1] == 10, row
-        conn.close()
     finally:
+        # close before unlink: on Windows an open handle makes os.unlink raise and mask
+        # whatever the real failure was
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
         os.unlink(p)
 
 
@@ -1055,6 +1160,7 @@ def t_llm_fill() -> None:
 
     fd, p = tempfile.mkstemp(suffix=".db")
     os.close(fd)
+    conn = None
     try:
         conn = fbase.open_db(p)
         conn.execute(
@@ -1062,10 +1168,11 @@ def t_llm_fill() -> None:
             "VALUES ('p1', 'Deep learning for protein folding', 'We study...', 'openalex')")
         conn.commit()
 
+        # explicit limit: the test must not depend on the config.yaml cap of the day
         orig = llm_client.complete
         llm_client.complete = lambda *a, **kw: {"domain": ALLOWED_DOMAINS[0]}
         try:
-            n = llm_fill_domains(conn)
+            n = llm_fill_domains(conn, limit=10)
             assert n == 1
             row = conn.execute("SELECT domains FROM papers WHERE paper_id='p1'").fetchone()
             assert json.loads(row[0]) == [ALLOWED_DOMAINS[0]]
@@ -1073,7 +1180,7 @@ def t_llm_fill() -> None:
                 "SELECT source FROM papers WHERE paper_id='p1'").fetchone()[0] == "openalex"
 
             # already-filled rows are never re-queried (the WHERE clause is idempotent)
-            n2 = llm_fill_domains(conn)
+            n2 = llm_fill_domains(conn, limit=10)
             assert n2 == 0
         finally:
             llm_client.complete = orig
@@ -1083,12 +1190,21 @@ def t_llm_fill() -> None:
         conn.commit()
         llm_client.complete = lambda *a, **kw: None
         try:
-            n3 = llm_fill_domains(conn)
+            n3 = llm_fill_domains(conn, limit=10)
             assert n3 == 0
         finally:
             llm_client.complete = orig
-        conn.close()
+
+        # a zero/negative cap disables the fill entirely
+        assert llm_fill_domains(conn, limit=0) == 0
     finally:
+        # close before unlink: on Windows an open handle makes os.unlink raise and mask
+        # whatever the real failure was
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
         os.unlink(p)
 
 
@@ -1114,6 +1230,7 @@ def _run_all() -> int:
         ("expand_runs", t_expand_runs),
         ("identity", t_identity),
         ("split", t_split),
+        ("fixed_holdout_split", t_fixed_holdout_split),
         ("targets", t_targets),
         ("classes", t_classes),
         ("metadata", t_metadata),
@@ -1135,6 +1252,9 @@ def _run_all() -> int:
         ("generated_sources_file", t_generated_sources_file),
         ("experiment_reg", t_experiment_reg),
         ("experiment_meta_and_clf", t_experiment_meta_and_clf),
+        ("sklearn_logreg", t_sklearn_logreg),
+        ("sklearn_linreg", t_sklearn_linreg),
+        ("accepted_seeds", t_accepted_seeds),
         ("saved_model_predicts", t_saved_model_predicts),
         ("validate", t_validate),
         ("workflow_table", t_workflow_table),

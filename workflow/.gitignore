@@ -9,8 +9,9 @@ __pycache__/
 /models/
 /results/
 
-# Generated result backups + timestamped DB backups (never commit — large, regenerable)
-/results_backup_*/
+# Generated result backups + data-size sweep snapshots (results_backup_*, results_100,
+# results_2000, results_5000, ...) — large, regenerable by re-running, never commit
+/results_*/
 *.pre_scratch_*
 *.pre_scratch_*/
 

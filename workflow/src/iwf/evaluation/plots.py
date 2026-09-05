@@ -97,11 +97,6 @@ def umap_3d(Z: np.ndarray, seed: int = 42) -> np.ndarray:
     )
 
 
-def _ordinal_color(idx: int, total: int) -> str:
-    colors = palette.ordinal_colors(total)
-    return colors[min(idx, len(colors) - 1)]
-
-
 def _impact_sizes(values, lo=2.0, hi=6.5):
     v = np.nan_to_num(np.asarray(values, dtype=float), nan=0.0).clip(0, 1)
     return lo + (hi - lo) * v
@@ -228,93 +223,149 @@ def _get_umap_data(seed_data: dict, df: pd.DataFrame, seed: int) -> dict | None:
             "df_len": len(df)}
 
 
-def _load_best_seed_data(wf_dir: Path, task: str) -> dict | None:
-    """Find the best-performing seed (by best_val_metric, falling back to the primary
-    test metric) and return its result.json contents."""
+def _pick_best_seed(seeds: list[dict], task: str,
+                    class_thresholds: list[float] | None = None) -> dict | None:
+    """The seed dict with the highest TEST correctness % (accuracy for clf; regression
+    predictions binned by class_thresholds for reg) - the ONE selection rule every "best
+    seed" plot uses, so a figure whose title says "(best seed)" and one that picks a seed
+    for a single-model view always agree. Falls back to best_val_metric / the primary test
+    metric only when correctness can't be computed (e.g. no class_thresholds available)."""
+    from workflow.src.iwf.evaluation.metrics import test_correctness
     metric_key = "macro_f1" if task == "clf" else "spearman"
     best, best_val = None, -np.inf
+    for s in seeds:
+        val = test_correctness(s, task, class_thresholds or [])
+        if val is None:
+            val = s.get("best_val_metric")
+            if not isinstance(val, (int, float)):
+                val = s.get(metric_key, -np.inf)
+        if isinstance(val, (int, float)) and val > best_val:
+            best_val, best = val, s
+    return best
+
+
+def _load_all_seeds(wf_dir: Path) -> list[dict]:
+    """Load every seed_*/result.json under a run folder, tagged with _seed_dir/_seed_name."""
+    seeds = []
     for sd in sorted(Path(wf_dir).glob("seed_*")):
         rj = sd / "result.json"
         if not rj.is_file():
             continue
         r = json.loads(rj.read_text(encoding="utf-8"))
-        val = r.get("best_val_metric")
-        if not isinstance(val, (int, float)):
-            val = r.get(metric_key, -np.inf)
-        if isinstance(val, (int, float)) and val > best_val:
-            best_val = val
-            best = r
-            best["_seed_dir"] = str(sd)
-            best["_seed_name"] = sd.name
-    return best
+        r["_seed_dir"] = str(sd)
+        r["_seed_name"] = sd.name
+        seeds.append(r)
+    return seeds
 
 
 # ===================================================================== split bars
 
-def _correctness_pct_bars(splits: list[str], correct: list[int], totals: list[int],
-                          agg: Path, wf_type: str, title: str) -> None:
-    """One olive-shaded bar per split showing % correct, item count in the x-label."""
-    pct = [100.0 * c / max(t, 1) for c, t in zip(correct, totals)]
+def _seed_note(n_used: int, n_excluded: int) -> str:
+    """Short annotation stating how many seeds fed a seed-averaged plot."""
+    if not n_excluded:
+        return f"n = {n_used} seed{'s' if n_used != 1 else ''}"
+    return f"n = {n_used}/{n_used + n_excluded} seeds ({n_excluded} excluded)"
+
+
+def _correctness_pct_bars(splits: list[str], means: list[float], stds: list[float],
+                          totals: list[int], agg: Path, wf_type: str, title: str,
+                          n_classes: int, n_used: int, n_excluded: int) -> None:
+    """One olive-shaded bar per split: mean % correct +- std across accepted seeds, item
+    count in the x-label, a chance-level reference line, and a seed-count note."""
     try:
-        pd.DataFrame({"split": splits, "n_correct": correct, "n_total": totals,
-                      "pct_correct": [round(p, 2) for p in pct]}).to_csv(
+        pd.DataFrame({"split": splits, "n_total": totals,
+                      "pct_correct_mean": [round(m, 2) for m in means],
+                      "pct_correct_std": [round(s, 2) for s in stds]}).to_csv(
             agg / f"correctness_bars_{wf_type}.csv", index=False)
     except Exception as e:
         print(f"[plots] {wf_type}: correctness CSV skipped ({e})")
     x = np.arange(len(splits))
     colors = [SPLIT_SHADES.get(sp, "#8FA35E") for sp in splits]
-    fig, ax = plt.subplots(figsize=(6, 4.5))
-    ax.bar(x, pct, color=colors, edgecolor=palette.INK, linewidth=0.6)
-    for i, p in enumerate(pct):
-        ax.text(i, p + 2, f"{p:.2f}%", ha="center", fontsize=9)
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.bar(x, means, yerr=stds, capsize=4, color=colors, edgecolor=palette.INK, linewidth=0.6,
+          error_kw=dict(ecolor=palette.ERROR_BAR_GRAY, elinewidth=1.2))
+    for i, (m, sd) in enumerate(zip(means, stds)):
+        ax.text(i, m + sd + 2.5, f"{m:.2f}%", ha="center", fontsize=9)
     ax.set_xticks(x)
     ax.set_xticklabels([f"{sp} ({totals[i]})" for i, sp in enumerate(splits)])
     ax.set_ylabel("Correct Predictions (%)")
-    ax.set_ylim(0, 108)
+    ax.set_ylim(0, 122)
+    chance = 100.0 / max(2, n_classes)
+    ax.axhline(chance, color=palette.GRAY, ls="--", lw=1, alpha=0.6,
+              label=f"chance ({n_classes} classes)")
+    ax.text(0.99, 0.02, _seed_note(n_used, n_excluded), transform=ax.transAxes,
+           ha="right", va="bottom", fontsize=8, color=palette.INK, alpha=0.85)
+    ax.legend(fontsize=9, loc="upper center", bbox_to_anchor=(0.5, -0.12),
+             ncol=1, frameon=False)
     ax.set_title(title)
     fig.tight_layout()
-    fig.savefig(agg / f"correctness_bars_{wf_type}.png", dpi=120)
+    fig.savefig(agg / f"correctness_bars_{wf_type}.png", dpi=120, bbox_inches="tight")
     plt.close(fig)
 
 
-def correctness_bars(split_preds: dict, agg: Path, wf_type: str, task: str,
-                     thresholds: list[float] | None = None) -> None:
-    """% correct per split. clf: exact class match; reg: prediction lands in the true
-    impact-class bin (same thresholds as the classifier — directly comparable)."""
-    splits = [s for s in ("train", "val", "test") if s in split_preds]
+def correctness_bars(accepted: list[dict], agg: Path, wf_type: str, task: str,
+                     thresholds: list[float] | None = None, n_classes: int = 2,
+                     n_excluded: int = 0) -> None:
+    """% correct per split, mean +- std across ACCEPTED seeds (see metrics.accepted_seeds) -
+    a single seed's own numbers when only one is accepted. clf: exact class match; reg:
+    prediction lands in the true impact-class bin (same thresholds as the classifier -
+    directly comparable)."""
+    per_seed = [sp for sp in (_extract_split_preds(s) for s in accepted) if sp]
+    if not per_seed:
+        return
+    splits = [sp_name for sp_name in ("train", "val", "test")
+             if any(sp_name in sp for sp in per_seed)]
     if not splits:
         return
-    correct, totals = [], []
-    for sp in splits:
-        yt = np.asarray(split_preds[sp]["y_true"])
-        yp = np.asarray(split_preds[sp]["y_pred"])
-        if task == "reg":
-            thr = sorted(float(t) for t in (thresholds or []))
-            yt = np.digitize(yt.astype(float), thr)
-            yp = np.digitize(yp.astype(float), thr)
-        correct.append(int((yt == yp).sum()))
-        totals.append(len(yt))
+    means, stds, totals = [], [], []
+    for sp_name in splits:
+        pcts, total = [], 0
+        for sp in per_seed:
+            if sp_name not in sp:
+                continue
+            yt = np.asarray(sp[sp_name]["y_true"])
+            yp = np.asarray(sp[sp_name]["y_pred"])
+            if task == "reg":
+                thr = sorted(float(t) for t in (thresholds or []))
+                yt = np.digitize(yt.astype(float), thr)
+                yp = np.digitize(yp.astype(float), thr)
+            pcts.append(100.0 * float((yt == yp).mean()))
+            total = len(yt)
+        means.append(float(np.mean(pcts)))
+        stds.append(float(np.std(pcts)))
+        totals.append(total)
     title = ("Prediction Accuracy by Split" if task == "clf"
              else "Category Accuracy by Split")
-    _correctness_pct_bars(splits, correct, totals, agg, wf_type, title)
+    _correctness_pct_bars(splits, means, stds, totals, agg, wf_type, title, n_classes,
+                          len(per_seed), n_excluded)
 
 
-def mse_bars(split_preds: dict, agg: Path, wf_type: str) -> None:
-    """Bar chart: MSE for train / val / test (regression only)."""
-    splits = [s for s in ("train", "val", "test") if s in split_preds]
+def mse_bars(accepted: list[dict], agg: Path, wf_type: str, n_excluded: int = 0) -> None:
+    """Bar chart: mean +- std MSE for train / val / test across ACCEPTED seeds (regression
+    only)."""
+    per_seed = [sp for sp in (_extract_split_preds(s) for s in accepted) if sp]
+    if not per_seed:
+        return
+    splits = [sp_name for sp_name in ("train", "val", "test")
+             if any(sp_name in sp for sp in per_seed)]
     if not splits:
         return
-    mses = [float(np.mean((np.asarray(split_preds[sp]["y_true"], dtype=float)
-                           - np.asarray(split_preds[sp]["y_pred"], dtype=float)) ** 2))
-            for sp in splits]
+    means, stds = [], []
+    for sp_name in splits:
+        mses = [float(np.mean((np.asarray(sp[sp_name]["y_true"], dtype=float)
+                               - np.asarray(sp[sp_name]["y_pred"], dtype=float)) ** 2))
+               for sp in per_seed if sp_name in sp]
+        means.append(float(np.mean(mses)))
+        stds.append(float(np.std(mses)))
     colors = [SPLIT_SHADES.get(sp, "#8FA35E") for sp in splits]
-    fig, ax = plt.subplots(figsize=(5, 4))
-    bars = ax.bar(splits, mses, color=colors, edgecolor=palette.INK, linewidth=0.6)
-    for b, v in zip(bars, mses):
-        ax.text(b.get_x() + b.get_width() / 2, v, f"{v:.4f}", ha="center", va="bottom",
+    fig, ax = plt.subplots(figsize=(6, 4.5))
+    bars = ax.bar(splits, means, yerr=stds, capsize=4, color=colors, edgecolor=palette.INK,
+                 linewidth=0.6, error_kw=dict(ecolor=palette.ERROR_BAR_GRAY, elinewidth=1.2))
+    for b, m in zip(bars, means):
+        ax.text(b.get_x() + b.get_width() / 2, m, f"{m:.4f}", ha="center", va="bottom",
                 fontsize=9)
     ax.set_ylabel("MSE")
-    ax.set_title("MSE by Split (best seed)")
+    ax.set_title(f"MSE by Split ({_seed_note(len(per_seed), n_excluded)})")
     fig.tight_layout()
     fig.savefig(agg / "mse_bars.png", dpi=120)
     plt.close(fig)
@@ -384,45 +435,118 @@ def learning_curve(history: dict, agg: Path, wf_type: str, task: str) -> None:
 
 # ===================================================================== seed-spread figures
 
-def _render_confusion_matrix(cm: np.ndarray, class_names: list[str], seed_label: str,
-                             agg: Path, wf_type: str) -> None:
-    """Confusion-matrix heatmap (blue); ticks auto-adjust to the class count (2..25).
-    Also writes the matrix as CSV next to the figure."""
-    n = cm.shape[0]
+def _render_confusion_matrix(matrices: list[np.ndarray], class_names: list[str],
+                             agg: Path, wf_type: str, n_used: int, n_excluded: int) -> None:
+    """Confusion-matrix heatmap: row-% of the actual class, averaged across ACCEPTED seeds.
+    Every seed in a run shares the exact same fixed test rows (only the model's init seed
+    differs), so summing raw counts across seeds then row-normalizing once gives the same
+    result as averaging each seed's row-percentages - done the simpler way here. Ticks
+    auto-adjust to the class count (2..25); also writes the row-% matrix as CSV."""
+    total = np.sum(matrices, axis=0)
+    n = total.shape[0]
     ticks = class_names if len(class_names) == n else [str(i) for i in range(n)]
-    # CSV of the raw counts (rows = actual class, cols = predicted class)
+    row_sums = total.sum(axis=1, keepdims=True)
+    pct = np.divide(total, row_sums, out=np.zeros_like(total, dtype=float), where=row_sums > 0)
+    pct *= 100.0
     try:
-        pd.DataFrame(cm.astype(int), index=[f"actual_{t}" for t in ticks],
-                     columns=[f"pred_{t}" for t in ticks]).to_csv(
-            agg / f"confusion_matrix_{wf_type}_{seed_label}.csv")
+        pd.DataFrame(pct, index=[f"actual_{t}" for t in ticks],
+                     columns=[f"pred_{t}" for t in ticks]).round(1).to_csv(
+            agg / f"confusion_matrix_{wf_type}.csv")
     except Exception as e:
         print(f"[plots] {wf_type}: confusion CSV skipped ({e})")
-    vmax = float(cm.max()) if cm.size else 1.0
     fig, ax = plt.subplots(figsize=(5, 4.5))
-    im = ax.imshow(cm, cmap=palette.register_blue_seq(), interpolation="nearest")
-    for i in range(cm.shape[0]):
-        for j in range(cm.shape[1]):
-            ax.text(j, i, int(cm[i, j]), ha="center", va="center", fontsize=8,
-                    color="white" if cm[i, j] > 0.55 * vmax else palette.INK)
+    im = ax.imshow(pct, cmap=palette.register_blue_seq(), interpolation="nearest",
+                   vmin=0, vmax=100)
+    for i in range(n):
+        for j in range(n):
+            ax.text(j, i, f"{pct[i, j]:.0f}%", ha="center", va="center", fontsize=8,
+                    color="white" if pct[i, j] > 55 else palette.INK)
     ax.set_xticks(range(n)); ax.set_xticklabels(ticks, rotation=45, ha="right")
     ax.set_yticks(range(n)); ax.set_yticklabels(ticks)
     ax.set_xlabel("Predicted Impact Class")
     ax.set_ylabel("Actual Impact Class")
-    ax.set_title("Confusion Matrix (Test Set)")
-    fig.colorbar(im, ax=ax)
+    ax.set_title(f"Confusion Matrix (Test Set, {_seed_note(n_used, n_excluded)})")
+    fig.colorbar(im, ax=ax, label="% of actual class")
     fig.tight_layout()
-    fig.savefig(agg / f"confusion_matrix_{wf_type}_{seed_label}.png", dpi=120)
+    fig.savefig(agg / f"confusion_matrix_{wf_type}.png", dpi=120)
     plt.close(fig)
 
 
+def _plot_seed_correctness(seeds: list[dict], task: str, class_thresholds: list[float],
+                           agg: Path, wf_type: str, class_names: list[str],
+                           excluded: list[dict]) -> None:
+    """One bar per seed of THIS run: TEST correctness % (a single bar when n_runs=1) - so
+    a run's own seed-to-seed spread is visible on the same 0-100% scale the cross-run
+    correctness comparison (results/summary/) uses. A seed dropped by
+    metrics.accepted_seeds is hatched and labelled, never silently hidden."""
+    from workflow.src.iwf.evaluation.metrics import test_correctness
+    excluded_names = {s.get("_seed_name") for s in excluded}
+    names, corr, is_excluded = [], [], []
+    for i, s in enumerate(seeds):
+        c = test_correctness(s, task, class_thresholds)
+        if c is None:
+            continue
+        name = s.get("_seed_name") or f"seed_{i}"
+        names.append(name)
+        corr.append(c * 100)
+        is_excluded.append(name in excluded_names)
+    if not corr:
+        return
+
+    n_classes = max(2, len(class_names) or len(class_thresholds) + 1)
+    palette.apply_style()
+    fig, ax = plt.subplots(figsize=(max(3.5, 1.2 * len(names) + 1.5), 4))
+    x = np.arange(len(names))
+    base_color = palette.OLIVE if task == "clf" else palette.SAGE
+    bars = ax.bar(x, corr, color=[palette.GRAY if ex else base_color for ex in is_excluded],
+                 alpha=0.88, edgecolor=palette.INK, linewidth=0.5, width=0.5)
+    for bar, ex in zip(bars, is_excluded):
+        if ex:
+            bar.set_hatch("//")
+    for xi, c, ex in zip(x, corr, is_excluded):
+        ax.text(xi, c + 1.5, f"{c:.0f}%" + (" (excluded)" if ex else ""), ha="center",
+               va="bottom", fontsize=9, color=palette.INK)
+    chance = 100.0 / max(2, n_classes)
+    ax.axhline(chance, color=palette.GRAY, ls="--", lw=1, alpha=0.6,
+              label=f"chance ({n_classes} classes)")
+    ax.set_xticks(x)
+    ax.set_xticklabels(names, fontsize=9)
+    ax.set_ylim(0, 108)
+    ax.set_ylabel("test correctness (%)")
+    ax.set_title(f"{wf_type}: test correctness by seed")
+    ax.legend(fontsize=8, loc="lower right")
+    ax.grid(True, axis="y", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(agg / f"seed_correctness_{wf_type}.png", dpi=120)
+    plt.close(fig)
+    pd.DataFrame({"seed": names, "test_correctness_pct": corr,
+                 "excluded": is_excluded}).to_csv(
+        agg / f"seed_correctness_{wf_type}.csv", index=False)
+    print(f"  [OK] seed_correctness_{wf_type}.png")
+
+
 def plot_seed_spread_figures(wf_type: str, task: str, seeds: list[dict], agg: Path,
-                             class_names: list[str], class_thresholds: list[float]) -> None:
-    """Across-seed figures written into aggregate/: metric spread, best-seed confusion
-    matrix (clf and class-binned reg), class boxplot, predicted-vs-actual scatter."""
+                             class_names: list[str], class_thresholds: list[float], *,
+                             target_label: str = "field_year_percentile",
+                             seed_outlier_enabled: bool = True,
+                             seed_outlier_min_n: int = 5,
+                             seed_outlier_gap_pct: float = 15.0) -> None:
+    """Across-seed figures written into aggregate/: metric spread, ACCEPTED-seed-averaged
+    confusion matrix (clf and class-binned reg), class boxplot, predicted-vs-actual scatter
+    (best seed), and per-seed test correctness (every seed, outliers marked)."""
+    from workflow.src.iwf.evaluation.metrics import accepted_seeds
     class_names = class_names or []
     thr = sorted(float(t) for t in (class_thresholds or []))
+    accepted, excluded = accepted_seeds(seeds, task, thr, enabled=seed_outlier_enabled,
+                                        min_n=seed_outlier_min_n, gap_pct=seed_outlier_gap_pct)
+    if not accepted:
+        accepted, excluded = seeds, []
+    try:
+        _plot_seed_correctness(seeds, task, thr, agg, wf_type, class_names, excluded)
+    except Exception as e:
+        print(f"[plots] {wf_type} seed_correctness skipped: {e}")
     if task == "reg":
-        rhos = [s.get("spearman") for s in seeds if isinstance(s.get("spearman"), (int, float))]
+        rhos = [s.get("spearman") for s in accepted if isinstance(s.get("spearman"), (int, float))]
         if rhos:
             fig, ax = plt.subplots(figsize=(5, 4))
             ax.hist(rhos, bins=min(10, max(3, len(rhos))), color=palette.DUSK_BLUE, alpha=0.8)
@@ -434,29 +558,35 @@ def plot_seed_spread_figures(wf_type: str, task: str, seeds: list[dict], agg: Pa
             ax.legend(loc="upper right")
             fig.tight_layout(); fig.savefig(agg / "spearman_distribution.png", dpi=120)
             plt.close(fig)
-        seed_p = next((s for s in seeds
-                       if isinstance(s.get("test"), dict) and s["test"].get("y_true")), None)
+        candidates = [s for s in accepted
+                     if isinstance(s.get("test"), dict) and s["test"].get("y_true")]
+        seed_p = _pick_best_seed(candidates, task, thr)
         if seed_p is not None:
             yt = np.asarray(seed_p["test"]["y_true"], dtype=float)
             yp = np.asarray(seed_p["test"]["y_pred"], dtype=float)
             fig, ax = plt.subplots(figsize=(5, 5))
             ax.scatter(yt, yp, s=10, alpha=0.5)
             ax.plot([0, 1], [0, 1], "r--", lw=1)
-            ax.set_xlabel("true percentile"); ax.set_ylabel("predicted")
+            ax.set_xlabel(f"true {target_label}"); ax.set_ylabel(f"predicted {target_label}")
             ax.set_xlim(0, 1); ax.set_ylim(0, 1)
             ax.set_title(f"{wf_type}: predicted vs actual (best seed)")
             fig.tight_layout(); fig.savefig(agg / "predicted_vs_actual.png", dpi=120)
             plt.close(fig)
-            # Class-binned confusion matrix: same thresholds as the classifier, so
-            # regression and classification workflows are directly comparable.
-            if thr and len(class_names) == len(thr) + 1:
-                from sklearn.metrics import confusion_matrix as sk_cm
-                cm = sk_cm(np.digitize(yt, thr), np.digitize(yp, thr),
-                           labels=list(range(len(class_names))))
-                _render_confusion_matrix(cm.astype(float), class_names,
-                                         seed_p.get("_seed_name", "seed_0"), agg, wf_type)
+        # Class-binned confusion matrix, averaged across every accepted seed: same
+        # thresholds as the classifier, so regression and classification workflows are
+        # directly comparable.
+        if thr and len(class_names) == len(thr) + 1:
+            from sklearn.metrics import confusion_matrix as sk_cm
+            cms = []
+            for s in candidates:
+                yt_s = np.digitize(np.asarray(s["test"]["y_true"], dtype=float), thr)
+                yp_s = np.digitize(np.asarray(s["test"]["y_pred"], dtype=float), thr)
+                cms.append(sk_cm(yt_s, yp_s, labels=list(range(len(class_names)))).astype(float))
+            if cms:
+                _render_confusion_matrix(cms, class_names, agg, wf_type,
+                                         len(candidates), len(excluded))
     else:
-        per_class = [s.get("per_class_f1") for s in seeds if s.get("per_class_f1")]
+        per_class = [s.get("per_class_f1") for s in accepted if s.get("per_class_f1")]
         if per_class:
             arr = [list(map(float, p)) for p in per_class if p]
             width = max(len(p) for p in arr)
@@ -487,11 +617,9 @@ def plot_seed_spread_figures(wf_type: str, task: str, seeds: list[dict], agg: Pa
             fig.tight_layout()
             fig.savefig(agg / f"class_boxplot_{wf_type}.png", dpi=120)
             plt.close(fig)
-        seed_c = next((s for s in seeds if s.get("confusion")), None)
-        if seed_c is not None:
-            _render_confusion_matrix(np.asarray(seed_c["confusion"], dtype=float),
-                                     class_names, seed_c.get("_seed_name", "seed_0"),
-                                     agg, wf_type)
+        cms = [np.asarray(s["confusion"], dtype=float) for s in accepted if s.get("confusion")]
+        if cms:
+            _render_confusion_matrix(cms, class_names, agg, wf_type, len(cms), len(excluded))
 
 
 # ===================================================================== 3-D UMAP plots
@@ -731,7 +859,7 @@ def _build_nn_html(weights: list[np.ndarray], layer_sizes: list[int], n_z: int) 
     vertical height ∝ its neuron count, so a 512-unit layer is drawn twice as tall as a
     256-unit layer. Connections are blue with opacity ∝ strength² (weak → invisible/white);
     only the strongest few per neuron are drawn."""
-    from matplotlib.colors import to_hex, to_rgb
+    from matplotlib.colors import to_rgb
 
     LAYER_SPACING = 320
     MAX_NEURONS_DISPLAY = 400
@@ -1082,16 +1210,31 @@ def generate_workflow_plots(wf_type: str, task: str, wf_dir: Path, settings) -> 
     agg = wf_dir / "aggregate"
     agg.mkdir(parents=True, exist_ok=True)
 
-    seed_data = _load_best_seed_data(wf_dir, task)
+    class_names = list(getattr(settings, "class_names", []) or [])
+    class_thresholds = list(getattr(settings, "class_thresholds", []) or [])
+    n_classes = max(2, len(class_names) or len(class_thresholds) + 1)
+
+    all_seeds = _load_all_seeds(wf_dir)
+    if not all_seeds:
+        print(f"[plots] {wf_type}: no seed data found, skipping plots.")
+        return
+    seed_data = _pick_best_seed(all_seeds, task, class_thresholds)
     if seed_data is None:
         print(f"[plots] {wf_type}: no seed data found, skipping plots.")
         return
 
+    from workflow.src.iwf.evaluation.metrics import accepted_seeds
+    accepted, excluded = accepted_seeds(
+        all_seeds, task, class_thresholds,
+        enabled=bool(getattr(settings, "seed_outlier_enabled", True)),
+        min_n=int(getattr(settings, "seed_outlier_min_n", 5)),
+        gap_pct=float(getattr(settings, "seed_outlier_gap_pct", 15.0)))
+    if not accepted:
+        accepted, excluded = all_seeds, []
+
     from workflow.src.iwf import paths
     from workflow.src.iwf.data.dataset import load_parquet
 
-    class_names = list(getattr(settings, "class_names", []) or [])
-    class_thresholds = list(getattr(settings, "class_thresholds", []) or [])
     class_scheme = getattr(settings, "class_scheme", "percentile")
     split_seed = int(getattr(settings, "split_seed", 42))
 
@@ -1117,19 +1260,15 @@ def generate_workflow_plots(wf_type: str, task: str, wf_dir: Path, settings) -> 
         except Exception:
             pass
 
-    split_preds = _extract_split_preds(seed_data)
-    if split_preds:
+    try:
+        correctness_bars(accepted, agg, wf_type, task, thresholds, n_classes, len(excluded))
+    except Exception as e:
+        print(f"[plots] {wf_type} correctness_bars skipped: {e}")
+    if task == "reg":
         try:
-            correctness_bars(split_preds, agg, wf_type, task, thresholds)
+            mse_bars(accepted, agg, wf_type, len(excluded))
         except Exception as e:
-            print(f"[plots] {wf_type} correctness_bars skipped: {e}")
-        if task == "reg":
-            try:
-                mse_bars(split_preds, agg, wf_type)
-            except Exception as e:
-                print(f"[plots] {wf_type} mse_bars skipped: {e}")
-    else:
-        print(f"[plots] {wf_type}: no split predictions, skipping split bars.")
+            print(f"[plots] {wf_type} mse_bars skipped: {e}")
 
     try:
         learning_curve(seed_data.get("history", {}), agg, wf_type, task)
@@ -1246,13 +1385,33 @@ def plot_tfm_loss_lr(history: dict, path: Path,
 
 # ===================================================================== dataset analysis plots
 
+def _year_cut_positions(labels: list[str], year_window) -> list[tuple[float, str]]:
+    """Where the training year cut falls on a year axis, as (x position, label) pairs."""
+    if not year_window:
+        return []
+    lo, hi = year_window
+    numeric = [(i, int(l)) for i, l in enumerate(labels) if l.isdigit()]
+    marks = []
+    if lo is not None:
+        before = [i for i, y in numeric if y < lo]
+        if before and len(before) < len(numeric):
+            marks.append((max(before) + 0.5, f"training cut: >= {lo}"))
+    if hi is not None:
+        after = [i for i, y in numeric if y > hi]
+        if after and len(after) < len(numeric):
+            marks.append((min(after) - 0.5, f"training cut: <= {hi}"))
+    return marks
+
+
 def plot_counts_year(counts: pd.DataFrame, path: Path, *, color: str | None = None,
-                     title: str | None = None) -> None:
+                     title: str | None = None, year_window=None) -> None:
     """Bar chart: papers per year. Everything before 1900 is compressed into one '<1900'
     bar (early years carry minimal counts), so the modern distribution stays readable.
+    Unknown-year papers are not counted at all (they have no place on this axis).
 
     Accepts the merged schema (``year_label``/``n``); falls back to a raw ``year`` column.
-    ``color``/``title`` let the training-subset variant re-render this in red.
+    ``year_window`` draws the training year cut; ``color``/``title`` let the
+    training-subset variant re-render this in red.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1263,6 +1422,10 @@ def plot_counts_year(counts: pd.DataFrame, path: Path, *, color: str | None = No
     fig, ax = plt.subplots(figsize=(max(10, len(labels) * 0.12), 4))
     ax.bar(x, counts["n"], color=color or palette.OLIVE, alpha=0.85,
            edgecolor=palette.INK, linewidth=0.5)
+    for pos, text in _year_cut_positions(labels, year_window):
+        ax.axvline(pos, color=palette.RED_DARK, linestyle="--", linewidth=1.6)
+        ax.text(pos, ax.get_ylim()[1] * 0.95, text, rotation=90, fontsize=7,
+                color=palette.RED_DARK, ha="right", va="top")
     ax.set_xticks(x)
     # thin the tick labels when there are many years so they don't overprint
     step = max(1, len(labels) // 30)
@@ -1386,12 +1549,13 @@ def plot_completeness(comp: pd.DataFrame, path: Path, *, bold_fields: set | None
 
 def plot_completeness_by_year(pivot_pct: pd.DataFrame, path: Path, *,
                               cmap: str | None = None, title: str | None = None,
-                              bold_fields: set | None = None) -> None:
+                              bold_fields: set | None = None, year_window=None) -> None:
     """Heatmap (blue): field × year completeness %. Fields (vertical axis) keep the same
     olive→blue→red group ordering as the full-completeness figure; pre-1900 years are one
     '<1900' column. Field labels use a slightly larger font for legibility. ``bold_fields``
     renders the named fields in bold (the ones feeding the impact target + title/abstract);
-    ``cmap``/``title`` let the training-subset variant re-render this in red."""
+    ``year_window`` marks the training year cut; ``cmap``/``title`` let the
+    training-subset variant re-render this in red."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     palette.apply_style()
@@ -1416,6 +1580,10 @@ def plot_completeness_by_year(pivot_pct: pd.DataFrame, path: Path, *,
         tick.set_color(group_base[palette.field_group_of(field)])
         if str(field).lower() in bold_fields:      # highlight target-defining fields
             tick.set_fontweight("bold")
+    for pos, text in _year_cut_positions([str(c) for c in pivot_pct.columns], year_window):
+        ax.axvline(pos, color=palette.RED_DARK, linestyle="--", linewidth=2)
+        ax.text(pos, -0.8, text, rotation=0, fontsize=8, color=palette.RED_DARK,
+                ha="center", va="bottom")
     ax.set_xlabel("Year")
     ax.set_ylabel("Field")
     ax.set_title(title or "Field Completeness (%) by Year")
@@ -1443,44 +1611,6 @@ def plot_abstract_length_hist(lengths: pd.Series, path: Path, *, color: str | No
     ax.set_ylabel("Frequency")
     ax.set_title(title or "Abstract Length Distribution")
     ax.legend(loc="upper right")
-    ax.grid(axis="y", alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(path, dpi=120)
-    plt.close(fig)
-
-
-def plot_abstract_length_box(lengths: pd.Series, path: Path,
-                             embedder_max_chars: dict[str, int] | None = None) -> None:
-    """Box plot of abstract character lengths (min → max, quartiles + median), with a
-    horizontal marker line per embedder at ``max_tokens * ~3`` characters — i.e. roughly how
-    much of the abstract each embedder can actually ingest before truncation. Lets you see at
-    a glance what fraction of abstracts overflow specter2/scibert's 512-token window."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    palette.apply_style()
-    vals = pd.to_numeric(lengths, errors="coerce").dropna().to_numpy()
-    fig, ax = plt.subplots(figsize=(9, 5))
-    if vals.size:
-        ax.boxplot(vals, vert=True, showfliers=False, widths=0.5,
-                   patch_artist=True,
-                   boxprops=dict(facecolor=palette.SAND, edgecolor=palette.INK),
-                   medianprops=dict(color=palette.OLIVE, linewidth=2),
-                   whiskerprops=dict(color=palette.INK), capprops=dict(color=palette.INK))
-        ax.text(1.06, np.max(vals), f"max {int(np.max(vals)):,}", va="center", fontsize=8,
-                color=palette.INK)
-        ax.text(1.06, np.min(vals), f"min {int(np.min(vals)):,}", va="center", fontsize=8,
-                color=palette.INK)
-    # one dashed marker per embedder capacity (max_tokens * ~3 chars/token)
-    ramp = palette.ordinal_colors(max(1, len(embedder_max_chars or {})))
-    for (name, chars), col in zip(sorted((embedder_max_chars or {}).items()), ramp):
-        ax.axhline(chars, color=col, linestyle="--", linewidth=1.5,
-                   label=f"{name} ≈{chars:,} chars")
-    ax.set_xticks([1])
-    ax.set_xticklabels(["abstracts"])
-    ax.set_ylabel("Abstract length (characters)")
-    ax.set_title("Abstract Length vs Embedder Input Capacity")
-    if embedder_max_chars:
-        ax.legend(loc="upper right", fontsize=8)
     ax.grid(axis="y", alpha=0.3)
     fig.tight_layout()
     fig.savefig(path, dpi=120)
@@ -1551,10 +1681,11 @@ def plot_correlation_heatmap(corr: pd.DataFrame, path: Path, *, cmap: str | None
     plt.close(fig)
 
 
-def plot_score_distributions(scores: pd.DataFrame, path: Path, *, color: str | None = None,
-                             title: str | None = None) -> None:
+def plot_score_distributions(scores: pd.DataFrame, path: Path, *, target_label: str,
+                             color: str | None = None, title: str | None = None) -> None:
     """Score distributions of the usable corpus: the [0,1] training target (should be
     ~uniform by construction), log-scaled citation counts, and FWCI when present.
+    ``target_label`` names the configured impact value (config.yaml target_kind);
     ``color``/``title`` let the training-subset variant re-render the target panel in red."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1565,9 +1696,9 @@ def plot_score_distributions(scores: pd.DataFrame, path: Path, *, color: str | N
 
     t = scores["target"].dropna()
     axes[0].hist(t, bins=40, color=color or palette.OLIVE, alpha=0.85)
-    axes[0].set_xlabel("impact target (field-year percentile, 0-1)")
+    axes[0].set_xlabel(f"impact training value: {target_label} (0-1)")
     axes[0].set_ylabel("papers")
-    axes[0].set_title("Training-target distribution")
+    axes[0].set_title(f"Impact training value ({target_label})")
 
     c = scores["citation_count"].dropna()
     c = c[c >= 0]
@@ -1589,41 +1720,128 @@ def plot_score_distributions(scores: pd.DataFrame, path: Path, *, color: str | N
     plt.close(fig)
 
 
-def plot_impact_inflation(matrix: pd.DataFrame, path: Path) -> None:
-    """Heatmap: how the impact metrics drift/inflate across time. Rows are year buckets
-    ('<1900' then equal modern ranges); columns are the impact metrics (raw citations,
-    field-weighted FWCI, normalized citation percentile). Each column is z-scored across
-    year buckets so a metric that trends up or down over time reads as a clear light→dark
-    gradient down the column (the 'citation inflation' check)."""
+def plot_citations_by_year(curve: pd.DataFrame, path: Path) -> None:
+    """Line chart: mean citations per publication year (median as a second line).
+
+    Only raw citation counts — the citation-inflation view. Expects year_label,
+    mean_citations, median_citations, n.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     palette.apply_style()
-    if matrix.empty:
+    if curve.empty:
         return
-    raw = matrix.to_numpy(dtype=float)
-    mean = np.nanmean(raw, axis=0)
-    std = np.nanstd(raw, axis=0)
-    z = (raw - mean) / np.where(std > 0, std, 1.0)     # per-column z-score
-    fig, ax = plt.subplots(figsize=(max(7, matrix.shape[1] * 1.6),
-                                    max(5, matrix.shape[0] * 0.5)))
-    im = ax.imshow(z, cmap=palette.register_blue_seq(), aspect="auto",
-                   interpolation="nearest")
-    ax.set_xticks(np.arange(matrix.shape[1]))
-    ax.set_yticks(np.arange(matrix.shape[0]))
-    ax.set_xticklabels(matrix.columns, rotation=20, ha="right", fontsize=9)
-    ax.set_yticklabels(matrix.index, fontsize=9)
-    ax.set_xlabel("Impact metric (z-scored across year buckets)")
-    ax.set_ylabel("Year range")
-    ax.set_title("Impact-Metric Inflation over Time")
-    for i in range(matrix.shape[0]):
-        for j in range(matrix.shape[1]):
-            if np.isfinite(raw[i, j]):
-                ax.text(j, i, f"{raw[i, j]:.2f}", ha="center", va="center", fontsize=7,
-                        color="white" if z[i, j] > 0.6 else palette.INK)
-    cbar = plt.colorbar(im, ax=ax)
-    cbar.set_label("z-score (per metric)")
+    labels = curve["year_label"].astype(str).tolist()
+    x = np.arange(len(labels))
+    fig, ax = plt.subplots(figsize=(min(20.0, max(10.0, len(labels) * 0.13)), 5))
+    ax.plot(x, curve["mean_citations"], color=palette.OLIVE, linewidth=2, marker="o",
+            markersize=2.5, label="mean citations")
+    ax.plot(x, curve["median_citations"], color=palette.DUSK_BLUE, linewidth=1.6,
+            linestyle="--", label="median citations")
+    counts = ax.twinx()
+    counts.bar(x, curve["n"], color=palette.SAND, alpha=0.45, width=0.8, zorder=0)
+    counts.set_ylabel("papers in that year", fontsize=9)
+    counts.set_ylim(0, max(1, float(curve["n"].max()) * 2.5))
+    counts.tick_params(labelsize=8)
+    ax.set_zorder(counts.get_zorder() + 1)
+    ax.patch.set_visible(False)
+    step = max(1, len(labels) // 30)
+    ax.set_xticks(x[::step])
+    ax.set_xticklabels(labels[::step], rotation=60, ha="right", fontsize=8)
+    ax.set_xlabel("Publication year")
+    ax.set_ylabel("Citations per paper")
+    ax.set_title("Citations per Paper by Year")
+    ax.legend(fontsize=9, loc="upper left")
+    ax.grid(axis="y", alpha=0.3)
     fig.tight_layout()
     fig.savefig(path, dpi=120)
+    plt.close(fig)
+
+
+def plot_target_by_year(curve: pd.DataFrame, path: Path, *, target_label: str,
+                        color: str | None = None, title: str | None = None) -> None:
+    """Line chart: average impact training value per year, over all fields.
+
+    Expects year_label, mean_target, median_target, n. A flat line near 0.5 is the healthy
+    shape — the value is a within-(field, year) percentile, so it must not drift with time.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    palette.apply_style()
+    if curve.empty:
+        return
+    labels = curve["year_label"].astype(str).tolist()
+    x = np.arange(len(labels))
+    fig, ax = plt.subplots(figsize=(max(9, len(labels) * 0.32), 5))
+    ax.plot(x, curve["mean_target"], color=color or palette.RED_MID, linewidth=2,
+            marker="o", markersize=3.5, label=f"mean {target_label}")
+    ax.plot(x, curve["median_target"], color=palette.INK, linewidth=1.3, linestyle="--",
+            alpha=0.7, label="median")
+    ax.axhline(0.5, color=palette.INK, linewidth=1, linestyle=":", alpha=0.6,
+               label="0.5 (expected)")
+    ax.set_ylim(0, 1)
+    step = max(1, len(labels) // 30)
+    ax.set_xticks(x[::step])
+    ax.set_xticklabels(labels[::step], rotation=60, ha="right", fontsize=8)
+    counts = ax.twinx()
+    counts.bar(x, curve["n"], color=palette.SAND, alpha=0.45, width=0.7, zorder=0)
+    counts.set_ylabel("papers in that year", fontsize=9, color=palette.INK)
+    counts.set_ylim(0, max(1, float(curve["n"].max()) * 3))
+    counts.tick_params(labelsize=8)
+    ax.set_zorder(counts.get_zorder() + 1)
+    ax.patch.set_visible(False)
+    ax.set_xlabel("Publication year")
+    ax.set_ylabel(f"{target_label} (0-1)")
+    ax.set_title(title or f"Impact training value per year — {target_label}")
+    ax.legend(fontsize=9)
+    ax.grid(axis="y", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(path, dpi=130)
+    plt.close(fig)
+
+
+def plot_target_correlation(data: pd.DataFrame, path: Path, *, target_label: str,
+                            title: str | None = None) -> None:
+    """Scatter of the impact training value against year, citations and abstract length.
+
+    Each panel prints its Spearman rho: year should be ~0 (the value is normalized within
+    year), citations strongly positive (it is derived from them).
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    palette.apply_style()
+    if data.empty:
+        return
+    panels = [("year", "Publication year", False),
+              ("citation_count", "Citations (log10 + 1)", True),
+              ("abstract_len", "Abstract length (chars)", False)]
+    panels = [p for p in panels if p[0] in data.columns and data[p[0]].notna().any()]
+    if not panels:
+        return
+    fig, axes = plt.subplots(1, len(panels), figsize=(4.8 * len(panels), 4.4))
+    axes = np.atleast_1d(axes)
+    for ax, (col, xlabel, log_x) in zip(axes, panels):
+        d = data[[col, "target"]].dropna()
+        if d.empty:
+            continue
+        rho = d[col].corr(d["target"], method="spearman")
+        xv = np.log10(d[col].clip(lower=0) + 1) if log_x else d[col]
+        ax.scatter(xv, d["target"], s=6, alpha=0.35, color=palette.RED_MID,
+                   edgecolors="none")
+        if len(d) >= 3 and np.nanstd(xv) > 0:
+            coef = np.polyfit(xv, d["target"], 1)
+            xs = np.linspace(np.nanmin(xv), np.nanmax(xv), 50)
+            ax.plot(xs, np.polyval(coef, xs), color=palette.INK, linewidth=1.6,
+                    linestyle="--", label="linear trend")
+            ax.legend(fontsize=8, loc="lower right")
+        ax.set_xlabel(xlabel)
+        ax.set_ylim(0, 1)
+        ax.set_title(f"vs {col}  (Spearman rho = {rho:.3f})", fontsize=10)
+        ax.grid(alpha=0.3)
+    axes[0].set_ylabel(f"{target_label} (0-1)")
+    fig.suptitle(title or f"Impact training value ({target_label}) vs metadata", fontsize=12)
+    fig.tight_layout()
+    fig.savefig(path, dpi=130)
     plt.close(fig)
 
 

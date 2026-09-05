@@ -124,21 +124,26 @@ derives from — task, feature set and phase list per topology:
 | `emb_all_meta_reg` | regression | same | 0 1 2 3 4 6 7 |
 | `tfm_clf` | classification | raw title+abstract into a fine-tuned transformer | 0 1 5 6 7 |
 | `tfm_reg` | regression | same | 0 1 6 7 |
-| `llm_clf` | classification | LLM-as-judge: RAG store of precedents + evolving notes.md | 0 1 2 5 6 7 |
+| `llm_clf` | classification | LLM-as-judge: RAG store of precedents, one LLM call per record | 0 1 2 5 6 7 |
 | `llm_reg` | regression | same | 0 1 2 6 7 |
 
 The `emb_all_meta_*` pair deliberately bypasses the leakage guard (set automatically from
 the workflow type) to measure the performance ceiling when target-derived columns are fed
 to the model. The `tfm_*` pair skips embed/encode/reduce entirely — it never touches the
 encoder artifact. The `llm_*` pair runs the embed phase (it retrieves over the frozen
-specter2 embedding) but skips encode/reduce/training: instead of a trained network, phase 6
-([`src/main_train_judge.py`](src/main_train_judge.py)) builds a RAG store of TRAIN
-abstracts + their true impact and a `notes.md` of general judging principles, both rewritten
-example-by-example via an OpenAI-compatible LLM (`LLM_JUDGE_PROVIDER`/`LLM_JUDGE_MODEL`/
-`LLM_JUDGE_API_KEY`/`LOCAL_LLM_URL`, all in `.env.workflow` — this workflow module reads its
-LLM credentials from `.env.workflow` only, not the repo-root `.env`); with no endpoint
-configured every LLM call is a no-op and the run falls back to a deterministic kNN-mean judge
-instead of erroring.
+specter2 embedding) but skips encode/reduce/training: there is no trained network and no
+training step at all. Phase 6 ([`src/main_train_judge.py`](src/main_train_judge.py)) first
+builds a complete RAG store, deterministically and with no LLM call, from up to
+`judge_max_train_papers` TRAIN papers' true impact values (0 = every TRAIN paper); it then
+judges every record — TRAIN, VAL, and TEST alike — exactly once against that one store: up
+to 5 similar precedents (cosine similarity, excluding a paper's own exact abstract match)
+plus a fixed rubric are sent to an OpenAI-compatible LLM
+(`LLM_JUDGE_PROVIDER`/`LLM_JUDGE_MODEL`/`LLM_JUDGE_API_KEY`/`LOCAL_LLM_URL`, all in
+`.env.workflow` — this workflow module reads its LLM credentials from `.env.workflow` only,
+not the repo-root `.env`), which the system prompt explicitly tells to treat the precedents
+as loose calibration only, never to copy or average their scores. With no endpoint
+configured every LLM call is a no-op and the run falls back to a deterministic kNN-mean
+judge instead of erroring.
 
 ## Phases (ids used by `--from` / `--to`)
 
@@ -255,11 +260,12 @@ All filenames are suffixed with the workflow type, so results never collide:
 
 | File | What it shows | Task |
 |---|---|---|
-| `correctness_bars_<wf>.png` | % correct per split (train/val/test), olive shades, item counts in labels; regression is binned by the same class thresholds as the classifier | both |
-| `learning_curve_<wf>.png` | Training loss + validation metric vs epoch, one merged legend | both |
-| `confusion_matrix_<wf>_<seed>.png` | Predicted vs actual impact class (regression binned identically) — auto-adjusts to any class count | both |
-| `class_boxplot_<wf>.png` | Per-class F1 spread across seeds | clf |
-| `spearman_distribution.png`, `predicted_vs_actual.png`, `mse_bars.png` | Seed spread, calibration scatter, split MSE | reg |
+| `correctness_bars_<wf>.png` | % correct per split (train/val/test), mean +- std across ACCEPTED seeds (error bars), a chance-level dashed line, item counts + seed-count note in labels; regression is binned by the same class thresholds as the classifier | both |
+| `learning_curve_<wf>.png` | Training loss + validation metric vs epoch (best seed), one merged legend | both |
+| `confusion_matrix_<wf>.png` | Predicted vs actual impact class, row-% averaged across ACCEPTED seeds (regression binned identically) — auto-adjusts to any class count | both |
+| `class_boxplot_<wf>.png` | Per-class F1 spread across accepted seeds | clf |
+| `spearman_distribution.png`, `predicted_vs_actual.png` (best seed) | Seed spread, calibration scatter | reg |
+| `mse_bars.png` | Split MSE, mean +- std across accepted seeds | reg |
 | `umap3d_correctness_<wf>.{html,png}`, `umap3d_classes_<wf>.{html,png}` | 3-D UMAP of `z`: gold=correct/purple=wrong; colour per class | clf |
 | `umap3d_error_<wf>.{html,png}` | 3-D UMAP, continuous gold→purple by per-sample error | reg |
 | `umap3d_domain_*_<wf>.{html,png}` | The same, split per research domain (grid PNG + one HTML per domain) | both |

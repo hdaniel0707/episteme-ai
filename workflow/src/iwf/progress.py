@@ -50,10 +50,6 @@ def _eta_str(seconds: float) -> str:
 _ACTIVE: "MultiWorkflowProgress | None" = None
 
 
-def active_progress() -> "MultiWorkflowProgress | None":
-    return _ACTIVE
-
-
 class _WFState:
     __slots__ = ("label", "status", "phase", "phase_total", "percent", "seed", "n_runs",
                  "metric_name", "metric_val", "start_time", "end_time", "error_msg", "_last_plain")
@@ -86,10 +82,12 @@ class MultiWorkflowProgress:
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._order = list(workflow_ids)
+        raw_labels = {wf: (labels or {}).get(wf) or f"{WF_NUMBER.get(wf, '  ')} {wf}"
+                     for wf in self._order}
+        self._label_width = max((len(v) for v in raw_labels.values()), default=12)
         self.states: dict[str, _WFState] = {}
         for wf in self._order:
-            lbl = (labels or {}).get(wf) or f"{WF_NUMBER.get(wf, '  ')} {wf}"
-            self.states[wf] = _WFState(self._fixed_label(lbl))
+            self.states[wf] = _WFState(self._fixed_label(raw_labels[wf]))
         self._ansi = self._supports_ansi()
         self._unicode = self._supports_unicode()
         self._drawn_lines = 0
@@ -166,8 +164,8 @@ class MultiWorkflowProgress:
         return "utf" in enc
 
     def _fixed_label(self, label: str) -> str:
-        label = label[:12]
-        return f"{label:<12}"
+        w = self._label_width
+        return f"{label[:w]:<{w}}"
 
     # ----------------------------------------------------------------- public API
     def start(self) -> "MultiWorkflowProgress":

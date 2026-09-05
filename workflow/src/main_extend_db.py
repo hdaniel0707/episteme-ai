@@ -32,7 +32,6 @@ workflow/.env.workflow.
 from __future__ import annotations
 
 import argparse
-import json
 import sqlite3
 import sys
 import time
@@ -47,19 +46,29 @@ from workflow.src.iwf.fetchers import base as fbase
 from workflow.src.iwf.fetchers.openalex import (
     OpenAlexFetcher, collect_new_papers, fill_author_h_index)
 from workflow.src.iwf.fetchers.s2 import fill_from_s2
-from workflow.src.iwf.fetchers.uefiscdi import UefiscdiSeedFetcher, print_download_hints
+from workflow.src.iwf.fetchers.uefiscdi import UefiscdiSeedFetcher
 from workflow.src.iwf.fetchers.crossref import CrossrefFetcher
 from workflow.src.iwf.fetchers.arxiv import ArxivFetcher
 
 
 # Per-source on/off switches read from .env.workflow, so a direct `main_extend_db` run
-# honours the same ENABLE_* toggles the deploy scripts pass as --sources. 'copy' has no
-# toggle (always allowed). Default True = source enabled unless explicitly turned off.
+# honours the same ENABLE_* toggles the deploy scripts pass as --sources. Default True =
+# source enabled unless explicitly turned off. ENABLE_COPY=false leaves extended.db
+# untouched, so `extend` only re-derives training.db from what is already stored.
 _SOURCE_TOGGLES = {
+    "copy": "ENABLE_COPY",
     "openalex": "ENABLE_OPENALEX", "s2": "ENABLE_S2", "pdf": "ENABLE_PDF",
     "crossref": "ENABLE_CROSSREF", "arxiv": "ENABLE_ARXIV",
     "uefiscdi": "ENABLE_UEFISCDI", "fill": "ENABLE_FILL",
 }
+
+
+def _cfg_int(cfg: dict, key: str, default: int) -> int:
+    """Read an int from config.yaml, keeping an explicit 0 instead of the default."""
+    value = cfg.get(key)
+    if value is None or value == "":
+        return default
+    return int(value)
 
 
 def _filter_sources(sources: set[str]) -> set[str]:
@@ -177,6 +186,20 @@ def derive_training(ext_path: Path, out_path: Path) -> tuple[int, int]:
              "year IS NOT NULL", "citation_count IS NOT NULL",
              "year >= ?", "year <= ?"]
     params = [year_from, year_to]
+    max_abs_chars = config.max_abstract_chars()
+    if max_abs_chars > 0:
+        where.append("LENGTH(abstract) <= ?")
+        params.append(max_abs_chars)
+    wanted_sources = config.training_sources()
+    if wanted_sources:
+        likes, like_params = [], []
+        for channel in wanted_sources:
+            for prefix in config.SOURCE_ALIASES[channel]:
+                likes.append("LOWER(COALESCE(source, '')) LIKE ?")
+                like_params.append(f"{prefix}%")
+        where.append("(" + " OR ".join(likes) + ")")
+        params.extend(like_params)
+        print(f"[derive] training_sources={wanted_sources}: other sources excluded")
     if not use_llm_abs:
         where.append("(source IS NULL OR source != 'llm')")
     # unknown-domain papers must never be used for training (config.yaml
@@ -420,8 +443,8 @@ def cmd_extend(args) -> int:
           f"from_scratch={from_scratch}, sources={sorted(sources)}")
 
     # Run-total LLM-fill budget, shared by the wait-time fills and the final llm_fill phase.
-    fill_budget = {"domain": int(cfg.get("llm_fill_domain_max") or 60),
-                   "abstract": int(cfg.get("llm_fill_abstract_max") or 50)}
+    fill_budget = {"domain": _cfg_int(cfg, "llm_fill_domain_max", 60),
+                   "abstract": _cfg_int(cfg, "llm_fill_abstract_max", 50)}
 
     def _fill_during_wait() -> None:
         """Spend an idle daily-limit wait on LLM domain/abstract fills."""
@@ -578,10 +601,12 @@ def cmd_extend(args) -> int:
     with phase_timeout("benchmark", 600):
         from workflow.src.iwf.evaluation.benchmarks import (
             build_holdout_benchmark, build_temporal_holdout)
+        from workflow.src.iwf import config as _config
         train_db = fbase.extended_db_path().parent / "training.db"
-        build_holdout_benchmark(train_db)
+        tk, tmr = _config.target_kind(), _config.target_min_refset()
+        build_holdout_benchmark(train_db, target_kind=tk, target_min_refset=tmr)
         try:
-            build_temporal_holdout(train_db)
+            build_temporal_holdout(train_db, target_kind=tk, target_min_refset=tmr)
         except Exception as e:
             print(f"[extend] temporal-holdout benchmark skipped: {e}")
 

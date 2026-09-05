@@ -127,11 +127,22 @@ def work_to_row(work: dict, source: str = "openalex") -> dict:
 
 
 class OpenAlexFetcher(BaseFetcher):
-    """Domain-balanced /works crawl. ``domain_filters`` = list of OpenAlex filter strings
-    (e.g. 'primary_topic.field.id:fields/17'); each is fetched round-robin up to
-    ``per_filter_cap`` so the field×year reference sets stay dense."""
+    """Domain-balanced /works crawl, RANDOMLY sampled. ``domain_filters`` = list of
+    OpenAlex filter strings (e.g. 'primary_topic.field.id:fields/17'); each is drawn from
+    round-robin up to ``per_filter_cap`` so the field×year reference sets stay dense.
+
+    Uses OpenAlex's own ``sample``+``seed`` mode (a fixed, seeded 10,000-work random draw
+    per filter, walked page-by-page) instead of a plain cursor crawl. Without an explicit
+    ``sort``, OpenAlex's cursor pagination returns works ORDERED BY CITED_BY_COUNT
+    DESCENDING for this filter shape (confirmed empirically) - a plain crawl silently
+    collects only the most-cited "blockbuster" papers per field, never anything typical.
+    ``sample`` fixes that: same seed -> same 10,000-work pool every time, so resuming after
+    a daily-limit wait (or a later, separate collection run) walks FURTHER into that same
+    pool via an advancing page number, never re-drawing already-seen pages."""
 
     name = "openalex"
+    SAMPLE_SIZE = 10000     # OpenAlex's own hard cap for sample=
+    SAMPLE_SEED = 42        # fixed -> same 10,000-work random pool per filter, every run
 
     def __init__(self, year_from: int | None = None, year_to: int | None = None,
                  domain_filters: list[str] | None = None,
@@ -152,23 +163,28 @@ class OpenAlexFetcher(BaseFetcher):
         return ",".join(parts)
 
     def rows(self, conn: sqlite3.Connection) -> Iterator[dict]:
+        total_pages = -(-self.SAMPLE_SIZE // PER_PAGE)   # ceil division
         for df in self.domain_filters:
             filt = self._base_filter() + (f",{df}" if df else "")
             state_key = f"{self.name}:{df or 'all'}"
-            cursor = get_cursor(conn, state_key) or "*"
+            page = int(get_cursor(conn, state_key) or "1")
             fetched = 0
-            while cursor:
+            while page <= total_pages:
                 if self.per_filter_cap and fetched >= self.per_filter_cap:
                     break
-                data = _get(WORKS_URL, {"filter": filt, "per-page": PER_PAGE,
-                                        "cursor": cursor, "select": SELECT})
+                data = _get(WORKS_URL, {"filter": filt, "per-page": PER_PAGE, "page": page,
+                                        "sample": self.SAMPLE_SIZE, "seed": self.SAMPLE_SEED,
+                                        "select": SELECT})
                 if data is None:
                     break
-                for work in data.get("results", []):
+                results = data.get("results", [])
+                if not results:
+                    break
+                for work in results:
                     fetched += 1
                     yield work_to_row(work)
-                cursor = (data.get("meta") or {}).get("next_cursor")
-                set_cursor(conn, state_key, cursor, fetched)
+                page += 1
+                set_cursor(conn, state_key, str(page), fetched)
                 time.sleep(0.11)  # ~9 req/s: inside the polite-pool rate limit
 
 

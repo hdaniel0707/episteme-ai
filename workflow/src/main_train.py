@@ -22,7 +22,7 @@ import numpy as np
 from workflow.src.iwf import paths, workflow_results
 from workflow.src.iwf.config import WORKFLOWS, Settings, load_settings
 from workflow.src.iwf.data.dataset import load_parquet, save_parquet
-from workflow.src.iwf.targets import to_classes
+from workflow.src.iwf.targets import resolve_settings_class_thresholds, to_classes
 from workflow.src.iwf.training.experiment import run_experiment
 
 NN_NEIGHBORS = 10   # kNN size for the novelty/feasibility geometry
@@ -92,6 +92,7 @@ def main(settings: Settings | None = None, *, workflow_type: str | None = None,
     df = load_parquet(parquet)
     if task == "clf":
         _ensure_class_label(df, s, parquet)
+    resolve_settings_class_thresholds(s, df)
 
     if features == "z":
         scalar_cols: list[str] = []

@@ -16,7 +16,6 @@ merges.
 """
 
 import sqlite3
-from pathlib import Path
 
 from workflow.src.iwf import paths
 from workflow.src.iwf.data.identity import stable_text_id

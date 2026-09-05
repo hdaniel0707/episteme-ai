@@ -257,6 +257,60 @@ def css_boundaries(values: np.ndarray, n_classes: int = 3) -> list[float]:
     return cuts
 
 
+def quantile_boundaries(values: np.ndarray, fractions: list[float]) -> list[float]:
+    """Cut points at the given fractions of THIS sample's own distribution (e.g. [0.5] ->
+    the sample's median), so every class gets exactly its configured share of the ACTUAL
+    data - balanced classes regardless of where the raw target values fall in any global
+    population (e.g. a small locally-collected corpus that happens to skew high or low on a
+    globally-calibrated target like OpenAlex's citation_normalized_percentile)."""
+    v = values[~np.isnan(values)]
+    fr = sorted(float(f) for f in fractions)
+    if v.size == 0:
+        return fr
+    return [float(np.quantile(v, f)) for f in fr]
+
+
+def resolve_class_boundaries(values: pd.Series, scheme: str, thresholds: list[float] | None,
+                             names: list[str] | None = None) -> list[float]:
+    """Concrete cut-point VALUES for the given scheme, so a caller can both classify the
+    data AND know (and reuse, e.g. for binning a regression model's predictions the same
+    way) the exact boundaries applied:
+
+      percentile  thresholds taken as-is (fixed, absolute cutoffs)
+      css         cluster boundaries (Glanzel & Schubert 1988), computed from this sample
+      quantile    this sample's own quantiles at the ``thresholds`` fractions
+    """
+    v = pd.to_numeric(values, errors="coerce")
+    n_classes = len(names) if names else (len(thresholds) + 1 if thresholds else 3)
+    scheme = (scheme or "percentile").lower()
+    if scheme == "css":
+        return css_boundaries(v.to_numpy(dtype="float64"), n_classes=n_classes)
+    if scheme == "quantile":
+        return quantile_boundaries(v.to_numpy(dtype="float64"), thresholds or [0.50, 0.90])
+    return sorted(float(t) for t in (thresholds or [0.50, 0.90]))
+
+
+def resolve_settings_class_thresholds(settings, df: pd.DataFrame) -> None:
+    """Overwrite ``settings.class_thresholds`` in place with the resolved absolute cut-point
+    VALUES for ``settings.class_scheme``, computed from the TRAIN split's own target values
+    only (never val/test - the boundary must not be informed by data the model never trains
+    on). ``percentile`` scheme is a no-op (thresholds are already absolute values).
+
+    Call this exactly ONCE per phase-6 (train) run, for every workflow type, so every
+    downstream consumer within that run - the class-binned confusion matrix for regression
+    predictions, the LLM judge's classification, benchmarks, baseline comparisons - bins by
+    the same resolved lines instead of some workflows keeping the raw config fraction (e.g.
+    0.5) while others resolve it, which corrupts any cross-workflow comparison."""
+    scheme = (settings.class_scheme or "percentile").lower()
+    if scheme == "percentile":
+        return
+    train_target = (df.loc[df["split"] == "train", "target"] if "split" in df.columns
+                    else df["target"])
+    cuts = resolve_class_boundaries(train_target, scheme, settings.class_thresholds,
+                                    settings.class_names)
+    settings.class_thresholds = [round(float(c), 6) for c in cuts]
+
+
 def to_classes(values: pd.Series, scheme: str = "percentile",
                thresholds: list[float] | None = None,
                names: list[str] | None = None) -> pd.Series:
@@ -264,10 +318,8 @@ def to_classes(values: pd.Series, scheme: str = "percentile",
 
     The number of classes follows the thresholds (N thresholds -> N+1 classes), so this works
     for the default 3-class scheme and for the 4-quartile (Q4..Q1) scheme alike. ``names`` are
-    the ascending-impact labels (defaults derived from the class count)."""
+    the ascending-impact labels (defaults derived from the class count). ``scheme`` selects how
+    the cut points are found - see ``resolve_class_boundaries``."""
     values = pd.to_numeric(values, errors="coerce")
-    n_classes = len(names) if names else (len(thresholds) + 1 if thresholds else 3)
-    if (scheme or "percentile").lower() == "css":
-        cuts = css_boundaries(values.to_numpy(dtype="float64"), n_classes=n_classes)
-        return _by_thresholds(values, cuts, names)
-    return _by_thresholds(values, thresholds or [0.50, 0.90], names)
+    cuts = resolve_class_boundaries(values, scheme, thresholds, names)
+    return _by_thresholds(values, cuts, names)

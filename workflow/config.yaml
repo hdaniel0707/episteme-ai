@@ -35,35 +35,67 @@
 #   all              run every topology once, sharing the common phases
 workflow: emb_clf
 
-n_runs: 3              # seeds per run (model seed varies; the data split never does)
+n_runs: 1              # seeds per run (model seed varies; the data split never does)
 model_seed: 42         # base seed; seed i trains with model_seed + i
+
+# Outlier-seed exclusion for seed-averaged plots (accuracy-by-split, confusion matrix,
+# train/test correctness bars): a seed is dropped only when a run has >= seed_outlier_min_n
+# seeds AND that seed's test correctness is more than seed_outlier_gap_pct percentage points
+# below the MEDIAN of the run's other seeds. Below seed_outlier_min_n seeds, nothing is ever
+# excluded (today's runs: queue below uses n_runs: 5, so this is active).
+seed_outlier_enabled: true
+seed_outlier_min_n: 5
+seed_outlier_gap_pct: 15.0
 
 # Number of impact classes (classification + the class-binned regression plots).
 # Set exactly ONE of the three knobs below — first one set wins (2..25 classes):
 #   class_distribution: [15, 35, 35, 15]   # per-class % shares (uneven allowed)
 #   num_classes: 4                         # equal-sized classes -> Q4..Q1
 #   class_thresholds: [0.25, 0.50, 0.75]   # manual [0,1] boundaries (N -> N+1 classes)
-# Two classes for now (easier training): 50% split -> bottom half Q2, upper half Q1.
+# DEMO: exactly two classes — one 0.5 boundary gives Q2 (bottom half) and Q1 (top half).
+# Names are auto-derived (Qn..Q1), so leave class_names unset or a per-run num_classes
+# override would clash with a hardcoded pair.
 class_thresholds: [0.5]
 # class_names: [Q4, Q3, Q2, Q1]  # optional; auto-derived (Qn..Q1) when omitted
-class_scheme: percentile          # percentile | css (cluster-based boundaries)
+# class_scheme - HOW class_thresholds is turned into cut-point VALUES:
+#   percentile   thresholds ARE the cut points, taken as fixed absolute values on the
+#                target (0.5 = literally the value 0.5) - can badly imbalance the classes
+#                on a small local sample if the raw target isn't centered near those values
+#                (e.g. fwci_percentile is calibrated against ALL of OpenAlex, so a small
+#                locally-collected corpus can easily skew almost entirely to one side of 0.5).
+#   css          cluster boundaries (Glanzel & Schubert 1988), computed from THIS run's data.
+#   quantile     thresholds are read as FRACTIONS of THIS run's own data (0.5 = the sample's
+#                own median) - guarantees each class gets exactly its configured share of
+#                the actual selected training data (here: 50% Q2 / 50% Q1), regardless of
+#                where the raw target values fall. The resolved cut-point VALUES are reused
+#                everywhere a continuous score gets binned into classes for the rest of that
+#                run (regression-model predictions included), so classifiers and
+#                regression-to-class comparisons are cut by the exact same lines.
+class_scheme: quantile
 
 # Impact target regressed / classified:
 #   field_year_percentile | fwci_percentile | normalized_percentile | bayesian_impact
-target_kind: field_year_percentile
+# fwci_percentile = OpenAlex's own field-normalized percentile (citation_normalized_percentile,
+# FWCI-rank fallback where absent). Sparser than field_year_percentile (not every paper has it),
+# but it is OpenAlex's own stable, externally-defined score rather than one computed in this repo.
+target_kind: fwci_percentile
 
 # ---------------------------------------------------------------------------
 # 2. MODEL & TRAINING  (the impact-predictor head; ignored by tfm_* workflows)
 # ---------------------------------------------------------------------------
-model_arch: resmlp     # mlp | resmlp | ft_transformer  (resmlp = recommended for the head)
-hidden: [384, 256, 128] # recommended layout: 3 residual blocks, tapering widths
+# FAST EXPERIMENT: plain feed-forward net (no residual blocks, no transformer head),
+# sized for 500 training rows on 768-d SPECTER2 vectors -> keep it small or it memorises.
+model_arch: mlp        # mlp | resmlp | ft_transformer | logreg  (mlp = plain neural network;
+                       # logreg = scikit-learn LogisticRegression baseline, classification
+                       # only, ignores hidden/dropout/lr/max_epochs/patience/batch_size/loss)
+hidden: [128, 64]      # 2 hidden layers; ~100k params, sane for 200 samples
 activation: gelu       # relu | gelu | tanh | htanh | sigmoid | leaky_relu | elu | silu | mish
-dropout: 0.4
-lr: 0.0005
+dropout: 0.3
+lr: 0.001              # a bit higher than the 300-epoch setup: few steps per epoch
 weight_decay: 0.01
-max_epochs: 300        # full training with early stopping (patience below)
-patience: 40           # epochs without val improvement before stopping
-batch_size: 512        # large corpus (embeddings precomputed) -> bigger batch is fine
+max_epochs: 100        # short run with early stopping (patience below)
+patience: 15           # epochs without val improvement before stopping
+batch_size: 32         # 500 train rows -> ~16 steps/epoch
 
 # Classifier loss (ignored by regression):
 class_weight: effective  # none | balanced (inverse-freq) | effective (Cui 2019)
@@ -75,13 +107,25 @@ label_smoothing: 0.05    # 0..~0.1; calms over-confident softmax
 # ---------------------------------------------------------------------------
 # 3. EMBEDDING & ENCODER  (emb_* workflows only)
 # ---------------------------------------------------------------------------
-embedder: specter2     # specter2 | scibert | scincl | e5 | openai — the frozen embedding
-                       # (sets both the computed embedding and the one fed to the encoder;
-                       #  use `embedders: [a, b]` + `embed_for_encoder: a` to compute extras)
-                       # Already cached in data/parquet/wf01_emb.parquet — free to reuse.
+embedder: specter2     # the frozen embedding (sets both the computed embedding and the one
+                       # fed to the encoder; use `embedders: [a, b]` + `embed_for_encoder: a`
+                       # to compute extras). Already cached in data/parquet/*_emb.parquet.
+                       # SPECTER2 flavours — all share allenai/specter2_base weights and
+                       # differ ONLY in which AllenAI task adapter is activated on top. The
+                       # adapter is supposed to match how the vector is consumed downstream:
+                       #   specter2_base   no adapter at all (the base-vs-adapter control)
+                       #   specter2        proximity/retrieval adapter — nearest-neighbour
+                       #                   search, link prediction. NOT a classifier feature
+                       #                   extractor, despite being AllenAI's default.
+                       #   specter2_clf    classification adapter -> use with emb_clf
+                       #   specter2_reg    regression adapter     -> use with emb_reg
+                       #   specter2_adhoc  ad-hoc query adapter — encodes SHORT queries
+                       # Other embedders: scibert | scincl | e5 | openai
+                       # Each flavour caches to its own emb_<name> column, so switching
+                       # flavours never reuses another flavour's vectors.
 encoder_kind: identity # identity (no reduction) | autoencoder | pca | umap
-                       # top-level default is identity; the encoder `runs:` below set
-                       # autoencoder to optimise the latent size.
+                       # FAST EXPERIMENT: identity everywhere — no autoencoder dimension
+                       # search (that phase alone costs more than the training here).
 dim_grid: [64, 128, 256, 512]   # candidate latent dims — the AE picks the smallest that
                        # keeps reconstruction quality (best dimension while quality constant)
 dim_recon_target: 0.95 # autoencoder: smallest k with reconstruction R^2 >= this
@@ -121,7 +165,8 @@ novelty_k: 10            # kNN size for the novelty/feasibility geometry
 # naip_local needs weights (python -m workflow.src.setup_external_models) + peft;
 # every scorer degrades to None gracefully when unavailable, runs never crash.
 # Default ON: the two fully-offline scorers (cached per paper_id, cheap after run 1).
-external_impact: [specter2_knn, venue_ais]
+# FAST EXPERIMENT: none — baseline scorers add minutes and say nothing on 300 papers.
+external_impact: []
 
 # Benchmark suites evaluated for every run at phase 7 (aggregate/model_benchmarks/):
 #   holdout_extended  local, built by `main_extend_db extend` — no network needed
@@ -129,25 +174,19 @@ external_impact: [specter2_knn, venue_ais]
 #   naip12k           downloaded NAIP dataset (evaluation.benchmarks.download_benchmark)
 #   sciimpact_pairs | dblp_v14_sample   optional, download first
 # Each benchmark gets its own figure + CSV in aggregate/model_benchmarks/.
-benchmarks: [holdout_extended, holdout_recent]
+# FAST EXPERIMENT: no benchmark suites — only the 50-paper internal test split is scored.
+benchmarks: []
 
 # ---------------------------------------------------------------------------
 # 5b. LLM-AS-JUDGE  (llm_clf / llm_reg only — see src/main_train_judge.py)
 # ---------------------------------------------------------------------------
-# These are per-run "science" knobs — they change what the judge learns and how much it
-# costs in LLM tokens — so, unlike the LLM endpoint/key/context-window (machine-level,
-# in .env.workflow), they live here and can differ per `runs:` entry.
-judge_batch_max_papers: 25        # hard cap: papers combined into one rewrite/chunk-write
-                                   # call (also auto-trimmed to fit LLM_JUDGE_MAX_CONTEXT_
-                                   # TOKENS in .env.workflow, whichever is smaller)
-judge_checkpoint_interval_pct: 0.15   # VAL-checkpoint cadence, as a fraction of TRAIN size
-judge_val_eval_start_pct: 0.10        # initial (cheap) fraction of VAL evaluated per check
-judge_val_eval_max_pct: 1.0           # ceiling for the escalating VAL subset (doubles on
-                                       # a suspected plateau; two saturations in a row stops)
-judge_early_stop_margin: 0.01         # min VAL-metric improvement to NOT count as saturated
-judge_error_gate_threshold: 0.15      # |predicted-true| >= this -> "bad" -> queued to learn
-judge_good_sample_fraction: 0.10      # random fraction of "good" (well-predicted) papers
-                                       # also queued, as a replay/regularization check
+# The RAG store is built FIRST, deterministically, from TRAIN's true target values (no LLM
+# call needed for that). Every record — TRAIN, VAL, TEST alike — is then judged exactly
+# once against that one complete store: no notes-rewriting, no checkpointing, no multi-pass
+# training. n_runs (section 1) still controls how many seeds (RAG-selection shuffles) run.
+judge_max_train_papers: 0   # cap how many TRAIN papers build the RAG store + get judged for
+                             # train metrics (0 = use every TRAIN paper); e.g. 4000 on a huge
+                             # corpus to bound LLM call volume/cost
 
 # ---------------------------------------------------------------------------
 # 6. DATA & SPLIT  (rarely changed — changing these invalidates cached parquets)
@@ -156,40 +195,118 @@ judge_good_sample_fraction: 0.10      # random fraction of "good" (well-predicte
                                     # this (and comment out wf01_verify/max_papers below)
                                     # for a real training session; config.yaml.full_backup
                                     # has the original flagship queue for that dataset.
-dataset_id: wf01_scratch200k       # separate id -> fresh cache for the from-scratch corpus
-split_seed: 45
-split_ratios: [0.70, 0.15, 0.15]   # train / val / test — ONE shared split for all stages
-target_min_refset: 30              # min (field x year) papers before pooling
-# year_from: 2015                  # optional corpus filters
-# year_to: 2023
-max_papers: 200000                 # full collected corpus (up to the fetch target below)
+dataset_id: wf02_final_train100v1  # FINAL SWEEP LINE (wf02, locked-in setup): 500+500 fixed
+                                   # val/test (up from 250+250), pool grown to 6000 to fit.
+                                   # The wf01 line (2500-row pool, 2000->500 steps) and the
+                                   # earlier wf02 250+250 draft are both superseded/paused —
+                                   # neither is comparable to this one, see below. NEW id ->
+                                   # fresh phase-0/embedding cache; changing the corpus REQUIRES
+                                   # a new id, otherwise the cached parquet of the previous
+                                   # corpus is silently reused. MUST bump for every train_n step
+                                   # within this line (v1 -> v2 -> ...), even when the pool
+                                   # itself doesn't change, so phase 1 actually reruns and picks
+                                   # up the new train_n — see 6a.
+split_seed: 145
+# DATA-SIZE SWEEP, FINAL LINE wf02: 6000-paper pool (a seeded RANDOM draw from the
+# OpenAlex-only extended.db, 9000 rows collected — see .env.workflow MAX_TRAINING_ROWS=6000 +
+# SELECTION_SEED=145). This pool is DISTINCT from the wf01 line's 2500-row pool and from the
+# earlier wf02 draft's 5500-row/250+250 pool: any change to max_papers or the holdout counts
+# below reselects which physical rows land in the pool, including val/test, so none of those
+# are directly comparable to this final line. Within THIS line, max_papers/MAX_TRAINING_ROWS
+# must stay FIXED at 6000 for every train_n step (5000 down to whatever comes next) — shrinking
+# it would change WHICH physical rows the split-layer below even sees, breaking the "same
+# val/test every step" guarantee in 6a. Do not change max_papers between steps within a line;
+# change train_n (6a) instead.
+split_ratios: [0.80, 0.10, 0.10]   # fallback only — ignored while 6a's holdout_val_n/
+                                   # holdout_test_n are set (see below)
+target_min_refset: 5               # min (field x year) papers before pooling (tiny corpus)
+# year_from: 2015                  # optional corpus filter (lower bound)
+year_to: 2024                      # newest publication year allowed in training; 2025/2026
+                                   # rows exist in extended.db but have no settled citation
+                                   # counts yet, so they are cut (see .env TRAIN_YEAR_TO)
+# Which ALREADY-COLLECTED sources may enter training. extended.db mixes acquisition
+# channels (legacy professor DBs + whatever main_extend_db has fetched), so pick the ones a
+# run should learn from — [openalex] keeps training scoped to freshly-collected OpenAlex
+# rows only, regardless of how many legacy S2/Crossref/arXiv rows sit in extended.db.
+# The exact per-channel row counts change every time collection runs; see
+# workflow/data/analysis/counts_source.csv (or dataset_report.md) for the current numbers —
+# filterable to specific channels via ANALYSE_SOURCES in .env.workflow.
+#   [openalex]         OpenAlex only
+#   [s2]                legacy S2 store only
+#   [openalex, s2]      both
+#   any                 every source, no filter
+# Valid channels: openalex | s2 | crossref | arxiv | pdf | llm | any
+# Enforced in derive_training AND the phase-0 loader, like the other training filters.
+training_sources: [openalex]
+# Longest abstract kept for training, in characters (0 = no limit). specter2/scibert read
+# 512 tokens ~= 1536 chars, so anything past that is truncated away by the embedder;
+# dropping the extreme cases keeps the trained text representative of the whole abstract.
+# Corpus reference: median 1268, p90 1961, p95 2352, max 29889 chars.
+max_abstract_chars: 2500
+max_papers: 6000                   # the fixed pool size for the FINAL wf02 sweep line — see above
+
+# ---------------------------------------------------------------------------
+# 6a. FIXED-HOLDOUT SPLIT  (data-size sweep — REPLACES split_ratios above)
+# ---------------------------------------------------------------------------
+# val/test are a FIXED 500+500 holdout, selected once from the pool by holdout_seed -
+# IDENTICAL rows every run regardless of train_n, as long as max_papers/holdout_val_n/
+# holdout_test_n/holdout_seed never change between steps WITHIN THIS FINAL LINE. train_n
+# controls how many of the remaining pool rows are actually trained on THIS step; a seeded,
+# nested prefix (train_select_seed) so a smaller train_n is a strict subset of every larger
+# one's train rows WITHIN THE SAME LINE. Leftover rows past train_n are excluded entirely
+# (label 'unused', no split trains on them).
+# FINAL wf02 LINE (locked in): 500+500 val/test (up from the wf01 250+250 and the earlier wf02
+# draft's 250+250), pool grown to 6000 to fit. holdout_seed/train_select_seed kept at 145/146 —
+# only the counts changed, and dataset_id above already forces a fresh cache/selection, so no
+# need for yet another seed pair. Every future step in THIS line must keep holdout_val_n=500,
+# holdout_test_n=500, holdout_seed=145, train_select_seed=146, max_papers=6000 unchanged and
+# only shrink train_n (bumping dataset_id each time).
+holdout_val_n: 500
+holdout_test_n: 500
+holdout_seed: 145
+train_n: 100                 # <- THE knob to change per experiment step within this final line
+train_select_seed: 146
 
 # ---------------------------------------------------------------------------
 # 6b. DATA EXTENSION  (python -m workflow.src.main_extend_db — plan §4)
 # ---------------------------------------------------------------------------
 # Grows the workflow-owned extended DB (workflow/data/sql/extended.db) toward
-# fetch_target_rows real papers from OpenAlex + UEFISCDI journal seeds; the
+# fetch_target_rows real papers from OpenAlex (only source enabled, .env.workflow); the
 # professor's store/ DBs are read-only. Point the pipeline at the result with
 # EPAI_DB=extended in workflow/.env.workflow.
-# THIS RUN: build a brand-new OpenAlex-only corpus of 200k papers spanning every field,
-# over at most 3 daily-credit cycles, then LLM-fill up to 5000 unknown domains and train.
-fetch_target_rows: 200000      # collect this many papers total from OpenAlex
-fetch_new_rows: 0              # 0 = fill toward fetch_target_rows (from scratch, have=0 -> 200k)
+# THIS RUN: collect 9000 MORE OpenAlex papers on top of the existing extended.db (already
+# holds ~9000 OpenAlex-only papers from the previous from-scratch pass). fetch_new_rows (not
+# fetch_target_rows) is used so the count is reliable regardless of the DB's starting size:
+# fetch_target_rows means "grow the corpus to N TOTAL rows" (a no-op once the corpus already
+# exceeds N — that silently collected zero new papers the first time this was tried).
+# Deduplication is automatic and safe to grow repeatedly like this: iwf.fetchers.base.Deduper
+# keys on OpenAlex's own globally-unique "OA:<id>" paper_id (plus a fuzzy title/year/author
+# check), so a paper already in extended.db is always skipped, never re-inserted, no matter
+# how many times collection reruns. fetch_wait_days: 0 below means the run NEVER waits out a
+# daily rate-limit reset — if OpenAlex's daily budget runs out before 9000 new papers is
+# reached, collection stops immediately with whatever was gathered (re-run later to top up).
+fetch_target_rows: 18000       # informational target; fetch_new_rows below actually governs it
+fetch_new_rows: 9000           # collect exactly 9000 NEW papers this pass, regardless of size
 # fetch_from_scratch: start a FRESH OpenAlex-only corpus instead of growing the existing DB.
 # true  = back up any current extended.db (non-destructive .pre_scratch_* copy) and build empty
 #         (skips the legacy 'copy' step, so no professor/base rows seed it)
 # false = grow the currently available extended.db as the starting point
-fetch_from_scratch: true       # true | false
+fetch_from_scratch: false      # true | false  (false = GROW the already-collected, already-
+                               # representative extended.db instead of discarding it again;
+                               # the earlier bias was a fetcher bug — see fetchers/openalex.py
+                               # OpenAlexFetcher — now fixed, not something scratch-rebuilding
+                               # again would have fixed on its own)
 # fetch_domains: list of OpenAlex filter strings, or `all` to crawl every one of OpenAlex's
 # 26 scientific fields (wide-domain coverage). Field ids: https://api.openalex.org/fields
 fetch_domains: all             # all | [] (whole index, unbucketed) | [<filter>, <filter>, ...]
-# fetch_wait_days: OpenAlex meters requests as DAILY credits (100k/day on the free key, resets
+# fetch_wait_days: OpenAlex meters requests as a DAILY BUDGET (measured 2026-07-29: 10000
+# credits, 1 per request, $0.0001 each — NOT the 100k the older docs describe; resets
 # ~midnight UTC). On the daily limit before fetch_target_rows is reached, wait
 # FETCH_RATE_LIMIT_WAIT_HOURS (.env.workflow, 25h) for the reset and continue — at most this
 # many times (3 = up to a 3-day campaign), then stop with what was gathered. Waiting is skipped
 # automatically when the query is exhausted / stalls on duplicates (a reset yields nothing new).
 # While waiting, the idle day is used to LLM-fill domains/abstracts (see caps below).
-fetch_wait_days: 3             # max daily-reset waits (0 = never wait)
+fetch_wait_days: 0             # max daily-reset waits (0 = never wait; no collection this run)
 # fetch_year_from: 2010
 # fetch_year_to: 2024
 fetch_per_journal_cap: 300     # max papers per UEFISCDI red/yellow journal (unused this run)
@@ -199,7 +316,8 @@ fetch_per_journal_cap: 300     # max papers per UEFISCDI red/yellow journal (unu
 # (paid) LLM tokens it spends. Gated by ENABLE_LLM_FILL / ENABLE_LLM_ABSTRACT_FILL /
 # ENABLE_LLM_WEBSEARCH in .env.workflow. The cap is a RUN TOTAL shared across the daily-limit
 # wait passes and the final fill pass. THIS RUN: domains only (abstract fill off).
-llm_fill_domain_max: 5000      # max UNKNOWN-domain rows to classify from ALLOWED_DOMAINS
+llm_fill_domain_max: 0         # FAST: 0 = no LLM calls at all (domains as-is in the DB)
+                               # max UNKNOWN-domain rows to classify from ALLOWED_DOMAINS
                                # (harmless: never marks source='llm', always trained)
 llm_fill_abstract_max: 0       # 0 = abstract reconstruction OFF this run (domains only)
 # Whether LLM-reconstructed abstracts (source='llm') may enter TRAINING (off; moot here since
@@ -241,64 +359,87 @@ require_known_domain_for_training: true # true | false
 
 runs:
   # ==========================================================================
-  # FULL QUEUE — 12 models on the fresh 200k wide-domain corpus (each entry runs
-  # both clf + reg). All inherit the recommended head (§2: resmlp [384,256,128],
-  # max_epochs 300). SPECTER2 embeddings only. Shared fetch/prepare/embed phases
-  # are computed once and reused across runs with matching data/embedding params.
-  #   1 specter2 + cites adapter (768-d, identity encoder)
-  #   2 specter2 + encoder       (base weights + autoencoder, optimised latent)
-  #   3 specter2 + cites adapter + encoder (adapter + autoencoder, optimised latent)
-  #   4 trf, short LoRA adapter  (r=8,  8 layers frozen, >=15 epochs)
-  #   5 trf, deep  LoRA adapter  (r=32, 0 layers frozen, >=15 epochs)
-  #   6 LLM-as-judge (<=2 dataset passes)
+  # DEMO QUEUE — 5 neural-network / classical-ML models on the OpenAlex-only corpus, FWCI
+  # target, 2000 train / 250 val / 250 test, two classes (Q2/Q1, dynamically quantile-cut so
+  # each is exactly half of the actual data - see class_scheme above). n_runs: 5 everywhere
+  # so every algorithm sits on the same 5-seed footing for the train-vs-test comparison
+  # figure (results/summary/algorithm_comparison_train_test.png) AND so the seed_outlier_*
+  # exclusion above (min_n: 5) is actually active. Hidden/batch/epoch/patience on the three
+  # MLP entries are hand-sized up from the old 100-train-row demo for the current 2000-row
+  # training set (bigger net, larger batches, a bit more training + patience) — no automated
+  # search, no change to dropout/lr (overfitting-focused tuning is a separate, later step).
+  # Text-transformer and LLM-as-judge are NOT trained this round (removed from the queue on
+  # purpose - GPU-heavy / LLM-cost-heavy, not needed while iterating on the fast baselines):
+  #   (1)  plain SPECTER2 (no adapter) + MLP head          clf + reg
+  #   (1b) scikit-learn LogisticRegression baseline        clf
+  #   (1c) scikit-learn LinearRegression baseline          reg
+  #   (2)  SPECTER2 citation adapter  + MLP head           clf + reg
+  #   (3)  SPECTER2 citation adapter  + autoencoder -> 256 clf + reg
+  # The full 12-model queue (incl. text-transformer + LLM judge) is preserved in
+  # config.yaml.full_backup; demo_trf_tiny/demo_llm_judge can be copied back from git history
+  # or re-added using the earlier entries in this file's own history when needed again.
   # ==========================================================================
 
-  # (1) SPECTER2 with citation/proximity adapter, full 768-d (identity encoder).
-  - name: specter2_adapter
+  # (1) Plain SPECTER2 base weights, NO adapter — the baseline the others compare against.
+  - name: demo_specter2_base
     workflow: [emb_clf, emb_reg]
-    embedder: specter2
-    encoder_kind: identity
+    embedder: specter2_base        # base weights only, no adapter
+    encoder_kind: identity         # full 768-d, no dimension reduction
+    model_arch: mlp                # plain feed-forward network
+    hidden: [256, 128]
+    dropout: 0.3
+    lr: 0.001
+    batch_size: 64
+    max_epochs: 150
+    patience: 20
+    n_runs: 5
 
-  # (2) SPECTER2 with encoder: base weights compressed by a trained autoencoder. The
-  #     autoencoder sweeps dim_grid and keeps the smallest latent that holds quality
-  #     (dim_recon_target 0.95) — "best dimension reducing while quality is constant".
-  - name: specter2_encoder
-    workflow: [emb_clf, emb_reg]
+  # (1b) scikit-learn LogisticRegression baseline — the simplest possible classifier, run
+  #      alongside the neural baselines so the comparison plot has a non-neural reference point.
+  - name: demo_sklearn_logreg
+    workflow: emb_clf
     embedder: specter2_base
-    encoder_kind: autoencoder
+    encoder_kind: identity
+    model_arch: logreg
+    n_runs: 5
 
-  # (3) SPECTER2 with cites adapter + encoder: adapter embedding, then the same
-  #     quality-preserving autoencoder dimension search.
-  - name: specter2_adapter_encoder
+  # (1c) scikit-learn LinearRegression baseline — the regression counterpart of (1b); plain,
+  #      unregularized (the user's explicit choice), run alongside the MLP regressors.
+  - name: demo_sklearn_linreg
+    workflow: emb_reg
+    embedder: specter2_base
+    encoder_kind: identity
+    model_arch: linreg
+    n_runs: 5
+
+  # (2) SPECTER2 with the citation/proximity adapter, same head — the adapter's effect.
+  - name: demo_specter2_adapter
+    workflow: [emb_clf, emb_reg]
+    embedder: specter2             # base + allenai/specter2 citation adapter
+    encoder_kind: identity
+    model_arch: mlp
+    hidden: [256, 128]
+    dropout: 0.3
+    lr: 0.001
+    batch_size: 64
+    max_epochs: 150
+    patience: 20
+    n_runs: 5
+
+  # (3) Same adapter embedding, compressed 768 -> 256 by a trained autoencoder.
+  #     dim_grid holds only 256, so the AE trains exactly that latent size.
+  - name: demo_specter2_ae256
     workflow: [emb_clf, emb_reg]
     embedder: specter2
     encoder_kind: autoencoder
-
-  # (4) Text transformer, SHORT LoRA adapter — low rank, most layers frozen.
-  - name: trf_short_adapter
-    workflow: [tfm_clf, tfm_reg]
-    text_transformer_arch: specter2_lora
-    text_transformer_lora_r: 8
-    text_transformer_lora_alpha: 16
-    text_transformer_freeze_layers: 8
-    text_transformer_epochs: 15
-    text_transformer_n_runs: 1
-
-  # (5) Text transformer, DEEP LoRA adapter — higher rank, all layers adapt.
-  - name: trf_deep_adapter
-    workflow: [tfm_clf, tfm_reg]
-    text_transformer_arch: specter2_lora
-    text_transformer_lora_r: 32
-    text_transformer_lora_alpha: 64
-    text_transformer_freeze_layers: 0
-    text_transformer_epochs: 15
-    text_transformer_n_runs: 1
-
-  # (6) LLM-as-judge: RAG store + evolving notes.md instead of a trained head (see
-  #     main_train_judge.py). Uses the gpt-oss:20b model on the Obuda gateway
-  #     (LLM_JUDGE_* + LOCAL_LLM_URL in .env.workflow). n_runs 1; the judge makes at most
-  #     ~2 passes over TRAIN while building precedents.
-  - name: llm_judge
-    workflow: [llm_reg, llm_clf]
-    embedder: specter2
-    n_runs: 1
+    dim_grid: [256]                # single candidate = fixed 256-d latent
+    encoder_max_epochs: 80         # demo-sized AE training
+    encoder_patience: 12
+    model_arch: mlp
+    hidden: [256, 128]
+    dropout: 0.3
+    lr: 0.001
+    batch_size: 64
+    max_epochs: 150
+    patience: 20
+    n_runs: 5

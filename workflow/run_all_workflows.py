@@ -127,7 +127,7 @@ def main() -> int:
     run_labels = [f"{wf}:{name}" for wf, name, _ in all_runs]
     progress = MultiWorkflowProgress(
         run_labels,
-        labels={rl: f"{rl[:12]:<12}" for rl in run_labels},
+        labels={rl: rl for rl in run_labels},
     ).start()
 
     data_done: set[tuple] = set()

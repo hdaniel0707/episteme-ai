@@ -24,6 +24,7 @@ DUSK_BLUE = "#7189A6"      # cool accent: tfm_clf, high-value items
 MAUVE = "#9A8AA8"          # secondary accent: wrong/inaccurate in clf plots
 GOLD = "#D9B96E"           # warm highlight: metadata, top metrics
 GRAY = "#8C8C8C"           # neutral: target/unknown/external/unlabeled
+ERROR_BAR_GRAY = "#4D4D4D" # neutral dark gray: seed-spread error bars (never pure black)
 
 # Blue family (for heatmaps, correlation, confusion, cross-domain, year×domain)
 BLUE_DARK = "#1F3A5F"      # darkest navy: strong positive / high count

@@ -2,8 +2,10 @@
 
 Reads the enriched corpus, computes the field-normalized impact ``target`` (Option A/B),
 builds numeric ``meta_*`` columns, derives a percentile-based ``strat_label`` used ONLY to
-stratify the split, then computes the single shared 70/15/15 split (seeded). Every later
-stage reuses this ``split`` column. Drops rows without a target.
+stratify the split, then computes the single shared split (seeded) — proportional
+(split_ratios) by default, or a fixed-size holdout (holdout_val_n/holdout_test_n/train_n)
+for a data-size sweep. Every later stage reuses this ``split`` column. Drops rows without a
+target.
 
     python -m workflow.src.main_prepare
 """
@@ -77,7 +79,9 @@ def main(settings: Settings | None = None) -> None:
 
     # 4) THE shared split (computed once; seeded; stratified)
     df = add_split_column(df, seed=s.split_seed, ratios=s.split_ratios,
-                          stratify_col="strat_label", domain_holdout=s.domain_holdout)
+                          stratify_col="strat_label", domain_holdout=s.domain_holdout,
+                          val_n=s.holdout_val_n, test_n=s.holdout_test_n, train_n=s.train_n,
+                          holdout_seed=s.holdout_seed, train_select_seed=s.train_select_seed)
     counts = df["split"].value_counts().to_dict()
     print(f"[prepare] split (seed={s.split_seed}): {counts}")
 

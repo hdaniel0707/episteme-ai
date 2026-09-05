@@ -16,7 +16,7 @@ from pathlib import Path
 from workflow.src.iwf import paths, workflow_results
 from workflow.src.iwf.config import WORKFLOWS, Settings, load_settings
 from workflow.src.iwf.data.dataset import load_parquet, save_parquet
-from workflow.src.iwf.targets import to_classes
+from workflow.src.iwf.targets import resolve_settings_class_thresholds, to_classes
 from workflow.src.iwf.training.text_trainer import TextTransformerTrainer
 
 
@@ -58,6 +58,7 @@ def main(settings: Settings | None = None, *, workflow_type: str | None = None,
     df = _ensure_text_columns(df, s, task)
     if task == "clf":
         save_parquet(df, paths.prepared_parquet(s.dataset_id))
+    resolve_settings_class_thresholds(s, df)
 
     workflow_results.write_run_config(wf, s, wf_dir)
     for i in range(tfm_runs):

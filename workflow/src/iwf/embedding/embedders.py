@@ -20,26 +20,49 @@ EPAI_TYPES = {"specter2", "scibert", "openai"}
 LOCAL_TYPES = {"scincl", "e5"}
 
 # SPECTER2 flavours selectable by name. Each maps to (base_model, adapter_or_None); the base
-# weights are always allenai/specter2_base and the *adapter* is what specialises them:
-#   specter2         base + the proximity/citation adapter (allenai/specter2) -> the "full result"
-#   specter2_base    base weights only, NO adapter (for base-vs-adapter comparison)
-#   specter2_adhoc   base + the ad-hoc query adapter (retrieval-flavoured)
+# weights are always allenai/specter2_base and the *adapter* is what specialises them.
+# AllenAI trains ONE adapter per SciRepEval task format, and the task format is supposed to
+# match how the embedding is consumed downstream (see SPECTER2_ADAPTER_PURPOSE below):
+#   specter2_base    base weights only, NO adapter (the base-vs-adapter control)
+#   specter2         + proximity/retrieval adapter   (nearest-neighbour, link prediction)
+#   specter2_clf     + classification adapter        (embeddings feeding a classifier head)
+#   specter2_reg     + regression adapter            (embeddings feeding a regressor head)
+#   specter2_adhoc   + ad-hoc query adapter          (SHORT text queries, not whole papers)
 # Because the output column is f"emb_{name}" (see add_embedding), each flavour gets its own
-# cached column / encoder input automatically, so two runs can contrast them.
+# cached column / encoder input automatically, so runs can contrast them without collisions.
 SPECTER2_VARIANTS = {
     "specter2": ("allenai/specter2_base", "allenai/specter2"),
     "specter2_base": ("allenai/specter2_base", None),
+    "specter2_clf": ("allenai/specter2_base", "allenai/specter2_classification"),
+    "specter2_reg": ("allenai/specter2_base", "allenai/specter2_regression"),
     "specter2_adhoc": ("allenai/specter2_base", "allenai/specter2_adhoc_query"),
 }
 
+# What each flavour's adapter is FOR — surfaced in the per-run description_<wf>.md so a
+# results folder states which adapter produced its embeddings and whether that adapter
+# matches the task it was used for (emb_clf wants specter2_clf, emb_reg wants specter2_reg).
+SPECTER2_ADAPTER_PURPOSE = {
+    "specter2_base": "no adapter — plain SPECTER2 base weights (base-vs-adapter control)",
+    "specter2": "proximity / retrieval: nearest-neighbour search and link prediction",
+    "specter2_clf": "classification: embeddings intended as features for a classifier head",
+    "specter2_reg": "regression: embeddings intended as features for a regressor head",
+    "specter2_adhoc": "ad-hoc search: encodes SHORT query strings, not full paper records",
+}
+# The adapter whose task format matches each workflow task, used only to flag a mismatch in
+# the generated documentation (never to override an explicit config choice).
+TASK_MATCHED_EMBEDDER = {"clf": "specter2_clf", "reg": "specter2_reg"}
+
 # transformer (CLS-pooled) embedders that have a batched GPU path here (EMBED_BATCH_SIZE):
-BATCHABLE_TYPES = {"specter2", "scibert", "specter2_base", "specter2_adhoc"}
-DIMS = {"specter2": 768, "specter2_base": 768, "specter2_adhoc": 768,
+BATCHABLE_TYPES = {"scibert", *SPECTER2_VARIANTS}
+DIMS = {**{name: 768 for name in SPECTER2_VARIANTS},
         "scibert": 768, "scincl": 768, "openai": 1536, "e5": 1024}
 # Max input tokens per embedder (title+abstract is truncated to this). Used by the analysis
 # abstract-length box plot to draw a "~max chars this embedder ingests" marker (tokens * ~3).
-MAX_TOKENS = {"specter2": 512, "specter2_base": 512, "specter2_adhoc": 512,
+MAX_TOKENS = {**{name: 512 for name in SPECTER2_VARIANTS},
               "scibert": 512, "scincl": 512, "e5": 512, "openai": 8191}
+
+# Every embedder name config.yaml may legally name (validated early, in Settings.validate).
+KNOWN_EMBEDDERS = frozenset({*SPECTER2_VARIANTS, *EPAI_TYPES, *LOCAL_TYPES})
 
 
 def _embed_batch_size() -> int:
@@ -55,8 +78,16 @@ def _hf_embed_batched(df: pd.DataFrame, emb_type: str, batch_size: int) -> pd.Da
 
     Numerically equivalent to the one-at-a-time path (padding is masked out by the
     attention_mask, so the [CLS] vector is unaffected) but processes ``batch_size`` papers
-    per forward pass - a large speed-up on GPU. For specter2 the proximity adapter is
-    explicitly activated, fixing the "adapters available but none are activated" warning.
+    per forward pass - a large speed-up on GPU.
+
+    For every adapter flavour the adapter is loaded AND verified active before any paper is
+    embedded: a silent activation failure would hand back plain base-weight vectors stored
+    under the adapter's column name, i.e. an invalid base-vs-adapter comparison that no
+    metric could reveal. It is therefore a hard error, never a warning.
+
+    Note: the `adapters` library logs "There are adapters available but none are activated
+    for the forward pass" ONCE per model load, before the active setup is read back. It is
+    benign - the assertion below is the authority on whether the adapter is really active.
     """
     from transformers import AutoTokenizer
 
@@ -70,12 +101,20 @@ def _hf_embed_batched(df: pd.DataFrame, emb_type: str, batch_size: int) -> pd.Da
         tok = load_hf(AutoTokenizer.from_pretrained, base_model, "tokenizer")
         model = load_hf(AutoAdapterModel.from_pretrained, base_model, "model")
         if adapter_name:                      # None -> plain base weights (specter2_base)
-            adapter = model.load_adapter(adapter_name, source="hf",
-                                         load_as="adapter", set_active=True)
-            try:                              # belt-and-braces: ensure it is the active adapter
-                model.set_active_adapters(adapter or "adapter")
-            except Exception:
-                pass
+            # load_as=emb_type so the active setup reads back as e.g. Stack[specter2_clf]
+            loaded = model.load_adapter(adapter_name, source="hf",
+                                        load_as=emb_type, set_active=True)
+            model.set_active_adapters(loaded)
+            active = str(getattr(model, "active_adapters", None) or "")
+            if loaded not in active:
+                raise RuntimeError(
+                    f"{emb_type}: adapter {adapter_name!r} loaded as {loaded!r} but is NOT "
+                    f"active (active_adapters={active or 'None'}). Embedding now would "
+                    f"silently produce plain {base_model} vectors under the "
+                    f"'emb_{emb_type}' column. Check the installed `adapters` version."
+                )
+            print(f"[embed] {emb_type}: adapter {adapter_name} active ({active}) — "
+                  f"{SPECTER2_ADAPTER_PURPOSE.get(emb_type, '')}")
     elif emb_type == "scibert":
         from transformers import AutoModel
 
@@ -143,24 +182,24 @@ def _hf_embed(df: pd.DataFrame, emb_type: str) -> pd.DataFrame:
 def add_embedding(df: pd.DataFrame, emb_type: str) -> pd.DataFrame:
     """Add an ``emb_{emb_type}`` column; routes to epai or the local HF path.
 
-    For specter2/scibert, EMBED_BATCH_SIZE>0 selects a batched GPU path (faster, and it
-    activates the specter2 adapter); EMBED_BATCH_SIZE=0 keeps the original per-row epai path.
+    EVERY specter2 flavour goes through the local batched path, whatever EMBED_BATCH_SIZE
+    says: that path is the only one that loads and activates the task adapter. Routing
+    "specter2" to the epai helper instead (it is also an EPAI_TYPE) would quietly return
+    un-adapted base vectors under the adapter's column name, so the flavour check comes
+    first and EMBED_BATCH_SIZE only chooses the batch size.
     """
     col = f"emb_{emb_type}"
     if col in df.columns and df[col].notna().all():
         return df
     batch_size = _embed_batch_size()
+    if emb_type in SPECTER2_VARIANTS:
+        return _hf_embed_batched(df, emb_type, batch_size or 32)
     if emb_type in BATCHABLE_TYPES and batch_size > 0:
         return _hf_embed_batched(df, emb_type, batch_size)
     if emb_type in EPAI_TYPES:
         return _epai_add_embedding(df, emb_type)
     if emb_type in LOCAL_TYPES:
         return _hf_embed(df, emb_type)
-    if emb_type in SPECTER2_VARIANTS:
-        # specter2 adapter flavours (specter2_base / specter2_adhoc) only have the batched
-        # HF path — that's where the adapter is selected — so use a default batch size when
-        # EMBED_BATCH_SIZE is unset rather than falling through to the error below.
-        return _hf_embed_batched(df, emb_type, batch_size or 32)
     raise ValueError(
         f"Unknown emb_type {emb_type!r}. "
         f"Choose from {sorted(EPAI_TYPES | LOCAL_TYPES | set(SPECTER2_VARIANTS))}."

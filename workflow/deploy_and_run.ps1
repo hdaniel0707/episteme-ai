@@ -24,6 +24,29 @@ $LogDir = Join-Path $ScriptDir "logs"
 
 function Log($msg) { Write-Host "`n[deploy] $msg" -ForegroundColor Cyan }
 
+# The launcher itself is configurable from .env.workflow too (same KEY=VALUE parse the
+# generated inner script uses). Literals below are only fallbacks for absent keys.
+$deployCfg = @{}
+$envWfOuter = Join-Path $ScriptDir ".env.workflow"
+if (Test-Path $envWfOuter) {
+    foreach ($line in Get-Content $envWfOuter) {
+        $t = $line.Trim()
+        if ($t -eq "" -or $t.StartsWith("#")) { continue }
+        $kv = $t -split '=', 2
+        if ($kv.Count -eq 2) { $deployCfg[$kv[0].Trim()] = ($kv[1] -split '#', 2)[0].Trim() }
+    }
+}
+function Get-Cfg([string]$name, [string]$fallback) {
+    $v = $deployCfg[$name]
+    if ($null -eq $v -or $v -eq "") { return $fallback }
+    return $v
+}
+function Test-CfgOn([string]$name, [bool]$fallback = $true) {
+    $v = $deployCfg[$name]
+    if ($null -eq $v -or $v -eq "") { return $fallback }
+    return @('1','true','yes','on') -contains $v.ToLower()
+}
+
 if (-not (Test-Path (Join-Path $RepoDir ".git"))) {
     throw "Run this from a cloned repo checkout."
 }
@@ -61,17 +84,9 @@ $inner = Join-Path $LogDir "pipeline_$ts.ps1"
 `$ErrorActionPreference = "Stop"
 Set-Location -LiteralPath '$RepoDir'
 `$env:PATH = "`$env:USERPROFILE\.local\bin;`$env:PATH"
-`$env:EPAI_DB = "training"
-`$env:UMAP_OPEN_BROWSER = "false"
-`$env:PARALLEL_JOBS = "auto"
-`$env:PARALLEL_LOAD_TARGET = "0.90"
-`$env:EMBED_BATCH_SIZE = "64"
-# Live status file: rewritten every tick to hold one current line per workflow (+ the AE
-# footer), each line only once, with growing bars — a clean dashboard even for the
-# detached run. View with:  Get-Content -Wait '$LogDir\progress.status'
-`$env:PROGRESS_STATUS_FILE = '$LogDir\progress.status'
 
-# Load big-feature toggles from .env.workflow (if present), then default unset ones to true.
+# Load EVERY key of .env.workflow (if present). Nothing below is hardcoded: each setting
+# comes from that file, and the literal here is only the fallback when the key is absent.
 `$envWf = Join-Path '$ScriptDir' '.env.workflow'
 `$toggles = @{}
 if (Test-Path `$envWf) {
@@ -90,6 +105,33 @@ function Is-On([string]`$name) {
     if (`$null -eq `$v -or `$v -eq "") { return `$true }   # default ON
     return @('1','true','yes','on') -contains `$v.ToLower()
 }
+function Get-Val([string]`$name, [string]`$fallback) {
+    `$v = `$toggles[`$name]
+    if (`$null -eq `$v -or `$v -eq "") { return `$fallback }
+    return `$v
+}
+
+# Machine knobs - .env.workflow wins; these literals apply only when it does not set them.
+# The progress bars/ticks are UTF-8 (block glyphs + check marks). Without these the
+# console decodes them as ANSI and shows mojibake instead of the bar/tick glyphs.
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
+`$env:PYTHONIOENCODING   = Get-Val 'PYTHONIOENCODING' 'utf-8'
+# Unbuffered: a detached run redirects stdout to a file, and Python block-buffers that.
+# Without this the log stays EMPTY for a long time and a stalled run looks identical to a
+# working one.
+`$env:PYTHONUNBUFFERED   = Get-Val 'PYTHONUNBUFFERED' '1'
+`$env:EPAI_DB            = Get-Val 'EPAI_DB' 'training'
+`$env:UMAP_OPEN_BROWSER  = Get-Val 'UMAP_OPEN_BROWSER' 'false'
+`$env:PARALLEL_JOBS      = Get-Val 'PARALLEL_JOBS' 'auto'
+`$env:PARALLEL_LOAD_TARGET = Get-Val 'PARALLEL_LOAD_TARGET' '0.90'
+`$env:EMBED_BATCH_SIZE   = Get-Val 'EMBED_BATCH_SIZE' '64'
+# Live status file: rewritten every tick to hold one current line per workflow (+ the AE
+# footer), each line only once, with growing bars - a clean dashboard even for the
+# detached run. View with:  Get-Content -Wait '$LogDir\progress.status'
+`$env:PROGRESS_STATUS_FILE = Get-Val 'PROGRESS_STATUS_FILE' '$LogDir\progress.status'
+# Drop the previous session's status: until training starts, the dashboard must show
+# nothing rather than the last run's finished models.
+Remove-Item `$env:PROGRESS_STATUS_FILE -ErrorAction SilentlyContinue
 
 `$bootSources = @()
 if (Is-On 'ENABLE_OPENALEX') { `$bootSources += 'openalex' }
@@ -97,7 +139,8 @@ if (Is-On 'ENABLE_CROSSREF') { `$bootSources += 'crossref' }
 if (Is-On 'ENABLE_ARXIV')    { `$bootSources += 'arxiv' }
 if (Is-On 'ENABLE_S2')       { `$bootSources += 's2' }
 
-`$extSources = @('copy')
+`$extSources = @()
+if (Is-On 'ENABLE_COPY')     { `$extSources += 'copy' }
 if (Is-On 'ENABLE_PDF')      { `$extSources += 'pdf' }
 if (Is-On 'ENABLE_UEFISCDI') { `$extSources += 'uefiscdi' }
 if (Is-On 'ENABLE_OPENALEX') { `$extSources += 'openalex' }
@@ -116,6 +159,9 @@ if ((Is-On 'ENABLE_BOOTSTRAP') -and `$bootSources.Count -gt 0) {
 }
 
 if (Is-On 'ENABLE_EXTEND_DB') {
+    # 'none' = every source off: no DB is modified, extend only re-derives training.db
+    # (seeded random subset of extended.db) + report + local benchmarks.
+    if (`$extSources.Count -eq 0) { `$extSources = @('none') }
     `$es = `$extSources -join ','
     Write-Host "===== [2/4] extend: raw.db + legacy DBs -> extended.db -> training.db (sources: `$es) ====="
     uv run python -m workflow.src.main_extend_db extend --sources `$es
@@ -125,8 +171,12 @@ if (Is-On 'ENABLE_EXTEND_DB') {
 }
 
 if (Is-On 'ENABLE_ANALYSE') {
-    Write-Host "===== [3/4] dataset statistics -> workflow/data/analysis/ ====="
-    uv run python -m workflow.src.main_analyse_dataset --db extended
+    # Two suites in one run: the olive figures describe ANALYSE_DB (the whole collected
+    # corpus, default extended) and the red '_train' figures describe the rows actually
+    # trained on (EPAI_DB). Set them to the same DB and the two suites become identical.
+    `$analyseDb = Get-Val 'ANALYSE_DB' 'extended'
+    Write-Host "===== [3/4] dataset statistics (corpus: `$analyseDb, trained-on: `$env:EPAI_DB) -> workflow/data/analysis/ ====="
+    uv run python -m workflow.src.main_analyse_dataset --db `$analyseDb --train-db `$env:EPAI_DB
 } else {
     Write-Host "===== [3/4] dataset statistics SKIPPED (ENABLE_ANALYSE=false) ====="
 }
@@ -165,7 +215,44 @@ if ($Foreground) {
     $psi.Id | Out-File (Join-Path $LogDir "pipeline.pid")
     $statusFile = Join-Path $LogDir 'progress.status'
     Log "started, PID $($psi.Id)."
-    Write-Host "        Full scrolling log:      Get-Content -Wait $runLog"
-    Write-Host "        Live progress dashboard: while(1){Clear-Host;Get-Content '$statusFile';Start-Sleep 1}"
+    Write-Host "        Full scrolling log:      Get-Content -Wait -Encoding UTF8 $runLog"
+    Write-Host "        Live progress dashboard: [Console]::OutputEncoding=[Text.Encoding]::UTF8;while(1){Clear-Host;Get-Content -Encoding UTF8 '$statusFile';Start-Sleep 1}"
     Write-Host "                                 (one line per workflow, updated in place, + AE footer)"
+    Write-Host "                                 -Encoding UTF8 keeps the bar glyphs readable"
+
+    # Without this the launcher returned instantly and the window closed on top of the run.
+    # FOLLOW_PROGRESS=false in .env.workflow skips it; FOLLOW_DELAY_SECONDS sets the wait.
+    $followDelay = [int](Get-Cfg 'FOLLOW_DELAY_SECONDS' '5')
+    if ((Test-CfgOn 'FOLLOW_PROGRESS') -and [Environment]::UserInteractive) {
+        Write-Host ""
+        Write-Host "[deploy] The live progress dashboard opens in $followDelay s. It is only a VIEWER:" -ForegroundColor Yellow
+        Write-Host "         press Ctrl-C (or close the window) any time - the run keeps going detached." -ForegroundColor Yellow
+        Write-Host "         Rejoin later:  powershell -NoProfile -Command ""[Console]::OutputEncoding=[Text.Encoding]::UTF8;while(1){Clear-Host;Get-Content -Encoding UTF8 '$statusFile';Start-Sleep 1}"""
+        Write-Host "         Turn this auto-open off: FOLLOW_PROGRESS=false in workflow\.env.workflow"
+        for ($i = $followDelay; $i -gt 0; $i--) {
+            Write-Host -NoNewline "`r         opening in $i s ... (Ctrl-C to stay here)   "
+            Start-Sleep -Seconds 1
+        }
+        Write-Host ""
+        # The status file is UTF-8 (bar/tick glyphs); read AND print it as UTF-8, otherwise
+        # Windows PowerShell decodes it as ANSI and the bars come out as mojibake.
+        $prevOutEnc = [Console]::OutputEncoding
+        try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
+        while (-not $psi.HasExited) {
+            Clear-Host
+            Write-Host "===== live progress (PID $($psi.Id)) - Ctrl-C closes this VIEW only =====" -ForegroundColor Cyan
+            # Before training starts (fetch/extend/analyse) there is no status file yet, so
+            # show the live log instead of an empty screen.
+            if (Test-Path $statusFile) {
+                Get-Content $statusFile -Encoding UTF8
+            } else {
+                Write-Host "(no training progress yet - last lines of $runLog)"
+                Get-Content $runLog -Tail 15 -Encoding UTF8 -ErrorAction SilentlyContinue
+            }
+            Start-Sleep -Seconds 1
+        }
+        try { [Console]::OutputEncoding = $prevOutEnc } catch { }
+        Write-Host ""
+        Log "pipeline process exited (code $($psi.ExitCode)). Full log: $runLog"
+    }
 }

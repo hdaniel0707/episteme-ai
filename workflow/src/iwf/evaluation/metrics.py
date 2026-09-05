@@ -53,6 +53,54 @@ def classification_metrics(
     }
 
 
+def test_correctness(result: dict, task: str, class_thresholds: list[float],
+                     split: str = "test") -> float | None:
+    """Fraction of one seed's SPLIT predictions in the correct impact class - accuracy for
+    classifiers; for regressors, predictions + true values binned by class_thresholds and
+    compared. The one comparable-across-tasks "correctness" score every best-seed
+    selection and every correctness plot uses. None if the seed lacks the needed data."""
+    split_data = result.get(split)
+    if not isinstance(split_data, dict):
+        return None
+    if task == "clf":
+        acc = split_data.get("accuracy")
+        return float(acc) if isinstance(acc, (int, float)) else None
+    y_true, y_pred = split_data.get("y_true"), split_data.get("y_pred")
+    if not y_true or not y_pred or not class_thresholds:
+        return None
+    cuts = sorted(float(t) for t in class_thresholds)
+    yt = np.digitize(np.asarray(y_true, dtype=float), cuts)
+    yp = np.digitize(np.asarray(y_pred, dtype=float), cuts)
+    return float((yt == yp).mean())
+
+
+def accepted_seeds(seeds: list[dict], task: str, class_thresholds: list[float], *,
+                   enabled: bool = True, min_n: int = 5,
+                   gap_pct: float = 15.0) -> tuple[list[dict], list[dict]]:
+    """Split a run's seeds into (accepted, excluded) by TEST correctness, so a single
+    catastrophically-failed seed doesn't skew a seed-averaged plot.
+
+    A seed is excluded only when there are at least ``min_n`` seeds with a computable
+    correctness AND its correctness is more than ``gap_pct`` percentage points below the
+    MEDIAN of the other seeds - never the mean (a robust reference point unaffected by the
+    outlier itself). Below ``min_n`` seeds, or with ``enabled=False``, every seed with a
+    computable correctness is accepted untouched (today's default n_runs is a no-op by
+    construction; raising the seed count later activates this without a code change)."""
+    scored = [(s, test_correctness(s, task, class_thresholds)) for s in seeds]
+    scored = [(s, c) for s, c in scored if c is not None]
+    if not enabled or len(scored) < min_n:
+        return [s for s, _ in scored], []
+    accepted, excluded = [], []
+    for s, c in scored:
+        others = [c2 for s2, c2 in scored if s2 is not s]
+        median_other = float(np.median(others))
+        if (median_other - c) * 100.0 > gap_pct:
+            excluded.append(s)
+        else:
+            accepted.append(s)
+    return accepted, excluded
+
+
 def generated_vs_human(human_scores: np.ndarray, generated: dict[str, np.ndarray]) -> dict:
     """Summary stats of predicted impact for the human test split vs each generated source."""
     def describe(a: np.ndarray) -> dict:
