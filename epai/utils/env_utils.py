@@ -1,6 +1,14 @@
 # env_utils.py
 import os
+import sys
+import time
 from dotenv import dotenv_values
+
+_RED = "\033[91m"
+_YELLOW = "\033[93m"
+_GREEN = "\033[92m"
+_DIM = "\033[2m"
+_RESET = "\033[0m"
 
 # GenAI4Science (HUN-REN SZTAKI) — an OpenAI-compatible endpoint for open-weight
 # models. Two deployments:
@@ -34,6 +42,150 @@ def genai4science_endpoint() -> tuple[str, str]:
         os.environ.get("GENAI4SCIENCE_BASE_URL", GENAI4SCIENCE_BASE_URL),
         "GENAI4SCIENCE_API_KEY",
     )
+
+
+def genai4science_tier() -> str:
+    """``"performance"`` when ``GENAI4SCIENCE_PERFORMANCE_API_KEY`` is set in the
+    environment right now, else ``"shared"`` — the endpoint
+    :func:`genai4science_endpoint` would pick."""
+    return "performance" if os.environ.get("GENAI4SCIENCE_PERFORMANCE_API_KEY") else "shared"
+
+
+def probe_genai4science(base_url: str, api_key: str, model: str,
+                        *, timeout: float = 45.0) -> tuple[bool, str]:
+    """Send one 1-token completion to ``model``. Returns ``(ok, message)``.
+
+    A cold open-weight model on the shared endpoint can take most of a minute to
+    load, hence the generous timeout and ``max_retries=0`` (the caller decides
+    what a failure means).
+    """
+    try:
+        from openai import OpenAI
+    except ImportError:
+        return False, "openai package not importable — cannot probe"
+    client = OpenAI(api_key=api_key, base_url=base_url, timeout=timeout, max_retries=0)
+    t0 = time.monotonic()
+    try:
+        client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": "ok"}],
+            max_tokens=1,
+        )
+        return True, f"OK in {time.monotonic() - t0:.1f}s"
+    except Exception as exc:  # noqa: BLE001 — any transport/HTTP error is a failed probe
+        first = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
+        return False, f"{exc.__class__.__name__}: {first[:200]}"
+
+
+def report_genai4science_endpoint(*, probe_model: str | None = None,
+                                  timeout: float = 45.0,
+                                  allow_fallback: bool = True,
+                                  stream=None) -> tuple[str, str]:
+    """Announce which GenAI4Science key/endpoint a run will use, and check it.
+
+    Prints, every time:
+      - ``performance endpoint`` in green when ``GENAI4SCIENCE_PERFORMANCE_API_KEY``
+        is set, or
+      - a **warning** that the performance key is missing and the run has fallen
+        back to the rate-limited shared endpoint (``GENAI4SCIENCE_API_KEY``).
+
+    When ``probe_model`` is given, sends a 1-token completion to confirm the
+    endpoint actually answers and prints the result. If the **performance**
+    endpoint fails the probe and ``allow_fallback`` is set and a
+    ``GENAI4SCIENCE_API_KEY`` is available that DOES answer, this pops the
+    performance key from ``os.environ`` for the rest of the process — so every
+    later :func:`genai4science_endpoint` call (client builds, subprocess envs)
+    transparently uses the shared endpoint — and says so loudly.
+
+    Returns ``(base_url, api_key_env)`` for the endpoint that won, same shape as
+    :func:`genai4science_endpoint`.
+    """
+    out = stream or sys.stdout
+
+    def emit(msg: str) -> None:
+        print(msg, file=out, flush=True)
+
+    base_url, api_key_env = genai4science_endpoint()
+    tier = genai4science_tier()
+    key = os.environ.get(api_key_env)
+
+    if tier == "performance":
+        emit(f"{_GREEN}GenAI4Science: performance endpoint{_RESET} "
+             f"{_DIM}({api_key_env}={summarize_value(key) if key else '<not set>'}  {base_url}){_RESET}")
+    else:
+        emit(f"{_YELLOW}GenAI4Science: GENAI4SCIENCE_PERFORMANCE_API_KEY is not set "
+             f"— using the SHARED endpoint via {api_key_env}.{_RESET}")
+        emit(f"{_YELLOW}  The shared endpoint is rate-limited and drops calls under "
+             f"batch load; set the performance key for dedicated (4-concurrent) "
+             f"capacity.{_RESET}")
+
+    if not key:
+        emit(f"{_RED}  {api_key_env} is not set — GenAI4Science calls will fail.{_RESET}")
+        return base_url, api_key_env
+
+    if not probe_model:
+        return base_url, api_key_env
+
+    ok, msg = probe_genai4science(base_url, key, probe_model, timeout=timeout)
+    emit(f"{_GREEN if ok else _RED}  probe {probe_model}: {msg}{_RESET}")
+    if ok:
+        return base_url, api_key_env
+
+    # The chosen endpoint did not answer.
+    shared_key = os.environ.get("GENAI4SCIENCE_API_KEY")
+    if tier != "performance" or not allow_fallback or not shared_key:
+        if tier == "performance":
+            emit(f"{_YELLOW}  The performance endpoint is not answering and there "
+                 f"is no GENAI4SCIENCE_API_KEY to fall back to. It will NOT switch "
+                 f"on its own — fix the endpoint or set the shared key.{_RESET}")
+        return base_url, api_key_env
+
+    emit(f"{_YELLOW}  Performance endpoint down — trying the shared endpoint "
+         f"(GENAI4SCIENCE_API_KEY)…{_RESET}")
+    shared_base = os.environ.get("GENAI4SCIENCE_BASE_URL", GENAI4SCIENCE_BASE_URL)
+    ok2, msg2 = probe_genai4science(shared_base, shared_key, probe_model, timeout=timeout)
+    emit(f"{_GREEN if ok2 else _RED}  probe {probe_model} (shared): {msg2}{_RESET}")
+    if not ok2:
+        emit(f"{_RED}  Neither GenAI4Science endpoint answered for {probe_model}.{_RESET}")
+        return base_url, api_key_env
+
+    # Fall back for the rest of this process: drop the performance key so every
+    # later genai4science_endpoint() resolves to the shared one.
+    os.environ.pop("GENAI4SCIENCE_PERFORMANCE_API_KEY", None)
+    emit(f"{_YELLOW}  → FALLING BACK to the shared endpoint (GENAI4SCIENCE_API_KEY) "
+         f"for the rest of this run.{_RESET}")
+    return shared_base, "GENAI4SCIENCE_API_KEY"
+
+
+def qwen3_thinking_off(model: str, messages: list[dict]) -> list[dict]:
+    """Append the ``/no_think`` soft switch to a Qwen3 call's last user turn.
+
+    Qwen3 models emit a ``<think>…</think>`` reasoning pass by default, which
+    roughly 10×'s the tokens per call. It buys nothing for the two things this
+    project asks a Qwen3 model to do — write an abstract from a title, and rate
+    a document 0–1 — and ``clean_generated`` strips the block from the corpus
+    anyway, so the cost is pure wall-clock.
+
+    ``/no_think`` is Qwen3's own chat-template switch, honoured by every backend
+    that uses that template (this endpoint is LiteLLM → Ollama). A model that
+    ignores it just sees nine extra characters. **Non-Qwen3 models are returned
+    unchanged** — the check is a substring match on the model id, so this is
+    safe to call unconditionally on every generation / judge call.
+
+    A new list is returned; the input messages are not mutated.
+    """
+    if "qwen3" not in model.lower():
+        return messages
+    out = [dict(m) for m in messages]
+    for m in reversed(out):
+        if m.get("role") == "user" and isinstance(m.get("content"), str):
+            m["content"] = m["content"].rstrip() + " /no_think"
+            return out
+    for m in out:  # no user turn (unusual) — put it on the system message
+        if m.get("role") == "system" and isinstance(m.get("content"), str):
+            m["content"] = m["content"].rstrip() + "\n\n/no_think"
+            return out
+    return out
 
 
 def summarize_value(value: str) -> str:

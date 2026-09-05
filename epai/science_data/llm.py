@@ -236,16 +236,20 @@ def openai_text_call(client, model: str, system: str, user: str) -> Callable[[],
     token-limit parameter names vary across model generations, and the prompts
     already state the required length, so there is nothing to gain by pinning
     them here.
+
+    The one model-specific touch: ``qwen3_thinking_off`` appends ``/no_think``
+    to a Qwen3 model's prompt (a no-op for every other model), because its
+    default ``<think>`` pass 10×'s the tokens per abstract for no gain.
     """
+    from epai.utils.env_utils import qwen3_thinking_off
+
+    messages = qwen3_thinking_off(model, [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ])
 
     def _call() -> str:
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-        )
+        response = client.chat.completions.create(model=model, messages=messages)
         return response.choices[0].message.content or ""
 
     return _call

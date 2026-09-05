@@ -443,6 +443,15 @@ def preflight(cfg: dict, args: argparse.Namespace, steps: list[str]) -> None:
                     f"THIS repo's .env (see .env_sample) — this process's "
                     f"environment is what gets copied into the fork's subprocess."
                 )
+            if api_key_env.startswith("GENAI4SCIENCE"):
+                # Announce + probe the endpoint before the fork spends hours on
+                # it. A failed performance probe falls this process back to the
+                # shared key, and submodule_env() copies that to the fork.
+                from epai.utils.env_utils import report_genai4science_endpoint
+
+                report_genai4science_endpoint(
+                    probe_model=cfg["generate"]["gpt_model"]
+                )
 
     if needs_seeds:
         gaps = missing_seeds(cfg)

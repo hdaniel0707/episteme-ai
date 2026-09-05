@@ -214,6 +214,32 @@ def _select_generators(cfg: dict, only: list[str] | None,
     return gens
 
 
+def _report_genai4science_generators(cfg: dict, gens: list[dict]) -> None:
+    """Announce + probe the GenAI4Science endpoint for each selected generator."""
+    from epai.utils.env_utils import (
+        probe_genai4science,
+        report_genai4science_endpoint,
+    )
+
+    g4s_models: list[str] = []
+    for gen in gens:
+        _, api_key_env = generator_endpoint(gen)
+        if api_key_env and api_key_env.startswith("GENAI4SCIENCE") \
+                and gen["model"] not in g4s_models:
+            g4s_models.append(gen["model"])
+    if not g4s_models:
+        return
+
+    # First model: full announce (tier, key, warning on shared) + probe, with the
+    # performance -> shared fallback if it fails.
+    base_url, api_key_env = report_genai4science_endpoint(probe_model=g4s_models[0])
+    # Any other models on the same endpoint: just probe them too.
+    key = os.environ.get(api_key_env)
+    for model in g4s_models[1:]:
+        ok, msg = probe_genai4science(base_url, key, model) if key else (False, "no key")
+        print(f"  probe {model}: {msg}", flush=True)
+
+
 def generate(df: pd.DataFrame, cfg: dict, prompts: dict, retry_failed: bool,
              only: list[str] | None = None, skip: list[str] | None = None) -> Shard:
     shard = Shard(shard_path(cfg, "generate"))
@@ -246,6 +272,12 @@ def generate(df: pd.DataFrame, cfg: dict, prompts: dict, retry_failed: bool,
     gens = _select_generators(cfg, only, skip)
     max_workers = cfg["generate"].get("max_workers", 8)
     retry_passes = cfg["generate"].get("retry_passes", 3)
+
+    # Say which GenAI4Science key/endpoint each selected generator will use, and
+    # probe that it actually answers, before the run starts. A failed probe of
+    # the performance endpoint falls the process back to the shared key here, so
+    # the client_for() calls below pick that up.
+    _report_genai4science_generators(cfg, gens)
 
     # One generator at a time — not for correctness (the shard key carries the
     # label, so interleaving is safe) but so the progress bar names the model

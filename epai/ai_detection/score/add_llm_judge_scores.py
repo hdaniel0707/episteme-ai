@@ -1204,10 +1204,12 @@ class ApiJudge(Judge):
         first; plain completion + :func:`parse_judge_probability` if the server
         does not honour ``response_format`` (many vLLM/Ollama deployments do not
         for every model). Which path each row took is counted for the summary."""
-        messages = [
+        from epai.utils.env_utils import qwen3_thinking_off
+
+        messages = qwen3_thinking_off(self.model_id, [
             {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": USER_TEMPLATE.format(text=text)},
-        ]
+        ])
         try:
             response = self._client.chat.completions.parse(
                 model=self.model_id, messages=messages, response_format=JudgeVerdict,
@@ -2216,6 +2218,14 @@ def main() -> None:
     blocked = blocking_reason(spec, args.device)
     if blocked:
         raise SystemExit(f"Cannot run judge {spec.key!r}: {blocked}.")
+
+    if spec.provider == "genai4science":
+        # Say which key/endpoint this judge will use and probe that it answers,
+        # before a corpus is loaded. A failed performance-endpoint probe falls
+        # the process back to the shared key here, which _build_client() reads.
+        from epai.utils.env_utils import report_genai4science_endpoint
+
+        report_genai4science_endpoint(probe_model=spec.model)
 
     allowed = resolve_generated_by(args.generated_by)
 
