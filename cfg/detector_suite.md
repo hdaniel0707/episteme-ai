@@ -81,13 +81,16 @@ runs, so adding it to one when the other already has it is nearly free.
 Pretrained supervised detectors, `detector_score_<name>`. `radar` only —
 `pangram_roberta` is gated on the Hub and access is pending.
 
-### judges (4)
+### judges (5)
 
 `llm_judge_score_<model>_<prompt>`, one scoring process each, in capability-ladder
 order:
 
 - **`qwen3-14b`** — local 14B, bf16 on the A100. The low rung — inverted (below
   chance) on science prose, which is the punchline of Leg 1.
+- **`qwen38-27b`** — GenAI4Science, a third open-weight family; 27B, a rung below
+  `llama33-70b`. Holds a dedicated GPU on the perf endpoint (unlike the
+  downgraded `llama33-70b`), so it actually serves 4 concurrent calls in parallel.
 - **`llama33-70b`** — GenAI4Science (HUN-REN SZTAKI) open-weight endpoint.
 - **`gptoss-120b`** — GenAI4Science, the top open-weight rung. gpt-oss and
   llama3.3 are also the Track-1/2 open-weight *generators*, so a judge and a
@@ -103,7 +106,7 @@ corpus. `llm_judge_score_sonnet5_v3` stays in the files that already carry it
 (`science_v3_gpt56luna_0811A`, `denario_hc`) and is not recomputed elsewhere.
 `haiku45` and `opus-5` are the planned frontier additions (experiment 8).
 
-The two GenAI4Science judges reach an **OpenAI-compatible endpoint**. Set
+The three GenAI4Science judges reach an **OpenAI-compatible endpoint**. Set
 `GENAI4SCIENCE_PERFORMANCE_API_KEY` (dedicated capacity, max 4 concurrent — a
 5th call trips a ~1-minute key block) and the code uses the performance
 endpoint automatically; otherwise it falls back to `GENAI4SCIENCE_API_KEY` on

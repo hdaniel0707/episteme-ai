@@ -185,28 +185,37 @@ def _key(paper_id: str, label: str) -> str:
     return f"{paper_id}|{label}"
 
 
-def _select_generators(cfg: dict, only: list[str] | None) -> list[dict]:
-    """The configured generators, optionally narrowed to those whose model or
-    ``generated_by`` label contains one of the ``--generator`` strings."""
+def _select_generators(cfg: dict, only: list[str] | None,
+                       skip: list[str] | None = None) -> list[dict]:
+    """The configured generators, narrowed by ``--generator`` / ``--skip-generator``.
+
+    ``only`` keeps generators whose model or ``generated_by`` label contains one
+    of the strings; ``skip`` then drops any that match one of its strings. Both
+    match the same way, and ``skip`` wins where they overlap. ``--skip-generator``
+    exists to leave a dead endpoint (llama3.3:70b) alone without editing the
+    config: its already-generated rows are still exported, only new calls to it
+    are suppressed.
+    """
     gens = cfg["generate"]["generators"]
-    if not only:
-        return gens
-    want = [s.lower() for s in only]
-    picked = [
-        g for g in gens
-        if any(w in g["model"].lower()
-               or w in generated_by_label(g["model"], cfg).lower() for w in want)
-    ]
-    if not picked:
+
+    def matches(g: dict, needles: list[str]) -> bool:
+        text = (g["model"].lower(), generated_by_label(g["model"], cfg).lower())
+        return any(n in t for n in needles for t in text)
+
+    if only:
+        gens = [g for g in gens if matches(g, [s.lower() for s in only])]
+    if skip:
+        gens = [g for g in gens if not matches(g, [s.lower() for s in skip])]
+    if not gens:
         raise SystemExit(
-            f"--generator {only} matched none of "
-            f"{[g['model'] for g in gens]}"
+            f"--generator {only} / --skip-generator {skip} left no generators "
+            f"of {[g['model'] for g in cfg['generate']['generators']]}"
         )
-    return picked
+    return gens
 
 
 def generate(df: pd.DataFrame, cfg: dict, prompts: dict, retry_failed: bool,
-             only: list[str] | None = None) -> Shard:
+             only: list[str] | None = None, skip: list[str] | None = None) -> Shard:
     shard = Shard(shard_path(cfg, "generate"))
     # Same key oa_fetch reads for the human abstracts. Bound once here rather
     # than inside the lambda so the setting cannot differ between calls.
@@ -234,7 +243,7 @@ def generate(df: pd.DataFrame, cfg: dict, prompts: dict, retry_failed: bool,
         return clients[cache_key]
 
     rows = df.to_dict("records")
-    gens = _select_generators(cfg, only)
+    gens = _select_generators(cfg, only, skip)
     max_workers = cfg["generate"].get("max_workers", 8)
     retry_passes = cfg["generate"].get("retry_passes", 3)
 
@@ -394,6 +403,17 @@ def main() -> None:
         "to retry a single provider. The parquet is NOT rewritten in this "
         "mode; finish with a plain run (no --generator) to export.",
     )
+    parser.add_argument(
+        "--skip-generator",
+        action="append",
+        default=None,
+        metavar="MODEL",
+        help="do NOT issue calls for generators whose model or label contains "
+        "this string (repeatable) — e.g. --skip-generator llama3.3:70b to leave "
+        "a dead endpoint alone. Unlike --generator, the parquet IS still "
+        "written: the skipped generator's already-cached rows are exported "
+        "as usual, only new calls to it are suppressed.",
+    )
     args = parser.parse_args()
 
     cfg = load_pipeline_config(args.cfg)
@@ -405,7 +425,8 @@ def main() -> None:
     print(f"Prompt config: {prompt_config_path(cfg).relative_to(BASE_DIR)}")
 
     df = load_parquet(prompts_path(cfg))
-    shard = generate(df, cfg, prompts, args.retry_failed, only=args.generator)
+    shard = generate(df, cfg, prompts, args.retry_failed, only=args.generator,
+                     skip=args.skip_generator)
 
     if args.generator:
         print(f"\n--generator {args.generator}: shard updated, parquet left "

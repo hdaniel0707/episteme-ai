@@ -1,0 +1,100 @@
+# Ghostbuster corpus, qwen3.8:27b via GenAI4Science — the qwen substitute for
+# the llama3.3:70b leg of the science-3 experiment (cfg/ghostbuster/gb_llama33_70b.yaml).
+# llama3.3:70b's GenAI4Science endpoint stalled mid-run; qwen3.8:27b holds a
+# dedicated GPU there and finishes. Everything else matches gb_llama33_70b.yaml.
+#
+# Run the whole pipeline with one command:
+#   uv run python epai/ghostbuster/run_full_pipeline.py --cfg cfg/ghostbuster/gb_qwen38_27b.yaml --yes --gpu 0
+#
+# Or, as one leg of the multi-generator experiment:
+#   uv run python epai/ai_detection/rollout/qwen_ghostbuster_new.py --gpu 0 --yes
+#
+# BEFORE THE FIRST RUN: GENAI4SCIENCE_API_KEY (or GENAI4SCIENCE_PERFORMANCE_API_KEY)
+# must be set in THIS repo's .env — see .env_sample.
+#
+# The seeded inputs (human/, prompts/, reuter's gpt/<author>/headlines/) must
+# already exist under external/ghostbuster/data/ — shared with every other
+# model variant, including this one.
+
+dataset_id: "ghostbuster"
+
+# ------------------------------------------------------------- generate ----
+generate:
+  gpt_model: "qwen3.8:27b"
+
+  provider: "genai4science"
+
+  # gpt_plain: no markdown, no formatting tells. The only type this corpus needs.
+  types: ["gpt_plain"]
+
+  # SAME prompt id as ghostbuster_gpt56luna / gptoss120b / llama3370b — same
+  # prompts, different model, so the corpora are directly comparable.
+  prompt_ids:
+    gpt_plain: "0701A"
+
+  domains: ["essay", "wp", "reuter"]
+
+  # null = the full ~1000 items/domain. Test with --gen-limit on the command line.
+  limit: null
+
+  seed: 0
+
+  # The GenAI4Science performance key blocks on a 5th concurrent call (~1-minute
+  # key block), so 4 is the cap regardless of model. qwen3.8:27b, unlike the
+  # downgraded llama3.3:70b, actually serves those 4 in parallel.
+  max_workers: 4
+
+  fix_empty: true
+  strip_boilerplate: false
+
+  retry_passes: 3
+  retry_cooldown: 60
+
+# -------------------------------------------------------------- prepare ----
+prepare:
+  embeddings: false
+
+# -------------------------------------------------------------- combine ----
+combine:
+  drop_generated_by: []
+  drop_incomplete: "none"
+  max_drop_frac: 0.05
+  remove_domain_parquets: true
+
+# ---------------------------------------------------------- standardize ----
+standardize:
+  enabled: true
+  whitespace: "lines"
+  keep_raw: true
+
+# ---------------------------------------------------------------- score ----
+score:
+  text_column: "text"
+  batch_size: 1
+  gpu: null
+  cpu_threads: null
+  observer: null
+  performer: null
+  limit: null
+
+# ---------------------------------------------------------------- embed ----
+embed:
+  embedders:
+    - "specter2"
+    - "scincl"
+    - "scibert"
+    - "mpnet"
+    - "minilm"
+    - "e5"
+    - "bge"
+    - "roberta"
+    - "styledistance"
+    - "style_wegmann"
+    - "luar"
+    - "luar_crud"
+  text_col: "text"
+  batch_size: null
+  gpu: null
+  cpu_threads: null
+  limit: null
+  recompute: false

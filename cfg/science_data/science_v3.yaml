@@ -256,6 +256,8 @@ generate:
       provider: "genai4science"
     - model: "llama3.3:70b"
       provider: "genai4science"
+    - model: "qwen3.8:27b"                  # slug qwen3827b -> label qwen3827b:0811A
+      provider: "genai4science"
     # - model: "gemma4:31b"                 # add once the first two are in
     #   provider: "genai4science"
 

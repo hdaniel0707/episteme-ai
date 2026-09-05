@@ -368,6 +368,17 @@ MODELS: dict[str, JudgeModel] = {
         note="GenAI4Science open-weight endpoint. A second open-weight family "
              "beside gpt-oss:120b, one rung below it.",
     ),
+    "qwen38-27b": JudgeModel(
+        key="qwen38-27b",
+        provider="genai4science",
+        model="qwen3.8:27b",
+        column="qwen38_27b",
+        note="GenAI4Science open-weight endpoint. A third open-weight family "
+             "beside gpt-oss:120b and llama3.3:70b, a rung below llama3.3:70b. "
+             "Unlike llama3.3:70b (downgraded, off dedicated GPUs) it holds a "
+             "dedicated GPU and actually serves the perf endpoint's 4 "
+             "concurrent calls in parallel.",
+    ),
     "qwen3-8b": JudgeModel(
         key="qwen3-8b",
         provider=LOCAL_PROVIDER,
