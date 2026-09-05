@@ -158,13 +158,16 @@ def _verify_one(args: argparse.Namespace, path: Path, reference: Path | None = N
 
     Both gate on ERROR (their own default), so either finding a refusal saved
     as content, a broken pairing, or a missing score/embedding stops the run
-    here rather than downstream.
+    here rather than downstream. ``--max-essay-human-blanks`` exempts (up to a
+    cap of 6) the known blank human seeds the upstream essay release ships,
+    which every one of these files carries and nothing here can regenerate.
     """
     if not args.dry_run and not path.is_file():
         print(f"{RED}Not found: {rel(path)}{RESET}")
         return 1
 
-    cmd = [sys.executable, str(BASE_DIR / COMPLETENESS_SCRIPT), rel(path)]
+    cmd = [sys.executable, str(BASE_DIR / COMPLETENESS_SCRIPT), rel(path),
+           "--max-essay-human-blanks"]
     if reference is not None:
         cmd += ["--reference", rel(reference)]
     code = run_cmd(cmd, args.dry_run)

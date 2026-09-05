@@ -172,6 +172,7 @@ class Report:
         self.verbose = verbose
         self.ids: dict[str, list] = {}  # identifier columns, for --verbose row refs
         self.gen: list | None = None    # generated_by per row, when the column exists
+        self.domain: list | None = None  # domain per row, when the column exists
 
     def rowref(self, i: int) -> str:
         """One offending row, tagged with whatever identifier columns exist."""
@@ -208,7 +209,8 @@ def _is_optional_null(name: str) -> bool:
     return any(name.startswith(p) for p in OPTIONAL_NULL_PREFIXES)
 
 
-def check_scalar(name: str, arr: pa.ChunkedArray, n: int, rep: Report) -> dict:
+def check_scalar(name: str, arr: pa.ChunkedArray, n: int, rep: Report,
+                  max_essay_human_blanks: int | None = None) -> dict:
     """Nulls, distinctness and — for numbers — range and non-finite values."""
     nulls = arr.null_count
     info: dict = {"nulls": nulls}
@@ -274,7 +276,13 @@ def check_scalar(name: str, arr: pa.ChunkedArray, n: int, rep: Report) -> dict:
                    + (f", {info['nan']} NaN" if info["nan"] else ""))
     else:  # string / bool / etc.
         if pa.types.is_string(arr.type) or pa.types.is_large_string(arr.type):
-            _check_string(name, non_null, n, n_distinct, rep, info)
+            # Identity mapping (None) when nothing was dropped: non_null's
+            # positions then line up 1:1 with the full column's row indices,
+            # which is what _check_string needs to look up domain/generated_by
+            # for a blank row without re-reading the column with nulls kept in.
+            valid_mask = arr.is_valid().to_numpy(zero_copy_only=False) if nulls else None
+            _check_string(name, non_null, n, n_distinct, rep, info,
+                          max_essay_human_blanks, valid_mask)
         else:
             rep.ok(f"{name}: {n_distinct} distinct")
 
@@ -415,15 +423,51 @@ def _scan_non_prose(name: str, docs: list[str], rep: Report, info: dict) -> None
         rep.detail(f"{rep.rowref(i)}  {' '.join(docs[i].split())[:140]!r}")
 
 
+def _essay_human_blank_count(blank_idx: list[int], rep: Report) -> int:
+    """How many of these row indices are a known essay/human seed blank.
+
+    The upstream Ghostbuster essay release ships six blank human documents —
+    seeded input, not model output, so nothing downstream can regenerate them.
+    Needs both ``domain`` and ``generated_by`` on the report to tell them apart
+    from a genuinely empty generated row.
+    """
+    if rep.domain is None or rep.gen is None:
+        return 0
+    return sum(
+        1 for i in blank_idx
+        if i < len(rep.domain) and i < len(rep.gen)
+        and rep.domain[i] == "essay" and rep.gen[i] == "human"
+    )
+
+
 def _check_string(name: str, non_null, n: int, n_distinct: int,
-                  rep: Report, info: dict) -> None:
+                  rep: Report, info: dict,
+                  max_essay_human_blanks: int | None = None,
+                  valid_mask: np.ndarray | None = None) -> None:
     s = non_null.to_pylist()
     empty = sum(1 for x in s if x == "" or (isinstance(x, str) and not x.strip()))
     info.update(empty_str=empty, distinct=n_distinct)
 
     if name in TEXTISH:
         if empty:
-            rep.error(f"{name}: {empty} empty / whitespace-only document(s)")
+            exempt = 0
+            if max_essay_human_blanks:
+                idx = np.arange(len(s)) if valid_mask is None else np.nonzero(valid_mask)[0]
+                blank_orig = [
+                    int(idx[i]) for i, x in enumerate(s)
+                    if x == "" or (isinstance(x, str) and not x.strip())
+                ]
+                eligible = _essay_human_blank_count(blank_orig, rep)
+                exempt = min(eligible, max_essay_human_blanks)
+            remaining = empty - exempt
+            if remaining:
+                rep.error(f"{name}: {remaining} empty / whitespace-only document(s)"
+                          + (f" (+{exempt} more exempted: known essay human seed "
+                             f"blanks, cap {max_essay_human_blanks})" if exempt else ""))
+            elif exempt:
+                rep.warn(f"{name}: {exempt} empty / whitespace-only document(s) — "
+                         f"known essay human seed blanks (exempted, cap "
+                         f"{max_essay_human_blanks})")
         lengths = np.array([len(x) for x in s], dtype=float)
         words = np.array([len(x.split()) for x in s], dtype=float)
         short = int((words < 20).sum())
@@ -640,6 +684,8 @@ def check_file(path: Path, reference_cols: set[str] | None,
             rep.ids = {c: t.column(c).to_pylist() for c in idcols}
     if "generated_by" in schema.names:
         rep.gen = pq.read_table(path, columns=["generated_by"]).column(0).to_pylist()
+    if "domain" in schema.names:
+        rep.domain = pq.read_table(path, columns=["domain"]).column(0).to_pylist()
 
     col_info: dict[str, dict] = {}
     print(f"\n  {BOLD}columns{RESET}")
@@ -648,7 +694,9 @@ def check_file(path: Path, reference_cols: set[str] | None,
         if pa.types.is_list(arr.type) or pa.types.is_large_list(arr.type):
             col_info[field.name] = check_list(field.name, arr, n, rep)
         else:
-            col_info[field.name] = check_scalar(field.name, arr, n, rep)
+            col_info[field.name] = check_scalar(
+                field.name, arr, n, rep, args.max_essay_human_blanks
+            )
 
     balance = check_class_balance(path, schema, rep)
     if balance:
@@ -691,6 +739,17 @@ def parse_args() -> argparse.Namespace:
                          "with its uid / id / generated_by")
     ap.add_argument("--json", type=Path, default=None,
                     help="write the machine-readable report here (last file wins)")
+    ap.add_argument("--max-essay-human-blanks", type=int, default=None, nargs="?",
+                    const=6,
+                    help="exempt up to this many empty/whitespace documents from "
+                         "the blank-text ERROR when they are domain=='essay', "
+                         "generated_by=='human' rows — the upstream Ghostbuster "
+                         "essay release ships six such seeds and nothing "
+                         "downstream can regenerate them. Off by default (every "
+                         "blank document is an ERROR); pass with no value for the "
+                         "known cap of 6, or a number to override. Ghostbuster-"
+                         "specific — leave unset for science or other corpora, "
+                         "where a blank text row is a real problem.")
     return ap.parse_args()
 
 

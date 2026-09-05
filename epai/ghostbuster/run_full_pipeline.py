@@ -1097,6 +1097,10 @@ def step_verify(cfg: dict, args: argparse.Namespace, var: str) -> int:
     became one after ``strip_boilerplate`` line-dropping, say, or a generator
     added without the retry-pass loop. Gating here, before standardize and
     score, means a bad corpus is never scored and embedded first.
+
+    ``--max-essay-human-blanks`` (default cap 6) exempts the known blank
+    human seeds the upstream essay release ships — a real problem elsewhere,
+    not one this pipeline can fix, so it should not block every essay run.
     """
     out = combined_path(cfg, var)
     banner("verify", f"{COMPLETENESS_SCRIPT} → {rel(out)}")
@@ -1107,7 +1111,7 @@ def step_verify(cfg: dict, args: argparse.Namespace, var: str) -> int:
         return 1
 
     cmd = [sys.executable, str(BASE_DIR / COMPLETENESS_SCRIPT), rel(out),
-           "--fail-on", "error"]
+           "--fail-on", "error", "--max-essay-human-blanks"]
     return run_cmd(cmd, args.dry_run)
 
 
