@@ -1,8 +1,8 @@
-r"""Shared helpers for the qwen roll-out scripts (``qwen_*.py`` in this dir).
+r"""Shared helpers for the gemma roll-out scripts (``gemma_*.py`` in this dir).
 
-Each ``qwen_*.py`` drives ONE corpus family through the stages it needs to carry
-``cfg/detector_suite.yaml``'s new judge ``qwen38-27b`` — and, for the two that
-generate, the new generator ``qwen3.8:27b``. They are separate files on purpose:
+Each ``gemma_*.py`` drives ONE corpus family through the stages it needs to carry
+``cfg/detector_suite.yaml``'s new judge ``gemma4-31b`` — and, for the two that
+generate, the new generator ``gemma4:31b``. They are separate files on purpose:
 a science corpus and a Ghostbuster corpus reach the suite by different routes.
 What they share is only this module: how a subprocess is run, and which judges
 the suite currently lists.

@@ -1,28 +1,28 @@
-r"""qwen3.8:27b into the science_v3f corpus — generate, append, score.
+r"""gemma4:31b into the science_v3f corpus — generate, append, score.
 
 ``llama3.3:70b`` already generated for this paper set and its rows are kept, so
-qwen3.8:27b is added *alongside* it (a 4th generator), not in its place.
+gemma4:31b is added *alongside* it (a 4th generator), not in its place.
 
   generate  epai/science_data/generate/generate_ai.py --cfg
             cfg/science_data/science_v3.yaml. The checkpoint is keyed by
-            (paper, label), so only the ~3000 qwen3827b:0811A calls are issued;
+            (paper, label), so only the ~3000 gemma431b:0811A calls are issued;
             the other generators are read from the shard. ``--skip-gen
             llama3.3:70b`` keeps the run off that endpoint entirely — its rows
             are still exported from cache.
-  append    epai/ai_detection/prepare/append_generator_rows.py — the qwen rows
+  append    epai/ai_detection/prepare/append_generator_rows.py — the gemma rows
             into data/parquet/science_v3f_multi_0811A.parquet (text folded the
             same way, suite columns Null). ~54 v3f papers were backfilled during
-            dedup and have no qwen row; that is reported, not fatal.
+            dedup and have no gemma row; that is reported, not fatal.
   score     run_holdout_pipeline.py --from embed — emb / Binoculars /
-            Fast-DetectGPT / detector / judges over the Null (qwen) rows, and
-            the new qwen38-27b judge column over every row. ``--skip-judge
+            Fast-DetectGPT / detector / judges over the Null (gemma) rows, and
+            the new gemma4-31b judge column over every row. ``--skip-judge
             llama33-70b`` while that endpoint is down.
 
-    python epai/ai_detection/rollout/qwen_science.py --gpu 0 --yes \
+    python epai/ai_detection/rollout/gemma_science.py --gpu 0 --yes \
         --skip-gen llama3.3:70b --skip-judge llama33-70b
 
-    python epai/ai_detection/rollout/qwen_science.py --from score --gpu 0 --yes
-    python epai/ai_detection/rollout/qwen_science.py --dry-run
+    python epai/ai_detection/rollout/gemma_science.py --from score --gpu 0 --yes
+    python epai/ai_detection/rollout/gemma_science.py --dry-run
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ APPEND_SCRIPT = "epai/ai_detection/prepare/append_generator_rows.py"
 
 GEN_OUT = BASE_DIR / "data/science/science_v3_multi_0811A.parquet"
 TARGET = BASE_DIR / "data/parquet/science_v3f_multi_0811A.parquet"
-LABEL = "qwen3827b:0811A"
+LABEL = "gemma431b:0811A"
 
 STEPS = ["generate", "append", "score"]
 
@@ -96,7 +96,7 @@ def main() -> None:
 
     run_steps(steps, {"generate": step_generate, "append": step_append,
                       "score": step_score},
-              "epai/ai_detection/rollout/qwen_science.py")
+              "epai/ai_detection/rollout/gemma_science.py")
 
 
 if __name__ == "__main__":

@@ -1,13 +1,15 @@
-# Ghostbuster corpus, qwen3.8:27b via GenAI4Science — the qwen substitute for
-# the llama3.3:70b leg of the science-3 experiment (cfg/ghostbuster/gb_llama33_70b.yaml).
-# llama3.3:70b's GenAI4Science endpoint stalled mid-run; qwen3.8:27b holds a
-# dedicated GPU there and finishes. Everything else matches gb_llama33_70b.yaml.
+# Ghostbuster corpus, gemma4:31b via GenAI4Science — the third generator of the
+# science-3 experiment, in place of llama3.3:70b (cfg/ghostbuster/gb_llama33_70b.yaml).
+# llama3.3:70b's endpoint stalled mid-run; qwen3.8:27b was tried but the SZTAKI
+# deployment would not disable its <think> pass (~14s/call). gemma4:31b is a
+# dense instruct model on a dedicated GPU: ~3s/call, no reasoning mode.
+# Everything else matches gb_llama33_70b.yaml.
 #
 # Run the whole pipeline with one command:
-#   uv run python epai/ghostbuster/run_full_pipeline.py --cfg cfg/ghostbuster/gb_qwen38_27b.yaml --yes --gpu 0
+#   uv run python epai/ghostbuster/run_full_pipeline.py --cfg cfg/ghostbuster/gb_gemma4_31b.yaml --yes --gpu 0
 #
 # Or, as one leg of the multi-generator experiment:
-#   uv run python epai/ai_detection/rollout/qwen_ghostbuster_new.py --gpu 0 --yes
+#   uv run python epai/ai_detection/rollout/gemma_ghostbuster_new.py --gpu 0 --yes
 #
 # BEFORE THE FIRST RUN: GENAI4SCIENCE_API_KEY (or GENAI4SCIENCE_PERFORMANCE_API_KEY)
 # must be set in THIS repo's .env — see .env_sample.
@@ -20,7 +22,7 @@ dataset_id: "ghostbuster"
 
 # ------------------------------------------------------------- generate ----
 generate:
-  gpt_model: "qwen3.8:27b"
+  gpt_model: "gemma4:31b"
 
   provider: "genai4science"
 
@@ -40,8 +42,8 @@ generate:
   seed: 0
 
   # The GenAI4Science performance key blocks on a 5th concurrent call (~1-minute
-  # key block), so 4 is the cap regardless of model. qwen3.8:27b, unlike the
-  # downgraded llama3.3:70b, actually serves those 4 in parallel.
+  # key block), so 4 is the cap regardless of model. gemma4:31b holds a
+  # dedicated GPU and serves those 4 in parallel.
   max_workers: 4
 
   fix_empty: true

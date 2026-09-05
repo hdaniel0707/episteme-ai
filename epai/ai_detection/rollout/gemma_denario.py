@@ -1,11 +1,11 @@
-r"""The qwen38-27b judge column for the Denario corpus.
+r"""The gemma4-31b judge column for the Denario corpus.
 
 ``denario_hc`` is eval-only and already fully scored; a new suite judge just
 needs its column. Runs every judge the suite lists (``--skip-judge`` drops one);
 ``add_llm_judge_scores.py`` skips rows that already have a score.
 
-    python epai/ai_detection/rollout/qwen_denario.py --yes --skip-judge llama33-70b
-    python epai/ai_detection/rollout/qwen_denario.py --dry-run
+    python epai/ai_detection/rollout/gemma_denario.py --yes --skip-judge llama33-70b
+    python epai/ai_detection/rollout/gemma_denario.py --dry-run
 """
 
 from __future__ import annotations

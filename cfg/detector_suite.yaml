@@ -107,7 +107,7 @@ judges:
     kind: genai4science    # top open-weight rung; max 4 concurrent on the perf endpoint.
   - key: llama33-70b       # GenAI4Science. second open-weight family; downgraded, slow to load.
     kind: genai4science
-  - key: qwen38-27b        # GenAI4Science. third open-weight family; 27B, a rung below llama3.3:70b.
+  - key: gemma4-31b        # GenAI4Science. third open-weight family (Google), dense; mid rung.
     kind: genai4science
   # - key: sonnet5         # removed 2026-09-03: cross-vendor control, but too
   #                          expensive to run on every corpus. Columns already in

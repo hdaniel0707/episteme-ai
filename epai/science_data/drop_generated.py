@@ -1,8 +1,9 @@
 r"""Remove one generator's rows from a science generate shard (and/or parquet).
 
-Use it when a generator has to be re-run under different settings — e.g.
-qwen3.8:27b generated with its ``<think>`` pass on, now to be regenerated with
-it off — and the already-produced rows must go so the corpus is consistent.
+Use it when a generator has to be re-run — a change of settings, or a swap to a
+different model (the qwen3.8:27b arm was replaced by gemma4:31b when the SZTAKI
+deployment would not disable qwen's ``<think>`` pass) — and the already-produced
+rows must go so the corpus is consistent.
 
   shard    ``data/science/<id>_generate.jsonl`` — the append-only checkpoint
            ``generate_ai.py`` resumes from. Dropping a label's keys here is what

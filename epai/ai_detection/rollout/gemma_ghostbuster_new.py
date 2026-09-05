@@ -1,19 +1,19 @@
-r"""The science-3 Ghostbuster experiment, with qwen3.8:27b in place of llama3.3:70b.
+r"""The science-3 Ghostbuster experiment, with gemma4:31b in place of llama3.3:70b.
 
 ``run_science3_full.py`` builds ``ghostbuster_multi_sci3.parquet`` from
 gpt56luna + gpt-oss:120b + llama3.3:70b. The llama3.3:70b leg stalled on the
 GenAI4Science endpoint and never finished, so this runs the same experiment with
-qwen3.8:27b as the third generator instead. llama was never generated here —
+gemma4:31b as the third generator instead. llama was never generated here —
 nothing to keep — so it is a replacement, not an addition. When the llama
 endpoint recovers, add it with ``append_generator_rows.py`` rather than
 rebuilding.
 
   gptoss120b      run_full_pipeline.py --cfg cfg/ghostbuster/gb_gptoss120b.yaml
-  qwen3827b       run_full_pipeline.py --cfg cfg/ghostbuster/gb_qwen38_27b.yaml
+  gemma431b       run_full_pipeline.py --cfg cfg/ghostbuster/gb_gemma4_31b.yaml
                   (generate → … → standardize → score → embed)
   verify_gpt56luna   the reused gpt56luna corpus is clean before it is folded in
   combine         build_ghostbuster_multi.py → ghostbuster_multi_sci3.parquet
-                  (human + gpt56luna + gpt-oss:120b + qwen3.8:27b)
+                  (human + gpt56luna + gpt-oss:120b + gemma4:31b)
   verify_combined
   score           run_holdout_pipeline.py --from embed — Fast-DetectGPT,
                   detector and every suite judge (emb / Binoculars are already
@@ -23,11 +23,11 @@ rebuilding.
 ``--skip-gen`` drops a generator leg by name (``--skip-gen gptoss`` when
 ghostbuster_gptoss120b is already built). ``--from`` resumes at a step.
 
-    python epai/ai_detection/rollout/qwen_ghostbuster_new.py --gpu 0 --yes \
+    python epai/ai_detection/rollout/gemma_ghostbuster_new.py --gpu 0 --yes \
         --skip-judge llama33-70b
 
-    python epai/ai_detection/rollout/qwen_ghostbuster_new.py --from combine --gpu 0 --yes
-    python epai/ai_detection/rollout/qwen_ghostbuster_new.py --dry-run
+    python epai/ai_detection/rollout/gemma_ghostbuster_new.py --from combine --gpu 0 --yes
+    python epai/ai_detection/rollout/gemma_ghostbuster_new.py --dry-run
 """
 
 from __future__ import annotations
@@ -52,9 +52,9 @@ DEFAULT_REFERENCE = PARQUET_DIR / "science_v3f_multi_0811A.parquet"
 # step key -> (cfg file, generator leg name for --skip-gen matching)
 GEN_LEGS = {
     "gptoss120b": ("gb_gptoss120b.yaml", "gpt-oss:120b gptoss120b"),
-    "qwen3827b": ("gb_qwen38_27b.yaml", "qwen3.8:27b qwen3827b"),
+    "gemma431b": ("gb_gemma4_31b.yaml", "gemma4:31b gemma431b"),
 }
-STEPS = ["gptoss120b", "qwen3827b", "verify_gpt56luna", "combine",
+STEPS = ["gptoss120b", "gemma431b", "verify_gpt56luna", "combine",
          "verify_combined", "score"]
 
 
@@ -107,13 +107,13 @@ def main() -> None:
                "--source", "ghostbuster_gpt56luna", "human",
                "--source", "ghostbuster_gpt56luna", "ai",
                "--source", "ghostbuster_gptoss120b", "ai",
-               "--source", "ghostbuster_qwen3827b", "ai"]
+               "--source", "ghostbuster_gemma431b", "ai"]
         return run(cmd, args.dry_run)
 
     reference = args.reference if args.reference.is_file() else None
     runners = {
         "gptoss120b": lambda: full_pipeline(GEN_LEGS["gptoss120b"][0]),
-        "qwen3827b": lambda: full_pipeline(GEN_LEGS["qwen3827b"][0]),
+        "gemma431b": lambda: full_pipeline(GEN_LEGS["gemma431b"][0]),
         "verify_gpt56luna": lambda: verify_corpus(GPT56LUNA, dry_run=args.dry_run),
         "combine": step_combine,
         "verify_combined": lambda: verify_corpus(
@@ -123,7 +123,7 @@ def main() -> None:
             per_band=args.per_band, yes=args.yes, dry_run=args.dry_run),
     }
 
-    run_steps(steps, runners, "epai/ai_detection/rollout/qwen_ghostbuster_new.py")
+    run_steps(steps, runners, "epai/ai_detection/rollout/gemma_ghostbuster_new.py")
 
 
 if __name__ == "__main__":

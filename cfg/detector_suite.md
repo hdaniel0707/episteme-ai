@@ -88,9 +88,11 @@ order:
 
 - **`qwen3-14b`** — local 14B, bf16 on the A100. The low rung — inverted (below
   chance) on science prose, which is the punchline of Leg 1.
-- **`qwen38-27b`** — GenAI4Science, a third open-weight family; 27B, a rung below
-  `llama33-70b`. Holds a dedicated GPU on the perf endpoint (unlike the
-  downgraded `llama33-70b`), so it actually serves 4 concurrent calls in parallel.
+- **`gemma4-31b`** — GenAI4Science, a third open-weight family (Google), dense
+  instruct, a mid rung. Chosen over qwen3.8:27b, whose `<think>` pass the SZTAKI
+  deployment would not turn off (~14 s/call vs ~3 s). Holds a dedicated GPU on the
+  perf endpoint (unlike the downgraded `llama33-70b`), so it serves 4 concurrent
+  calls in parallel.
 - **`llama33-70b`** — GenAI4Science (HUN-REN SZTAKI) open-weight endpoint.
 - **`gptoss-120b`** — GenAI4Science, the top open-weight rung. gpt-oss and
   llama3.3 are also the Track-1/2 open-weight *generators*, so a judge and a

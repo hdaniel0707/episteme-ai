@@ -1,4 +1,4 @@
-r"""The qwen38-27b judge column for the existing Ghostbuster corpora.
+r"""The gemma4-31b judge column for the existing Ghostbuster corpora.
 
 These corpora are already generated, embedded and Binoculars-scored — the only
 thing a new suite judge needs from them is the judge column itself, so this runs
@@ -9,15 +9,15 @@ that already have a score, so a corpus that already carries ``gpt56luna`` /
 
   ghostbuster_gpt35t    original gpt-3.5-turbo generations (raw text)
   ghostbuster_gpt35ts   the same, standardize_text.py already run
-  ghostbuster_gpt56luna the new-generator baseline; needs gptoss/qwen38 added
+  ghostbuster_gpt56luna the new-generator baseline; needs gptoss/gemma4 added
 
 ``ghostbuster_gpt54mini`` is deliberately not here — it is not part of any
 future corpus.
 
-    python epai/ai_detection/rollout/qwen_ghostbuster_original.py --yes \
+    python epai/ai_detection/rollout/gemma_ghostbuster_original.py --yes \
         --skip-judge llama33-70b
 
-    python epai/ai_detection/rollout/qwen_ghostbuster_original.py --dry-run \
+    python epai/ai_detection/rollout/gemma_ghostbuster_original.py --dry-run \
         --only ghostbuster_gpt56luna
 """
 

@@ -34,7 +34,7 @@ target paper with no new row fatal instead of a warning.
     python epai/ai_detection/prepare/append_generator_rows.py \
         --source data/science/science_v3_multi_0811A.parquet \
         --target data/parquet/science_v3f_multi_0811A.parquet \
-        --label qwen3827b:0811A
+        --label gemma431b:0811A
 
     # see what it would do, write nothing
     python epai/ai_detection/prepare/append_generator_rows.py ... --dry-run
@@ -80,7 +80,7 @@ def main() -> None:
                          "unless -o is given")
     ap.add_argument("--label", required=True,
                     help="generated_by value of the rows to move, e.g. "
-                         "qwen3827b:0811A")
+                         "gemma431b:0811A")
     ap.add_argument("-o", "--out", type=Path, default=None,
                     help="write here instead of overwriting --target")
     ap.add_argument("--whitespace", default="flat", choices=["flat", "lines"],
