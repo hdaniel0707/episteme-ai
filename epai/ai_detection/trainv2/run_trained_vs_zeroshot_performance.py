@@ -85,25 +85,38 @@ HUMAN_LABEL = "human"
 
 # The two hybrid architectures cfg/ai_detection/train/clf_id/clf_id_science_v3f.yaml
 # runs together on emb_luar_crud + the same cue-vector column -- reused here
-# unchanged, only the embedding swapped for emb_roberta.
+# unchanged, only the embedding swapped for emb_roberta. ``cuevec_logistic`` is
+# that same config's third feature_sets row (the cue vector ALONE, no
+# embedding) -- 'feature_col' is what makes that possible: every spec names
+# which column is its X, so a spec need not be built on EMB_COL at all.
 TRAINED_SPECS: dict[str, dict] = {
     "roberta_logistic": {
         "label": "RoBERTa + Logistic",
         "alg": "logistic",
+        "feature_col": EMB_COL,
         "aux": False,
         "params": {"C": 1.0, "max_iter": 1000},
     },
     "roberta_fusion_cuevec": {
         "label": "RoBERTa ⊕ judge cues (fusion)",
         "alg": "fusion_mlp",
+        "feature_col": EMB_COL,
         "aux": True,
         "params": {"pre_dims": [256, 16], "post_dims": [32], "aux_dims": [32]},
     },
     "roberta_gated_cuevec": {
         "label": "RoBERTa + gated judge cues",
         "alg": "gated_mlp",
+        "feature_col": EMB_COL,
         "aux": True,
         "params": {"emb_dims": [256, 64], "aux_dims": [32], "gate": "sigmoid"},
+    },
+    "cuevec_logistic": {
+        "label": "Judge cues (11-dim) + Logistic",
+        "alg": "logistic",
+        "feature_col": AUX_COL,
+        "aux": False,
+        "params": {"C": 1.0, "max_iter": 1000},
     },
 }
 
@@ -111,6 +124,7 @@ _TRAINED_HUES: dict[str, tuple[int, int, int]] = {
     "roberta_logistic": (204, 153, 0),
     "roberta_fusion_cuevec": (219, 39, 119),
     "roberta_gated_cuevec": (20, 150, 130),
+    "cuevec_logistic": (153, 101, 21),
 }
 _ALL_HUES: dict[str, tuple[int, int, int]] = {**_ZEROSHOT_HUES, **_TRAINED_HUES}
 _FALLBACK_HUE = (110, 110, 110)
@@ -160,7 +174,7 @@ def fit_and_calibrate(
     """
     y = (df[GEN_COL].astype(str) != HUMAN_LABEL).to_numpy().astype(int)
     groups = df[GROUP_COL].to_numpy()
-    X = _stack(df[EMB_COL])
+    X = _stack(df[spec["feature_col"]])
     Z = _stack(df[AUX_COL]) if spec["aux"] else None
 
     alg = build_algorithm(spec["alg"], seed=seed, **spec["params"])
@@ -189,7 +203,7 @@ def evaluate_trained(spec: dict, alg, threshold: float, df: pd.DataFrame) -> dic
     y = (df[GEN_COL].astype(str) != HUMAN_LABEL).to_numpy().astype(int)
     if np.unique(y).size < 2 or len(y) < 10:
         return None
-    X = _stack(df[EMB_COL])
+    X = _stack(df[spec["feature_col"]])
     if spec["aux"]:
         Z = _stack(df[AUX_COL])
         scores = alg.decision_score(X, Z)
