@@ -1,0 +1,8 @@
+# Calibrated by calibrate_detector_baseline.py on science_v3_multi_0811A.parquet
+# target FPR 0.01, pooled over every domain ('all').
+# Read by cd_core.baseline_entries() / run_detector_performance.py.
+detector_baseline:
+  columns:
+  - column: detector_score_radar
+    threshold: 0.963726
+    label: radar
