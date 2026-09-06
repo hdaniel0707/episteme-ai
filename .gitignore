@@ -3,6 +3,7 @@
 .venv/
 info/
 old/
+temp_debug_llama/
 
 /results/
 /data/

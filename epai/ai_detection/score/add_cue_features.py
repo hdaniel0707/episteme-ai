@@ -499,11 +499,19 @@ def main() -> None:
             continue
 
         column = feature_column(stem)
-        if column in df.columns and not args.overwrite:
-            print(f"  [skip] {path.name}: {column} already present — "
-                  f"pass --overwrite to rebuild it")
-            failures.append(str(path))
-            continue
+        existing = column in df.columns
+        have = (df[column].notna().to_numpy() if existing
+                else np.zeros(len(df), dtype=bool))
+        if existing and not args.overwrite:
+            if have.all():
+                # Nothing to do is success, not a failure: the pipeline's verify
+                # step checks the column is filled, and it is.
+                print(f"  [ok] {path.name}: {column} already complete "
+                      f"({len(df)} rows)")
+                continue
+            print(f"  {path.name}: {column} present, {int((~have).sum())} row(s) "
+                  f"null — filling those (rows appended after the first build; "
+                  f"pass --overwrite to rebuild every row)")
 
         # One transcript per file rather than one per run: the report directory
         # is named after the (parquet, judge) pair, so a re-run replaces its own
@@ -520,11 +528,19 @@ def main() -> None:
             out.print("")
             out.print("--dry-run: no parquet written.")
         else:
-            df[column] = pd.Series(values, index=df.index, dtype="object")
+            if have.any() and not args.overwrite:
+                merged = df[column].tolist()
+                for i in np.flatnonzero(~have):
+                    merged[i] = values[i]
+                df[column] = pd.Series(merged, index=df.index, dtype="object")
+                note = f" ({int((~have).sum())} row(s) filled)"
+            else:
+                df[column] = pd.Series(values, index=df.index, dtype="object")
+                note = ""
             target = args.out or path
             save_parquet(df, target)
             out.print("")
-            out.print(f"wrote {column} → {target}")
+            out.print(f"wrote {column} → {target}{note}")
 
         if not args.no_save:
             print(f"Report → {save_report(out, payload, path, stem)}")

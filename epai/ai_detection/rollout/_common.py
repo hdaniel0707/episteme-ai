@@ -154,6 +154,21 @@ def verify_corpus(parquet: Path, *, reference: Path | None = None,
     return run([sys.executable, BASE_DIR / AUDIT_SCRIPT, parquet], dry_run)
 
 
+def check_completeness(parquet: Path, *, dry_run: bool = False) -> int:
+    """``check_parquet_completeness.py --fail-on error`` on one file.
+
+    The lighter gate — no ``audit_corpus.py``, so an accepted pairing gap (a
+    generator arm that covers most but not all ids) does not block. It still
+    fails on a real generation malfunction: a blank / error-body / refusal
+    document, or a text many times off its human partner's length.
+    """
+    if not dry_run and not Path(parquet).is_file():
+        print(f"{RED}not found: {rel(parquet)}{RESET}")
+        return 1
+    return run([sys.executable, BASE_DIR / COMPLETENESS_SCRIPT, parquet,
+               "--fail-on", "error"], dry_run)
+
+
 def run_steps(steps: list[str], runners: dict, script_rel: str) -> None:
     """Run ``steps`` in order, stop at the first failure, print a summary."""
     import time

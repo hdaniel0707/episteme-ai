@@ -110,6 +110,19 @@ NO_DOMAIN = "(whole file)"
 # ghostbuster_gpt54mini) still can, which is why this check stays.
 SHORT_WORDS = 25
 
+# Runaway-generation detector. The generator is asked for text about as long as
+# the human original, so a machine row many times longer is a decoding loop
+# (seen on llama-3.3-70b via llama.cpp: it re-wrote its own conclusion until the
+# context window). Flagged only when BOTH gates trip: the ratio to the human
+# partner, and an absolute bar of max(LEN_ABS_MIN_WORDS, LEN_ABS_MULT x median
+# human words) -- a normal-length reply to a freakishly long human original is
+# not a malfunction. Under-generation is left to the blank / short-text checks.
+LEN_ERROR_RATIO = 4.0
+LEN_WARN_RATIO = 2.0
+LEN_MIN_REF_WORDS = 20
+LEN_ABS_MIN_WORDS = 900
+LEN_ABS_MULT = 3.0
+
 RULE = 92
 MAX_LISTED = 8
 
@@ -309,8 +322,66 @@ def check_identity(df: pd.DataFrame, rep: Report, limit: int) -> None:
           f"({sorted(df[TARGET_COL].astype(str).unique())})")
 
 
+def _check_length_vs_human(df: pd.DataFrame, words: pd.Series, blank: np.ndarray,
+                           rep: Report, limit: int,
+                           err_ratio: float, warn_ratio: float) -> None:
+    """Machine texts that are a runaway generation — many times longer than both
+    their human partner AND the corpus's own median human length.
+
+    Two gates so neither noise source (an atypically short human original; a
+    model writing a normal-length reply to a freakishly long one) trips it
+    alone. Long side only; under-generation is the blank / short-text checks'
+    job. See ``LEN_ERROR_RATIO``.
+    """
+    if "human" not in set(df[TARGET_COL]):
+        return
+    human = (df[TARGET_COL] == "human").to_numpy()
+    hw = pd.Series(words.to_numpy()[human], index=df[ID_COL].to_numpy()[human])
+    hw = hw[~hw.index.duplicated()]
+    if hw.empty:
+        return
+    abs_bar = max(LEN_ABS_MIN_WORDS, LEN_ABS_MULT * float(hw.median()))
+
+    machine = (~human) & (~blank)
+    mrows = df.index[machine]
+    ref = df.loc[mrows, ID_COL].map(hw)
+    ok = ref.notna().to_numpy() & (ref.to_numpy() >= LEN_MIN_REF_WORDS)
+    if not ok.any():
+        return
+
+    mrows = mrows[ok]
+    mw = words.loc[mrows].to_numpy()
+    ratio = mw / ref.to_numpy()[ok]
+    gen = df.loc[mrows, TARGET_COL].to_numpy()
+    print(f"  length vs human partner    : median {np.median(ratio):.2f}x, "
+          f"p95 {np.percentile(ratio, 95):.2f}x, max {ratio.max():.2f}x "
+          f"({len(ratio)} machine rows, runaway bar {abs_bar:.0f}w)")
+
+    key = UID_COL if UID_COL in df.columns else ID_COL
+    long_enough = mw >= abs_bar
+
+    def _flag(sel: np.ndarray, verb: str, emit) -> None:
+        if not sel.any():
+            return
+        by_gen = pd.Series(gen[sel]).value_counts().to_dict()
+        keys = df.loc[mrows[sel][np.argsort(-mw[sel])], key].astype(str).tolist()
+        emit("documents",
+             f"{int(sel.sum())} machine text(s) are a runaway generation "
+             f"({verb}, and >= {abs_bar:.0f} words) ({by_gen})",
+             "The generator is asked for text about as long as the human "
+             "original; a model many times over that, looping on its own "
+             "conclusion, is the llama.cpp failure mode. Drop these rows and "
+             "re-run generate for their ids.",
+             rows=keys[:limit])
+
+    _flag(long_enough & (ratio >= err_ratio), f">= {err_ratio:g}x", rep.error)
+    _flag(long_enough & (ratio >= warn_ratio) & (ratio < err_ratio),
+          f">= {warn_ratio:g}x", rep.warn)
+
+
 def check_documents(df: pd.DataFrame, rep: Report, limit: int,
-                    short_words: int) -> None:
+                    short_words: int, len_error_ratio: float = LEN_ERROR_RATIO,
+                    len_warn_ratio: float = LEN_WARN_RATIO) -> None:
     """Blank, near-blank and duplicated texts, per domain x generator."""
     section("Documents")
     n = len(df)
@@ -362,6 +433,9 @@ def check_documents(df: pd.DataFrame, rep: Report, limit: int,
                  "human original was short enough to round the generator's word "
                  "budget down to zero.",
                  rows=row_keys(df, short, limit))
+
+    _check_length_vs_human(df, words, blank, rep, limit,
+                           len_error_ratio, len_warn_ratio)
 
     # Exact repeats across DIFFERENT ids: one refusal string or one boilerplate
     # answer reused for many prompts. Within a pair it would be caught above.
@@ -663,7 +737,8 @@ def audit(path: Path, args: argparse.Namespace) -> tuple[Report, dict]:
     rep = Report()
     check_schema(path, df, rep)
     check_identity(df, rep, args.list)
-    check_documents(df, rep, args.list, args.short_words)
+    check_documents(df, rep, args.list, args.short_words,
+                    args.len_outlier_error, args.len_outlier_warn)
     check_balance(df, rep)
     check_scores(df, rep, args.list)
     emb_stats = check_embeddings(df, rep, args.list)
@@ -686,6 +761,15 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--short-words", type=int, default=SHORT_WORDS, metavar="N",
                     help=f"Flag non-blank texts under N words (default: "
                          f"{SHORT_WORDS}).")
+    ap.add_argument("--len-outlier-error", type=float, default=LEN_ERROR_RATIO,
+                    metavar="R",
+                    help=f"A machine text >= R x (or <= 1/R of) its human "
+                         f"partner's word count is an ERROR (default {LEN_ERROR_RATIO}) "
+                         f"— a looped or mostly-failed generation.")
+    ap.add_argument("--len-outlier-warn", type=float, default=LEN_WARN_RATIO,
+                    metavar="R",
+                    help=f"The same, on the long side only, as a WARN (default "
+                         f"{LEN_WARN_RATIO}).")
     ap.add_argument("--json", type=Path, default=None, metavar="PATH",
                     help="Also write the findings and the usable-row counts "
                          "there, for a pipeline step to read.")

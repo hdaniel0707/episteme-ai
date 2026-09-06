@@ -12,7 +12,11 @@ gemma4:31b is added *alongside* it (a 4th generator), not in its place.
   append    epai/ai_detection/prepare/append_generator_rows.py — the gemma rows
             into data/parquet/science_v3f_multi_0811A.parquet (text folded the
             same way, suite columns Null). ~54 v3f papers were backfilled during
-            dedup and have no gemma row; that is reported, not fatal.
+            dedup and have no gemma row; that is reported, not fatal. Close the
+            gap afterwards with gemma_science_backfill.py.
+  verify    check_parquet_completeness.py --fail-on error — blocks before the
+            GPU stages if a gemma row came back blank, as an error body, or many
+            times off its human partner's length (a looped generation).
   score     run_holdout_pipeline.py --from embed — emb / Binoculars /
             Fast-DetectGPT / detector / judges over the Null (gemma) rows, and
             the new gemma4-31b judge column over every row. ``--skip-judge
@@ -32,7 +36,8 @@ import sys
 from pathlib import Path
 
 from epai.ai_detection.rollout._common import (
-    BASE_DIR, DIM, RESET, YELLOW, holdout_score, rel, resolve_judges, run, run_steps,
+    BASE_DIR, DIM, RESET, YELLOW, check_completeness, holdout_score, rel,
+    resolve_judges, run, run_steps,
 )
 
 CFG = "cfg/science_data/science_v3.yaml"
@@ -43,7 +48,7 @@ GEN_OUT = BASE_DIR / "data/science/science_v3_multi_0811A.parquet"
 TARGET = BASE_DIR / "data/parquet/science_v3f_multi_0811A.parquet"
 LABEL = "gemma431b:0811A"
 
-STEPS = ["generate", "append", "score"]
+STEPS = ["generate", "append", "verify", "score"]
 
 
 def main() -> None:
@@ -89,13 +94,16 @@ def main() -> None:
             cmd.append("--dry-run")
         return run(cmd, args.dry_run)
 
+    def step_verify() -> int:
+        return check_completeness(TARGET, dry_run=args.dry_run)
+
     def step_score() -> int:
         return holdout_score(TARGET, judges, gpu=args.gpu,
                              cpu_threads=args.cpu_threads, per_band=args.per_band,
                              yes=args.yes, dry_run=args.dry_run)
 
     run_steps(steps, {"generate": step_generate, "append": step_append,
-                      "score": step_score},
+                      "verify": step_verify, "score": step_score},
               "epai/ai_detection/rollout/gemma_science.py")
 
 

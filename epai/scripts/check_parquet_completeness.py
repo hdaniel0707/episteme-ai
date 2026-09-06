@@ -148,6 +148,22 @@ LEADING_WINDOW = 80
 # machine rows have a `prompt`, only some works have a `doi`), so it is a WARN.
 REQUIRED_COLS = ("uid", "id", "text", "generated_by", "domain", "y", "group")
 
+# Runaway-generation detector. Both corpus families ask the generator for text
+# about as long as the human original (ghostbuster: round_to_50(human words);
+# science: "approximately the same length"), so a machine row many times longer
+# is the shape of a decoding loop -- a model re-writing its own conclusion until
+# it hits the context window (seen on llama-3.3-70b via llama.cpp). Flagged only
+# when BOTH gates trip: the ratio to the human partner (>= ERROR / >= WARN), and
+# an absolute bar of max(LEN_ABS_MIN_WORDS, LEN_ABS_MULT x median human words) --
+# a normal-length reply to a freakishly long human original is not a
+# malfunction. Human partners under LEN_MIN_REF words don't anchor a ratio.
+# Under-generation is left to the blank / <20-word / refusal scans.
+LEN_OUTLIER_ERROR_RATIO = 4.0
+LEN_OUTLIER_WARN_RATIO = 2.0
+LEN_MIN_REF_WORDS = 20
+LEN_ABS_MIN_WORDS = 900
+LEN_ABS_MULT = 3.0
+
 
 def _partial_null_is_error(name: str) -> bool:
     return name in REQUIRED_COLS or name.startswith(SCORE_PREFIXES) or _is_vector(name)
@@ -173,6 +189,9 @@ class Report:
         self.ids: dict[str, list] = {}  # identifier columns, for --verbose row refs
         self.gen: list | None = None    # generated_by per row, when the column exists
         self.domain: list | None = None  # domain per row, when the column exists
+        self.rid: list | None = None    # id per row, when the column exists
+        self.len_error_ratio: float = LEN_OUTLIER_ERROR_RATIO
+        self.len_warn_ratio: float = LEN_OUTLIER_WARN_RATIO
 
     def rowref(self, i: int) -> str:
         """One offending row, tagged with whatever identifier columns exist."""
@@ -423,6 +442,89 @@ def _scan_non_prose(name: str, docs: list[str], rep: Report, info: dict) -> None
         rep.detail(f"{rep.rowref(i)}  {' '.join(docs[i].split())[:140]!r}")
 
 
+def _scan_length_outliers(name: str, docs: list[str], orig_idx, rep: Report,
+                          info: dict) -> None:
+    """Machine documents that are a runaway generation — many times longer than
+    both their human partner AND anything else in the corpus.
+
+    Two gates, because either alone is noisy: the *ratio* to the human partner
+    (a corpus with an atypically short human original would trip a pure ratio
+    check), and an *absolute* bar tied to the corpus's own median human length
+    (a model writing a normal-length essay in reply to a freakishly long human
+    one is not malfunctioning). Only the long side — under-generation is already
+    covered by the blank / <20-word / refusal scans above.
+
+    Needs ``id`` and ``generated_by`` on the report and a ``human`` class.
+    """
+    if rep.rid is None or rep.gen is None:
+        return
+    rid, gen = rep.rid, rep.gen
+    if not any(str(g) == "human" for g in gen):
+        return
+
+    doc_words = [len(d.split()) for d in docs]
+    human_words: dict[str, int] = {}
+    for i, oi in enumerate(orig_idx):
+        oi = int(oi)
+        if str(gen[oi]) == "human":
+            human_words[str(rid[oi])] = doc_words[i]
+    if not human_words:
+        return
+
+    median_human = float(np.median(list(human_words.values())))
+    # "too long for this corpus, whatever the human partner was."
+    abs_bar = max(LEN_ABS_MIN_WORDS, LEN_ABS_MULT * median_human)
+    e, w = rep.len_error_ratio, rep.len_warn_ratio
+
+    err: list[tuple] = []
+    warn: list[tuple] = []
+    ratios: list[float] = []
+    for i, oi in enumerate(orig_idx):
+        oi = int(oi)
+        g = str(gen[oi])
+        if g == "human":
+            continue
+        h = human_words.get(str(rid[oi]))
+        if not h or h < LEN_MIN_REF_WORDS:
+            continue
+        gw = doc_words[i]
+        r = gw / h
+        ratios.append(r)
+        if gw < abs_bar:
+            continue
+        hit = (oi, h, gw, r, g)
+        if r >= e:
+            err.append(hit)
+        elif r >= w:
+            warn.append(hit)
+
+    if not ratios:
+        return
+    arr = np.array(ratios)
+    info["length_vs_human"] = {
+        "checked": len(ratios), "ratio_median": float(np.median(arr)),
+        "ratio_p95": float(np.percentile(arr, 95)), "ratio_max": float(arr.max()),
+        "abs_bar_words": abs_bar, "error_runaway": len(err), "warn_long": len(warn),
+    }
+
+    def _report(hits: list[tuple], verb: str, emit) -> None:
+        by_gen = Counter(g for *_, g in hits)
+        emit(f"{name}: {len(hits)} machine document(s) are a runaway generation "
+             f"({verb}, and >= {abs_bar:.0f} words) ({dict(by_gen)}) — "
+             f"regenerate those rows")
+        for oi, h, gw, r, g in sorted(hits, key=lambda x: -x[2])[
+                : None if rep.verbose else 5]:
+            rep.detail(f"row {oi}  id={rid[oi]}  {g}  {gw}w = {r:.1f}x its {h}w human partner")
+
+    if err:
+        _report(err, f">= {e:g}x the human partner", rep.error)
+    if warn:
+        _report(warn, f">= {w:g}x the human partner", rep.warn)
+    if not err and not warn:
+        rep.ok(f"{name}: {len(ratios)} machine doc(s), none a runaway "
+               f"(median {np.median(arr):.2f}x human, bar {abs_bar:.0f}w)")
+
+
 def _essay_human_blank_count(blank_idx: list[int], rep: Report) -> int:
     """How many of these row indices are a known essay/human seed blank.
 
@@ -481,6 +583,10 @@ def _check_string(name: str, non_null, n: int, n_distinct: int,
         _scan_text_errors(name, s, rep, info)
         _scan_non_prose(name, s, rep, info)
         _scan_language(name, s, rep, info)
+        if name in ("text", "abstract"):
+            orig_idx = (np.arange(len(s)) if valid_mask is None
+                        else np.nonzero(valid_mask)[0])
+            _scan_length_outliers(name, s, orig_idx, rep, info)
         rep.detail(f"{name}: {info['words_med']} words median, "
                    f"chars [{info['len_min']}, {info['len_max']}], {n_distinct} distinct")
     elif name in TITLEISH:
@@ -686,6 +792,10 @@ def check_file(path: Path, reference_cols: set[str] | None,
         rep.gen = pq.read_table(path, columns=["generated_by"]).column(0).to_pylist()
     if "domain" in schema.names:
         rep.domain = pq.read_table(path, columns=["domain"]).column(0).to_pylist()
+    if "id" in schema.names:
+        rep.rid = pq.read_table(path, columns=["id"]).column(0).to_pylist()
+    rep.len_error_ratio = args.len_outlier_error
+    rep.len_warn_ratio = args.len_outlier_warn
 
     col_info: dict[str, dict] = {}
     print(f"\n  {BOLD}columns{RESET}")
@@ -739,6 +849,14 @@ def parse_args() -> argparse.Namespace:
                          "with its uid / id / generated_by")
     ap.add_argument("--json", type=Path, default=None,
                     help="write the machine-readable report here (last file wins)")
+    ap.add_argument("--len-outlier-error", type=float, default=LEN_OUTLIER_ERROR_RATIO,
+                    metavar="R",
+                    help="a machine document >= R x its human partner's word "
+                         "count AND absolutely long for the corpus is an ERROR "
+                         f"(default {LEN_OUTLIER_ERROR_RATIO}) — the shape of a looped generation")
+    ap.add_argument("--len-outlier-warn", type=float, default=LEN_OUTLIER_WARN_RATIO,
+                    metavar="R",
+                    help=f"the same, as a WARN (default {LEN_OUTLIER_WARN_RATIO})")
     ap.add_argument("--max-essay-human-blanks", type=int, default=None, nargs="?",
                     const=6,
                     help="exempt up to this many empty/whitespace documents from "
