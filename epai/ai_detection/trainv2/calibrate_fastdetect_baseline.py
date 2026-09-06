@@ -1,7 +1,7 @@
 r"""Calibrate one fixed, 1%-FPR threshold per Fast-DetectGPT pair into a baseline config.
 
     uv run python epai/ai_detection/trainv2/calibrate_fastdetect_baseline.py \
-        data/parquet/science_v3_multi_0811A.parquet \
+        data/parquet/science_v3f_multi_0811A.parquet \
         -o cfg/ai_detection/trainv2/fastdetect_baseline_calibrated.yaml
 
 Writes a ``fastdetect_baseline`` block -- the SAME config shape
@@ -21,8 +21,8 @@ not per domain, not per dataset -- because the point of calibrating is to
 apply the SAME cutoff to every corpus a later comparison looks at
 (``run_fastdetect_performance.py``), not to refit a new one per corpus. Fit it
 on a single, large, already-fully-scored reference corpus: the default,
-``science_v3_multi_0811A.parquet``, carries 6000 human rows, so the 1% cut
-sits on ~60 of them. A small corpus is a bad calibration source for the same
+``science_v3f_multi_0811A.parquet``, carries 3000 human rows, so the 1% cut
+sits on ~30 of them. A small corpus is a bad calibration source for the same
 reason cd_core's own docs call out -- ``denario_hc.parquet``'s 80 human rows
 would place a 1%-FPR cut on well under one row, which is not a threshold, it
 is noise.
@@ -33,7 +33,7 @@ This is the Fast-DetectGPT sibling of ``calibrate_judge_baseline.py`` /
 Run:
     uv run python epai/ai_detection/trainv2/calibrate_fastdetect_baseline.py
     uv run python epai/ai_detection/trainv2/calibrate_fastdetect_baseline.py \
-        data/parquet/science_v3_multi_0811A.parquet --fpr-target 0.05
+        data/parquet/science_v3f_multi_0811A.parquet --fpr-target 0.05
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ import yaml
 from epai.utils.cd_core import auroc_score, oriented_scores, rates_at_threshold, roc_point_at_fpr
 
 BASE_DIR = Path(__file__).resolve().parents[3]
-DEFAULT_DATASET = BASE_DIR / "data" / "parquet" / "science_v3_multi_0811A.parquet"
+DEFAULT_DATASET = BASE_DIR / "data" / "parquet" / "science_v3f_multi_0811A.parquet"
 DEFAULT_OUT = BASE_DIR / "cfg" / "ai_detection" / "trainv2" / "fastdetect_baseline_calibrated.yaml"
 
 FASTDETECT_PREFIX = "fastdetect_crit_"

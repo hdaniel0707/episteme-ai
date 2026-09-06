@@ -1,6 +1,11 @@
 # Calibrated by calibrate_judge_baseline.py on science_v3_multi_0811A.parquet
 # target FPR 0.01, pooled over every domain ('all').
 # Read by cd_core.baseline_entries() / run_judge_performance.py.
+#
+# gemma4_31b was added later, calibrated the same way but on
+# science_v3f_multi_0811A.parquet (the only science corpus carrying the
+# llm_judge_score_gemma4_31b_v3 column). Re-run calibrate_judge_baseline.py on
+# science_v3f_multi_0811A.parquet to refit every row against one source.
 llm_judge_baseline:
   columns:
   - column: llm_judge_score_gpt56luna_v3
@@ -15,3 +20,6 @@ llm_judge_baseline:
   - column: llm_judge_score_qwen3_14b_v3
     threshold: -.inf
     label: qwen3_14b
+  - column: llm_judge_score_gemma4_31b_v3
+    threshold: 0.12
+    label: gemma4_31b

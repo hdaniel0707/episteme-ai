@@ -1,7 +1,7 @@
 r"""AUROC vs. TPR@1%FPR across datasets, one fixed threshold per judge.
 
     uv run python epai/ai_detection/trainv2/run_judge_performance.py \
-        data/parquet/science_v3_multi_0811A.parquet \
+        data/parquet/science_v3f_multi_0811A.parquet \
         data/parquet/denario_hc.parquet \
         --cfg cfg/ai_detection/trainv2/judge_baseline_calibrated.yaml
 
@@ -26,7 +26,7 @@ Output:
 
 Run:
     uv run python epai/ai_detection/trainv2/run_judge_performance.py \
-        data/parquet/science_v3_multi_0811A.parquet data/parquet/denario_hc.parquet \
+        data/parquet/science_v3f_multi_0811A.parquet data/parquet/denario_hc.parquet \
         --cfg cfg/ai_detection/trainv2/judge_baseline_calibrated.yaml
 """
 
@@ -63,6 +63,7 @@ _BASE_HUES: dict[str, tuple[int, int, int]] = {
     "qwen3_14b": (106, 81, 163),
     "gptoss_120b": (43, 130, 191),
     "llama33_70b": (191, 90, 43),
+    "gemma4_31b": (198, 62, 128),
 }
 _FALLBACK_HUE = (110, 110, 110)
 

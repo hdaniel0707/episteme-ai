@@ -18,29 +18,47 @@ random 70/30 split:
         as this fold's science reading
         apply that SAME threshold, unchanged, to the full --denario file
 
-The REPORTED numbers are the MEAN over the three folds -- one science number
-and one denario number per algorithm, not nine. That is what "leave one
-out" means as a single comparison point: how the algorithm does on a domain
-it has never seen, averaged over which domain that was, rather than a single
-lucky (or unlucky) train/test split.
+The REPORTED numbers are the MEAN +/- STD over every (domain, seed) reading --
+3 domains x ``--seeds`` (default 3: 42/43/44) = 9 readings pooled into one
+science number and one denario number per algorithm, not printed as nine.
+That std mixes two sources of variation at once, deliberately not separated:
+which domain was held out, and that fold's own model fit (init, internal
+validation split, optimizer noise) -- "how much does this reading move if you
+redo the whole thing", not a controlled ablation of either source alone.
 
 Denario is evaluated in full every fold, with no split: it was never in the
 training pool either way, so "from denario there is only test" is true fold
 by fold as well as overall.
 
-The zero-shot side is unchanged and un-folded: best-of-family picked once by
-AUROC on the FULL --science file, each winner's already-calibrated 1%-FPR
-threshold applied to the full science file and to denario -- there is nothing
-to leave out for a method that trains on nothing.
+Best-of-family is still picked once, by AUROC on the FULL --science file --
+there is no reason to fold that choice, since it costs no training either
+way. But its SCIENCE reading now gets a real std too: since a zero-shot score
+never changes, there is nothing to refit per fold, so instead each of the
+three held-out DOMAINS' rows is scored once (no seed dependence -- the domain
+slice is all that varies for a fixed score) and the three domain-level
+readings are what the mean +/- std is taken over, the zero-shot analogue of
+the trained side's per-fold reads. Denario still gets a single deterministic
+reading either way: nothing here ever splits it.
 
-Output:
-    <csv>   one row per (series, dataset): mean auroc/tpr/fpr/n over folds
-            for the trained series, a single reading for the zero-shot ones
+Output, three levels in one CSV (a ``level`` column tells them apart) -- see
+``run_trained_vs_zeroshot_performance.py``'s own docstring for the full
+description; here a ``run`` row also carries ``held_out_domain``:
+    run           trained: one row per (series, dataset, seed, held_out_domain).
+                  zero-shot: one row per held-out domain for science (seed is
+                  always ``None`` -- nothing about the score depends on it);
+                  a single row for denario (domain and seed both ``None``).
+    dataset_mean  one row per (series, dataset): mean +/- std over every
+                  reading feeding it -- (domain, seed) pairs for a trained
+                  series, domains alone for a zero-shot one. Absent for
+                  denario, which has only the one deterministic run.
+    overall_mean  one row per series: mean +/- std OF the (up to two)
+                  per-dataset numbers feeding it -- "the mean of the
+                  datasets", drawn as the solid circle and its error bar.
     <fig>   the AUROC vs TPR@<fpr-target>%FPR scatter, all seven series
 
 Run:
     uv run python epai/ai_detection/trainv2/run_trained_vs_zeroshot_lodo_performance.py
-    uv run python epai/ai_detection/trainv2/run_trained_vs_zeroshot_lodo_performance.py --seed 7
+    uv run python epai/ai_detection/trainv2/run_trained_vs_zeroshot_lodo_performance.py --seeds 7 8 9
 """
 
 from __future__ import annotations
@@ -66,6 +84,7 @@ from .run_trained_vs_zeroshot_performance import (
     evaluate_trained,
     fit_and_calibrate,
     load_features,
+    mean_row,
     plot,
 )
 
@@ -74,38 +93,24 @@ DEFAULT_OUT_DIR = BASE_DIR / "results" / "trainv2" / "trained_vs_zeroshot_lodo_p
 DOMAIN_COL = "domain"
 
 
-def _mean_row(rows: list[dict]) -> dict:
-    """Mean over folds. ``n`` is the mean fold size too, not a total -- these
-    are per-fold reads of the SAME held-out corpus (denario) or of disjoint
-    slices of one corpus (the held-out science domains), and either way what
-    a reader wants next to the mean AUROC is "about how many rows was that
-    read on", not a sum that double-counts denario three times over."""
-    return {
-        "n": int(round(np.mean([r["n"] for r in rows]))),
-        "auroc": float(np.mean([r["auroc"] for r in rows])),
-        "tpr": float(np.mean([r["tpr"] for r in rows])),
-        "fpr": float(np.mean([r["fpr"] for r in rows])),
-        "n_folds": len(rows),
-    }
-
-
 def lodo_folds(
     spec: dict, sci_df: pd.DataFrame, domains: list[str], denario_df: pd.DataFrame,
     seed: int, fpr_target: float,
-) -> tuple[list[dict], list[dict]]:
-    """One fold per domain; returns ``(science_fold_rows, denario_fold_rows)``."""
+) -> tuple[list[tuple[str, dict, float]], list[tuple[str, dict, float]]]:
+    """One fold per domain; returns ``(science_folds, denario_folds)``, each a
+    list of ``(held_out_domain, row, threshold)``."""
     domain_col = sci_df[DOMAIN_COL].to_numpy()
-    sci_rows: list[dict] = []
-    den_rows: list[dict] = []
+    sci_folds: list[tuple[str, dict, float]] = []
+    den_folds: list[tuple[str, dict, float]] = []
     for d in domains:
         train_idx = np.flatnonzero(domain_col != d)
         test_idx = np.flatnonzero(domain_col == d)
         fit = fit_and_calibrate(spec, sci_df, train_idx, test_idx, seed, fpr_target)
-        sci_rows.append(fit["science_test_row"])
+        sci_folds.append((d, fit["science_test_row"], fit["threshold"]))
         r = evaluate_trained(spec, fit["alg"], fit["threshold"], denario_df)
         if r is not None:
-            den_rows.append(r)
-    return sci_rows, den_rows
+            den_folds.append((d, r, fit["threshold"]))
+    return sci_folds, den_folds
 
 
 def main() -> None:
@@ -115,7 +120,10 @@ def main() -> None:
     ap.add_argument("--science", type=Path, default=DEFAULT_SCIENCE)
     ap.add_argument("--denario", type=Path, default=DEFAULT_DENARIO)
     ap.add_argument("--fpr-target", type=float, default=0.01)
-    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--seeds", type=int, nargs="+", default=[42, 43, 44],
+                     help="one LODO pass (all domains) per seed; reported numbers "
+                          "are mean +/- std over every (domain, seed) reading "
+                          "(default: 3 seeds)")
     ap.add_argument("--human-label", default=HUMAN_LABEL)
     ap.add_argument("--csv", type=Path, default=None)
     ap.add_argument("--fig", type=Path, default=None)
@@ -126,51 +134,111 @@ def main() -> None:
     fig_path = args.fig or DEFAULT_OUT_DIR / "trained_vs_zeroshot_lodo_performance.png"
     rows: list[dict] = []
 
-    # ---- zero-shot side: unfolded, exactly as in the non-LODO sibling ----
-    calib_df = pd.read_parquet(args.science)
-    if GEN_COL not in calib_df.columns:
+    # ---- ONE science frame for everything, domain column included, so the
+    # zero-shot per-domain slices below are the identical rows the trained
+    # folds hold out.
+    sci_df = load_features(args.science, need_aux=True, extra_cols=(DOMAIN_COL,),
+                            all_columns=True)
+    if GEN_COL not in sci_df.columns:
         raise SystemExit(f"{args.science}: no {GEN_COL!r} column")
-    denario_df_full = pd.read_parquet(args.denario)
+    denario_full = pd.read_parquet(args.denario)  # zero-shot denario: full file, no filter
+    den_df = load_features(args.denario, need_aux=True)  # trained denario: emb/aux-filtered
+    domains = sorted(sci_df[DOMAIN_COL].unique().tolist())
+    science_mean_name = f"{args.science.stem} (LODO mean, {len(domains)} domains)"
 
+    # ---- zero-shot side. Best-of-family still picked once, on the pooled
+    # file (no training to fold). Science: one reading per held-out domain --
+    # the zero-shot analogue of a trained fold, real domain-driven variance
+    # instead of the std-of-two-arbitrary-numbers the first version of this
+    # script computed. Denario: one deterministic reading, as always.
     print(f"zero-shot: best of each family, by AUROC on {args.science.name} "
-          f"({len(calib_df)} rows)\n")
+          f"({len(sci_df)} rows)\n")
     print(f"{'family':<12}{'winner':<20}{'ref auroc':>10}")
+    domain_col = sci_df[DOMAIN_COL].to_numpy()
     for family, (kind_key, cfg_path) in FAMILIES.items():
-        entry, ref_auroc = pick_best(cfg_path, kind_key, calib_df, args.human_label)
+        entry, ref_auroc = pick_best(cfg_path, kind_key, sci_df, args.human_label)
         print(f"{family:<12}{entry['label']:<20}{ref_auroc:>10.3f}")
         kind = _KIND_BY_KEY[kind_key]
-        for ds_name, ds_df in ((args.science.stem, calib_df), (args.denario.stem, denario_df_full)):
-            r = evaluate_zeroshot(ds_df, entry["column"], entry["threshold"],
+
+        sci_reads: list[dict] = []
+        for d in domains:
+            sub = sci_df[domain_col == d]
+            r = evaluate_zeroshot(sub, entry["column"], entry["threshold"],
                                    kind.machine_is_high, args.human_label)
             if r is None:
                 continue
-            rows.append({"series": family, "label": entry["label"], "dataset": ds_name, **r})
+            sci_reads.append(r)
+            rows.append({"series": family, "label": entry["label"], "dataset": science_mean_name,
+                          "level": "run", "seed": None, "held_out_domain": d, **r})
+        sci_mean = mean_row(sci_reads) if sci_reads else None
+        if sci_mean:
+            rows.append({"series": family, "label": entry["label"], "dataset": science_mean_name,
+                          "level": "dataset_mean", "seed": None, "held_out_domain": None,
+                          **{k: v for k, v in sci_mean.items() if k != "n_reads"},
+                          "n_reads": sci_mean["n_reads"]})
 
-    # ---- trained side: emb_roberta, leave-one-domain-out on science ----
-    need_aux = any(s["aux"] for s in TRAINED_SPECS.values())
-    sci_df = load_features(args.science, need_aux=True, extra_cols=(DOMAIN_COL,))
-    den_df = load_features(args.denario, need_aux=True)
-    domains = sorted(sci_df[DOMAIN_COL].unique().tolist())
+        den_r = evaluate_zeroshot(denario_full, entry["column"], entry["threshold"],
+                                   kind.machine_is_high, args.human_label)
+        if den_r is not None:
+            rows.append({"series": family, "label": entry["label"], "dataset": args.denario.stem,
+                          "level": "run", "seed": None, "held_out_domain": None, **den_r})
 
-    science_mean_name = f"{args.science.stem} (LODO mean, {len(domains)} domains)"
-    print(f"\ntrained: leave-one-domain-out over {domains}, seed {args.seed}\n")
-    print(f"{'series':<24}{'dataset':<40}{'n':>7}{'auroc':>8}{'tpr':>8}{'fpr':>8}")
+        dataset_means = ([sci_mean] if sci_mean else []) + ([den_r] if den_r is not None else [])
+        if dataset_means:
+            overall = mean_row(dataset_means)
+            rows.append({"series": family, "label": entry["label"], "dataset": "overall",
+                          "level": "overall_mean",
+                          **{k: v for k, v in overall.items() if k != "n_reads"}})
+
+    print(f"\ntrained: leave-one-domain-out over {domains}, seeds {args.seeds}\n")
+    print(f"{'series':<24}{'dataset':<40}{'n':>7}{'auroc':>8}{'+/-':>7}"
+          f"{'tpr':>8}{'+/-':>7}{'fpr':>8}")
 
     for name, spec in TRAINED_SPECS.items():
-        sci_folds, den_folds = lodo_folds(spec, sci_df, domains, den_df, args.seed,
-                                           args.fpr_target)
-        sci_mean = _mean_row(sci_folds)
-        rows.append({"series": name, "label": spec["label"], "dataset": science_mean_name,
-                      **{k: v for k, v in sci_mean.items() if k != "n_folds"}})
-        print(f"{name:<24}{science_mean_name:<40}{sci_mean['n']:>7}{sci_mean['auroc']:>8.3f}"
-              f"{sci_mean['tpr']:>8.3f}{sci_mean['fpr']:>8.3f}")
+        sci_reads: list[dict] = []
+        den_reads: list[dict] = []
+        for seed in args.seeds:
+            sci_folds, den_folds = lodo_folds(spec, sci_df, domains, den_df, seed,
+                                               args.fpr_target)
+            for d, row, thr in sci_folds:
+                sci_reads.append(row)
+                rows.append({"series": name, "label": spec["label"], "dataset": science_mean_name,
+                              "level": "run", "seed": seed, "held_out_domain": d,
+                              "threshold": thr, **row})
+            for d, row, thr in den_folds:
+                den_reads.append(row)
+                rows.append({"series": name, "label": spec["label"], "dataset": args.denario.stem,
+                              "level": "run", "seed": seed, "held_out_domain": d,
+                              "threshold": thr, **row})
 
-        if den_folds:
-            den_mean = _mean_row(den_folds)
+        sci_mean = mean_row(sci_reads)
+        rows.append({"series": name, "label": spec["label"], "dataset": science_mean_name,
+                      "level": "dataset_mean", "seed": None, "held_out_domain": None,
+                      **{k: v for k, v in sci_mean.items() if k != "n_reads"},
+                      "n_reads": sci_mean["n_reads"]})
+        print(f"{name:<24}{science_mean_name:<40}{sci_mean['n']:>7}{sci_mean['auroc']:>8.3f}"
+              f"{sci_mean['auroc_std']:>7.3f}{sci_mean['tpr']:>8.3f}{sci_mean['tpr_std']:>7.3f}"
+              f"{sci_mean['fpr']:>8.3f}")
+
+        den_mean = None
+        if den_reads:
+            den_mean = mean_row(den_reads)
             rows.append({"series": name, "label": spec["label"], "dataset": args.denario.stem,
-                          **{k: v for k, v in den_mean.items() if k != "n_folds"}})
+                          "level": "dataset_mean", "seed": None, "held_out_domain": None,
+                          **{k: v for k, v in den_mean.items() if k != "n_reads"},
+                          "n_reads": den_mean["n_reads"]})
             print(f"{name:<24}{args.denario.stem:<40}{den_mean['n']:>7}{den_mean['auroc']:>8.3f}"
-                  f"{den_mean['tpr']:>8.3f}{den_mean['fpr']:>8.3f}")
+                  f"{den_mean['auroc_std']:>7.3f}{den_mean['tpr']:>8.3f}{den_mean['tpr_std']:>7.3f}"
+                  f"{den_mean['fpr']:>8.3f}")
+
+        dataset_means = [m for m in (sci_mean, den_mean) if m]
+        overall = mean_row(dataset_means)
+        rows.append({"series": name, "label": spec["label"], "dataset": "overall",
+                      "level": "overall_mean",
+                      **{k: v for k, v in overall.items() if k != "n_reads"}})
+        print(f"{name:<24}{'overall (mean of datasets)':<40}{overall['n']:>7}"
+              f"{overall['auroc']:>8.3f}{overall['auroc_std']:>7.3f}{overall['tpr']:>8.3f}"
+              f"{overall['tpr_std']:>7.3f}{overall['fpr']:>8.3f}")
 
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows).to_csv(csv_path, index=False)

@@ -1,7 +1,7 @@
 r"""Calibrate one fixed, 1%-FPR threshold per pretrained detector into a baseline config.
 
     uv run python epai/ai_detection/trainv2/calibrate_detector_baseline.py \
-        data/parquet/science_v3_multi_0811A.parquet \
+        data/parquet/science_v3f_multi_0811A.parquet \
         -o cfg/ai_detection/trainv2/detector_baseline_calibrated.yaml
 
 Writes a ``detector_baseline`` block -- the SAME config shape
@@ -25,8 +25,8 @@ detector -- not per domain, not per dataset -- for the same reason as its
 Binoculars / Fast-DetectGPT / judge siblings: apply the SAME cutoff to every
 corpus a later comparison looks at, not a fresh one per corpus. Fit it on a
 single, large, already-fully-scored reference corpus: the default,
-``science_v3_multi_0811A.parquet``, carries 6000 human rows, so the 1% cut
-sits on ~60 of them.
+``science_v3f_multi_0811A.parquet``, carries 3000 human rows, so the 1% cut
+sits on ~30 of them.
 
 This is the pretrained-detector sibling of ``calibrate_judge_baseline.py`` /
 ``calibrate_binox_baseline.py`` / ``calibrate_fastdetect_baseline.py``.
@@ -34,7 +34,7 @@ This is the pretrained-detector sibling of ``calibrate_judge_baseline.py`` /
 Run:
     uv run python epai/ai_detection/trainv2/calibrate_detector_baseline.py
     uv run python epai/ai_detection/trainv2/calibrate_detector_baseline.py \
-        data/parquet/science_v3_multi_0811A.parquet --fpr-target 0.05
+        data/parquet/science_v3f_multi_0811A.parquet --fpr-target 0.05
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ import yaml
 from epai.utils.cd_core import auroc_score, oriented_scores, rates_at_threshold, roc_point_at_fpr
 
 BASE_DIR = Path(__file__).resolve().parents[3]
-DEFAULT_DATASET = BASE_DIR / "data" / "parquet" / "science_v3_multi_0811A.parquet"
+DEFAULT_DATASET = BASE_DIR / "data" / "parquet" / "science_v3f_multi_0811A.parquet"
 DEFAULT_OUT = BASE_DIR / "cfg" / "ai_detection" / "trainv2" / "detector_baseline_calibrated.yaml"
 
 DETECTOR_PREFIX = "detector_score_"
