@@ -185,23 +185,21 @@ def main() -> None:
     print(f"\n{GREEN}appended {len(rows_for)} row(s){RESET} → {rel(args.target)} "
           f"({combined.num_rows} rows)")
 
-    code = check_completeness(args.target)
-    if code != 0:
-        raise SystemExit(
-            f"{RED}completeness check failed on the backfilled corpus — see above. "
-            f"Drop the bad rows (drop_generated.py) and re-run.{RESET}"
-        )
-
     judges = resolve_judges(args.skip_judge)
     if args.no_score:
         print(f"\n  next: run_holdout_pipeline.py --from embed -o {rel(args.target)} "
               f"--judges {' '.join(judges)} --per-band {args.per_band} "
               f"--skip-existing --gpu <id> --yes")
         return
+
+    # Score first -- the rows just appended are all-Null, so a completeness check
+    # here would trivially fail. Then check that the scoring actually filled them.
     code = holdout_score(args.target, judges, gpu=args.gpu,
                          cpu_threads=args.cpu_threads, per_band=args.per_band,
                          yes=args.yes, dry_run=False)
-    raise SystemExit(code)
+    if code != 0:
+        raise SystemExit(code)
+    raise SystemExit(check_completeness(args.target))
 
 
 if __name__ == "__main__":
