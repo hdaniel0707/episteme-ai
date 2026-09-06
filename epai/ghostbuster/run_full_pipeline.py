@@ -623,6 +623,16 @@ def step_generate(cfg: dict, args: argparse.Namespace) -> int:
         code = _generate_once(cfg, args)
         if code != 0:
             return code
+
+    # One last scrub: the final retry pass above is not followed by a check, so
+    # a refusal or runaway it produced would otherwise reach collect/verify. It
+    # stays missing (the retry budget is spent) and audit reports the shortfall
+    # — but the tree handed on is clean, and a re-run refills just that gap.
+    if passes:
+        left = scrub_bad_generations(cfg)
+        if left:
+            print(f"{YELLOW}  generate: scrubbed {left} file(s) after the last "
+                  f"retry pass; re-run generate to refill them.{RESET}")
     return 0
 
 
@@ -1110,6 +1120,14 @@ def step_verify(cfg: dict, args: argparse.Namespace, var: str) -> int:
     ``--max-essay-human-blanks`` (default cap 6) exempts the known blank
     human seeds the upstream essay release ships — a real problem elsewhere,
     not one this pipeline can fix, so it should not block every essay run.
+
+    ``--allow-unstandardized`` because the *next* stage is standardize: the
+    text here is the raw generator output by design, and the checker's
+    "text not standardised" finding would otherwise ERROR on every run. The
+    strict form of that check runs downstream, on the standardised corpus
+    (``run_holdout_pipeline.py`` / the rollout's ``verify_combined``). What
+    this stage is here to catch — a refusal or error body saved as content,
+    and a runaway (looped) generation — is unaffected by standardization.
     """
     out = combined_path(cfg, var)
     banner("verify", f"{COMPLETENESS_SCRIPT} → {rel(out)}")
@@ -1120,7 +1138,8 @@ def step_verify(cfg: dict, args: argparse.Namespace, var: str) -> int:
         return 1
 
     cmd = [sys.executable, str(BASE_DIR / COMPLETENESS_SCRIPT), rel(out),
-           "--fail-on", "error", "--max-essay-human-blanks"]
+           "--fail-on", "error", "--max-essay-human-blanks",
+           "--allow-unstandardized"]
     return run_cmd(cmd, args.dry_run)
 
 

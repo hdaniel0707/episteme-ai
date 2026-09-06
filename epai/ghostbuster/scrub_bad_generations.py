@@ -16,6 +16,15 @@ the first 80 characters), not its WARN-tier "phrase anywhere in the document",
 which is too permissive to auto-delete on: a document that merely *mentions*
 rate limits midway through is not a failed call.
 
+It also deletes a **runaway generation** — a file that is both >= 4x its human
+partner's length and absolutely long for the corpus, the same ERROR gate
+``check_parquet_completeness.py`` applies (a model on an OpenAI-compatible
+open-weight backend re-writing its own conclusion until it hits the output
+cap). Only that ERROR ratio, not the 2x WARN tier: a merely long reply is a
+human's call to keep or cut. Deleting it here means ``run_full_pipeline.py``'s
+retry-pass loop regenerates it — now under ``generate.py``'s ``MAX_OUTPUT_TOKENS``
+cap — instead of the whole leg failing ``verify`` on three buried rows.
+
 Deleting the file is the fix, not a report: the fork's own generate.py and
 fix_empty_generations.py both skip a file that already exists, so the next
 ``--only generate`` (or ``run_full_pipeline.py``'s own retry-pass loop) simply
@@ -30,6 +39,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import statistics
 from pathlib import Path
 
 from epai.ghostbuster.config import (
@@ -43,6 +53,10 @@ from epai.ghostbuster.config import (
 )
 from epai.scripts.check_parquet_completeness import (
     LEADING_WINDOW,
+    LEN_ABS_MIN_WORDS,
+    LEN_ABS_MULT,
+    LEN_MIN_REF_WORDS,
+    LEN_OUTLIER_ERROR_RATIO,
     TEXT_ERROR_SIGNATURES_PHRASE,
     TEXT_ERROR_SIGNATURES_STRUCTURAL,
 )
@@ -75,7 +89,58 @@ def looks_like_failed_call(text: str) -> str | None:
     return None
 
 
-def scan_dir(root: Path) -> list[tuple[Path, str]]:
+def _human_words(path: Path) -> int:
+    """Word count of a human .txt, by the same ``split()`` the checker uses."""
+    return len(path.read_text(encoding="utf-8", errors="replace").split())
+
+
+def _human_partner_words(rel_path: Path, domain: str) -> int | None:
+    """Length of the human original a generated file was written against.
+
+    ``rel_path`` is the generated file's path relative to its generator
+    directory — ``<n>.txt`` for essay/wp, ``<author>/<n>.txt`` for reuter — and
+    the human tree mirrors that layout under ``data/<domain>/human/``.
+    """
+    human = GB_DATA_DIR / domain / "human" / rel_path
+    return _human_words(human) if human.is_file() else None
+
+
+def _runaway_abs_bar(cfg: dict) -> float:
+    """``check_parquet_completeness``'s absolute length bar for this run.
+
+    ``max(LEN_ABS_MIN_WORDS, LEN_ABS_MULT x median human words)`` over the human
+    trees of every domain the config builds — "too long for this corpus,
+    whatever the human partner was".
+    """
+    words = [
+        _human_words(p)
+        for domain in domains(cfg)
+        for p in (GB_DATA_DIR / domain / "human").rglob("*.txt")
+        if p.read_text(encoding="utf-8", errors="replace").strip()
+    ]
+    median_human = statistics.median(words) if words else 0.0
+    return max(LEN_ABS_MIN_WORDS, LEN_ABS_MULT * median_human)
+
+
+def looks_like_runaway(text: str, human_words: int | None, abs_bar: float) -> str | None:
+    """A description of the runaway, or None. Mirrors ``_scan_length_outliers``.
+
+    Both gates must trip: the ratio to the human partner (>= the ERROR ratio,
+    not the WARN one) and the absolute bar. A human partner shorter than
+    ``LEN_MIN_REF_WORDS`` does not anchor a ratio.
+    """
+    if not human_words or human_words < LEN_MIN_REF_WORDS:
+        return None
+    gen_words = len(text.split())
+    if gen_words < abs_bar:
+        return None
+    ratio = gen_words / human_words
+    if ratio < LEN_OUTLIER_ERROR_RATIO:
+        return None
+    return f"runaway: {gen_words}w = {ratio:.1f}x its {human_words}w human partner"
+
+
+def scan_dir(root: Path, domain: str, abs_bar: float) -> list[tuple[Path, str]]:
     """``(path, matched signature)`` for every offending file under ``root``.
 
     Recursive, so it works for reuter's ``<author>/<n>.txt`` layout as well as
@@ -91,6 +156,10 @@ def scan_dir(root: Path) -> list[tuple[Path, str]]:
         if not text.strip():
             continue
         sig = looks_like_failed_call(text)
+        if sig is None:
+            sig = looks_like_runaway(
+                text, _human_partner_words(path.relative_to(root), domain), abs_bar
+            )
         if sig:
             hits.append((path, sig))
     return hits
@@ -104,11 +173,12 @@ def scrub(cfg: dict, dry_run: bool = False) -> int:
     and never another variant's directory sitting alongside them in the fork's
     shared tree.
     """
+    abs_bar = _runaway_abs_bar(cfg)
     total = 0
     for domain in domains(cfg):
         for gen_type in types(cfg):
             root = GB_DATA_DIR / domain / output_dir_name(cfg, gen_type)
-            for path, sig in scan_dir(root):
+            for path, sig in scan_dir(root, domain, abs_bar):
                 try:
                     rel = path.relative_to(BASE_DIR)
                 except ValueError:
