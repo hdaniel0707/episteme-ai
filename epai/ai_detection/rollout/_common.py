@@ -154,19 +154,24 @@ def verify_corpus(parquet: Path, *, reference: Path | None = None,
     return run([sys.executable, BASE_DIR / AUDIT_SCRIPT, parquet], dry_run)
 
 
-def check_completeness(parquet: Path, *, dry_run: bool = False) -> int:
+def check_completeness(parquet: Path, *, allow_incomplete_groups: bool = False,
+                       dry_run: bool = False) -> int:
     """``check_parquet_completeness.py --fail-on error`` on one file.
 
-    The lighter gate — no ``audit_corpus.py``, so an accepted pairing gap (a
-    generator arm that covers most but not all ids) does not block. It still
-    fails on a real generation malfunction: a blank / error-body / refusal
-    document, or a text many times off its human partner's length.
+    The lighter gate — no ``audit_corpus.py``. It fails on a real generation
+    malfunction: a blank / error-body / refusal document, a text many times off
+    its human partner's length, or (unless ``allow_incomplete_groups``) an id
+    that is missing one of its domain's generators.
+    ``allow_incomplete_groups`` is for the mid-rollout state where one arm is
+    knowingly still short pending its backfill.
     """
     if not dry_run and not Path(parquet).is_file():
         print(f"{RED}not found: {rel(parquet)}{RESET}")
         return 1
-    return run([sys.executable, BASE_DIR / COMPLETENESS_SCRIPT, parquet,
-               "--fail-on", "error"], dry_run)
+    cmd = [sys.executable, BASE_DIR / COMPLETENESS_SCRIPT, parquet, "--fail-on", "error"]
+    if allow_incomplete_groups:
+        cmd.append("--allow-incomplete-groups")
+    return run(cmd, dry_run)
 
 
 def run_steps(steps: list[str], runners: dict, script_rel: str) -> None:

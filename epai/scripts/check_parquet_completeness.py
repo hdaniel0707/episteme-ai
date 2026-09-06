@@ -192,6 +192,7 @@ class Report:
         self.rid: list | None = None    # id per row, when the column exists
         self.len_error_ratio: float = LEN_OUTLIER_ERROR_RATIO
         self.len_warn_ratio: float = LEN_OUTLIER_WARN_RATIO
+        self.allow_incomplete_groups: bool = False
 
     def rowref(self, i: int) -> str:
         """One offending row, tagged with whatever identifier columns exist."""
@@ -742,7 +743,8 @@ def check_class_balance(path: Path, schema, rep: Report) -> dict:
                 rep.warn(f"{d}: generated_by classes uneven — {counts}")
 
     if key:
-        per = Counter(str(x) for x in t.column(key).to_pylist())
+        key_vals = [str(x) for x in t.column(key).to_pylist()]
+        per = Counter(key_vals)
         sizes = Counter(per.values())
         info["groups"] = {"count": len(per), "rows_per_group": dict(sizes)}
         if len(sizes) > 1:
@@ -753,6 +755,36 @@ def check_class_balance(path: Path, schema, rep: Report) -> dict:
                      + (f" (e.g. {odd[:5]})" if rep.verbose else ""))
         else:
             rep.ok(f"{key}: {next(iter(sizes))} rows/group, {len(per)} groups")
+
+        # Every group should carry the full generator set its domain has — a
+        # missing label is an unpaired example (the human and machine answers to
+        # one source prompt no longer both exist), which usually means those
+        # rows need regenerating. Per domain, since domains may use different
+        # generators.
+        if len(gens) > 1:
+            dom_labels: dict[str, set] = {}
+            grp_labels: dict[tuple, set] = {}
+            for d, g, k in zip(dom, gen, key_vals):
+                dom_labels.setdefault(d, set()).add(g)
+                grp_labels.setdefault((d, k), set()).add(g)
+            missing_by_label: Counter = Counter()
+            bad: list[tuple] = []
+            for (d, k), present in grp_labels.items():
+                gap = dom_labels[d] - present
+                if gap:
+                    bad.append((k, sorted(gap)))
+                    missing_by_label.update(gap)
+            info["incomplete_groups"] = {
+                "count": len(bad), "by_missing_label": dict(missing_by_label)}
+            if bad:
+                emit = rep.warn if rep.allow_incomplete_groups else rep.error
+                emit(f"{key}: {len(bad)} group(s) missing a generator their domain "
+                     f"has — {dict(missing_by_label.most_common())}; regenerate "
+                     f"those, or drop the group")
+                for k, gap in (bad if rep.verbose else bad[:5]):
+                    rep.detail(f"{key}={k}  missing {gap}")
+            else:
+                rep.ok(f"{key}: every group has its domain's full generator set")
     return info
 
 
@@ -796,6 +828,7 @@ def check_file(path: Path, reference_cols: set[str] | None,
         rep.rid = pq.read_table(path, columns=["id"]).column(0).to_pylist()
     rep.len_error_ratio = args.len_outlier_error
     rep.len_warn_ratio = args.len_outlier_warn
+    rep.allow_incomplete_groups = args.allow_incomplete_groups
 
     col_info: dict[str, dict] = {}
     print(f"\n  {BOLD}columns{RESET}")
@@ -857,6 +890,9 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--len-outlier-warn", type=float, default=LEN_OUTLIER_WARN_RATIO,
                     metavar="R",
                     help=f"the same, as a WARN (default {LEN_OUTLIER_WARN_RATIO})")
+    ap.add_argument("--allow-incomplete-groups", action="store_true",
+                    help="downgrade the 'group missing a generator' finding from "
+                         "ERROR to WARN — for a deliberately unpaired corpus")
     ap.add_argument("--max-essay-human-blanks", type=int, default=None, nargs="?",
                     const=6,
                     help="exempt up to this many empty/whitespace documents from "

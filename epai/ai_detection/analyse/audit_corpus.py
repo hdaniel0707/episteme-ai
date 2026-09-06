@@ -589,12 +589,18 @@ def check_embeddings(df: pd.DataFrame, rep: Report, limit: int) -> dict[str, dic
     return stats
 
 
-def check_pairing(df: pd.DataFrame, rep: Report, limit: int) -> None:
+def check_pairing(df: pd.DataFrame, rep: Report, limit: int,
+                  allow_incomplete_groups: bool = False) -> None:
     """ids missing a generator that the rest of their domain has.
 
     Per domain, not corpus-wide: domains legitimately use different generators,
     and comparing every id against the union would report the whole corpus as
     broken the moment one domain gained a second generator.
+
+    An orphan is an ERROR by default -- the human and machine answers to one
+    source prompt no longer both exist, so those rows want regenerating (or the
+    whole group dropped). ``--allow-incomplete-groups`` keeps it a WARN for a
+    corpus that is unpaired on purpose.
     """
     section("Pairing  (id = pair key, uid = row key)")
     total_orphans = 0
@@ -628,12 +634,13 @@ def check_pairing(df: pd.DataFrame, rep: Report, limit: int) -> None:
             print(f"    e.g. {listing([str(i) for i in orphans.index], len(orphans), MAX_LISTED)}")
 
     if total_orphans:
-        rep.warn("pairing", f"{total_orphans} id(s) are missing a generator their "
-                 f"domain otherwise has",
-                 "Each is an unmatched example: the human and machine answers to "
-                 "one source prompt no longer both exist. Expected right after a "
-                 "row-wise drop of broken rows — drop by id instead to keep the "
-                 "pairs whole.")
+        emit = rep.warn if allow_incomplete_groups else rep.error
+        emit("pairing", f"{total_orphans} id(s) are missing a generator their "
+             f"domain otherwise has",
+             "Each is an unmatched example: the human and machine answers to "
+             "one source prompt no longer both exist. Regenerate the missing "
+             "rows, or drop by id to keep the pairs whole "
+             "(--allow-incomplete-groups to accept it).")
     print("\n  Split on 'id', not 'uid' — the two halves of a pair share a source "
           "prompt,\n  and straddling a fold leaks it across train/test.")
 
@@ -742,7 +749,7 @@ def audit(path: Path, args: argparse.Namespace) -> tuple[Report, dict]:
     check_balance(df, rep)
     check_scores(df, rep, args.list)
     emb_stats = check_embeddings(df, rep, args.list)
-    check_pairing(df, rep, args.list)
+    check_pairing(df, rep, args.list, args.allow_incomplete_groups)
     usable = check_usable(df, emb_stats, rep)
     print_verdict(path, rep, args.list)
 
@@ -770,6 +777,9 @@ def parse_args() -> argparse.Namespace:
                     metavar="R",
                     help=f"The same, on the long side only, as a WARN (default "
                          f"{LEN_WARN_RATIO}).")
+    ap.add_argument("--allow-incomplete-groups", action="store_true",
+                    help="Downgrade 'id missing a generator' from ERROR to WARN "
+                         "— for a corpus that is unpaired on purpose.")
     ap.add_argument("--json", type=Path, default=None, metavar="PATH",
                     help="Also write the findings and the usable-row counts "
                          "there, for a pipeline step to read.")
