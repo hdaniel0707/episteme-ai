@@ -379,9 +379,48 @@ def _check_length_vs_human(df: pd.DataFrame, words: pd.Series, blank: np.ndarray
           f">= {warn_ratio:g}x", rep.warn)
 
 
+def _check_standardization(df: pd.DataFrame, blank: np.ndarray, rep: Report,
+                           limit: int, allow_unstandardized: bool) -> None:
+    """Is TEXT_COL standardised? A row still carrying a character
+    ``standardize_text`` folds (curly quote, em-dash, nbsp, CR) means the
+    standardize stage was skipped or an arm was appended without it — the text a
+    score/embedding no longer describes. Character fold only; whitespace mode is
+    per-corpus. ERROR unless ``--allow-incomplete-groups``' sibling flag."""
+    try:
+        from epai.utils.text_standardize import substitution_counts
+    except Exception:
+        return
+    groups: Counter = Counter()
+    hit = np.zeros(len(df), dtype=bool)
+    text = df[TEXT_COL].fillna("").astype(str)
+    for i, d in enumerate(text):
+        if blank[i]:
+            continue
+        c = substitution_counts(d)
+        cr = d.count("\r")
+        if c or cr:
+            hit[i] = True
+            groups.update(c)
+            if cr:
+                groups["carriage_return"] += cr
+    if not hit.any():
+        return
+    by_gen = df.loc[hit, TARGET_COL].value_counts().to_dict()
+    emit = rep.warn if allow_unstandardized else rep.error
+    emit("documents",
+         f"{int(hit.sum())} row(s) still hold characters standardize_text folds "
+         f"({dict(groups.most_common())}; {by_gen})",
+         "This column is not standardised — the standardize stage was skipped, "
+         "or an arm was appended without it. Re-run standardize_text.py (or the "
+         "pipeline's standardize stage) before scoring. --allow-unstandardized "
+         "for a deliberately raw corpus.",
+         rows=row_keys(df, hit, limit))
+
+
 def check_documents(df: pd.DataFrame, rep: Report, limit: int,
                     short_words: int, len_error_ratio: float = LEN_ERROR_RATIO,
-                    len_warn_ratio: float = LEN_WARN_RATIO) -> None:
+                    len_warn_ratio: float = LEN_WARN_RATIO,
+                    allow_unstandardized: bool = False) -> None:
     """Blank, near-blank and duplicated texts, per domain x generator."""
     section("Documents")
     n = len(df)
@@ -436,6 +475,7 @@ def check_documents(df: pd.DataFrame, rep: Report, limit: int,
 
     _check_length_vs_human(df, words, blank, rep, limit,
                            len_error_ratio, len_warn_ratio)
+    _check_standardization(df, blank, rep, limit, allow_unstandardized)
 
     # Exact repeats across DIFFERENT ids: one refusal string or one boilerplate
     # answer reused for many prompts. Within a pair it would be caught above.
@@ -745,7 +785,8 @@ def audit(path: Path, args: argparse.Namespace) -> tuple[Report, dict]:
     check_schema(path, df, rep)
     check_identity(df, rep, args.list)
     check_documents(df, rep, args.list, args.short_words,
-                    args.len_outlier_error, args.len_outlier_warn)
+                    args.len_outlier_error, args.len_outlier_warn,
+                    args.allow_unstandardized)
     check_balance(df, rep)
     check_scores(df, rep, args.list)
     emb_stats = check_embeddings(df, rep, args.list)
@@ -780,6 +821,9 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--allow-incomplete-groups", action="store_true",
                     help="Downgrade 'id missing a generator' from ERROR to WARN "
                          "— for a corpus that is unpaired on purpose.")
+    ap.add_argument("--allow-unstandardized", action="store_true",
+                    help="Downgrade 'text not standardised' from ERROR to WARN "
+                         "— for a deliberately raw corpus (ghostbuster_gpt35t).")
     ap.add_argument("--json", type=Path, default=None, metavar="PATH",
                     help="Also write the findings and the usable-row counts "
                          "there, for a pipeline step to read.")

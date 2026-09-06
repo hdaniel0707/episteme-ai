@@ -193,6 +193,7 @@ class Report:
         self.len_error_ratio: float = LEN_OUTLIER_ERROR_RATIO
         self.len_warn_ratio: float = LEN_OUTLIER_WARN_RATIO
         self.allow_incomplete_groups: bool = False
+        self.allow_unstandardized: bool = False
 
     def rowref(self, i: int) -> str:
         """One offending row, tagged with whatever identifier columns exist."""
@@ -526,6 +527,50 @@ def _scan_length_outliers(name: str, docs: list[str], orig_idx, rep: Report,
                f"(median {np.median(arr):.2f}x human, bar {abs_bar:.0f}w)")
 
 
+def _scan_standardization(name: str, docs: list[str], orig_idx, rep: Report,
+                          info: dict) -> None:
+    """Is this ``text`` column standardised?
+
+    ``standardize_text`` folds typographic characters to ASCII (curly quotes,
+    em-dashes, ellipsis, non-breaking spaces, …) — a corpus that skipped that
+    stage, or an arm appended without it, carries a feature that is about the
+    text's *route* to the parquet, not its author, and every score / embedding
+    on it describes text a standardised corpus no longer holds. Only the
+    character fold is checked (whitespace mode is per-corpus); ``text_raw``
+    legitimately keeps the raw form and is not checked.
+    """
+    try:
+        from epai.utils.text_standardize import substitution_counts
+    except Exception:
+        return
+
+    groups: Counter = Counter()
+    hits: list[int] = []
+    for i, d in enumerate(docs):
+        c = substitution_counts(d)
+        cr = d.count("\r")
+        if c or cr:
+            hits.append(int(orig_idx[i]))
+            groups.update(c)
+            if cr:
+                groups["carriage_return"] += cr
+    info["unstandardized"] = {"rows": len(hits), "groups": dict(groups)}
+    if not hits:
+        rep.ok(f"{name}: standardised — no foldable typographic characters")
+        return
+
+    by_gen = (Counter(str(rep.gen[oi]) for oi in hits)
+              if rep.gen is not None else None)
+    emit = rep.warn if rep.allow_unstandardized else rep.error
+    emit(f"{name}: {len(hits)} row(s) still hold characters standardize_text "
+         f"folds ({dict(groups.most_common())}"
+         + (f"; {dict(by_gen)}" if by_gen else "")
+         + ") — this column is not standardised. Re-run the standardize stage "
+         f"(or standardize_text.py) before scoring / embedding.")
+    for oi in (hits if rep.verbose else hits[:5]):
+        rep.detail(rep.rowref(oi))
+
+
 def _essay_human_blank_count(blank_idx: list[int], rep: Report) -> int:
     """How many of these row indices are a known essay/human seed blank.
 
@@ -588,6 +633,7 @@ def _check_string(name: str, non_null, n: int, n_distinct: int,
             orig_idx = (np.arange(len(s)) if valid_mask is None
                         else np.nonzero(valid_mask)[0])
             _scan_length_outliers(name, s, orig_idx, rep, info)
+            _scan_standardization(name, s, orig_idx, rep, info)
         rep.detail(f"{name}: {info['words_med']} words median, "
                    f"chars [{info['len_min']}, {info['len_max']}], {n_distinct} distinct")
     elif name in TITLEISH:
@@ -829,6 +875,7 @@ def check_file(path: Path, reference_cols: set[str] | None,
     rep.len_error_ratio = args.len_outlier_error
     rep.len_warn_ratio = args.len_outlier_warn
     rep.allow_incomplete_groups = args.allow_incomplete_groups
+    rep.allow_unstandardized = args.allow_unstandardized
 
     col_info: dict[str, dict] = {}
     print(f"\n  {BOLD}columns{RESET}")
@@ -893,6 +940,10 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--allow-incomplete-groups", action="store_true",
                     help="downgrade the 'group missing a generator' finding from "
                          "ERROR to WARN — for a deliberately unpaired corpus")
+    ap.add_argument("--allow-unstandardized", action="store_true",
+                    help="downgrade the 'text not standardised' finding from "
+                         "ERROR to WARN — for a deliberately raw corpus "
+                         "(e.g. ghostbuster_gpt35t)")
     ap.add_argument("--max-essay-human-blanks", type=int, default=None, nargs="?",
                     const=6,
                     help="exempt up to this many empty/whitespace documents from "

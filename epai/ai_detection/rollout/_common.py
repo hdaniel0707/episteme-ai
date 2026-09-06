@@ -155,15 +155,17 @@ def verify_corpus(parquet: Path, *, reference: Path | None = None,
 
 
 def check_completeness(parquet: Path, *, allow_incomplete_groups: bool = False,
+                       allow_unstandardized: bool = False,
                        dry_run: bool = False) -> int:
     """``check_parquet_completeness.py --fail-on error`` on one file.
 
     The lighter gate — no ``audit_corpus.py``. It fails on a real generation
     malfunction: a blank / error-body / refusal document, a text many times off
-    its human partner's length, or (unless ``allow_incomplete_groups``) an id
-    that is missing one of its domain's generators.
-    ``allow_incomplete_groups`` is for the mid-rollout state where one arm is
-    knowingly still short pending its backfill.
+    its human partner's length, an id missing one of its domain's generators, or
+    ``text`` that never went through standardize_text. The two ``allow_*`` flags
+    downgrade the last two — ``allow_incomplete_groups`` for the mid-rollout
+    state where one arm is knowingly short pending its backfill,
+    ``allow_unstandardized`` for a deliberately raw corpus.
     """
     if not dry_run and not Path(parquet).is_file():
         print(f"{RED}not found: {rel(parquet)}{RESET}")
@@ -171,6 +173,8 @@ def check_completeness(parquet: Path, *, allow_incomplete_groups: bool = False,
     cmd = [sys.executable, BASE_DIR / COMPLETENESS_SCRIPT, parquet, "--fail-on", "error"]
     if allow_incomplete_groups:
         cmd.append("--allow-incomplete-groups")
+    if allow_unstandardized:
+        cmd.append("--allow-unstandardized")
     return run(cmd, dry_run)
 
 
