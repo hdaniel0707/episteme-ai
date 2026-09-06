@@ -806,13 +806,17 @@ def check_class_balance(path: Path, schema, rep: Report) -> dict:
         # missing label is an unpaired example (the human and machine answers to
         # one source prompt no longer both exist), which usually means those
         # rows need regenerating. Per domain, since domains may use different
-        # generators.
-        if len(gens) > 1:
-            dom_labels: dict[str, set] = {}
-            grp_labels: dict[tuple, set] = {}
-            for d, g, k in zip(dom, gen, key_vals):
-                dom_labels.setdefault(d, set()).add(g)
-                grp_labels.setdefault((d, k), set()).add(g)
+        # generators. Only when `key` is actually a pairing key: an eval-only
+        # holdout uses a row-level id (every group is one row, one label) and
+        # the check does not apply there.
+        grp_labels: dict[tuple, set] = {}
+        dom_labels: dict[str, set] = {}
+        for d, g, k in zip(dom, gen, key_vals):
+            dom_labels.setdefault(d, set()).add(g)
+            grp_labels.setdefault((d, k), set()).add(g)
+        pairs_by_key = max((len(v) for v in grp_labels.values()), default=1) > 1
+
+        if len(gens) > 1 and pairs_by_key:
             missing_by_label: Counter = Counter()
             bad: list[tuple] = []
             for (d, k), present in grp_labels.items():

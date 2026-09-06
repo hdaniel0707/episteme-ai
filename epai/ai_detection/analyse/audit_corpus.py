@@ -653,12 +653,19 @@ def check_pairing(df: pd.DataFrame, rep: Report, limit: int,
         per_id = present.map(len)
         sizes = Counter(per_id.values.tolist())
         complete = sizes.get(len(labels), 0)
-        orphans = per_id[per_id < len(labels)]
-        total_orphans += len(orphans)
 
         print(f"\n  {domain}")
         print(f"    generators              : {len(labels)}  ({labels})")
         print(f"    distinct ids            : {len(per_id)}")
+        # `id` is only a pairing key when it actually groups >1 label somewhere;
+        # an eval-only holdout gives every row its own id and the human/machine
+        # halves need not be about the same source at all.
+        if len(labels) > 1 and int(per_id.max()) <= 1:
+            print(f"    (row-level id — not a pairing key; skipping the "
+                  f"orphan check)")
+            continue
+        orphans = per_id[per_id < len(labels)]
+        total_orphans += len(orphans)
         print(f"    complete ids            : {complete}")
         for size in sorted(sizes):
             if size != len(labels):
