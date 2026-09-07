@@ -205,11 +205,15 @@ def main() -> None:
         if left_blank or left_run:
             print(f"{RED}still present: blank={left_blank} runaway={left_run}{RESET}")
             raise SystemExit(1)
-        print(f"{GREEN}no blank-text or runaway rows remain.{RESET}")
-        print(f"{DIM}Partial-fill errors from the full checker are expected here "
-              f"and are filled by:{RESET}")
-        print(f"  uv run python epai/ai_detection/rollout/fill_suite.py {rel(out)} "
-              f"--gpu <id> --yes")
+        print(f"{GREEN}no blank-text or runaway rows remain.{RESET}\n")
+        code = run_checker(out)
+        if code == 0:
+            print(f"\n{GREEN}corpus is clean.{RESET}")
+        else:
+            print(f"\n{YELLOW}the checker still reports errors above. If they are "
+                  f"'partial fill' on suite columns, that is expected before "
+                  f"fill_suite.py:{RESET}\n  uv run python "
+                  f"epai/ai_detection/rollout/fill_suite.py {rel(out)} --gpu <id> --yes")
 
 
 if __name__ == "__main__":
