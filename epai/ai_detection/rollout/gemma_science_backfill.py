@@ -134,7 +134,8 @@ def main() -> None:
     shard = Shard(SHARD)
     tasks = [
         (_key(pid, args.label),
-         openai_text_call(client, args.model, system, user_of[pid]))
+         openai_text_call(client, args.model, system, user_of[pid],
+                          base_url=base_url))
         for pid in missing
     ]
     run_resumable(

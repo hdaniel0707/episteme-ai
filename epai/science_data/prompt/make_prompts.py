@@ -138,7 +138,8 @@ def build_specs(
             (
                 row["id"],
                 openai_text_call(
-                    client, model, prompts["spec_system_prompt"], user
+                    client, model, prompts["spec_system_prompt"], user,
+                    base_url=None,   # build_specs uses OpenAI() directly
                 ),
             )
         )

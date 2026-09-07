@@ -1,38 +1,34 @@
-r"""Regenerate the runaway machine rows in the merged Ghostbuster corpus, in place.
+r"""Regenerate the runaway machine rows in ``ghostbuster_gpt56luna.parquet``.
 
 A runaway is a decoding loop — one generator's answer to a prompt, many times
 longer than the human original (see check_parquet_completeness.py). Dropping it
-takes the whole ``id`` group with it (the human original and every other
-generator's good answer to the same prompt). This regenerates just the bad row
-instead: it asks the SAME generator for a fresh document, standardises it, drops
-it back into the row, and nulls that row's suite columns so ``fill_suite.py``
-re-scores only it.
-
-WHAT IT CAN REGENERATE
-    Rows whose ``generated_by`` is a label this script knows how to reproduce
-    (``REGENERABLE`` below — currently ``gpt56luna:0701A`` via OpenAI) in the
-    ``essay`` / ``wp`` domains, where the fork addresses a document as
-    ``data/<domain>/<out_name>/<idx>.txt``. A ``reuter`` id or an unknown
-    generator is reported and left for ``gb_v3f_clean.py`` to drop.
+takes the whole ``id`` group with it (the human original and the other three
+generators' good answers to the same prompt). This regenerates just the bad row
+instead, and does it **through the fork's own generate.py**, so the replacement
+document goes through the exact prompt, model and post-processing that built the
+rest of the corpus — nothing is reimplemented here.
 
 WHAT IT DOES
   1. find the runaway rows (same gates as the checker; ``--ids`` to name them)
-  2. delete the fork's ``.txt`` for each, run ``generate.py`` in the fork's env
-     (BILLED API calls — one per row), confirm the files came back
-  3. standardise the new text (epai.utils.text_standardize, whitespace=lines)
-  4. write ``text`` / ``text_raw`` back into the merged parquet and NULL every
-     suite column for those rows
+  2. delete the fork's ``.txt`` for each and run ``generate.py`` in the fork's
+     environment (``uv run --project external/ghostbuster``) — BILLED API calls,
+     one per row; the fork skips every file that already exists, so only the
+     deleted ones are regenerated. The fork now picks ``max_tokens`` /
+     ``max_completion_tokens`` from the endpoint, so the OpenAI call succeeds.
+  3. standardise the new text (epai.utils.text_standardize, whitespace=lines —
+     the pipeline's ``standardize`` stage, which generate.py output has not seen)
+  4. write ``text`` / ``text_raw`` into ``ghostbuster_gpt56luna.parquet`` and
+     NULL every suite column on those rows, for ``fill_suite.py`` to recompute
 
-It never touches a row it did not regenerate, and never the source
-``ghostbuster_<gen>.parquet`` files — only the merged corpus given as argument.
-A fresh generation that is ITSELF a runaway is reported and NOT spliced.
+It only touches rows it regenerated. The regenerated ``.txt`` is also copied
+into the collected tree, so a later ``run_full_pipeline.py`` over gpt56luna is
+consistent. A fresh generation that is ITSELF a runaway is reported, not spliced.
 
+Pipeline:  regen (this)  ->  gb_v3f_merge.py  ->  fill_suite.py  ->  gb_v3f_clean.py
+
+    uv run python epai/ai_detection/rollout/gb_v3f_regen.py --yes
     uv run python epai/ai_detection/rollout/gb_v3f_regen.py \
-        data/parquet/ghostbuster_v3f_multi.parquet --yes
-    uv run python epai/ai_detection/rollout/gb_v3f_regen.py \
-        data/parquet/ghostbuster_v3f_multi.parquet --ids essay:800 essay:885 --dry-run
-
-Next: fill_suite.py on the same file.
+        --ids essay:800 essay:885 --dry-run
 """
 
 from __future__ import annotations
@@ -48,24 +44,27 @@ import pyarrow.parquet as pq
 from dotenv import load_dotenv
 
 from epai.ai_detection.rollout._common import (
-    BASE_DIR, BOLD, DIM, GREEN, RED, RESET, YELLOW, banner, rel,
+    BASE_DIR, DIM, GREEN, RED, RESET, YELLOW, banner, rel,
 )
 from epai.ai_detection.rollout.gb_v3f_clean import RATIO_WARN, runaway_hits
-from epai.ai_detection.rollout.gemma_ghostbuster_new import COMBINED
 from epai.utils.text_standardize import standardize_text
 
-# GENAI4SCIENCE_*/OPENAI_API_KEY live in THIS repo's .env; the fork's subprocess
-# inherits os.environ, so the key must be in this process first.
-load_dotenv()
+# The fork's subprocess inherits os.environ; the API key must be in it first.
+for _env in (BASE_DIR / ".env", BASE_DIR / "external/ghostbuster/.env"):
+    load_dotenv(_env)
 
 FORK = BASE_DIR / "external" / "ghostbuster"
 COLLECTED = BASE_DIR / "data" / "ghostbuster-data-gpt56luna"
+SOURCE = BASE_DIR / "data" / "parquet" / "ghostbuster_gpt56luna.parquet"
 
-# generated_by label -> what the fork needs to reproduce it. Plain-OpenAI only
-# for now (no --base_url / --api_key_env); add an entry with those keys for a
-# GenAI4Science-hosted generator.
+# generated_by label -> what generate.py needs. ``base_url`` None means OpenAI's
+# own API (no endpoint flags); a GenAI4Science generator sets base_url +
+# api_key_env, passed through as --base_url / --api_key_env.
 REGENERABLE: dict[str, dict] = {
-    "gpt56luna:0701A": {"gpt_model": "gpt-5.6-luna", "out_name": "gpt56luna_0701A"},
+    "gpt56luna:0701A": {
+        "gpt_model": "gpt-5.6-luna", "out_name": "gpt56luna_0701A",
+        "base_url": None, "api_key_env": "OPENAI_API_KEY",
+    },
 }
 
 # Everything that is not row identity gets nulled and recomputed by fill_suite.
@@ -74,9 +73,9 @@ KEEP_COLS = {"uid", "id", "domain", "text", "text_raw", "generated_by"}
 
 def fork_env() -> dict:
     env = dict(os.environ)
-    env.pop("VIRTUAL_ENV", None)
+    env.pop("VIRTUAL_ENV", None)          # inherited from the outer `uv run`
     env.pop("UV_PROJECT_ENVIRONMENT", None)
-    env["CUDA_VISIBLE_DEVICES"] = ""          # pure API calls, keep off the GPU
+    env["CUDA_VISIBLE_DEVICES"] = ""      # pure API calls
     return env
 
 
@@ -136,6 +135,7 @@ def collected_txt(tg: dict) -> Path:
 
 
 def regenerate(rows: list[dict], workers: int, dry_run: bool) -> int:
+    """Delete each target's .txt, then one generate.py run per (domain, spec)."""
     for tg in rows:
         p = fork_txt(tg)
         if p.is_file():
@@ -143,12 +143,18 @@ def regenerate(rows: list[dict], workers: int, dry_run: bool) -> int:
             if not dry_run:
                 p.unlink()
 
-    combos = {(tg["domain"], tg["spec"]["out_name"], tg["spec"]["gpt_model"])
-              for tg in rows}
-    for domain, out_name, model in sorted(combos):
+    runs: dict[tuple, dict] = {}
+    for tg in rows:
+        s = tg["spec"]
+        runs.setdefault((tg["domain"], s["out_name"], s["gpt_model"],
+                         s["base_url"], s["api_key_env"]), s)
+
+    for (domain, out_name, model, base_url, api_key_env), _ in runs.items():
         cmd = ["uv", "run", "--project", str(FORK), "python", "generate.py",
                f"--{domain}_gpt_plain", "--out_name", out_name,
                "--gpt_model", model, "--seed", "0", "--workers", str(workers)]
+        if base_url is not None:
+            cmd += ["--base_url", base_url, "--api_key_env", api_key_env]
         print(f"\n{DIM}$ {' '.join(cmd)}{RESET}{DIM}  (cwd {rel(FORK)}){RESET}")
         if dry_run:
             continue
@@ -166,9 +172,7 @@ def regenerate(rows: list[dict], workers: int, dry_run: bool) -> int:
         print(f"{RED}no usable text came back for: {', '.join(missing)}{RESET}")
         return 1
 
-    # Keep the collected tree in step with the fork tree, the way `collect`
-    # would — so a later run_full_pipeline over gpt56luna sees the fix too.
-    for tg in rows:
+    for tg in rows:                       # keep the collected tree in step
         dst = collected_txt(tg)
         if dst.parent.is_dir():
             dst.write_text(fork_txt(tg).read_text())
@@ -176,8 +180,7 @@ def regenerate(rows: list[dict], workers: int, dry_run: bool) -> int:
     return 0
 
 
-def splice(src: Path, out: Path, rows: list[dict], ratio: float,
-           force_runaway: bool) -> int:
+def splice(src: Path, out: Path, rows: list[dict], force_runaway: bool) -> int:
     t = pq.read_table(src)
     id_col = [str(x) for x in t.column("id").to_pylist()]
     gen_col = [str(x) for x in t.column("generated_by").to_pylist()]
@@ -205,11 +208,12 @@ def splice(src: Path, out: Path, rows: list[dict], ratio: float,
     if still_runaway and not force_runaway:
         print(f"\n{RED}still a runaway after regeneration: "
               f"{', '.join(still_runaway)}{RESET}\n  Re-run (the model may do "
-              f"better on a retry), or pass --force-runaway to splice anyway, "
-              f"or drop these with gb_v3f_clean.py.")
+              f"better on a retry), pass --force-runaway to splice anyway, or "
+              f"drop these with gb_v3f_clean.py.")
         return 1
     if not new_text:
-        print(f"{YELLOW}nothing to splice.{RESET}")
+        print(f"{YELLOW}nothing to splice (no matching row for the target "
+              f"id + label).{RESET}")
         return 1
 
     row_mask = pa.array([i in new_text for i in range(len(id_col))])
@@ -217,14 +221,10 @@ def splice(src: Path, out: Path, rows: list[dict], ratio: float,
     cols = []
     for name in t.column_names:
         col = t.column(name)
-        if name == "text":
+        if name in ("text", "text_raw"):
+            src_map = new_text if name == "text" else new_raw
             vals = col.to_pylist()
-            for i, v in new_text.items():
-                vals[i] = v
-            cols.append(pa.array(vals, type=col.type))
-        elif name == "text_raw":
-            vals = col.to_pylist()
-            for i, v in new_raw.items():
+            for i, v in src_map.items():
                 vals[i] = v
             cols.append(pa.array(vals, type=col.type))
         elif name in KEEP_COLS:
@@ -245,8 +245,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("parquet", type=Path, nargs="?", default=COMBINED,
-                    help=f"merged corpus to patch (default {rel(COMBINED)})")
+    ap.add_argument("parquet", type=Path, nargs="?", default=SOURCE,
+                    help=f"per-generator parquet to patch (default {rel(SOURCE)})")
     ap.add_argument("-o", "--out", type=Path, default=None,
                     help="write here instead of patching the input in place")
     ap.add_argument("--ids", nargs="+", default=None, metavar="ID",
@@ -268,12 +268,6 @@ def main() -> None:
     if not (FORK / "generate.py").is_file():
         raise SystemExit(f"{RED}fork not checked out: {rel(FORK / 'generate.py')}"
                          f"{RESET}\n  git submodule update --init")
-    if not args.dry_run and not os.environ.get("OPENAI_API_KEY") \
-            and not (FORK / ".env").is_file():
-        raise SystemExit(
-            f"{RED}OPENAI_API_KEY not set and {rel(FORK / '.env')} absent.{RESET}\n"
-            f"  gpt-5.6-luna is an OpenAI-direct model; put the key in this "
-            f"repo's .env or the fork's .env before running.")
 
     banner("targets", rel(src))
     rows = targets(pq.read_table(src, columns=["id", "generated_by", "text"]),
@@ -281,6 +275,14 @@ def main() -> None:
     if not rows:
         print(f"{GREEN}no regenerable runaway rows.{RESET}")
         return
+
+    missing = sorted({s["api_key_env"] for tg in rows for s in (tg["spec"],)
+                      if not os.environ.get(s["api_key_env"])})
+    if not args.dry_run and missing:
+        raise SystemExit(
+            f"{RED}not set: {', '.join(missing)}{RESET}\n  needed by the target "
+            f"generator(s); put the key(s) in this repo's .env or "
+            f"external/ghostbuster/.env.")
 
     for tg in rows:
         gap = check_seeds(tg)
@@ -306,11 +308,10 @@ def main() -> None:
         return
 
     banner("splice", rel(out))
-    code = splice(src, out, rows, args.ratio, args.force_runaway)
+    code = splice(src, out, rows, args.force_runaway)
     if code != 0:
         raise SystemExit(code)
-    print(f"\n  next: uv run python epai/ai_detection/rollout/fill_suite.py "
-          f"{rel(out)} --gpu <id> --yes")
+    print(f"\n  next: uv run python epai/ai_detection/rollout/gb_v3f_merge.py")
 
 
 if __name__ == "__main__":

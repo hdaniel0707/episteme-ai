@@ -229,27 +229,42 @@ def run_resumable(
     return shard
 
 
-def openai_text_call(client, model: str, system: str, user: str) -> Callable[[], str]:
+# Hard ceiling on one reply, same value and reasons as the ghostbuster fork's
+# generate.py MAX_OUTPUT_TOKENS: a stop for a model that will not stop itself
+# (an open-weight model on a llama.cpp / Ollama backend can fall into a
+# paragraph-level loop). 16384, not ~4096, because on an OpenAI-compatible
+# backend serving a REASONING model the cap bounds reasoning + answer together,
+# and the analysis channel alone can run several thousand tokens.
+MAX_OUTPUT_TOKENS = 16384
+
+
+def openai_text_call(client, model: str, system: str, user: str, *,
+                     base_url: str | None,
+                     max_output_tokens: int = MAX_OUTPUT_TOKENS) -> Callable[[], str]:
     """Build a zero-argument thunk that returns the model's text response.
 
-    Deliberately minimal: only ``model`` and ``messages`` are sent. Sampling and
-    token-limit parameter names vary across model generations, and the prompts
-    already state the required length, so there is nothing to gain by pinning
-    them here.
+    Sends ``model``, ``messages`` and an output-token ceiling. The ceiling's
+    parameter name is chosen from ``base_url``
+    (:func:`epai.utils.env_utils.token_limit_param`): OpenAI's own API wants
+    ``max_completion_tokens``, a GenAI4Science endpoint takes ``max_tokens``.
+    Sampling is still left to the model default — the prompts state the length.
 
     The one model-specific touch: ``qwen3_thinking_off`` appends ``/no_think``
     to a Qwen3 model's prompt (a no-op for every other model), because its
     default ``<think>`` pass 10×'s the tokens per abstract for no gain.
     """
-    from epai.utils.env_utils import qwen3_thinking_off
+    from epai.utils.env_utils import qwen3_thinking_off, token_limit_param
 
     messages = qwen3_thinking_off(model, [
         {"role": "system", "content": system},
         {"role": "user", "content": user},
     ])
+    cap = {token_limit_param(base_url): max_output_tokens}
 
     def _call() -> str:
-        response = client.chat.completions.create(model=model, messages=messages)
+        response = client.chat.completions.create(
+            model=model, messages=messages, **cap
+        )
         return response.choices[0].message.content or ""
 
     return _call

@@ -44,6 +44,22 @@ def genai4science_endpoint() -> tuple[str, str]:
     )
 
 
+def token_limit_param(base_url: str | None) -> str:
+    """Which request field carries the max-output-tokens cap for a chat call.
+
+    OpenAI's own API (``base_url`` is ``None`` — the SDK default) dropped
+    ``max_tokens`` for the GPT-5 family and 400s on it with
+    ``unsupported_parameter``; it requires ``max_completion_tokens``. Every
+    OpenAI-*compatible* endpoint this project talks to — GenAI4Science's vLLM —
+    still takes the legacy ``max_tokens``. Decided from the endpoint, never by
+    try/except, so a genuine 400 is never absorbed.
+
+    The ghostbuster fork carries its own inline copy of this rule (it cannot
+    import this package); keep the two in step.
+    """
+    return "max_completion_tokens" if base_url is None else "max_tokens"
+
+
 def genai4science_tier() -> str:
     """``"performance"`` when ``GENAI4SCIENCE_PERFORMANCE_API_KEY`` is set in the
     environment right now, else ``"shared"`` — the endpoint

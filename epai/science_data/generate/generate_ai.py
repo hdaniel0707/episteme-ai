@@ -285,11 +285,13 @@ def generate(df: pd.DataFrame, cfg: dict, prompts: dict, retry_failed: bool,
     for gi, gen in enumerate(gens, 1):
         label = generated_by_label(gen["model"], cfg)
         client = client_for(gen)
+        base_url, _ = generator_endpoint(gen)
         keys = [_key(r["id"], label) for r in rows]
         keyset = set(keys)
         tasks = [
             (k, openai_text_call(client, gen["model"],
-                                 prompts["generation_system_prompt"], r["prompt"]))
+                                 prompts["generation_system_prompt"], r["prompt"],
+                                 base_url=base_url))
             for k, r in zip(keys, rows)
         ]
 
