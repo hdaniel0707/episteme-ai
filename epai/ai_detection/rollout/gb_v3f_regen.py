@@ -39,7 +39,6 @@ import subprocess
 from pathlib import Path
 
 import pyarrow as pa
-import pyarrow.compute as pc
 import pyarrow.parquet as pq
 from dotenv import load_dotenv
 
@@ -216,22 +215,28 @@ def splice(src: Path, out: Path, rows: list[dict], force_runaway: bool) -> int:
               f"id + label).{RESET}")
         return 1
 
-    row_mask = pa.array([i in new_text for i in range(len(id_col))])
-    n_targets = len(new_text)
+    # Rebuild column by column. text / text_raw get the new document; every
+    # suite column (scalar OR list<double> embedding) is nulled on the target
+    # rows via a pylist round-trip — pyarrow's replace_with_mask has no kernel
+    # for list types, and the parquet is only 6000 rows.
+    pass_through = KEEP_COLS - {"text", "text_raw"}
     cols = []
     for name in t.column_names:
         col = t.column(name)
-        if name in ("text", "text_raw"):
-            src_map = new_text if name == "text" else new_raw
-            vals = col.to_pylist()
-            for i, v in src_map.items():
-                vals[i] = v
-            cols.append(pa.array(vals, type=col.type))
-        elif name in KEEP_COLS:
+        if name in pass_through:
             cols.append(col)
+            continue
+        vals = col.to_pylist()
+        if name == "text":
+            for i, v in new_text.items():
+                vals[i] = v
+        elif name == "text_raw":
+            for i, v in new_raw.items():
+                vals[i] = v
         else:
-            cols.append(pc.replace_with_mask(
-                col, row_mask, pa.nulls(n_targets, type=col.type)))
+            for i in new_text:
+                vals[i] = None
+        cols.append(pa.array(vals, type=col.type))
 
     pq.write_table(pa.table(cols, schema=t.schema), out)
     nulled = [n for n in t.column_names if n not in KEEP_COLS]
@@ -256,6 +261,9 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--force-runaway", action="store_true",
                     help="splice even if the fresh generation is also a runaway")
+    ap.add_argument("--splice-only", action="store_true",
+                    help="skip generation, splice the .txt already in the fork "
+                         "tree (resume after a splice failure without re-billing)")
     ap.add_argument("--yes", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
@@ -286,25 +294,35 @@ def main() -> None:
 
     for tg in rows:
         gap = check_seeds(tg)
+        exists = fork_txt(tg).is_file()
         print(f"  {tg['id']:<14} {tg['label']:<16} "
               f"fork: data/{tg['domain']}/{tg['spec']['out_name']}/{tg['idx']}.txt"
+              f"{'  (present)' if exists else ''}"
               + (f"  {RED}{gap}{RESET}" if gap else ""))
-        if gap:
+        if gap and not args.splice_only:
             raise SystemExit(1)
+        if args.splice_only and not exists:
+            raise SystemExit(f"{RED}--splice-only: {rel(fork_txt(tg))} is not "
+                             f"there — nothing to splice.{RESET}")
 
-    print(f"\n{YELLOW}{len(rows)} document(s) will be regenerated with billed "
-          f"API calls.{RESET}")
-    if not args.dry_run and not args.yes:
-        if input("proceed? [y/N] ").strip().lower() not in ("y", "yes"):
-            raise SystemExit("aborted.")
+    if not args.splice_only:
+        print(f"\n{YELLOW}{len(rows)} document(s) will be regenerated with billed "
+              f"API calls.{RESET}")
+        if not args.dry_run and not args.yes:
+            if input("proceed? [y/N] ").strip().lower() not in ("y", "yes"):
+                raise SystemExit("aborted.")
 
-    banner("regenerate", f"{rel(FORK)}/generate.py")
-    code = regenerate(rows, args.workers, args.dry_run)
-    if code != 0:
-        raise SystemExit(code)
-    if args.dry_run:
-        print(f"\n{DIM}--dry-run: no files deleted, no calls made, "
-              f"nothing spliced.{RESET}")
+        banner("regenerate", f"{rel(FORK)}/generate.py")
+        code = regenerate(rows, args.workers, args.dry_run)
+        if code != 0:
+            raise SystemExit(code)
+        if args.dry_run:
+            print(f"\n{DIM}--dry-run: no files deleted, no calls made, "
+                  f"nothing spliced.{RESET}")
+            return
+    elif args.dry_run:
+        print(f"\n{DIM}--dry-run --splice-only: would splice the existing "
+              f".txt; nothing written.{RESET}")
         return
 
     banner("splice", rel(out))
