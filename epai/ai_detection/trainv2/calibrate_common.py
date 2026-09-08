@@ -30,9 +30,10 @@ Two modes, both through :func:`run`:
   ('all'), print a per-corpus table, write the CSV, drop one distribution PNG
   per column, and write the YAML from the pooled 'all' row.
 
-The registered corpora are the four splits of the SCRIBE benchmark:
-``sci`` (SCRIBE-Sci), ``gb`` (SCRIBE-GB), ``gb_orig`` (SCRIBE-GB-orig) and
-``denario`` (SCRIBE-Denario); pooled is ``all`` (SCRIBE-All).
+The registered corpora are the four splits of the SCRIBE benchmark, in the
+fixed left-to-right order used everywhere: ``gb_orig`` (SCRIBE-GB-orig),
+``gb`` (SCRIBE-GB), ``sci`` (SCRIBE-Sci), ``denario`` (SCRIBE-Denario);
+pooled is ``all`` (SCRIBE-All), always last.
 """
 
 from __future__ import annotations
@@ -53,37 +54,16 @@ from epai.utils.cd_core import (
     youden_threshold,
 )
 
+from .splits import POOLED, SPLITS
+from .splits import display as _display
+from .splits import resolve as _resolve_splits
+
 BASE_DIR = Path(__file__).resolve().parents[3]
 PARQUET_DIR = BASE_DIR / "data" / "parquet"
 DEFAULT_OUT_DIR = BASE_DIR / "cfg" / "ai_detection" / "trainv2"
 DEFAULT_FIG_DIR = BASE_DIR / "results" / "trainv2" / "baseline_calibration"
 
 GEN_COL = "generated_by"
-POOLED = "all"
-
-#: The four SCRIBE splits, in the order they print. ``sci`` stays first -- it
-#: is the historical single-dataset default and the largest fully-scored human
-#: pool.
-CORPORA: dict[str, str] = {
-    "sci": "scribe_sci.parquet",
-    "gb": "scribe_gb.parquet",
-    "gb_orig": "scribe_gb_orig.parquet",
-    "denario": "scribe_denario.parquet",
-}
-
-#: Paper-facing names, used in plot titles (not in the CSV, which keeps the
-#: short keys as join-friendly values).
-DISPLAY: dict[str, str] = {
-    "sci": "SCRIBE-Sci",
-    "gb": "SCRIBE-GB",
-    "gb_orig": "SCRIBE-GB-orig",
-    "denario": "SCRIBE-Denario",
-    "all": "SCRIBE-All",
-}
-
-
-def _display(corpus: str) -> str:
-    return DISPLAY.get(corpus, corpus)
 
 #: CSV column order. Scalars only -- the raw score arrays never go here.
 CSV_FIELDS = [
@@ -102,18 +82,8 @@ _YOUDEN_COLOR = "#0ca678"  # threshold: Youden's J cut = teal
 
 
 def resolve_corpora(names: list[str]) -> list[tuple[str, Path]]:
-    """``["all"]`` or a subset of :data:`CORPORA` keys -> ``[(name, path), ...]``."""
-    if names == ["all"] or names == []:
-        chosen = list(CORPORA)
-    else:
-        unknown = [n for n in names if n not in CORPORA]
-        if unknown:
-            raise SystemExit(
-                f"unknown corpus name(s) {unknown}. "
-                f"choose from {list(CORPORA)} or 'all'"
-            )
-        chosen = names
-    return [(n, PARQUET_DIR / CORPORA[n]) for n in chosen]
+    """``["all"]`` or a subset of SCRIBE split keys -> ``[(key, path), ...]``."""
+    return _resolve_splits(names, PARQUET_DIR)
 
 
 def _row(
@@ -475,7 +445,7 @@ def _multi(
     if not entries:
         raise SystemExit("nothing to write -- no finite pooled threshold")
     src = "+".join(n for n, _ in corpora)
-    desc = "SCRIBE-All" if [n for n, _ in corpora] == list(CORPORA) else src
+    desc = "SCRIBE-All" if [n for n, _ in corpora] == list(SPLITS) else src
     _write_yaml(entries, block_key, out, script, f"{desc} ({src}), pooled ('all')",
                 fpr_target)
 
@@ -507,7 +477,7 @@ def run(
                          f"(default: {default_dataset.relative_to(BASE_DIR)})")
     ap.add_argument("--corpora", nargs="+", default=None, metavar="NAME",
                     help=f"calibrate per-corpus AND pooled 'all'; show the "
-                         f"distributions. Names: {list(CORPORA)} or 'all'. "
+                         f"distributions. Names: {list(SPLITS)} or 'all'. "
                          f"When given, the positional dataset is ignored.")
     ap.add_argument("--cols", nargs="+", default=None,
                     help=f"columns to calibrate (default: every {prefix}* column "

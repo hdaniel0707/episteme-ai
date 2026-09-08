@@ -7,9 +7,9 @@ r"""Calibrate one fixed, 1%-FPR threshold per Fast-DetectGPT pair into a baselin
 Writes a ``fastdetect_baseline`` block -- the SAME config shape
 ``epai.utils.cd_core.BASELINE_KINDS`` already reads for a zero-shot score
 baseline (``column``/``threshold``/``label`` entries under ``columns:``), so
-the result is usable both by ``run_fastdetect_performance.py`` (this
-experiment) and, unchanged, as a real baseline block in a
-``run_clf_cross_domain.py`` training config.
+the result drops in unchanged as a real baseline block in a
+``run_clf_cross_domain.py`` training config, and feeds
+``run_best_of_family_performance.py``'s transported reading.
 
 Only ``fastdetect_crit_*`` columns are calibrated -- the ``_prob_``/``_ntok_``
 columns are not scores (see ``cfg/detector_suite.yaml``). A HIGH criterion
@@ -19,13 +19,13 @@ over the same model pairs.
 ONE dataset, POOLED over every domain ('all'), fixes ONE threshold per pair --
 not per domain, not per dataset -- because the point of calibrating is to
 apply the SAME cutoff to every corpus a later comparison looks at
-(``run_fastdetect_performance.py``), not to refit a new one per corpus. A
+(``run_best_of_family_performance.py``), not to refit a new one per corpus. A
 small corpus is a bad calibration source: ``scribe_denario.parquet``'s 80 human
 rows would place a 1%-FPR cut on well under one row, which is not a
 threshold, it is noise.
 
-``--corpora`` calibrates on each SCRIBE split (``sci``, ``gb``,
-``gb_orig``, ``denario``) AND on all of them
+``--corpora`` calibrates on each SCRIBE split (``gb_orig``, ``gb``,
+``sci``, ``denario``) AND on all of them
 pooled ('all'), prints a per-corpus AUROC / threshold / rate / percentile
 table, drops one distribution PNG per pair, and writes the YAML from the
 pooled 'all' row:

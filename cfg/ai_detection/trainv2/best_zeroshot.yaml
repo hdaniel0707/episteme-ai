@@ -1,0 +1,12 @@
+# The hand-picked best zero-shot detector per family, chosen from
+# run_zeroshot_performance.py's SCRIBE-split means. Read by
+# run_best_zeroshot_performance.py, which scores each column on every SCRIBE
+# split (oriented AUROC + oracle TPR@1%FPR, threshold refit per split) and
+# plots them all on ONE AUROC-vs-TPR@1%FPR figure.
+#
+# A flat list of score columns; each is routed to its family by prefix.
+columns:
+  - binoculars_score_llama31_8b     # Binoculars      -> llama31-8b
+  - fastdetect_crit_llama31_8b      # Fast-DetectGPT  -> llama31-8b
+  - llm_judge_score_gpt56luna_v3    # LLM judge       -> gpt56luna
+  - llm_judge_score_gemma4_31b_v3   # LLM judge       -> gemma4_31b

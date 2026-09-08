@@ -20,8 +20,8 @@ detector -- not per domain, not per dataset -- for the same reason as its
 Binoculars / Fast-DetectGPT / judge siblings: apply the SAME cutoff to every
 corpus a later comparison looks at, not a fresh one per corpus.
 
-``--corpora`` calibrates on each SCRIBE split (``sci``, ``gb``,
-``gb_orig``, ``denario``) AND on all of them
+``--corpora`` calibrates on each SCRIBE split (``gb_orig``, ``gb``,
+``sci``, ``denario``) AND on all of them
 pooled ('all'), prints a per-corpus AUROC / threshold / rate / percentile
 table, drops one distribution PNG per detector column, and writes the YAML
 from the pooled 'all' row:

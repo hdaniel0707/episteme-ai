@@ -1,4 +1,4 @@
-# Calibrated by calibrate_detector_baseline.py on SCRIBE-All (sci+gb+gb_orig+denario), pooled ('all')
+# Calibrated by calibrate_detector_baseline.py on SCRIBE-All (gb_orig+gb+sci+denario), pooled ('all')
 # 'threshold' = 0.01-FPR cut, pooled over every domain ('all').
 # 'threshold_youden' = Youden's J cut (recorded; cd_core reads 'threshold').
 # Read by cd_core.baseline_entries().

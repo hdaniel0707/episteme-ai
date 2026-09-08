@@ -7,20 +7,20 @@ r"""Calibrate one fixed, 1%-FPR threshold per LLM judge into a baseline config.
 Writes an ``llm_judge_baseline`` block -- the SAME config shape
 ``epai.utils.cd_core.BASELINE_KINDS`` already reads for a zero-shot score
 baseline (``column``/``threshold``/``label`` entries under ``columns:``), so
-the result is usable both by ``run_judge_performance.py`` (this experiment)
-and, unchanged, as a real baseline block in a ``run_clf_cross_domain.py``
-training config.
+the result drops in unchanged as a real baseline block in a
+``run_clf_cross_domain.py`` training config, and feeds
+``run_best_of_family_performance.py``'s transported reading.
 
 ONE dataset, POOLED over every domain ('all'), fixes ONE threshold per judge
 -- not per domain, not per dataset -- because the point of calibrating is to
 apply the SAME cutoff to every corpus a later comparison looks at
-(``run_judge_performance.py``), not to refit a new one per corpus. A small
+(``run_best_of_family_performance.py``), not to refit a new one per corpus. A small
 corpus is a bad calibration source: ``scribe_denario.parquet``'s 80 human rows
 would place a 1%-FPR cut on well under one row, which is not a threshold, it
 is noise.
 
-``--corpora`` calibrates on each SCRIBE split (``sci``, ``gb``,
-``gb_orig``, ``denario``) AND on all of them
+``--corpora`` calibrates on each SCRIBE split (``gb_orig``, ``gb``,
+``sci``, ``denario``) AND on all of them
 pooled ('all'), prints a per-corpus AUROC / threshold / rate / percentile
 table, drops one distribution PNG per judge, and writes the YAML from the
 pooled 'all' row:

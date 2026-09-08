@@ -1,32 +1,36 @@
-r"""Judge x generator matrix: AUROC and TPR@1%FPR (oracle), one dataset.
+r"""Judge LLM x generator LLM: does each judge catch each generator's text?
 
-    uv run python epai/ai_detection/trainv2/run_judge_by_generator.py \
-        data/parquet/scribe_sci.parquet
+For every (judge, generator) pair, on each of the three multi-generator SCRIBE
+splits (SCRIBE-GB-orig, SCRIBE-GB, SCRIBE-Sci) -- human rows vs. that ONE
+generator's rows, every other generator excluded from the cell -- this reports
+two ORACLE numbers, each its own matrix:
 
-For every (judge, generator) pair in ONE dataset -- human rows vs. that ONE
-generator's rows, every other generator's rows excluded from the cell -- this
-reports AUROC (threshold-free) and the ORACLE TPR@1%FPR: the threshold read
-off THAT CELL's own ROC curve (``cd_core.roc_point_at_fpr``), not a threshold
-carried in from anywhere else. That is a deliberate difference from
-``run_judge_performance.py``, which applies one FIXED, pre-calibrated cutoff
-across several datasets -- this is a within-dataset comparison of what each
-judge CAN tell apart, generator by generator, not what one deployed cutoff
-would catch.
+    AUROC            threshold-free, oriented so machine = positive
+    TPR@1%FPR        threshold read off THAT CELL's own ROC
+                     (cd_core.roc_point_at_fpr), nothing carried in
 
-Cells where the judge and the generator share a model family are marked
-``*`` -- whether a judge is better or worse at catching text from its own
-family is the reason this matrix exists, not a footnote.
+Cells where the judge and the generator are the same model family are marked
+``*`` -- whether a judge is soft on its own family is the reason this matrix
+exists. (SCRIBE-GB-orig is all GPT-3.5, so it has no self-family cells.)
 
-Output:
-    <out>_auroc.csv               judge x generator, AUROC
-    <out>_tpr_at_<L>fpr.csv       judge x generator, oracle TPR@L FPR
-    <out>_auroc.png               heatmap
-    <out>_tpr_at_<L>fpr.png       heatmap
+compute -> CSV -> plots from the CSV:
+
+    results/trainv2/judge_by_generator/
+        matrix.csv           long: split, judge, generator, n, auroc,
+                              tpr_at_fpr, self_family
+        auroc.png            one heatmap panel per split
+        tpr_at_1pct_fpr.png  one heatmap panel per split
+
+``llm_judge_score_sonnet5_v3`` is dropped by default (absent on SCRIBE-Sci);
+pass it via ``--cols`` to include it.
+
+Replaces the old single-dataset, gemma-less version.
 
 Run:
     uv run python epai/ai_detection/trainv2/run_judge_by_generator.py
+    uv run python epai/ai_detection/trainv2/run_judge_by_generator.py --splits gb sci
     uv run python epai/ai_detection/trainv2/run_judge_by_generator.py \
-        data/parquet/scribe_sci.parquet --fpr-target 0.05
+        --replot results/trainv2/judge_by_generator/matrix.csv
 """
 
 from __future__ import annotations
@@ -39,19 +43,32 @@ import pandas as pd
 
 from epai.utils.cd_core import auroc_score, oriented_scores, roc_point_at_fpr
 
+from epai.ai_detection.trainv2.splits import resolve as resolve_splits
+
 BASE_DIR = Path(__file__).resolve().parents[3]
-DEFAULT_DATASET = BASE_DIR / "data" / "parquet" / "scribe_sci.parquet"
+PARQUET_DIR = BASE_DIR / "data" / "parquet"
 DEFAULT_OUT_DIR = BASE_DIR / "results" / "trainv2" / "judge_by_generator"
 
 JUDGE_PREFIX = "llm_judge_score_"
+JUDGE_EXCLUDE = frozenset({"llm_judge_score_sonnet5_v3"})
 GEN_COL = "generated_by"
-# The judge writes P(human): a LOW score means machine. Fixed, not a flag --
-# matches cd_core's llm_judge BaselineKind.
+# The judge writes P(human): a LOW score means machine. Matches cd_core's
+# llm_judge BaselineKind.
 MACHINE_IS_HIGH = False
+#: the multi-generator splits -- SCRIBE-Denario has one generator, no matrix.
+DEFAULT_SPLITS = ["gb_orig", "gb", "sci"]
+
+CSV_FIELDS = ["split", "judge", "generator", "gen_model", "n", "auroc",
+              "tpr_at_fpr", "self_family"]
 
 
 def _judge_key(column: str) -> str:
-    return column.replace(JUDGE_PREFIX, "").replace("_v3", "")
+    return column.removeprefix(JUDGE_PREFIX).replace("_v3", "")
+
+
+def _gen_model(generator: str) -> str:
+    """``gpt56luna:0701A`` -> ``gpt56luna``."""
+    return generator.split(":", 1)[0]
 
 
 def _norm(s: str) -> str:
@@ -59,14 +76,8 @@ def _norm(s: str) -> str:
     return "".join(ch for ch in s.lower() if ch.isalnum())
 
 
-def is_self(judge: str, generator: str) -> bool:
-    """Same model family judging its own generations (the prompt/version id
-    after ':' is the generator's, not the model's, so it is stripped first)."""
-    return _norm(judge) == _norm(generator.split(":", 1)[0])
-
-
-def cell(df: pd.DataFrame, column: str, generator: str, human_label: str,
-         fpr_target: float) -> dict | None:
+def _cell(df: pd.DataFrame, column: str, generator: str, human_label: str,
+          fpr: float) -> dict | None:
     sub = df[df[GEN_COL].isin([human_label, generator])][[column, GEN_COL]]
     sub = sub.dropna(subset=[column])
     raw = sub[column].to_numpy(dtype=float)
@@ -74,110 +85,136 @@ def cell(df: pd.DataFrame, column: str, generator: str, human_label: str,
     if np.unique(y).size < 2 or len(y) < 10:
         return None
     oriented = oriented_scores(raw, MACHINE_IS_HIGH)
-    tpr, _ = roc_point_at_fpr(y, oriented, fpr_target)
-    return {"n": int(len(y)), "auroc": auroc_score(y, oriented), "tpr_at_fpr": tpr}
+    tpr, _ = roc_point_at_fpr(y, oriented, fpr)
+    return {"n": int(len(y)), "auroc": float(auroc_score(y, oriented)),
+            "tpr_at_fpr": float(tpr)}
 
 
-def plot_heatmap(matrix: pd.DataFrame, judges: list[str], generators: list[str],
-                  title: str, path: Path, cmap: str) -> None:
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+def compute(splits, cols_arg, fpr, human_label) -> list[dict]:
+    import pyarrow.parquet as pq
 
-    data = matrix.loc[judges, generators].to_numpy(dtype=float)
-    fig, ax = plt.subplots(figsize=(1.3 * len(generators) + 2.4, 0.9 * len(judges) + 1.6))
-    im = ax.imshow(data, cmap=cmap, vmin=0, vmax=1, aspect="auto")
-    ax.set_xticks(range(len(generators)))
-    ax.set_xticklabels(generators, rotation=30, ha="right")
-    ax.set_yticks(range(len(judges)))
-    ax.set_yticklabels(judges)
-    for i, j in enumerate(judges):
-        for k, g in enumerate(generators):
-            v = data[i, k]
-            text = "-" if np.isnan(v) else f"{v:.2f}"
-            if not np.isnan(v) and is_self(j, g):
-                text += "*"
-            ax.text(k, i, text, ha="center", va="center", fontsize=9)
-    fig.colorbar(im, ax=ax, shrink=0.85)
-    ax.set_title(f"{title}\n(* = judge and generator share a model family)", fontsize=10)
-    fig.tight_layout()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=150)
-    plt.close(fig)
-    print(f"wrote {path}")
+    rows: list[dict] = []
+    for split_key, path in splits:
+        names = pq.read_schema(path).names
+        cols = (cols_arg if cols_arg
+                else sorted(c for c in names if c.startswith(JUDGE_PREFIX)
+                            and c not in JUDGE_EXCLUDE))
+        cols = [c for c in cols if c in names]
+        df = pd.read_parquet(path, columns=[GEN_COL, *cols])
+        generators = sorted(g for g in df[GEN_COL].astype(str).unique()
+                            if g != human_label)
+        for col in cols:
+            judge = _judge_key(col)
+            for gen in generators:
+                r = _cell(df, col, gen, human_label, fpr)
+                if r is None:
+                    continue
+                rows.append({
+                    "split": split_key, "judge": judge, "generator": gen,
+                    "gen_model": _gen_model(gen), "n": r["n"],
+                    "auroc": r["auroc"], "tpr_at_fpr": r["tpr_at_fpr"],
+                    "self_family": _norm(judge) == _norm(_gen_model(gen)),
+                })
+    return rows
+
+
+def _overall(rows: list[dict]) -> list[dict]:
+    """One row per judge: its grand mean of each metric over every cell
+    (all splits, all generators), sorted best AUROC first."""
+    import numpy as np
+
+    out = []
+    for j in sorted({r["judge"] for r in rows}):
+        cells = [r for r in rows if r["judge"] == j]
+        out.append({
+            "judge": j, "n_cells": len(cells),
+            "mean_auroc": float(np.mean([c["auroc"] for c in cells])),
+            "mean_tpr_at_fpr": float(np.mean([c["tpr_at_fpr"] for c in cells])),
+        })
+    return sorted(out, key=lambda r: r["mean_auroc"], reverse=True)
+
+
+def _print_matrices(rows: list[dict], split_order: list[str], fpr: float) -> None:
+    ovr = {o["judge"]: o for o in _overall(rows)}
+    for metric, key, lbl in (("auroc", "mean_auroc", "AUROC"),
+                             ("tpr_at_fpr", "mean_tpr_at_fpr",
+                              f"oracle TPR@{fpr * 100:g}%FPR")):
+        judges = sorted(ovr, key=lambda j: ovr[j][key], reverse=True)
+        for sk in split_order:
+            sub = {(r["judge"], r["gen_model"]): r
+                   for r in rows if r["split"] == sk}
+            if not sub:
+                continue
+            gens = sorted({g for _, g in sub})
+            print(f"\n{sk} — {lbl}  (* = same model family; rows ranked by overall)")
+            print(f"{'judge':<14}" + "".join(f"{g:>13}" for g in gens)
+                  + f"{'overall':>13}")
+            for j in judges:
+                line = f"{j:<14}"
+                for g in gens:
+                    r = sub.get((j, g))
+                    line += (f"{'--':>13}" if r is None else
+                             f"{r[metric]:>12.3f}{'*' if r['self_family'] else ' '}")
+                print(line + f"{ovr[j][key]:>13.3f}")
+
+
+def plots_from_csv(csv_path: Path, meta: dict, out_dir: Path) -> None:
+    rows = pd.read_csv(csv_path).to_dict("records")
+    from epai.ai_detection.trainv2.plots import judge_generator_heatmaps
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    judge_generator_heatmaps(rows, "auroc", meta, out_dir / "auroc.png")
+    judge_generator_heatmaps(rows, "tpr_at_fpr", meta,
+                             out_dir / f"tpr_at_{meta['fpr'] * 100:g}pct_fpr.png")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("dataset", type=Path, nargs="?", default=DEFAULT_DATASET)
+    ap.add_argument("--splits", nargs="+", default=None, metavar="KEY",
+                    help=f"SCRIBE splits (default: {DEFAULT_SPLITS})")
     ap.add_argument("--cols", nargs="+", default=None,
-                     help="judge columns (default: every llm_judge_score_* column)")
+                    help=f"judge columns (default: every {JUDGE_PREFIX}* column "
+                         f"minus {sorted(JUDGE_EXCLUDE)})")
+    ap.add_argument("--fpr", type=float, default=0.01)
     ap.add_argument("--human-label", default="human")
-    ap.add_argument("--fpr-target", type=float, default=0.01)
     ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     ap.add_argument("--no-plots", action="store_true")
+    ap.add_argument("--replot", type=Path, default=None, metavar="MATRIX_CSV")
     args = ap.parse_args()
 
-    df = pd.read_parquet(args.dataset)
-    if GEN_COL not in df.columns:
-        raise SystemExit(f"{args.dataset}: no {GEN_COL!r} column")
-    cols = args.cols or sorted(c for c in df.columns if c.startswith(JUDGE_PREFIX))
-    if not cols:
-        raise SystemExit(f"no {JUDGE_PREFIX}* column in {args.dataset}")
-    generators = sorted(g for g in df[GEN_COL].astype(str).unique() if g != args.human_label)
-    if not generators:
-        raise SystemExit(f"{args.dataset}: no non-human {GEN_COL!r} values")
-    judges = [_judge_key(c) for c in cols]
+    splits = resolve_splits(args.splits or DEFAULT_SPLITS, PARQUET_DIR)
+    meta = {"fpr": args.fpr, "splits": [s for s, _ in splits]}
 
-    print(f"dataset    : {args.dataset}  ({len(df)} rows)")
-    print(f"judges     : {judges}")
-    print(f"generators : {generators}\n")
+    if args.replot is not None:
+        plots_from_csv(args.replot, meta, args.replot.parent)
+        print(f"replotted from {args.replot}")
+        return
 
-    auroc_mat = pd.DataFrame(index=judges, columns=generators, dtype=float)
-    tpr_mat = pd.DataFrame(index=judges, columns=generators, dtype=float)
+    missing = [str(p) for _, p in splits if not p.exists()]
+    if missing:
+        raise SystemExit(f"parquet(s) not found: {missing}")
 
-    for col, judge in zip(cols, judges):
-        for gen in generators:
-            r = cell(df, col, gen, args.human_label, args.fpr_target)
-            if r is None:
-                print(f"  skipped: {judge} x {gen} -- n<10 or single class")
-                continue
-            auroc_mat.loc[judge, gen] = r["auroc"]
-            tpr_mat.loc[judge, gen] = r["tpr_at_fpr"]
+    print(f"splits : {[s for s, _ in splits]}")
+    print(f"metric : AUROC (oriented), oracle TPR@{args.fpr * 100:g}%FPR, per (judge, generator)")
 
-    def _fmt(mat: pd.DataFrame) -> pd.DataFrame:
-        out = pd.DataFrame(index=mat.index, columns=mat.columns, dtype=object)
-        for j in mat.index:
-            for g in mat.columns:
-                v = mat.loc[j, g]
-                if pd.isna(v):
-                    out.loc[j, g] = ""
-                else:
-                    out.loc[j, g] = f"{v:.3f}" + ("*" if is_self(j, g) else "")
-        return out
+    rows = compute(splits, args.cols, args.fpr, args.human_label)
+    if not rows:
+        raise SystemExit("nothing evaluated")
 
-    print(f"\nAUROC  (machine = positive; * = own model family)")
-    print(_fmt(auroc_mat).to_string())
-    print(f"\nTPR@{args.fpr_target * 100:g}%FPR (oracle; * = own model family)")
-    print(_fmt(tpr_mat).to_string())
-
-    out_dir = args.out_dir
-    out_dir.mkdir(parents=True, exist_ok=True)
-    stem = args.dataset.stem
-    auroc_csv = out_dir / f"{stem}_auroc.csv"
-    tpr_csv = out_dir / f"{stem}_tpr_at_{args.fpr_target:g}fpr.csv"
-    auroc_mat.to_csv(auroc_csv)
-    tpr_mat.to_csv(tpr_csv)
-    print(f"\nwrote {auroc_csv}\nwrote {tpr_csv}")
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = args.out_dir / "matrix.csv"
+    overall_path = args.out_dir / "overall.csv"
+    pd.DataFrame(rows, columns=CSV_FIELDS).to_csv(csv_path, index=False)
+    pd.DataFrame(_overall(rows),
+                 columns=["judge", "n_cells", "mean_auroc", "mean_tpr_at_fpr"]
+                 ).to_csv(overall_path, index=False)
+    _print_matrices(rows, meta["splits"], args.fpr)
+    print(f"\nwrote {csv_path}\nwrote {overall_path}")
 
     if not args.no_plots:
-        plot_heatmap(auroc_mat, judges, generators, "AUROC by judge x generator",
-                     out_dir / f"{stem}_auroc.png", "coolwarm")
-        plot_heatmap(tpr_mat, judges, generators,
-                     f"TPR@{args.fpr_target * 100:g}%FPR (oracle) by judge x generator",
-                     out_dir / f"{stem}_tpr_at_{args.fpr_target:g}fpr.png", "viridis")
+        plots_from_csv(csv_path, meta, args.out_dir)
 
 
 if __name__ == "__main__":

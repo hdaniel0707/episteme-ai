@@ -22,11 +22,10 @@ reporting whichever one wins locally on each corpus would make every family
 look artificially strong everywhere.
 
 The winning column is then evaluated on every dataset using its
-ALREADY-CALIBRATED threshold from that family's config (the same transported
-reading ``run_judge_performance.py`` / ``run_binox_performance.py`` /
-``run_fastdetect_performance.py`` / ``calibrate_detector_baseline.py`` use) --
-so a dataset where TPR drops despite a high reference AUROC is telling you
-the winning column's calibration did not transport there.
+ALREADY-CALIBRATED threshold from that family's config (the transported
+reading; ``run_zeroshot_performance.py`` is the oracle counterpart, threshold
+refit per split) -- so a dataset where TPR drops despite a high reference
+AUROC is telling you the winning column's calibration did not transport there.
 
 Needs all four calibrated configs to already exist:
     cfg/ai_detection/trainv2/judge_baseline_calibrated.yaml
