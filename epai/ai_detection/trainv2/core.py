@@ -14,9 +14,7 @@ beside a legacy one:
 
 from __future__ import annotations
 
-import csv
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import numpy as np
 from sklearn.metrics import roc_auc_score, roc_curve
@@ -55,24 +53,6 @@ class Variant:
         return f"{emb} · {self.alg_label or self.alg_name}"
 
 
-def build_variants(embeddings: list[str], algorithms: list[dict]) -> list[Variant]:
-    """The full cross product, in ``embeddings`` x ``algorithms`` order.
-
-    ``algorithms`` entries are ``{name, label?, params?}`` mappings (already
-    normalised by :mod:`config`).
-    """
-    return [
-        Variant(
-            embedding=emb,
-            alg_name=alg["name"],
-            alg_label=alg.get("label", alg["name"]),
-            alg_params=alg.get("params", {}),
-        )
-        for emb in embeddings
-        for alg in algorithms
-    ]
-
-
 # ---------------------------------------------------------------------------
 # The split
 # ---------------------------------------------------------------------------
@@ -83,11 +63,18 @@ def grouped_split(
 ) -> tuple[np.ndarray, np.ndarray]:
     """One grouped train/test split. A group never straddles the cut.
 
+    ``groups`` is the group id per row -- here always the document id, so a
+    human text and every rewrite of it (which share that id) move together.
     Returns ``(train_idx, test_idx)`` into the arrays passed in. The splitter
-    only reads the row count, so a dummy stands in for the design matrix.
+    only reads the row count, so a dummy stands in for the design matrix. The
+    assert makes the group-disjointness explicit (and catches a caller that
+    passed row indices instead of group ids).
     """
     splitter = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=seed)
-    return next(splitter.split(np.zeros((len(y), 1)), y, groups))
+    train_idx, test_idx = next(splitter.split(np.zeros((len(y), 1)), y, groups))
+    assert set(groups[train_idx]).isdisjoint(groups[test_idx]), \
+        "grouped_split: a group ended up on both sides of the cut"
+    return train_idx, test_idx
 
 
 # ---------------------------------------------------------------------------
@@ -199,23 +186,3 @@ def aggregate_seeds(per_seed: list[dict], keys: tuple[str, ...]) -> dict:
         if const in per_seed[0]:
             out[const] = per_seed[0][const]
     return out
-
-
-# ---------------------------------------------------------------------------
-# Output
-# ---------------------------------------------------------------------------
-
-
-def write_csv(rows: list[dict], path: Path) -> None:
-    """The same rows written as ``.jsonl``, as a CSV — for opening in a
-    spreadsheet rather than parsing. Columns follow the first row's key order;
-    every row in a trainv2 summary/ranking list shares one schema, so that's
-    the whole file.
-    """
-    if not rows:
-        path.write_text("")
-        return
-    with open(path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-        writer.writeheader()
-        writer.writerows(rows)

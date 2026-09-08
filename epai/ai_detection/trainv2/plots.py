@@ -1,14 +1,9 @@
-"""One figure family: a small-multiples grid of (AUROC, TPR@FPR) scatters.
-
-Rows are embeddings, columns are algorithms, one figure per domain slice. Inside
-each panel, one point per generator — the answer to "which generator does this
-detector catch, and does it hold at a 1%-FPR operating point".
+"""The trainv2 figure family: AUROC vs. TPR@1%FPR scatters and a couple of
+Cleveland dot plots, all reading a run's CSV records (dicts).
 
 Deliberately plain: no gridlines behind the marks, no dual axes, fixed
 categorical colours in slot order (the data-viz default palette — its first
-three slots clear the all-pairs colour-vision gate, which is why three
-generators is the comfortable case), and every point is directly labelled so
-identity never rests on colour alone.
+three slots clear the all-pairs colour-vision gate).
 """
 
 from __future__ import annotations
@@ -22,11 +17,6 @@ matplotlib.use("Agg")
 import matplotlib.patheffects as pe
 import matplotlib.pyplot as plt
 
-from .core import POOLED
-
-#: Categorical slots 1–3 of the validated default palette (all-pairs safe).
-#: A 4th+ generator extends into the later slots and prints a note — past three,
-#: colour alone is not reliable, but the direct labels still carry identity.
 _PALETTE = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#4a3aa7",
             "#008300", "#e34948"]
 _SURFACE = "#fcfcfb"
@@ -34,43 +24,9 @@ _INK = "#0b0b0b"
 _MUTED = "#8a8a86"
 
 
-def _short(generator: str) -> str:
-    """``gpt56luna:0811A`` -> ``gpt56luna``."""
-    return generator.split(":", 1)[0]
-
-
 def _emb_short(column: str) -> str:
     """``emb_luar_crud`` -> ``luar_crud``."""
     return column[4:] if column.startswith("emb_") else column
-
-
-def _domain_title(domain: str) -> str:
-    return "pooled (all domains)" if domain == POOLED else domain
-
-
-def scatter_grids(summary_rows: list[dict], meta: dict, fig_dir: Path) -> list[Path]:
-    """Write ``scatter_<domain>.png`` for every domain in ``summary_rows``."""
-    fpr_pct = f"{meta['fpr'] * 100:g}"
-    embeddings = sorted({r["embedding"] for r in summary_rows})
-    algorithms = sorted({r["algorithm"] for r in summary_rows})
-    generators = sorted({r["generator"] for r in summary_rows})
-    domains = sorted({r["domain"] for r in summary_rows})
-    colour = {g: _PALETTE[i % len(_PALETTE)] for i, g in enumerate(generators)}
-
-    out: list[Path] = []
-    for domain in domains:
-        rows = [r for r in summary_rows if r["domain"] == domain]
-        path = fig_dir / f"scatter_{domain}.png"
-        _one_grid(
-            rows, embeddings, algorithms, colour, generators,
-            xlim=_axis_range([r["auroc_mean"] for r in rows]),
-            ylim=_axis_range([r["tpr_at_fpr_mean"] for r in rows], hard_lo=0.0),
-            fpr_level=meta["fpr"], fpr_pct=fpr_pct,
-            title=f"{meta['experiment']} — {_domain_title(domain)}",
-            path=path,
-        )
-        out.append(path)
-    return out
 
 
 def _axis_range(values, *, hard_lo=None, min_span=0.05, ceil_cap=1.008):
@@ -91,87 +47,6 @@ def _axis_range(values, *, hard_lo=None, min_span=0.05, ceil_cap=1.008):
         lo = max(lo, hard_lo)
     return lo, hi
 
-
-def _one_grid(rows, embeddings, algorithms, colour, generators, *,
-              xlim, ylim, fpr_level, fpr_pct, title, path):
-    nr, nc = len(embeddings), len(algorithms)
-    fig, axes = plt.subplots(
-        nr, nc, figsize=(3.3 * nc + 1.0, 3.0 * nr + 1.0),
-        squeeze=False, sharex=True, sharey=True,
-    )
-    fig.patch.set_facecolor("white")
-    stroke = [pe.withStroke(linewidth=2, foreground="white")]
-    by_cell: dict[tuple[str, str], list[dict]] = {}
-    for r in rows:
-        by_cell.setdefault((r["embedding"], r["algorithm"]), []).append(r)
-
-    for i, emb in enumerate(embeddings):
-        for j, alg in enumerate(algorithms):
-            ax = axes[i][j]
-            ax.set_facecolor(_SURFACE)
-            for spine in ("top", "right"):
-                ax.spines[spine].set_visible(False)
-            if xlim[0] <= 0.5 <= xlim[1]:
-                ax.axvline(0.5, color=_MUTED, lw=0.8, ls=":", zorder=0)
-            if ylim[0] <= fpr_level <= ylim[1]:
-                ax.axhline(fpr_level, color=_MUTED, lw=0.8, ls=":", zorder=0)
-
-            cell = sorted(by_cell.get((emb, alg), []), key=lambda r: r["generator"])
-            y0, y1 = ylim
-            for k, r in enumerate(cell):
-                g = r["generator"]
-                yv = r["tpr_at_fpr_mean"]
-                ax.errorbar(
-                    r["auroc_mean"], yv,
-                    xerr=r["auroc_std"], yerr=r["tpr_at_fpr_std"],
-                    fmt="o", ms=8, mfc=colour[g], mec="white", mew=1.2,
-                    ecolor=colour[g], elinewidth=1, capsize=2, alpha=0.95, zorder=3,
-                )
-                # Label to the right of the marker, clear of the vertical error
-                # bar; stagger vertically by index so stacked points stay apart.
-                dy = 7 - 12 * (k % 3)
-                ax.annotate(
-                    _short(g), (r["auroc_mean"], yv),
-                    textcoords="offset points", xytext=(9, dy), ha="left", va="center",
-                    fontsize=7, color=_INK, zorder=4, path_effects=stroke,
-                )
-
-            ax.set_title(f"{_emb_short(emb)} · {alg}", fontsize=9, color=_INK)
-            ax.set_xlim(*xlim)
-            ax.set_ylim(*ylim)
-            ax.tick_params(labelsize=7.5, colors=_MUTED)
-            if i == nr - 1:
-                ax.set_xlabel("AUROC", fontsize=8.5, color=_INK)
-            if j == 0:
-                ax.set_ylabel(f"TPR @ {fpr_pct}% FPR (oracle)", fontsize=8.5, color=_INK)
-
-    # The legend anchor and the reserved bottom margin scale with figure height
-    # rather than a fixed fraction, so a taller grid (more embeddings) doesn't
-    # waste space and a short one still fits both rows below the panels. A
-    # NEGATIVE bbox_to_anchor y (placing the legend below the canvas) combined
-    # with a nearby fig.text reliably corrupts matplotlib's tight-bbox export
-    # into wildly oversized text — keep both anchors positive and separated.
-    height = fig.get_size_inches()[1]
-    legend_y, caption_y, rect_bottom = 0.34 / height, 0.08 / height, 0.62 / height
-
-    handles = [
-        plt.Line2D([], [], marker="o", ls="", ms=7, color=colour[g], label=_short(g))
-        for g in generators
-    ]
-    fig.legend(
-        handles=handles, loc="lower center", ncol=min(len(generators), 6),
-        frameon=False, fontsize=8.5, bbox_to_anchor=(0.5, legend_y),
-    )
-    fig.suptitle(title, fontsize=11, color=_INK, y=0.995)
-    fig.text(
-        0.5, caption_y,
-        "each point = one human-vs-generator training · error bars = ±1 SD over seeds "
-        "· axes zoomed to the data",
-        ha="center", fontsize=7, color=_MUTED,
-    )
-    fig.tight_layout(rect=(0, rect_bottom, 1, 0.97))
-    fig.savefig(path, dpi=150, facecolor="white", bbox_inches="tight")
-    plt.close(fig)
 
 
 # ---------------------------------------------------------------------------
@@ -344,12 +219,24 @@ def zeroshot_scatter(
     ax.scatter([0.5], [fpr], s=120, color="#b5495b", marker="x", lw=1.8,
                alpha=0.6, zorder=0)
 
+    def _err(r: dict) -> tuple[float | None, float | None]:
+        """SD, when the CSV carries a finite one (trained rows). Only ever
+        drawn on the mean marker -- the light per-split points stay bare."""
+        xe, ye = r.get("auroc_std"), r.get("tpr_at_fpr_std")
+        try:
+            xe, ye = float(xe), float(ye)
+        except (TypeError, ValueError):
+            return None, None
+        return (xe if np.isfinite(xe) else None, ye if np.isfinite(ye) else None)
+
+    # Light per-split points: bare markers, no error bars.
     for r in rows:
         if r["split"] == "mean" or not np.isfinite(r["tpr_at_fpr"]):
             continue
-        ax.scatter([r["auroc"]], [r["tpr_at_fpr"]], s=62,
+        ax.scatter([r["auroc"]], [r["tpr_at_fpr"]], s=42,
+                   marker=marker.get(r["split"], "P"),
                    color=_tint(hue[r[key]]), edgecolors="#6a6a6a", lw=0.6,
-                   marker=marker.get(r["split"], "P"), zorder=3)
+                   zorder=3)
 
     means = [next((r for r in rows if r[key] == v and r["split"] == "mean"), None)
              for v in names]
@@ -357,8 +244,10 @@ def zeroshot_scatter(
     for v, m in zip(names, means):
         if m is None or not np.isfinite(m["tpr_at_fpr"]):
             continue
-        ax.scatter([m["auroc"]], [m["tpr_at_fpr"]], s=165, color=hue[v],
-                   edgecolors="#222222", lw=1.0, marker="o", zorder=5)
+        xe, ye = _err(m)
+        ax.errorbar([m["auroc"]], [m["tpr_at_fpr"]], xerr=xe, yerr=ye,
+                    fmt="o", ms=12, mfc=hue[v], mec="#222222", mew=1.0,
+                    ecolor="#222222", elinewidth=1.0, capsize=2.5, zorder=5)
         # Label away from the right edge / the legend column: past 78% of the
         # x-range it goes to the marker's left instead.
         right = m["auroc"] > 0.45 + 0.78 * (x_hi - 0.45)

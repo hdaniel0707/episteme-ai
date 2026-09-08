@@ -5,20 +5,32 @@ families, eval-only holdouts, hybrid/fusion algorithms, three training modes and
 a pile of cross-corpus comparison tables. It answers a lot of questions at once,
 which is the problem: no single run is legible.
 
-trainv2 restarts from the opposite end. One experiment at a time, one input
-shape, two metrics, one figure family:
+trainv2 restarts from the opposite end. One experiment per script, over the
+four splits of the **SCRIBE** benchmark (:mod:`.splits`), two metrics, one
+figure family:
 
-  * input  — a ``*_multi_*`` parquet only (human + >=2 generators, one row per
-    ``(source document, generator)``, sharing a group id).
-  * metrics — AUROC and TPR@1%FPR, both **oracle** (threshold fit on the
-    evaluation rows themselves). No transported-threshold machinery.
-  * split  — one grouped train/test split so a document and its rewrites never
-    straddle the cut. Seeded, repeated, reported as mean +- std.
+  * metrics — AUROC and TPR@1%FPR (**oracle** where there is no calibration
+    slice: threshold fit on the evaluation rows themselves).
+  * split  — where a classifier is trained, a grouped 70/30 split so a
+    document and its rewrites never straddle the cut, seeded and repeated,
+    reported as mean +- SD over seeds.
+  * every script is compute -> CSV -> plot-from-CSV, with a ``--replot`` that
+    redraws the figures from the CSV without recomputing.
 
-The first experiment (``run_in_domain.py``) evaluates **data-generator
-effectiveness**: for every generator in the file, train human-vs-that-generator
-over the embedding x algorithm grid, per domain and pooled, and plot each
-training as a point in (AUROC, TPR@1%FPR) space.
+The scripts:
+
+  * ``calibrate_*_baseline.py`` — one fixed 1%-FPR + Youden threshold per
+    score column, per split and pooled.
+  * ``run_embedding_effectiveness.py`` — which embedding separates human from
+    AI best, per split and on average (logistic, seeds, mean +- SD).
+  * ``run_zeroshot_performance.py`` / ``run_best_zeroshot_performance.py`` —
+    zero-shot AUROC vs. oracle TPR@1%FPR per family / for the hand-picked best.
+  * ``run_in_domain_performance.py`` / ``run_lodo_performance.py`` — the
+    trained headline (one fixed config), random 70/30 and leave-one-domain-out
+    respectively, with the zero-shot picks overlaid.
+  * ``run_judge_by_generator.py`` — judge x generator matrix, per split.
+  * ``run_best_of_family_performance.py`` — auto-picked best of each family
+    at its transported cutoff, on one figure.
 
 Reused from the old code: only ``epai/algs`` (the pluggable classifier
 registry). Everything else here is self-contained.
