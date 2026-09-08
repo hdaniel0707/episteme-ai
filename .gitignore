@@ -1,9 +1,11 @@
 .env
 *.pyc
 .venv/
-info/
-old/
-temp_debug_llama/
+
+
+/info
+/old
+/temp_debug_llama
 
 /results/
 /data/
