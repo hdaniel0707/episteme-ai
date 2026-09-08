@@ -1,25 +1,26 @@
-# Calibrated by calibrate_judge_baseline.py on science_v3_multi_0811A.parquet
-# target FPR 0.01, pooled over every domain ('all').
-# Read by cd_core.baseline_entries() / run_judge_performance.py.
-#
-# gemma4_31b was added later, calibrated the same way but on
-# science_v3f_multi_0811A.parquet (the only science corpus carrying the
-# llm_judge_score_gemma4_31b_v3 column). Re-run calibrate_judge_baseline.py on
-# science_v3f_multi_0811A.parquet to refit every row against one source.
+# Calibrated by calibrate_judge_baseline.py on SCRIBE-All (sci+gb+gb_orig+denario), pooled ('all')
+# 'threshold' = 0.01-FPR cut, pooled over every domain ('all').
+# 'threshold_youden' = Youden's J cut (recorded; cd_core reads 'threshold').
+# Read by cd_core.baseline_entries().
 llm_judge_baseline:
   columns:
-  - column: llm_judge_score_gpt56luna_v3
-    threshold: 0.17
-    label: gpt56luna
-  - column: llm_judge_score_gptoss_120b_v3
-    threshold: 0.21
-    label: gptoss_120b
-  - column: llm_judge_score_llama33_70b_v3
-    threshold: 0.17
-    label: llama33_70b
-  - column: llm_judge_score_qwen3_14b_v3
-    threshold: -.inf
-    label: qwen3_14b
   - column: llm_judge_score_gemma4_31b_v3
     threshold: 0.12
+    threshold_youden: 0.43
     label: gemma4_31b
+  - column: llm_judge_score_gpt56luna_v3
+    threshold: 0.07
+    threshold_youden: 0.18
+    label: gpt56luna
+  - column: llm_judge_score_gptoss_120b_v3
+    threshold: 0.17
+    threshold_youden: 0.64
+    label: gptoss_120b
+  - column: llm_judge_score_llama33_70b_v3
+    threshold: 0.18
+    threshold_youden: 0.27
+    label: llama33_70b
+  - column: llm_judge_score_qwen3_14b_v3
+    threshold: 0.1
+    threshold_youden: 0.37
+    label: qwen3_14b

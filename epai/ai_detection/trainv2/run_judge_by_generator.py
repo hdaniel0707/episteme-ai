@@ -1,7 +1,7 @@
 r"""Judge x generator matrix: AUROC and TPR@1%FPR (oracle), one dataset.
 
     uv run python epai/ai_detection/trainv2/run_judge_by_generator.py \
-        data/parquet/science_v3f_multi_0811A.parquet
+        data/parquet/scribe_sci.parquet
 
 For every (judge, generator) pair in ONE dataset -- human rows vs. that ONE
 generator's rows, every other generator's rows excluded from the cell -- this
@@ -26,7 +26,7 @@ Output:
 Run:
     uv run python epai/ai_detection/trainv2/run_judge_by_generator.py
     uv run python epai/ai_detection/trainv2/run_judge_by_generator.py \
-        data/parquet/science_v3f_multi_0811A.parquet --fpr-target 0.05
+        data/parquet/scribe_sci.parquet --fpr-target 0.05
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ import pandas as pd
 from epai.utils.cd_core import auroc_score, oriented_scores, roc_point_at_fpr
 
 BASE_DIR = Path(__file__).resolve().parents[3]
-DEFAULT_DATASET = BASE_DIR / "data" / "parquet" / "science_v3f_multi_0811A.parquet"
+DEFAULT_DATASET = BASE_DIR / "data" / "parquet" / "scribe_sci.parquet"
 DEFAULT_OUT_DIR = BASE_DIR / "results" / "trainv2" / "judge_by_generator"
 
 JUDGE_PREFIX = "llm_judge_score_"

@@ -95,8 +95,8 @@ from .run_best_of_family_performance import (
 )
 
 BASE_DIR = Path(__file__).resolve().parents[3]
-DEFAULT_SCIENCE = BASE_DIR / "data" / "parquet" / "science_v3f_multi_0811A.parquet"
-DEFAULT_DENARIO = BASE_DIR / "data" / "parquet" / "denario_hc.parquet"
+DEFAULT_SCIENCE = BASE_DIR / "data" / "parquet" / "scribe_sci.parquet"
+DEFAULT_DENARIO = BASE_DIR / "data" / "parquet" / "scribe_denario.parquet"
 DEFAULT_OUT_DIR = BASE_DIR / "results" / "trainv2" / "trained_vs_zeroshot_performance"
 
 GROUP_COL = "id"

@@ -3,7 +3,7 @@ Fast-DetectGPT pair, and the pretrained detector, on one AUROC-vs-TPR@1%FPR
 figure.
 
     uv run python epai/ai_detection/trainv2/run_best_of_family_performance.py \
-        data/parquet/science_v3f_multi_0811A.parquet data/parquet/denario_hc.parquet
+        data/parquet/scribe_sci.parquet data/parquet/scribe_denario.parquet
 
 Four families, one point per family per dataset:
     judge         best of the llm_judge_baseline columns
@@ -12,7 +12,7 @@ Four families, one point per family per dataset:
     detector      the pretrained detector -- currently just radar
 
 "BEST" IS DECIDED ONCE, NOT PER DATASET. Whichever column has the highest
-AUROC on ``--calibration-dataset`` (default: ``science_v3f_multi_0811A.parquet``,
+AUROC on ``--calibration-dataset`` (default: ``scribe_sci.parquet``,
 the same corpus every ``*_baseline_calibrated.yaml`` was fit on) wins that
 family -- for every dataset in this run, not re-picked per dataset. Picking
 the winner separately on each evaluation corpus would be exactly the
@@ -45,7 +45,7 @@ Output:
 
 Run:
     uv run python epai/ai_detection/trainv2/run_best_of_family_performance.py \
-        data/parquet/science_v3f_multi_0811A.parquet data/parquet/denario_hc.parquet
+        data/parquet/scribe_sci.parquet data/parquet/scribe_denario.parquet
 """
 
 from __future__ import annotations
@@ -68,7 +68,7 @@ from epai.utils.cd_core import (
 BASE_DIR = Path(__file__).resolve().parents[3]
 CFG_DIR = BASE_DIR / "cfg" / "ai_detection" / "trainv2"
 DEFAULT_OUT_DIR = BASE_DIR / "results" / "trainv2" / "best_of_family_performance"
-DEFAULT_CALIBRATION_DATASET = BASE_DIR / "data" / "parquet" / "science_v3f_multi_0811A.parquet"
+DEFAULT_CALIBRATION_DATASET = BASE_DIR / "data" / "parquet" / "scribe_sci.parquet"
 GEN_COL = "generated_by"
 
 _KIND_BY_KEY = {k.key: k for k in BASELINE_KINDS}

@@ -1,20 +1,26 @@
-# Calibrated by calibrate_fastdetect_baseline.py on science_v3_multi_0811A.parquet
-# target FPR 0.01, pooled over every domain ('all').
-# Read by cd_core.baseline_entries() / run_fastdetect_performance.py.
+# Calibrated by calibrate_fastdetect_baseline.py on SCRIBE-All (sci+gb+gb_orig+denario), pooled ('all')
+# 'threshold' = 0.01-FPR cut, pooled over every domain ('all').
+# 'threshold_youden' = Youden's J cut (recorded; cd_core reads 'threshold').
+# Read by cd_core.baseline_entries().
 fastdetect_baseline:
   columns:
   - column: fastdetect_crit_falcon3_7b
-    threshold: 1.930541
+    threshold: 1.816006
+    threshold_youden: 0.575574
     label: falcon3-7b
   - column: fastdetect_crit_falcon_7b
-    threshold: 2.393918
+    threshold: 2.538524
+    threshold_youden: 1.78726
     label: falcon-7b
   - column: fastdetect_crit_llama31_8b
-    threshold: 2.416485
+    threshold: 2.403521
+    threshold_youden: 1.428845
     label: llama31-8b
   - column: fastdetect_crit_mistral_v03
-    threshold: 2.143542
+    threshold: 2.02951
+    threshold_youden: 0.987082
     label: mistral-v03
   - column: fastdetect_crit_qwen25_7b
-    threshold: 2.282373
+    threshold: 1.892195
+    threshold_youden: 0.511173
     label: qwen25-7b

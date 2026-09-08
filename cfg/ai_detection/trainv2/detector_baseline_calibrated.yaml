@@ -1,8 +1,10 @@
-# Calibrated by calibrate_detector_baseline.py on science_v3_multi_0811A.parquet
-# target FPR 0.01, pooled over every domain ('all').
-# Read by cd_core.baseline_entries() / run_detector_performance.py.
+# Calibrated by calibrate_detector_baseline.py on SCRIBE-All (sci+gb+gb_orig+denario), pooled ('all')
+# 'threshold' = 0.01-FPR cut, pooled over every domain ('all').
+# 'threshold_youden' = Youden's J cut (recorded; cd_core reads 'threshold').
+# Read by cd_core.baseline_entries().
 detector_baseline:
   columns:
   - column: detector_score_radar
-    threshold: 0.963726
+    threshold: 0.923052
+    threshold_youden: 0.176589
     label: radar

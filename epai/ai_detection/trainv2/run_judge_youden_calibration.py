@@ -1,7 +1,7 @@
 r"""Calibrate LLM judges: per-domain and pooled Youden's J thresholds.
 
     uv run python epai/ai_detection/trainv2/run_judge_youden_calibration.py \
-        data/parquet/science_v3f_multi_0811A.parquet
+        data/parquet/scribe_sci.parquet
 
 For every ``llm_judge_score_*`` column (P(human) -- a LOW score means machine,
 the judge's own convention; see ``epai.utils.cd_core.DEFAULT_JUDGE_COL``), per
@@ -34,10 +34,10 @@ Output:
                               'all' pooled, each with its own cut marked
 
 Run:
-    uv run python epai/ai_detection/trainv2/run_judge_youden_calibration.py data/parquet/science_v3f_multi_0811A.parquet
+    uv run python epai/ai_detection/trainv2/run_judge_youden_calibration.py data/parquet/scribe_sci.parquet
     uv run python epai/ai_detection/trainv2/run_judge_youden_calibration.py data/parquet/ghostbuster_multi_sci3.parquet \
         --cols llm_judge_score_gpt56luna_v3 llm_judge_score_qwen3_14b_v3
-    uv run python epai/ai_detection/trainv2/run_judge_youden_calibration.py data/parquet/denario_hc.parquet --no-plots
+    uv run python epai/ai_detection/trainv2/run_judge_youden_calibration.py data/parquet/scribe_denario.parquet --no-plots
 """
 
 from __future__ import annotations

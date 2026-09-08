@@ -13,7 +13,7 @@
 
 name: emb_effectiveness_science_v3f
 
-parquet: data/parquet/science_v3f_multi_0811A.parquet
+parquet: data/parquet/scribe_sci.parquet
 
 group_col: id          # human abstract + every rewrite of it share this
 human_label: human     # -> y = 0; any generator -> y = 1

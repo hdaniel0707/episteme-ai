@@ -1,7 +1,7 @@
 r"""Calibrate Fast-DetectGPT pairs: per-domain and pooled Youden's J thresholds.
 
     uv run python epai/ai_detection/trainv2/run_fastdetect_youden_calibration.py \
-        data/parquet/science_v3f_multi_0811A.parquet
+        data/parquet/scribe_sci.parquet
 
 For every ``fastdetect_crit_*`` column (a HIGH score means machine -- the
 opposite direction from Binoculars and the LLM judge; see
@@ -39,8 +39,8 @@ Output:
                              'all' pooled, each with its own cut marked
 
 Run:
-    uv run python epai/ai_detection/trainv2/run_fastdetect_youden_calibration.py data/parquet/science_v3f_multi_0811A.parquet
-    uv run python epai/ai_detection/trainv2/run_fastdetect_youden_calibration.py data/parquet/denario_hc.parquet --no-plots
+    uv run python epai/ai_detection/trainv2/run_fastdetect_youden_calibration.py data/parquet/scribe_sci.parquet
+    uv run python epai/ai_detection/trainv2/run_fastdetect_youden_calibration.py data/parquet/scribe_denario.parquet --no-plots
 """
 
 from __future__ import annotations

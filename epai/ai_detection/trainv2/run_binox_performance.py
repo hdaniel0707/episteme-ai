@@ -1,8 +1,8 @@
 r"""AUROC vs. TPR@1%FPR across datasets, one fixed threshold per Binoculars pair.
 
     uv run python epai/ai_detection/trainv2/run_binox_performance.py \
-        data/parquet/science_v3f_multi_0811A.parquet \
-        data/parquet/denario_hc.parquet \
+        data/parquet/scribe_sci.parquet \
+        data/parquet/scribe_denario.parquet \
         --cfg cfg/ai_detection/trainv2/binox_baseline_calibrated.yaml
 
 Reads each pair's threshold from a ``binoculars_baseline`` config block -- the
@@ -27,7 +27,7 @@ Output:
 
 Run:
     uv run python epai/ai_detection/trainv2/run_binox_performance.py \
-        data/parquet/science_v3f_multi_0811A.parquet data/parquet/denario_hc.parquet \
+        data/parquet/scribe_sci.parquet data/parquet/scribe_denario.parquet \
         --cfg cfg/ai_detection/trainv2/binox_baseline_calibrated.yaml
 """
 

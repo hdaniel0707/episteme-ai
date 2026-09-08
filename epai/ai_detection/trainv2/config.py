@@ -6,7 +6,7 @@ No preflight report, no staged checks — one function that either returns a
 Example (``cfg/ai_detection/trainv2/gen_effectiveness_science_v3f.yaml``)::
 
     experiment: generator_effectiveness
-    parquet: data/parquet/science_v3f_multi_0811A.parquet
+    parquet: data/parquet/scribe_sci.parquet
     group_col: id
     human_label: human
     domain_col: domain

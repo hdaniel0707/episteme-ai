@@ -1,20 +1,26 @@
-# Calibrated by calibrate_binox_baseline.py on science_v3_multi_0811A.parquet
-# target FPR 0.01, pooled over every domain ('all').
-# Read by cd_core.baseline_entries() / run_binox_performance.py.
+# Calibrated by calibrate_binox_baseline.py on SCRIBE-All (sci+gb+gb_orig+denario), pooled ('all')
+# 'threshold' = 0.01-FPR cut, pooled over every domain ('all').
+# 'threshold_youden' = Youden's J cut (recorded; cd_core reads 'threshold').
+# Read by cd_core.baseline_entries().
 binoculars_baseline:
   columns:
   - column: binoculars_score
-    threshold: 0.870323
+    threshold: 0.882811
+    threshold_youden: 0.92511
     label: falcon-7b
   - column: binoculars_score_falcon3_7b
-    threshold: 0.871948
+    threshold: 0.895694
+    threshold_youden: 0.96678
     label: falcon3-7b
   - column: binoculars_score_llama31_8b
-    threshold: 0.83356
+    threshold: 0.860231
+    threshold_youden: 0.930275
     label: llama31-8b
   - column: binoculars_score_mistral_v03
-    threshold: 0.861781
+    threshold: 0.881331
+    threshold_youden: 0.947288
     label: mistral-v03
   - column: binoculars_score_qwen25_7b
-    threshold: 0.786889
+    threshold: 0.868891
+    threshold_youden: 0.968196
     label: qwen25-7b

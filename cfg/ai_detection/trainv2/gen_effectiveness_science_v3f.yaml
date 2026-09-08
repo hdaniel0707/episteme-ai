@@ -14,7 +14,7 @@ name: gen_effectiveness_science_v3f
 
 # THE MULTI PARQUET. Must carry `human` + >=2 generators, one row per
 # (source paper, generator), all four rows of a paper sharing one `id`.
-parquet: data/parquet/science_v3f_multi_0811A.parquet
+parquet: data/parquet/scribe_sci.parquet
 
 group_col: id          # human abstract + every rewrite of it share this
 human_label: human     # -> y = 0; any generator -> y = 1
