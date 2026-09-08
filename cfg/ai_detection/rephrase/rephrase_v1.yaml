@@ -1,0 +1,82 @@
+# Prompt config 0908R — the rephrase arm.
+#
+# This file IS the experiment's independent variable. Its id ("0908R") is
+# stamped into every rephrased row's `generated_by` as
+# "<model_slug>:<id>" — i.e. gpt56luna:0908R — so a row in the corpus names the
+# exact prompt that produced it.
+#
+# THEREFORE: never edit this file in place once a corpus has been generated from
+# it. Copy it to a new id (0908S, 0909A, ...) and point the build at that.
+# Editing in place makes every existing row's label a lie.
+#
+# Ids are <MMDD><letter>: the date the config was written, plus a letter. "R"
+# for the first rephrase config written on 09-08.
+#
+# ===========================================================================
+# WHAT THIS ARM IS
+# ===========================================================================
+# The other corpora (science_v3f, ghostbuster_v3f) are FULL-TEXT GENERATION
+# under the Ghostbuster protocol: the generator never sees the human text. This
+# arm is the opposite — a single moderate rephrase of each human text, meaning
+# preserved, wording changed. It is the content-preserving point on the
+# LM-involvement spectrum.
+#
+# "Moderate" is the whole design point: aggressive enough that surface form
+# clearly changes, restrained enough that no new content is introduced and the
+# text is not effectively regenerated. Calibration is checked after the fact by
+# epai/ai_detection/analyse/rephrase_qc.py; a domain that comes out too weak or
+# too strong is fixed in a NEW id, not here.
+
+id: "0908R"
+description: >
+  One moderate, domain-aware rephrase of each human text, by gpt-5.6-luna.
+  ~5,992 human texts across six domains (essay, news, creative writing,
+  computer science, mathematics, sociology), each paired with its rephrase via
+  the shared `id`. Meaning, facts, structure and length are preserved; wording
+  and sentence structure are changed.
+
+# Sent as the system message. The user message is the human text verbatim.
+system_prompt: |
+  You are rephrasing an existing piece of writing. Rewrite it so that the
+  wording and sentence structure differ substantially from the original, while
+  preserving its meaning exactly.
+
+  Rules:
+  - Preserve every fact, claim, figure, name, date, citation and quotation, and
+    keep them in the same logical order.
+  - Do not add anything: no new information, examples, framing, or opinions.
+  - Do not remove anything: every point in the original must still be present.
+  - Do not change the genre, register, or point of view.
+  - Rephrase at the sentence and phrase level — replace vocabulary, recast
+    clauses, split or join sentences — but do not reorganise the piece or
+    substitute your own argument.
+  - Keep the length within about 15% of the original.
+  - Output only the rewritten text. No preamble, no notes, no markdown, no
+    headings, no labels.
+
+# Appended to the system prompt, chosen by the row's `domain`. Every domain that
+# appears in the corpus must have an entry here or the build stops.
+domain_hints:
+  essay: >
+    The text is a student's argumentative or analytical essay. Keep the thesis,
+    the sequence of arguments, and every supporting example exactly as they are.
+  reuter: >
+    The text is a news-wire article. Keep every reported fact, all attributions
+    and quotations, named sources, figures, and the dateline/lede style of a
+    news report.
+  wp: >
+    The text is a piece of short creative fiction written to a prompt. Keep the
+    plot, the characters, the sequence of events, the point of view and the
+    tone. Vary the prose, not the story.
+  computer_science: >
+    The text is the abstract of a computer-science paper. Keep the problem, the
+    method, the system or algorithm described, every quantitative result and
+    metric, and the stated contributions.
+  mathematics: >
+    The text is the abstract of a mathematics paper. Keep every definition,
+    theorem, hypothesis and result, and the precise logical statements. Do not
+    alter notation or the exact form of any claim.
+  sociology: >
+    The text is the abstract of a sociology paper. Keep the research question,
+    the data and method, every finding, the theoretical framing and all cited
+    concepts.
