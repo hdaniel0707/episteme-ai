@@ -176,7 +176,7 @@ def compute_zeroshot(splits, cols, fpr, human_label) -> list[dict]:
 
 def plots_from_csv(csv_path: Path, meta: dict, out_dir: Path) -> None:
     rows = pd.read_csv(csv_path).to_dict("records")
-    from epai.ai_detection.trainv2.plots import zeroshot_scatter
+    from epai.ai_detection.trainv2.plots import denario_scatter, zeroshot_scatter
 
     out_dir.mkdir(parents=True, exist_ok=True)
     ood = "/".join(meta["ood"])
@@ -185,6 +185,12 @@ def plots_from_csv(csv_path: Path, meta: dict, out_dir: Path) -> None:
         title=f"In-domain trained (70/30, {meta['n_seeds']} seeds) — held-out "
               f"test per corpus, plus {ood} as eval-only OOD, vs. zero-shot picks"
               f"\nAUROC vs. oracle TPR@{meta['fpr'] * 100:g}%FPR",
+    )
+    denario_scatter(
+        rows, meta, out_dir / "in_domain_denario.png",
+        title=f"In-domain trained (70/30, {meta['n_seeds']} seeds) on {ood} "
+              f"(eval-only OOD)\nsame detectors — AUROC vs. oracle "
+              f"TPR@{meta['fpr'] * 100:g}%FPR",
     )
 
 

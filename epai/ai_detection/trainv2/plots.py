@@ -297,6 +297,115 @@ def zeroshot_scatter(
 
 
 # ---------------------------------------------------------------------------
+# The eval-only OOD corpus on its own (run_in_domain_performance.py /
+# run_lodo_performance.py, alongside their main scatter). A dedicated zoom on
+# MG-Den -- the one point the main scatters bury against the ceiling: every
+# trained detector (marker carries the SD across the source models) and every
+# zero-shot pick (open diamond, reference only), one point each. Reads the same
+# CSV records; keeps the full 0-1 TPR axis so the drop from the in-domain
+# ceiling stays visible.
+# ---------------------------------------------------------------------------
+
+
+def denario_scatter(
+    rows: list[dict], meta: dict, path: Path, *, title: str = ""
+) -> None:
+    """AUROC vs. oracle TPR@FPR on the ``meta["ood"]`` corpus alone (MG-Den by
+    default). Built for the single-corpus default; with several OOD corpora each
+    detector gets one point per corpus, colour-coded by detector only."""
+    fpr = meta["fpr"]
+    ood_keys = set(meta.get("ood") or ["mg_den"])
+
+    def _f(v):
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return None
+        return v if np.isfinite(v) else None
+
+    pts = [r for r in rows
+           if r.get("split") in ood_keys
+           and _f(r.get("auroc")) is not None
+           and _f(r.get("tpr_at_fpr")) is not None]
+    trained = [r for r in pts if r.get("kind") == "trained"]
+    zshot = [r for r in pts if r.get("kind") == "zeroshot"]
+    if not trained and not zshot:
+        print(f"denario_scatter: no OOD rows for {sorted(ood_keys)} — skipped")
+        return
+
+    # Same colour per detector as the main scatter: identical assignment rule
+    # (sorted detector names -> palette slots) over the identical row set.
+    names = sorted({r["detector"] for r in rows})
+    hue = {v: _PALETTE[i % len(_PALETTE)] for i, v in enumerate(names)}
+
+    fig, ax = plt.subplots(figsize=(7.6, 5.6))
+    ax.set_facecolor(_SURFACE)
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+
+    # Chance: AUROC 0.5, oracle TPR at the target FPR is that FPR -- one point.
+    ax.axvline(0.5, color="#b5495b", lw=1.0, ls=":", alpha=0.6, zorder=0)
+    ax.axhline(fpr, color="#b5495b", lw=1.0, ls=":", alpha=0.6, zorder=0)
+    ax.scatter([0.5], [fpr], s=120, color="#b5495b", marker="x", lw=1.8,
+               alpha=0.6, zorder=0)
+
+    aurocs = [_f(r["auroc"]) for r in trained + zshot]
+    x_lo, x_hi = max(0.0, min(aurocs) - 0.05), 1.01
+
+    # No in-plot point labels: on MG-Den every detector piles into the same
+    # corner, so a name next to each mark is an unreadable stack. The legend
+    # carries the colour -> detector key instead.
+    for r in zshot:
+        ax.scatter([_f(r["auroc"])], [_f(r["tpr_at_fpr"])], s=80, marker="D",
+                   facecolors="none", edgecolors=hue[r["detector"]],
+                   linewidths=1.5, zorder=3)
+
+    for r in trained:
+        ax.errorbar([_f(r["auroc"])], [_f(r["tpr_at_fpr"])],
+                    xerr=_f(r.get("auroc_std")), yerr=_f(r.get("tpr_at_fpr_std")),
+                    fmt="o", ms=12, mfc=hue[r["detector"]], mec="#222222",
+                    mew=1.0, ecolor="#222222", elinewidth=1.0, capsize=2.5,
+                    zorder=5)
+
+    ax.set_xlim(x_lo, x_hi)
+    ax.set_ylim(-0.04, 1.04)
+    ax.grid(True, lw=0.4, alpha=0.4)
+    ax.tick_params(labelsize=8, colors=_MUTED)
+    ax.set_xlabel("AUROC (machine = positive)", fontsize=9, color=_INK)
+    ax.set_ylabel(f"oracle TPR @ {fpr * 100:g}% FPR", fontsize=9, color=_INK)
+
+    # One coloured entry per detector, exactly as the main scatter's legend,
+    # then the marker-shape key (fill = trained, outline = zero-shot) + chance.
+    handles = [plt.Line2D([], [], marker="o", ls="", ms=8, color=hue[v], label=v)
+               for v in names]
+    handles.append(plt.Line2D([], [], ls="", label=""))
+    handles += [
+        plt.Line2D([], [], marker="o", ls="", ms=9, mfc="#8a8a8a",
+                   mec="#222222", label="trained  (bars = SD across source models)"),
+        plt.Line2D([], [], marker="D", ls="", ms=9, mfc="none", mec="#8a8a8a",
+                   label="zero-shot pick  (reference)"),
+        plt.Line2D([], [], marker="x", ls="", color="#b5495b",
+                   label=f"chance  (0.5, {fpr * 100:g}%)"),
+    ]
+    ax.legend(handles=handles, fontsize=8, loc="upper left",
+              bbox_to_anchor=(1.01, 1.0), framealpha=0.9, borderaxespad=0.0,
+              title="colour = detector")
+
+    ood = "/".join(sorted(ood_keys))
+    ax.set_title(title or f"{ood} (eval-only OOD) — AUROC vs. oracle "
+                 f"TPR@{fpr * 100:g}%FPR", fontsize=10.5, color=_INK)
+    fig.text(0.02, 0.008,
+             f"{ood}: never trained on. Few human rows -> the {fpr * 100:g}%-FPR "
+             f"grid point floors at FPR=0, so TPR here is a lower bound, not an "
+             f"estimate.", fontsize=7, color=_MUTED)
+    fig.tight_layout(rect=(0, 0.035, 1, 1))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=150, facecolor="white", bbox_inches="tight")
+    plt.close(fig)
+    print(f"wrote {path}")
+
+
+# ---------------------------------------------------------------------------
 # Judge x generator matrix (run_judge_by_generator.py). One heatmap panel per
 # MANUGRAM split, judges down the rows, generators across the columns; the cell
 # is the oracle AUROC or TPR@1%FPR for human-vs-that-one-generator. '*' marks a
