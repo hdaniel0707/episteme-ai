@@ -30,10 +30,19 @@ Two modes, both through :func:`run`:
   ('all'), print a per-corpus table, write the CSV, drop one distribution PNG
   per column, and write the YAML from the pooled 'all' row.
 
-The registered corpora are the five splits of the MANUGRAM benchmark, in the
-fixed left-to-right order used everywhere: ``gb_orig`` (GB-orig),
-``mg_gb`` (MG-GB), ``mg_sci`` (MG-Sci), ``mg_reph`` (MG-Reph),
-``mg_den`` (MG-Den); pooled is ``all`` (MG-All), always last.
+``--corpora all`` (and a bare run) uses the four core splits, in the fixed
+left-to-right order used everywhere: ``gb_orig`` (GB-orig), ``mg_gb`` (MG-GB),
+``mg_sci`` (MG-Sci), ``mg_den`` (MG-Den); pooled is ``all`` (MG-All), always
+last. The MG-Reph family (``mg_reph`` / ``mg_reph_sci`` / ``mg_reph_gb``) is
+registered but opt-in only -- pass it by name (``--corpora mg_reph_sci`` …).
+
+``--generators MODEL ...`` restricts the machine class to rows whose
+``generated_by`` model (the part before ``:``) is named -- e.g.
+``--generators gpt56luna`` calibrates human vs. gpt-5.6-luna only, the
+single-generator comparison the rephrase experiments make. Such a run writes
+everything (CSV, PNGs, YAML) under
+``results/trainv2/baseline_calibration_[flag=<models>]/`` and never touches the
+shared ``cfg/ai_detection/trainv2/*_baseline_calibrated.yaml``.
 """
 
 from __future__ import annotations
@@ -54,7 +63,7 @@ from epai.utils.cd_core import (
     youden_threshold,
 )
 
-from .splits import POOLED, SPLITS
+from .splits import DEFAULT, POOLED, SPLITS
 from .splits import display as _display
 from .splits import resolve as _resolve_splits
 
@@ -230,11 +239,28 @@ def _plot_column(
     print(f"wrote {path}")
 
 
+def _filter_generators(
+    df: pd.DataFrame, human_label: str, generators: list[str] | None
+) -> pd.DataFrame:
+    """Keep the human rows and, of the machine rows, only those whose
+    ``generated_by`` model (the part before ``:``) is in ``generators``.
+    ``None`` / empty -> unchanged."""
+    if not generators:
+        return df
+    g = df[GEN_COL].astype(str)
+    keep = g == human_label
+    for spec in generators:
+        keep |= (g == spec) | g.str.startswith(f"{spec}:")
+    return df[keep]
+
+
 def _load(
-    path: Path, prefix: str, cols_arg: list[str] | None, exclude: frozenset[str]
+    path: Path, prefix: str, cols_arg: list[str] | None, exclude: frozenset[str],
+    human_label: str, generators: list[str] | None,
 ) -> pd.DataFrame:
     """Read ``generated_by`` and the score columns only -- never the embedding
-    columns, which are gigabytes and unused here."""
+    columns, which are gigabytes and unused here. ``generators`` restricts the
+    machine class (see :func:`_filter_generators`)."""
     import pyarrow.parquet as pq
 
     names = pq.read_schema(path).names
@@ -245,7 +271,8 @@ def _load(
     else:
         want = {c for c in names if c.startswith(prefix)} - exclude
     need = [GEN_COL] + sorted(want & set(names))
-    return pd.read_parquet(path, columns=need)
+    return _filter_generators(pd.read_parquet(path, columns=need),
+                              human_label, generators)
 
 
 def _yaml_entries(
@@ -315,17 +342,20 @@ def _single(
     exclude: frozenset[str],
     fpr_target: float,
     human_label: str,
+    generators: list[str] | None,
     out: Path,
     csv_path: Path,
     script: str,
 ) -> None:
     """Historical mode: one parquet, pooled over domains, one row per column."""
-    df = _load(dataset, prefix, cols_arg, exclude)
+    df = _load(dataset, prefix, cols_arg, exclude, human_label, generators)
     cols = cols_arg or sorted(c for c in df.columns if c.startswith(prefix))
     if not cols:
         raise SystemExit(f"no {prefix}* column in {dataset}")
 
     corpus = dataset.stem
+    if generators:
+        print(f"machine class restricted to: {', '.join(generators)}")
     print(f"calibrating on {dataset}  ({len(df)} rows, target FPR {fpr_target:g})\n")
     print(_table_header())
 
@@ -352,7 +382,10 @@ def _single(
         print(f"not written ({fpr_target:g}-FPR unreachable): {dropped}")
     if not entries:
         raise SystemExit("nothing to write -- no finite threshold")
-    _write_yaml(entries, block_key, out, script, dataset.name, fpr_target)
+    src_desc = dataset.name
+    if generators:
+        src_desc += f" [machine: {'+'.join(generators)}]"
+    _write_yaml(entries, block_key, out, script, src_desc, fpr_target)
 
 
 def _multi(
@@ -366,6 +399,7 @@ def _multi(
     exclude: frozenset[str],
     fpr_target: float,
     human_label: str,
+    generators: list[str] | None,
     out: Path,
     csv_path: Path,
     fig_dir: Path,
@@ -376,7 +410,8 @@ def _multi(
 ) -> None:
     """``--corpora`` mode: per-corpus + pooled 'all' rows, CSV, one PNG per
     column drawn from the CSV, YAML from the pooled 'all' row."""
-    frames = {name: _load(path, prefix, cols_arg, exclude) for name, path in corpora}
+    frames = {name: _load(path, prefix, cols_arg, exclude, human_label, generators)
+              for name, path in corpora}
     pooled = pd.concat(frames.values(), ignore_index=True)
 
     if cols_arg:
@@ -388,6 +423,8 @@ def _multi(
         raise SystemExit(f"no {prefix}* column in any of {list(frames)}")
 
     orient = "machine = HIGH score" if machine_is_high else "machine = LOW score"
+    if generators:
+        print(f"machine   : restricted to {', '.join(generators)}")
     print(f"corpora   : {', '.join(f'{n} ({len(df)})' for n, df in frames.items())}")
     print(f"pooled    : {POOLED} ({len(pooled)} rows)")
     print(f"columns   : {cols}")
@@ -445,9 +482,11 @@ def _multi(
     if not entries:
         raise SystemExit("nothing to write -- no finite pooled threshold")
     src = "+".join(n for n, _ in corpora)
-    desc = "MG-All" if [n for n, _ in corpora] == list(SPLITS) else src
-    _write_yaml(entries, block_key, out, script, f"{desc} ({src}), pooled ('all')",
-                fpr_target)
+    desc = "MG-All" if [n for n, _ in corpora] == list(DEFAULT) else src
+    src_desc = f"{desc} ({src}), pooled ('all')"
+    if generators:
+        src_desc += f" [machine: {'+'.join(generators)}]"
+    _write_yaml(entries, block_key, out, script, src_desc, fpr_target)
 
 
 def run(
@@ -484,7 +523,15 @@ def run(
                          f"except {sorted(exclude_cols) or 'none'})")
     ap.add_argument("--fpr-target", type=float, default=0.01)
     ap.add_argument("--human-label", default="human")
-    ap.add_argument("-o", "--out", type=Path, default=default_out)
+    ap.add_argument("--generators", nargs="+", default=None, metavar="MODEL",
+                    help="restrict the machine class to these generator model(s), "
+                         "matched on the part before ':' (e.g. 'gpt56luna'); human "
+                         "rows are kept. Output then goes to "
+                         "results/trainv2/baseline_calibration_[flag=<models>]/ and "
+                         "the YAML is written there, NOT to cfg/.")
+    ap.add_argument("-o", "--out", type=Path, default=None,
+                    help=f"YAML path (default: {default_out.relative_to(BASE_DIR)}, "
+                         f"or inside the flag dir when --generators is given)")
     ap.add_argument("--csv", type=Path, default=None,
                     help=f"thresholds CSV path "
                          f"(default: {DEFAULT_FIG_DIR}/<script>/…_thresholds.csv)")
@@ -496,12 +543,23 @@ def run(
                     help="--corpora mode: skip the PNGs (CSV is still written)")
     args = ap.parse_args(argv)
 
-    out_dir = DEFAULT_FIG_DIR / script.removesuffix(".py")
+    fig_root = DEFAULT_FIG_DIR
+    if args.generators:
+        fig_root = DEFAULT_FIG_DIR.with_name(
+            f"{DEFAULT_FIG_DIR.name}_[flag={'+'.join(args.generators)}]"
+        )
+    out_dir = fig_root / script.removesuffix(".py")
+
+    yaml_out = args.out
+    if yaml_out is None:
+        yaml_out = (out_dir / default_out.name) if args.generators else default_out
+
     common = dict(
         prefix=prefix, machine_is_high=machine_is_high, block_key=block_key,
         label_fn=label_fn, cols_arg=args.cols,
         exclude=exclude_cols,  # ignored when --cols is given (explicit wins)
-        fpr_target=args.fpr_target, human_label=args.human_label, out=args.out,
+        fpr_target=args.fpr_target, human_label=args.human_label,
+        generators=args.generators, out=yaml_out,
         script=script,
     )
     if args.corpora:

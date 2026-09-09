@@ -50,7 +50,7 @@ import pandas as pd
 
 from epai.utils.cd_core import auroc_score, oriented_scores, rates_at_threshold, youden_threshold
 
-from .core import POOLED
+from epai.ai_detection.trainv2.core import POOLED
 
 BASE_DIR = Path(__file__).resolve().parents[3]
 DEFAULT_OUT_DIR = BASE_DIR / "results" / "trainv2" / "judge_calibration"

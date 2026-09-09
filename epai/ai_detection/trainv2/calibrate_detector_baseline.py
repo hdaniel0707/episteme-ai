@@ -21,12 +21,18 @@ Binoculars / Fast-DetectGPT / judge siblings: apply the SAME cutoff to every
 corpus a later comparison looks at, not a fresh one per corpus.
 
 ``--corpora`` calibrates on each MANUGRAM split (``gb_orig``,
-``mg_gb``, ``mg_sci``, ``mg_reph``, ``mg_den``) AND on all of them
+``mg_gb``, ``mg_sci``, ``mg_den``) AND on all of them
 pooled ('all'), prints a per-corpus AUROC / threshold / rate / percentile
 table, drops one distribution PNG per detector column, and writes the YAML
 from the pooled 'all' row:
 
     uv run python epai/ai_detection/trainv2/calibrate_detector_baseline.py --corpora all
+
+``--generators gpt56luna`` restricts the machine class to gpt-5.6-luna rows and
+writes to ``results/trainv2/baseline_calibration_[flag=gpt56luna]/`` (YAML there
+too, not ``cfg/``):
+
+    uv run python epai/ai_detection/trainv2/calibrate_detector_baseline.py --corpora all --generators gpt56luna
 
 Run:
     uv run python epai/ai_detection/trainv2/calibrate_detector_baseline.py

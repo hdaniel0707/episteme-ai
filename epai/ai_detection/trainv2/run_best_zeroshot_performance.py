@@ -14,8 +14,9 @@ MG-Den (80 human) can't reach 1% FPR, so its cells are kept in the
 mean's AUROC but left out of the mean's TPR -- same rule as
 ``run_zeroshot_performance.py``.
 
-The curated-picks counterpart of ``run_best_of_family_performance.py`` (which
-auto-picks the strongest column per family and applies a transported cutoff).
+The curated-picks companion to ``run_zeroshot_performance.py`` -- that sweeps
+every column of every family; this scores just the hand-picked list and puts
+them on one figure.
 
 compute -> CSV -> plot from the CSV:
 

@@ -8,24 +8,31 @@ Writes a ``binoculars_baseline`` block -- the SAME config shape
 ``epai.utils.cd_core.BASELINE_KINDS`` already reads for a zero-shot score
 baseline (``column``/``threshold``/``label`` entries under ``columns:``), so
 the result drops in unchanged as a real baseline block in a
-``run_clf_cross_domain.py`` training config, and feeds
-``run_best_of_family_performance.py``'s transported reading.
+``run_clf_cross_domain.py`` training config.
 
 ONE dataset, POOLED over every domain ('all'), fixes ONE threshold per pair --
 not per domain, not per dataset -- because the point of calibrating is to
-apply the SAME cutoff to every corpus a later comparison looks at
-(``run_best_of_family_performance.py``), not to refit a new one per corpus. A small
+apply the SAME cutoff to every corpus a later comparison looks at, not to
+refit a new one per corpus. A small
 corpus is a bad calibration source: ``manugram_den.parquet``'s 80 human rows
 would place a 1%-FPR cut on well under one row, which is not a threshold, it
 is noise.
 
 ``--corpora`` calibrates on each MANUGRAM split (``gb_orig``,
-``mg_gb``, ``mg_sci``, ``mg_reph``, ``mg_den``) AND on all of them
+``mg_gb``, ``mg_sci``, ``mg_den``) AND on all of them
 pooled ('all'), prints a per-corpus AUROC / threshold / rate / percentile
 table, drops one distribution PNG per pair, and writes the YAML from the
 pooled 'all' row:
 
     uv run python epai/ai_detection/trainv2/calibrate_binox_baseline.py --corpora all
+
+``--generators gpt56luna`` restricts the machine class to gpt-5.6-luna-generated
+rows (matched on the part before ``:``); the run then writes to
+``results/trainv2/baseline_calibration_[flag=gpt56luna]/`` (YAML included, not
+``cfg/``) -- a reference calibration comparable to the single-generator rephrase
+experiments:
+
+    uv run python epai/ai_detection/trainv2/calibrate_binox_baseline.py --corpora all --generators gpt56luna
 
 Run:
     uv run python epai/ai_detection/trainv2/calibrate_binox_baseline.py
