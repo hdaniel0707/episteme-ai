@@ -1,8 +1,8 @@
-r"""Zero-shot detector performance across the SCRIBE splits: AUROC vs. the
+r"""Zero-shot detector performance across the MANUGRAM splits: AUROC vs. the
 ORACLE TPR@1%FPR, one scatter per detector family.
 
 No training, no calibrated cutoff, no seeds. For every score column of a
-family, on each SCRIBE split (pooled over its domains and generators), this
+family, on each MANUGRAM split (pooled over its domains and generators), this
 reads AUROC (threshold-free, oriented so machine = positive) and the ORACLE
 TPR@1%FPR -- the threshold read off THAT split's own ROC
 (``cd_core.roc_point_at_fpr``), an upper bound on the operating point and the
@@ -16,16 +16,16 @@ compute -> CSV -> 3 plots drawn from the CSV:
         fastdetect.png     … Fast-DetectGPT pairs
         judge.png          … LLM judges
 
-In each plot: colour = detector version, marker shape = SCRIBE split, and a
+In each plot: colour = detector version, marker shape = MANUGRAM split, and a
 bold filled circle = that version's mean across the splits (the answer; the
 small shape-coded points are the per-split evidence).
 
 Two notes on the mean:
-  * SCRIBE-Denario has 80 human rows, so a 1%-FPR threshold sits on < 1 of
+  * MG-Den has 80 human rows, so a 1%-FPR threshold sits on < 1 of
     them -- its TPR@1%FPR is a floor, not a measurement. Those cells are kept
     in the CSV (``reachable = False``) but left OUT of the mean's TPR (still
     in the mean's AUROC).
-  * ``llm_judge_score_sonnet5_v3`` is absent on SCRIBE-Sci and dropped by
+  * ``llm_judge_score_sonnet5_v3`` is absent on MG-Sci and dropped by
     default -- pass it via ``--cols`` to include it.
 
 Replaces run_{binox,fastdetect,judge}_performance.py (which applied a fixed
@@ -34,7 +34,7 @@ transported cutoff); the oracle sibling of run_embedding_effectiveness.py.
 Run:
     uv run python epai/ai_detection/trainv2/run_zeroshot_performance.py
     uv run python epai/ai_detection/trainv2/run_zeroshot_performance.py \
-        --families judge --splits gb gb_orig
+        --families judge --splits mg_gb gb_orig
     uv run python epai/ai_detection/trainv2/run_zeroshot_performance.py \
         --replot results/trainv2/zeroshot_performance/performance.csv
 """
@@ -187,7 +187,7 @@ def plots_from_csv(csv_path: Path, meta: dict, out_dir: Path) -> None:
     for family in sorted({r["family"] for r in rows}):
         fam_rows = [r for r in rows if r["family"] == family]
         title = (f"{_FAMILY_TITLE.get(family, family)} — zero-shot AUROC vs. "
-                 f"oracle TPR@{fpr:g}%FPR across the SCRIBE splits")
+                 f"oracle TPR@{fpr:g}%FPR across the MANUGRAM splits")
         zeroshot_scatter(fam_rows, meta, out_dir / f"{family}.png",
                          key="version", title=title)
 
@@ -199,7 +199,7 @@ def main() -> None:
     ap.add_argument("--families", nargs="+", default=None, choices=list(FAMILIES),
                     help="detector families (default: all three)")
     ap.add_argument("--splits", nargs="+", default=None, metavar="KEY",
-                    help="SCRIBE splits (default: all)")
+                    help="MANUGRAM splits (default: all)")
     ap.add_argument("--cols", nargs="+", default=None,
                     help="score columns (default: every one of each family's "
                          "prefix, minus the family's exclude list)")

@@ -1,7 +1,7 @@
 r"""Calibrate one fixed, 1%-FPR threshold per pretrained detector into a baseline config.
 
     uv run python epai/ai_detection/trainv2/calibrate_detector_baseline.py \
-        data/parquet/scribe_sci.parquet \
+        data/parquet/manugram_sci.parquet \
         -o cfg/ai_detection/trainv2/detector_baseline_calibrated.yaml
 
 Writes a ``detector_baseline`` block -- the SAME config shape
@@ -20,8 +20,8 @@ detector -- not per domain, not per dataset -- for the same reason as its
 Binoculars / Fast-DetectGPT / judge siblings: apply the SAME cutoff to every
 corpus a later comparison looks at, not a fresh one per corpus.
 
-``--corpora`` calibrates on each SCRIBE split (``gb_orig``, ``gb``,
-``sci``, ``denario``) AND on all of them
+``--corpora`` calibrates on each MANUGRAM split (``gb_orig``,
+``mg_gb``, ``mg_sci``, ``mg_reph``, ``mg_den``) AND on all of them
 pooled ('all'), prints a per-corpus AUROC / threshold / rate / percentile
 table, drops one distribution PNG per detector column, and writes the YAML
 from the pooled 'all' row:
@@ -31,7 +31,7 @@ from the pooled 'all' row:
 Run:
     uv run python epai/ai_detection/trainv2/calibrate_detector_baseline.py
     uv run python epai/ai_detection/trainv2/calibrate_detector_baseline.py \
-        data/parquet/scribe_sci.parquet --fpr-target 0.05
+        data/parquet/manugram_sci.parquet --fpr-target 0.05
 """
 
 from __future__ import annotations
@@ -58,6 +58,6 @@ if __name__ == "__main__":
         label_fn=_detector_label,
         family="detector",
         xlabel="detector score  P(AI)",
-        default_dataset=PARQUET_DIR / "scribe_sci.parquet",
+        default_dataset=PARQUET_DIR / "manugram_sci.parquet",
         default_out=DEFAULT_OUT_DIR / "detector_baseline_calibrated.yaml",
     )

@@ -1,17 +1,17 @@
-r"""In-domain trained detection across the SCRIBE splits, with SCRIBE-Denario
+r"""In-domain trained detection across the MANUGRAM splits, with MG-Den
 as an eval-only OOD corpus and the zero-shot picks for reference — AUROC vs.
 oracle TPR@1%FPR on one figure.
 
 Three trained detectors (:mod:`epai.ai_detection.trainv2._trained`): a plain
 logistic probe on ``emb_roberta``, and the two ``emb_roberta`` + judge
 cue-vector hybrids -- concatenation fusion and a learned gate. Within each
-TRAINING split (default SCRIBE-GB-orig / -GB / -Sci): a grouped 70/30
+TRAINING split (default GB-orig / MG-GB / MG-Sci): a grouped 70/30
 train/test split (a document and every rewrite of it share an ``id`` and never
 straddle the cut), repeated over N seeds, human vs. every AI row pooled.
 AUROC / TPR@1%FPR are the seed mean.
 
 Every fitted model is ALSO scored, unchanged, on each ``--ood-splits`` corpus
-in full (default SCRIBE-Denario) — never trained on, an additional held-out
+in full (default MG-Den) — never trained on, an additional held-out
 test corpus. Its reading is the mean over every (training split, seed) model.
 
 Per-corpus points carry no error bar. The 'overall' row is the mean over the
@@ -21,7 +21,7 @@ in-domain readings AND the OOD readings; ITS SD is the typical per-corpus SD
 The zero-shot picks from ``cfg/ai_detection/trainv2/best_zeroshot.yaml`` are
 overlaid for reference (oracle, no seeds -> no error bars).
 
-SCRIBE-Denario has < 100 humans, so its 1%-FPR point is a floor: kept in the
+MG-Den has < 100 humans, so its 1%-FPR point is a floor: kept in the
 AUROC mean, left out of the TPR mean, for every detector.
 
 compute -> CSV -> plot from the CSV:
@@ -34,7 +34,7 @@ compute -> CSV -> plot from the CSV:
 Run:
     uv run python epai/ai_detection/trainv2/run_in_domain_performance.py
     uv run python epai/ai_detection/trainv2/run_in_domain_performance.py \
-        --splits gb sci --ood-splits denario --seeds 0 1 2 3 4
+        --splits mg_gb mg_sci --ood-splits mg_den --seeds 0 1 2 3 4
     uv run python epai/ai_detection/trainv2/run_in_domain_performance.py \
         --replot results/trainv2/in_domain_performance/performance.csv
 """
@@ -63,8 +63,8 @@ BASE_DIR = Path(__file__).resolve().parents[3]
 PARQUET_DIR = BASE_DIR / "data" / "parquet"
 DEFAULT_OUT_DIR = BASE_DIR / "results" / "trainv2" / "in_domain_performance"
 
-DEFAULT_SPLITS = ["gb_orig", "gb", "sci"]
-DEFAULT_OOD = ["denario"]
+DEFAULT_SPLITS = ["gb_orig", "mg_gb", "mg_sci"]
+DEFAULT_OOD = ["mg_den"]
 
 CSV_FIELDS = ["kind", "detector", "split", "role", "n_train", "n_test",
               "n_seeds", "auroc", "auroc_std", "tpr_at_fpr", "tpr_at_fpr_std"]

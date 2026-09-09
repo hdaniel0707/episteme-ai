@@ -1,7 +1,7 @@
 r"""Calibrate one fixed, 1%-FPR threshold per Binoculars pair into a baseline config.
 
     uv run python epai/ai_detection/trainv2/calibrate_binox_baseline.py \
-        data/parquet/scribe_sci.parquet \
+        data/parquet/manugram_sci.parquet \
         -o cfg/ai_detection/trainv2/binox_baseline_calibrated.yaml
 
 Writes a ``binoculars_baseline`` block -- the SAME config shape
@@ -15,12 +15,12 @@ ONE dataset, POOLED over every domain ('all'), fixes ONE threshold per pair --
 not per domain, not per dataset -- because the point of calibrating is to
 apply the SAME cutoff to every corpus a later comparison looks at
 (``run_best_of_family_performance.py``), not to refit a new one per corpus. A small
-corpus is a bad calibration source: ``scribe_denario.parquet``'s 80 human rows
+corpus is a bad calibration source: ``manugram_den.parquet``'s 80 human rows
 would place a 1%-FPR cut on well under one row, which is not a threshold, it
 is noise.
 
-``--corpora`` calibrates on each SCRIBE split (``gb_orig``, ``gb``,
-``sci``, ``denario``) AND on all of them
+``--corpora`` calibrates on each MANUGRAM split (``gb_orig``,
+``mg_gb``, ``mg_sci``, ``mg_reph``, ``mg_den``) AND on all of them
 pooled ('all'), prints a per-corpus AUROC / threshold / rate / percentile
 table, drops one distribution PNG per pair, and writes the YAML from the
 pooled 'all' row:
@@ -30,7 +30,7 @@ pooled 'all' row:
 Run:
     uv run python epai/ai_detection/trainv2/calibrate_binox_baseline.py
     uv run python epai/ai_detection/trainv2/calibrate_binox_baseline.py \
-        data/parquet/scribe_sci.parquet --fpr-target 0.05
+        data/parquet/manugram_sci.parquet --fpr-target 0.05
 """
 
 from __future__ import annotations
@@ -61,6 +61,6 @@ if __name__ == "__main__":
         label_fn=_pair_label,
         family="pair",
         xlabel="Binoculars score",
-        default_dataset=PARQUET_DIR / "scribe_sci.parquet",
+        default_dataset=PARQUET_DIR / "manugram_sci.parquet",
         default_out=DEFAULT_OUT_DIR / "binox_baseline_calibrated.yaml",
     )

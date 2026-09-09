@@ -1,7 +1,7 @@
 r"""Calibrate Binoculars pairs: per-domain and pooled Youden's J thresholds.
 
     uv run python epai/ai_detection/trainv2/run_binox_youden_calibration.py \
-        data/parquet/scribe_sci.parquet
+        data/parquet/manugram_sci.parquet
 
 For every ``binoculars_score*`` column (a LOW score means machine -- see
 ``epai.utils.cd_core.DEFAULT_BINOX_COL``), per domain and pooled
@@ -33,10 +33,10 @@ Output:
                              'all' pooled, each with its own cut marked
 
 Run:
-    uv run python epai/ai_detection/trainv2/run_binox_youden_calibration.py data/parquet/scribe_sci.parquet
+    uv run python epai/ai_detection/trainv2/run_binox_youden_calibration.py data/parquet/manugram_sci.parquet
     uv run python epai/ai_detection/trainv2/run_binox_youden_calibration.py data/parquet/ghostbuster_multi_sci3.parquet \
         --cols binoculars_score binoculars_score_qwen25_7b
-    uv run python epai/ai_detection/trainv2/run_binox_youden_calibration.py data/parquet/scribe_denario.parquet --no-plots
+    uv run python epai/ai_detection/trainv2/run_binox_youden_calibration.py data/parquet/manugram_den.parquet --no-plots
 """
 
 from __future__ import annotations

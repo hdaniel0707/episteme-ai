@@ -6,7 +6,7 @@ a pile of cross-corpus comparison tables. It answers a lot of questions at once,
 which is the problem: no single run is legible.
 
 trainv2 restarts from the opposite end. One experiment per script, over the
-four splits of the **SCRIBE** benchmark (:mod:`.splits`), two metrics, one
+five splits of the **MANUGRAM** benchmark (:mod:`.splits`), two metrics, one
 figure family:
 
   * metrics — AUROC and TPR@1%FPR (**oracle** where there is no calibration

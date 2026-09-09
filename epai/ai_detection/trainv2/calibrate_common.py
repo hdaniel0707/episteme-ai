@@ -30,10 +30,10 @@ Two modes, both through :func:`run`:
   ('all'), print a per-corpus table, write the CSV, drop one distribution PNG
   per column, and write the YAML from the pooled 'all' row.
 
-The registered corpora are the four splits of the SCRIBE benchmark, in the
-fixed left-to-right order used everywhere: ``gb_orig`` (SCRIBE-GB-orig),
-``gb`` (SCRIBE-GB), ``sci`` (SCRIBE-Sci), ``denario`` (SCRIBE-Denario);
-pooled is ``all`` (SCRIBE-All), always last.
+The registered corpora are the five splits of the MANUGRAM benchmark, in the
+fixed left-to-right order used everywhere: ``gb_orig`` (GB-orig),
+``mg_gb`` (MG-GB), ``mg_sci`` (MG-Sci), ``mg_reph`` (MG-Reph),
+``mg_den`` (MG-Den); pooled is ``all`` (MG-All), always last.
 """
 
 from __future__ import annotations
@@ -82,7 +82,7 @@ _YOUDEN_COLOR = "#0ca678"  # threshold: Youden's J cut = teal
 
 
 def resolve_corpora(names: list[str]) -> list[tuple[str, Path]]:
-    """``["all"]`` or a subset of SCRIBE split keys -> ``[(key, path), ...]``."""
+    """``["all"]`` or a subset of MANUGRAM split keys -> ``[(key, path), ...]``."""
     return _resolve_splits(names, PARQUET_DIR)
 
 
@@ -222,7 +222,7 @@ def _plot_column(
         ax.grid(True, lw=0.4, alpha=0.4)
     axes[0].set_ylabel("density")
     axes[0].legend(fontsize=8, loc="upper left")
-    fig.suptitle(f"{column} -- calibration across SCRIBE splits", fontsize=11)
+    fig.suptitle(f"{column} -- calibration across MANUGRAM splits", fontsize=11)
     fig.tight_layout(rect=(0, 0, 1, 0.94))
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=150)
@@ -445,7 +445,7 @@ def _multi(
     if not entries:
         raise SystemExit("nothing to write -- no finite pooled threshold")
     src = "+".join(n for n, _ in corpora)
-    desc = "SCRIBE-All" if [n for n, _ in corpora] == list(SPLITS) else src
+    desc = "MG-All" if [n for n, _ in corpora] == list(SPLITS) else src
     _write_yaml(entries, block_key, out, script, f"{desc} ({src}), pooled ('all')",
                 fpr_target)
 

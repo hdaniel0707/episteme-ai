@@ -1,7 +1,7 @@
 r"""Judge LLM x generator LLM: does each judge catch each generator's text?
 
-For every (judge, generator) pair, on each of the three multi-generator SCRIBE
-splits (SCRIBE-GB-orig, SCRIBE-GB, SCRIBE-Sci) -- human rows vs. that ONE
+For every (judge, generator) pair, on each of the three multi-generator MANUGRAM
+splits (GB-orig, MG-GB, MG-Sci) -- human rows vs. that ONE
 generator's rows, every other generator excluded from the cell -- this reports
 two ORACLE numbers, each its own matrix:
 
@@ -11,7 +11,7 @@ two ORACLE numbers, each its own matrix:
 
 Cells where the judge and the generator are the same model family are marked
 ``*`` -- whether a judge is soft on its own family is the reason this matrix
-exists. (SCRIBE-GB-orig is all GPT-3.5, so it has no self-family cells.)
+exists. (GB-orig is all GPT-3.5, so it has no self-family cells.)
 
 compute -> CSV -> plots from the CSV:
 
@@ -21,14 +21,14 @@ compute -> CSV -> plots from the CSV:
         auroc.png            one heatmap panel per split
         tpr_at_1pct_fpr.png  one heatmap panel per split
 
-``llm_judge_score_sonnet5_v3`` is dropped by default (absent on SCRIBE-Sci);
+``llm_judge_score_sonnet5_v3`` is dropped by default (absent on MG-Sci);
 pass it via ``--cols`` to include it.
 
 Replaces the old single-dataset, gemma-less version.
 
 Run:
     uv run python epai/ai_detection/trainv2/run_judge_by_generator.py
-    uv run python epai/ai_detection/trainv2/run_judge_by_generator.py --splits gb sci
+    uv run python epai/ai_detection/trainv2/run_judge_by_generator.py --splits mg_gb mg_sci
     uv run python epai/ai_detection/trainv2/run_judge_by_generator.py \
         --replot results/trainv2/judge_by_generator/matrix.csv
 """
@@ -55,8 +55,8 @@ GEN_COL = "generated_by"
 # The judge writes P(human): a LOW score means machine. Matches cd_core's
 # llm_judge BaselineKind.
 MACHINE_IS_HIGH = False
-#: the multi-generator splits -- SCRIBE-Denario has one generator, no matrix.
-DEFAULT_SPLITS = ["gb_orig", "gb", "sci"]
+#: the multi-generator splits -- MG-Den has one generator, no matrix.
+DEFAULT_SPLITS = ["gb_orig", "mg_gb", "mg_sci"]
 
 CSV_FIELDS = ["split", "judge", "generator", "gen_model", "n", "auroc",
               "tpr_at_fpr", "self_family"]
@@ -173,7 +173,7 @@ def main() -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     ap.add_argument("--splits", nargs="+", default=None, metavar="KEY",
-                    help=f"SCRIBE splits (default: {DEFAULT_SPLITS})")
+                    help=f"MANUGRAM splits (default: {DEFAULT_SPLITS})")
     ap.add_argument("--cols", nargs="+", default=None,
                     help=f"judge columns (default: every {JUDGE_PREFIX}* column "
                          f"minus {sorted(JUDGE_EXCLUDE)})")

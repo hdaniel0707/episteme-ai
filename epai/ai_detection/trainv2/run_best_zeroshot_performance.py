@@ -1,16 +1,16 @@
 r"""The hand-picked best zero-shot detector of each family, on ONE figure.
 
 Reads a flat list of score columns from ``--config`` (default
-``cfg/ai_detection/trainv2/best_zeroshot.yaml``), scores each on every SCRIBE
+``cfg/ai_detection/trainv2/best_zeroshot.yaml``), scores each on every MANUGRAM
 split exactly as ``run_zeroshot_performance.py`` does -- oriented AUROC +
 ORACLE TPR@1%FPR, threshold refit on that split's own ROC -- and plots them
 all on one AUROC-vs-TPR@1%FPR scatter:
 
     colour = detector (``<family>/<version>``)
-    marker shape = SCRIBE split (splits.MARKER)
+    marker shape = MANUGRAM split (splits.MARKER)
     bold filled circle = that detector's mean across the splits
 
-SCRIBE-Denario (80 human) can't reach 1% FPR, so its cells are kept in the
+MG-Den (80 human) can't reach 1% FPR, so its cells are kept in the
 mean's AUROC but left out of the mean's TPR -- same rule as
 ``run_zeroshot_performance.py``.
 
@@ -77,7 +77,7 @@ def plots_from_csv(csv_path: Path, meta: dict, out_dir: Path) -> None:
     zeroshot_scatter(
         rows, meta, out_dir / "best_zeroshot.png", key="detector",
         title=f"Best zero-shot detector per family — AUROC vs. oracle "
-              f"TPR@{meta['fpr'] * 100:g}%FPR across the SCRIBE splits",
+              f"TPR@{meta['fpr'] * 100:g}%FPR across the MANUGRAM splits",
     )
 
 

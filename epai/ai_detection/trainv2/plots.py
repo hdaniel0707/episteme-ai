@@ -50,7 +50,7 @@ def _axis_range(values, *, hard_lo=None, min_span=0.05, ceil_cap=1.008):
 
 
 # ---------------------------------------------------------------------------
-# Embedding effectiveness across the SCRIBE splits
+# Embedding effectiveness across the MANUGRAM splits
 # (run_embedding_effectiveness.py). Two Cleveland dot plots, not scatters:
 # with a dozen embeddings a 2-D scatter piles labels on top of each other
 # right where the answer lives (near the ceiling). A ranked list scales to as
@@ -64,7 +64,7 @@ def _emb_rows(summary_rows: list[dict], split: str) -> dict[str, dict]:
 
 
 def emb_mean_ranking(summary_rows: list[dict], meta: dict, path: Path) -> None:
-    """Embeddings ranked by mean AUROC across the SCRIBE splits, AUROC and
+    """Embeddings ranked by mean AUROC across the MANUGRAM splits, AUROC and
     TPR@FPR as two series on one 0-1 rate axis. ``xerr`` is the spread ACROSS
     splits (does it hold up on every benchmark), not seed noise."""
     mean = _emb_rows(summary_rows, "mean")
@@ -110,13 +110,13 @@ def emb_mean_ranking(summary_rows: list[dict], meta: dict, path: Path) -> None:
     ], loc="upper left", frameon=False, fontsize=8)
     tr = int(round((1 - meta["test_size"]) * 100))
     ax.set_title(
-        f"Embedding ranking — mean over {len(meta['splits'])} SCRIBE splits, "
+        f"Embedding ranking — mean over {len(meta['splits'])} MANUGRAM splits, "
         f"logistic regression\n{meta['n_seeds']} seeds, "
         f"{tr}/{100 - tr} grouped split",
         fontsize=10.5, color=_INK, loc="left",
     )
     fig.text(0.02, 0.008,
-             "bars = spread across the SCRIBE splits (consistency, not seed noise)",
+             "bars = spread across the MANUGRAM splits (consistency, not seed noise)",
              fontsize=7, color=_MUTED)
     fig.tight_layout(rect=(0, 0.035, 1, 1))
     fig.savefig(path, dpi=150, facecolor="white", bbox_inches="tight")
@@ -124,7 +124,7 @@ def emb_mean_ranking(summary_rows: list[dict], meta: dict, path: Path) -> None:
 
 
 def emb_by_split(summary_rows: list[dict], meta: dict, path: Path) -> None:
-    """AUROC per embedding, a column per SCRIBE split plus a 'mean' column, in
+    """AUROC per embedding, a column per MANUGRAM split plus a 'mean' column, in
     the mean ranking's row order — does the ranking hold on every benchmark.
     Error bars: seed SD in a split column, across-split SD in 'mean'."""
     from .splits import display as _split_display
@@ -169,7 +169,7 @@ def emb_by_split(summary_rows: list[dict], meta: dict, path: Path) -> None:
     axes[0].set_yticklabels([_emb_short(e) for e in order], fontsize=8, color=_INK)
     axes[0].set_ylim(-0.6, n - 0.4)
 
-    fig.suptitle("Embedding AUROC by SCRIBE split (row order = mean ranking)",
+    fig.suptitle("Embedding AUROC by MANUGRAM split (row order = mean ranking)",
                  fontsize=10.5, color=_INK)
     fig.tight_layout(rect=(0, 0, 1, 0.94))
     fig.savefig(path, dpi=150, facecolor="white", bbox_inches="tight")
@@ -180,7 +180,7 @@ def emb_by_split(summary_rows: list[dict], meta: dict, path: Path) -> None:
 # Zero-shot detector performance (run_zeroshot_performance.py /
 # run_best_zeroshot_performance.py). AUROC vs. oracle-TPR@1%FPR scatter:
 # colour = detector (keyed by ``key`` -- 'version' within a family, 'detector'
-# across families), marker shape = SCRIBE split (splits.MARKER), a bold filled
+# across families), marker shape = MANUGRAM split (splits.MARKER), a bold filled
 # circle = that detector's mean across splits. ``rows`` is the pre-filtered
 # subset to draw; it includes the split=="mean" rows.
 # ---------------------------------------------------------------------------
@@ -287,7 +287,7 @@ def zeroshot_scatter(
               title="● = mean across splits\nshape = split")
 
     ax.set_title(title or "zero-shot AUROC vs. oracle TPR@"
-                 f"{fpr * 100:g}%FPR across the SCRIBE splits",
+                 f"{fpr * 100:g}%FPR across the MANUGRAM splits",
                  fontsize=10.5, color=_INK)
     fig.tight_layout()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -298,7 +298,7 @@ def zeroshot_scatter(
 
 # ---------------------------------------------------------------------------
 # Judge x generator matrix (run_judge_by_generator.py). One heatmap panel per
-# SCRIBE split, judges down the rows, generators across the columns; the cell
+# MANUGRAM split, judges down the rows, generators across the columns; the cell
 # is the oracle AUROC or TPR@1%FPR for human-vs-that-one-generator. '*' marks a
 # judge scoring its own model family. Reads the long matrix CSV's records.
 # ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-r"""Leave-one-domain-out (LODO) trained detection across the SCRIBE splits,
+r"""Leave-one-domain-out (LODO) trained detection across the MANUGRAM splits,
 with the zero-shot picks for reference — AUROC vs. oracle TPR@1%FPR.
 
 The LODO sibling of ``run_in_domain_performance.py``. Same three trained
@@ -16,7 +16,7 @@ and one domain (checked on load), so holding out a domain holds out those
 whole groups — a (human, gen1..genN) set is never split across the fold.
 
 Every fold's model is ALSO scored, unchanged, on each ``--ood-splits`` corpus
-in full (default SCRIBE-Denario) — never trained on, an additional held-out
+in full (default MG-Den) — never trained on, an additional held-out
 test corpus. Its reading is the mean over every (training split, held-out
 domain, seed) model.
 
@@ -28,8 +28,8 @@ robustness. The 'overall' row is the mean across splits; its SD is the typical
 per-split fold SD (mean of them), never the spread across splits.
 
 Only splits with >= 2 domains of at least ``--min-domain-rows`` rows are used
-(SCRIBE-Denario's domains are ~15 rows each — no LODO there), so the default
-is SCRIBE-GB-orig / SCRIBE-GB / SCRIBE-Sci, 3 domains each.
+(MG-Den's domains are ~15 rows each — no LODO there), so the default
+is GB-orig / MG-GB / MG-Sci, 3 domains each.
 
 The zero-shot picks from ``cfg/ai_detection/trainv2/best_zeroshot.yaml`` are
 scored on each full split (no folding — nothing is trained) and overlaid for
@@ -80,8 +80,8 @@ from epai.ai_detection.trainv2.splits import resolve as resolve_splits
 BASE_DIR = Path(__file__).resolve().parents[3]
 PARQUET_DIR = BASE_DIR / "data" / "parquet"
 DEFAULT_OUT_DIR = BASE_DIR / "results" / "trainv2" / "lodo_performance"
-DEFAULT_SPLITS = ["gb_orig", "gb", "sci"]
-DEFAULT_OOD = ["denario"]
+DEFAULT_SPLITS = ["gb_orig", "mg_gb", "mg_sci"]
+DEFAULT_OOD = ["mg_den"]
 
 DOMAIN_COL = "domain"
 GROUP_COL = "id"
@@ -298,7 +298,7 @@ def main() -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     ap.add_argument("--splits", nargs="+", default=None, metavar="KEY",
-                    help=f"SCRIBE splits to LODO over (default: {DEFAULT_SPLITS})")
+                    help=f"MANUGRAM splits to LODO over (default: {DEFAULT_SPLITS})")
     ap.add_argument("--ood-splits", nargs="+", default=None, metavar="KEY",
                     help=f"eval-only corpora, never trained on (default: {DEFAULT_OOD})")
     ap.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2])

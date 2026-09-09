@@ -1,4 +1,4 @@
-r"""Which text embedding best separates human from AI text — on each SCRIBE
+r"""Which text embedding best separates human from AI text — on each MANUGRAM
 split, and on average across them.
 
 The algorithm is fixed (L2 logistic regression on standardised features is
@@ -24,7 +24,7 @@ never disagree with the table.
 Run:
     uv run python epai/ai_detection/trainv2/run_embedding_effectiveness.py
     uv run python epai/ai_detection/trainv2/run_embedding_effectiveness.py \
-        --splits sci gb --seeds 0 1 2 3 4
+        --splits mg_sci mg_gb --seeds 0 1 2 3 4
     uv run python epai/ai_detection/trainv2/run_embedding_effectiveness.py \
         --replot results/trainv2/embedding_effectiveness/summary.csv
 """
@@ -142,7 +142,7 @@ def _print_ranking(summary: list[dict], fpr: float, n_splits: int) -> None:
     w = max((len(e) for e in order), default=10) + 2
     pct = f"{fpr * 100:g}"
     print(f"\n{'=' * (w + 40)}")
-    print(f"  EMBEDDING RANKING — mean over {n_splits} SCRIBE splits, logistic regression")
+    print(f"  EMBEDDING RANKING — mean over {n_splits} MANUGRAM splits, logistic regression")
     print(f"{'=' * (w + 40)}")
     print(f"{'embedding':<{w}}{'AUROC':>16}{f'TPR@{pct}%FPR':>18}")
     print("-" * (w + 40))
@@ -152,7 +152,7 @@ def _print_ranking(summary: list[dict], fpr: float, n_splits: int) -> None:
               f"{r['auroc_mean'] * 100:>10.1f} ± {r['auroc_std'] * 100:<3.1f}"
               f"{r['tpr_at_fpr_mean'] * 100:>11.1f} ± {r['tpr_at_fpr_std'] * 100:<3.1f}")
     print("-" * (w + 40))
-    print("  ± is the spread ACROSS SCRIBE splits (consistency), not seed noise.")
+    print("  ± is the spread ACROSS MANUGRAM splits (consistency), not seed noise.")
     print(f"  best embedding: {order[0]}")
 
 
@@ -174,7 +174,7 @@ def main() -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     ap.add_argument("--splits", nargs="+", default=None, metavar="KEY",
-                    help="SCRIBE splits to run (default: all)")
+                    help="MANUGRAM splits to run (default: all)")
     ap.add_argument("--embeddings", nargs="+", default=None,
                     help="emb_* columns (default: every one common to the splits)")
     ap.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2, 3, 4])
