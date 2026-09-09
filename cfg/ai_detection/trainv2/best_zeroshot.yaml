@@ -6,7 +6,8 @@
 #
 # A flat list of score columns; each is routed to its family by prefix.
 columns:
-  - binoculars_score_llama31_8b     # Binoculars      -> llama31-8b
-  - fastdetect_crit_llama31_8b      # Fast-DetectGPT  -> llama31-8b
-  - llm_judge_score_gpt56luna_v3    # LLM judge       -> gpt56luna
-  - llm_judge_score_gemma4_31b_v3   # LLM judge       -> gemma4_31b
+  - binoculars_score_llama31_8b      # Binoculars      -> llama31-8b
+  - fastdetect_crit_llama31_8b       # Fast-DetectGPT  -> llama31-8b
+  - llm_judge_score_gpt56luna_v3     # LLM judge       -> gpt56luna
+  - llm_judge_score_gemma4_31b_v3    # LLM judge       -> gemma4_31b (parsed)
+  - llm_judge_score_gemma4_31b_v3_lp # LLM judge       -> gemma4_31b (logprob)

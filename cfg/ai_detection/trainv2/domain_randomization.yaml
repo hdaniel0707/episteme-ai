@@ -1,0 +1,17 @@
+# Domain randomization for the trainv2 transfer experiment.
+# Read ONLY by epai/ai_detection/trainv2/run_dr_transfer.py -- an opt-in add-on.
+# Nothing else in the pipeline touches this file, and run_dr_transfer.py is not
+# part of rebuild_all.py. Perturbs the TRAINING embeddings only; every eval set
+# (in-domain held-out, LODO held-out domain, MG-Den OOD) is left untouched.
+
+enabled: true
+
+noise:
+  kind: gaussian          # gaussian | none   (none => dr twin == base, a null control)
+  sigma: 0.05             # noise scale
+  per_feature_std: true   # sigma multiplies each embedding dim's train-set std
+                          # false => sigma is an absolute additive std in raw units
+  n_copies: 2             # noised replicas appended to the clean training rows
+                          # 0 => in-place jitter instead (row count unchanged)
+
+seed_offset: 7000         # noise RNG seed = model_seed + seed_offset

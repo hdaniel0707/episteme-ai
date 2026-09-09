@@ -286,6 +286,29 @@ uv run python epai/ai_detection/trainv2/run_lodo_performance.py --replot results
 ```
 Outputs (`results/trainv2/lodo_performance/`): `performance.csv`, `lodo.png`.
 
+### G. Domain randomization → MG-Den transfer (opt-in)
+
+**`run_dr_transfer.py`** — an opt-in add-on, never in `rebuild_all.py`. Re-runs
+both transfer measurements above (in-domain 70/30 and LODO, scored on `mg_den`)
+and for every `_trained.py` detector also trains a **domain-randomized twin**:
+the same algorithm fit on training embeddings perturbed with Gaussian noise
+(config `cfg/ai_detection/trainv2/domain_randomization.yaml` — `sigma`,
+`per_feature_std`, `n_copies`; `enabled: false` or `kind: none` makes the twin a
+null control). Noise touches **training rows only**; every eval set is scored
+clean. Only the RoBERTa embedding is noised — the cue vector is tiled verbatim.
+Nothing in the main pipeline is touched; when the script is not run the pipeline
+is byte-identical.
+
+```bash
+.venv/bin/python epai/ai_detection/trainv2/run_dr_transfer.py
+.venv/bin/python epai/ai_detection/trainv2/run_dr_transfer.py --regimes in_domain --seeds 0 1
+.venv/bin/python epai/ai_detection/trainv2/run_dr_transfer.py --replot results/trainv2/dr_transfer/performance.csv
+```
+Outputs (`results/trainv2/dr_transfer/`): `performance.csv`, `dr_transfer.png`
+(per regime a panel; base = filled circle, twin = hollow ring of the same
+colour, joined by a connector). MG-Den has 80 human rows, so its oracle
+TPR@1%FPR floors at FPR=0 — read the **base → twin delta**, not the absolute.
+
 ---
 
 ## MG-Reph experiments (opt-in)

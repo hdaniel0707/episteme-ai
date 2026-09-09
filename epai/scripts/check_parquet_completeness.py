@@ -5,7 +5,12 @@ Column by column: nulls, empty strings / arrays, non-finite numbers, and — the
 check a null count misses — **degenerate columns**: a score or embedding column
 that came out constant, near-constant, all-zero, or ragged. That is the shape a
 flaky scoring endpoint leaves behind (every row "filled" with 0.5), and nothing
-downstream notices until a figure comes out at AUROC 0.5.
+downstream notices until a figure comes out at AUROC 0.5. A **logprob-mode judge
+column** (``llm_judge_score_*_lp``) gets a tighter version of the same test: it
+is meant to be tie-free, so a clumped one — many rows on one value, or few
+distinct values overall — is flagged even when it is nowhere near constant (the
+losing token falling outside the endpoint's ``top_logprobs`` window re-clumps
+the score at 0 / 1).
 
 The other thing a null count misses is a **failed call written as content**: an
 API error body, a refused completion, or leaked model scaffolding (``<think>``,
@@ -112,6 +117,20 @@ OPTIONAL_NULL_PREFIXES = ("fastdetect_prob_", "fastdetect_ntok_")
 # genuinely clumpy judge — worth a look, not necessarily broken).
 CONSTANT_FRAC = 0.99
 SUSPICIOUS_FRAC = 0.80
+
+# A logprob-mode judge column — ``llm_judge_score_<model>_<prompt>_lp`` — reads
+# P(...) off the answer token's distribution instead of parsing a written
+# number. The whole point of the mode is to be tie-free, so a healthy one comes
+# out near-continuous (close to one distinct value per row, small clumps). A
+# clumped ``_lp`` column means the losing token often fell outside the
+# endpoint's ``top_logprobs`` window — the score then saturates to exactly 0 or
+# 1 — or the endpoint is not returning a real distribution at all. This is a
+# looser bar than the generic score check above: SUSPICIOUS_FRAC would never
+# fire on an ``_lp`` column that is merely re-clumped at the extremes.
+LOGPROB_SCORE_SUFFIX = "_lp"
+LOGPROB_MIN_DISTINCT_FRAC = 0.50   # below → WARN (not behaving tie-free)
+LOGPROB_MAX_TIE_FRAC = 0.25        # one identical value on ≥ this share → WARN
+LOGPROB_DEAD_DISTINCT = 5          # ≤ this many distinct values → ERROR
 
 # Text columns whose emptiness is a real problem, and whose length is worth a
 # distribution.
@@ -291,6 +310,27 @@ def check_scalar(name: str, arr: pa.ChunkedArray, n: int, rep: Report,
                 rep.warn(f"{name}: {top_frac:.0%} of rows share one value "
                          f"({n_distinct} distinct total) — check this scorer ran "
                          f"properly (or it is a very clumpy judge)")
+
+            if (name.startswith("llm_judge_score_")
+                    and name.endswith(LOGPROB_SCORE_SUFFIX) and finite.size):
+                frac_distinct = n_distinct / len(finite)
+                info["logprob_distinct_frac"] = frac_distinct
+                if n_distinct <= LOGPROB_DEAD_DISTINCT:
+                    rep.error(f"{name}: logprob-mode column with only {n_distinct} "
+                              f"distinct value(s) over {len(finite)} rows — the "
+                              f"endpoint is not returning a token distribution "
+                              f"(check probe_genai4science_logprobs.py)")
+                elif (frac_distinct < LOGPROB_MIN_DISTINCT_FRAC
+                      or top_frac >= LOGPROB_MAX_TIE_FRAC):
+                    rep.warn(f"{name}: logprob-mode column clumps — {n_distinct} "
+                             f"distinct ({frac_distinct:.0%} of rows), largest tie "
+                             f"{top_frac:.0%}. A logprob score should be near "
+                             f"tie-free; this many ties usually means the losing "
+                             f"token fell outside the endpoint's top_logprobs "
+                             f"window (score saturates to 0 / 1) on those rows")
+                else:
+                    rep.ok(f"{name}: logprob-mode, {n_distinct} distinct "
+                           f"({frac_distinct:.0%} of rows) — near tie-free")
         rep.detail(f"{name}: {n_distinct} distinct, "
                    f"[{_fmt(info['min'])}, {_fmt(info['max'])}] "
                    f"mean {_fmt(info['mean'])} std {_fmt(info['std'])}"
