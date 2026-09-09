@@ -49,6 +49,7 @@ _SYSTEM = (
 MODEL_IDS = {
     "gptoss-120b": "gpt-oss:120b",
     "llama33-70b": "llama3.3:70b",
+    "gemma4-31b": "gemma4:31b",
 }
 
 

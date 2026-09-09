@@ -68,7 +68,8 @@ the other cards, so the one it names is ``cuda:0`` inside the process and
     the same thing", and that question is only answered by a score on the same
     scale as the one it is being compared against.
 
-``logprob`` (local only, ``--mode logprob``)
+``logprob`` (``--mode logprob``; every local judge, plus the API judges in
+``LOGPROB_API_MODELS``)
     The prompt asks for one word, ``human`` or ``machine``, and the score is
     read off that position's distribution:
     ``P(human) / (P(human) + P(machine))``. One forward pass, nothing sampled,
@@ -76,6 +77,15 @@ the other cards, so the one it names is ``cuda:0`` inside the process and
     a written probability piles onto 0.2/0.5/0.8 however firmly the prompt asks
     it not to, and ROC-AUC reads only the ranking, so every tie is discarded
     information. A distribution has no ties.
+
+    Locally the whole vocabulary's logits are available. Over an API only the
+    top few tokens come back (``top_logprobs``), which is enough here because a
+    one-word-answer prompt puts ``human`` and ``machine`` at the very top --
+    and only for an endpoint that returns logprobs AND a model that answers with
+    the bare word at token 0. ``gemma4-31b`` (GenAI4Science) does; ``gpt-oss``
+    does not (its Harmony format opens a routing token first). Each API row is
+    checked against the returned token before its score is kept -- see
+    ``_score_genai4science_logprob``.
 
 The mode is part of the column name (``_lp``), because a logprob score and a
 parsed score are not on one scale. So is the reason the two prompts differ: in
@@ -230,6 +240,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import math
 import os
 import random
 import re
@@ -543,6 +554,32 @@ MACHINE_WORDS = ("machine", " machine", "Machine", " Machine", "MACHINE")
 # hide.
 MIN_ANSWER_MASS = 0.10
 
+# `logprob` mode over an API is possible only where the endpoint returns the
+# next-token distribution AND the model's first generated token is the bare
+# answer word. GenAI4Science's OpenAI-compatible endpoint does return
+# `top_logprobs`; whether token 0 is the answer is per-model -- `gpt-oss:120b`
+# opens an OpenAI-Harmony routing token first, so it is NOT here. Each entry was
+# checked with probe_genai4science_logprobs.py before being added.
+LOGPROB_API_MODELS = frozenset({"gemma4:31b"})
+
+# `top_logprobs` window asked of the API. 20 is the OpenAI-documented maximum
+# and what the GenAI4Science endpoint honours. On a one-word-answer prompt both
+# `human` and `machine` sit at the very top of the distribution, so they fall
+# inside this window unless the model is almost certain -- in which case the
+# missing side's mass is genuinely negligible and treated as 0.
+LOGPROB_API_TOP_N = 20
+
+# A returned logprob token, reduced to the bare lowercase word, so ` human`,
+# `human`, `Human` and `▁human` all count as the same answer regardless of how
+# the endpoint's tokeniser spells it.
+_LP_HUMAN_SET = frozenset(re.sub(r"[^a-z]", "", w.lower()) for w in HUMAN_WORDS)
+_LP_MACHINE_SET = frozenset(re.sub(r"[^a-z]", "", w.lower()) for w in MACHINE_WORDS)
+
+
+def _norm_lp_token(token: str) -> str:
+    """The bare lowercase letters of a returned logprob token (see the sets above)."""
+    return re.sub(r"[^a-z]", "", token.lower())
+
 # System prompts, keyed by version. The version names the output column together
 # with the model alias, so both are kept here rather than edited in place: a
 # score is only comparable to another score from the same (model, prompt) pair,
@@ -800,12 +837,13 @@ def parse_args() -> argparse.Namespace:
         default=None,
         choices=MODES,
         help=f"How the score is obtained. {MODE_PARSED!r}: the model writes the "
-        f"probability and it is parsed (the only option through an API, and "
-        f"what the existing columns hold). {MODE_LOGPROB!r}: the model answers "
-        "with one word and the score is read off that token's distribution — "
-        f"local only, one forward pass per row, no ties. Default: {DEFAULT_MODE} "
-        "everywhere, so a local run is comparable with the API columns already "
-        "in the file.",
+        f"probability and it is parsed (what the existing columns hold). "
+        f"{MODE_LOGPROB!r}: the model answers with one word and the score is "
+        "read off that token's distribution — one forward pass per row, no "
+        "ties; every local judge, plus the API judges in LOGPROB_API_MODELS "
+        f"({', '.join(sorted(LOGPROB_API_MODELS))}). Default: {DEFAULT_MODE} "
+        "everywhere, so a run is comparable with the API columns already in the "
+        "file.",
     )
     ap.add_argument(
         "--device",
@@ -1000,11 +1038,13 @@ def resolve_model(requested: str, column_name: str | None) -> JudgeModel:
 def resolve_mode(spec: JudgeModel, requested: str | None) -> str:
     """The scoring mode for this judge: what was asked for, or `parsed`."""
     mode = requested or DEFAULT_MODE
-    if mode == MODE_LOGPROB and not spec.is_local:
+    if mode == MODE_LOGPROB and not spec.is_local and spec.model not in LOGPROB_API_MODELS:
         raise SystemExit(
-            f"--mode {MODE_LOGPROB} needs the token distribution, which the "
-            f"{spec.provider} API does not return here. Run {spec.key!r} with "
-            f"--mode {MODE_PARSED}, or pick a local judge (--list-models)."
+            f"--mode {MODE_LOGPROB} needs the answer token's distribution. Local "
+            f"judges always expose it; of the API judges only "
+            f"{', '.join(sorted(LOGPROB_API_MODELS))} has been shown to (via "
+            f"probe_genai4science_logprobs.py). Run {spec.key!r} with --mode "
+            f"{MODE_PARSED}, or pick a local judge (--list-models)."
         )
     return mode
 
@@ -1166,6 +1206,11 @@ class ApiJudge(Judge):
         self._g4s_structured = 0
         self._g4s_fallback = 0
         self._g4s_parsefail = 0
+        # genai4science logprob mode only: the answer mass and the winning token
+        # of every row that scored, for the summary. A row that failed the
+        # per-call checks below raised instead and is in the failure list.
+        self._g4s_lp_mass: list[float] = []
+        self._g4s_lp_token: list[str] = []
 
     def _build_client(self):
         # Imported here rather than at module level so a missing optional SDK
@@ -1195,6 +1240,8 @@ class ApiJudge(Judge):
         if self.provider == "openai":
             return self._score_openai(text)
         if self.provider == "genai4science":
+            if self.mode == MODE_LOGPROB:
+                return self._score_genai4science_logprob(text)
             return self._score_genai4science(text)
         if self.provider == "anthropic":
             return self._score_anthropic(text)
@@ -1234,9 +1281,84 @@ class ApiJudge(Judge):
                 self._g4s_parsefail += 1
             raise
 
+    def _score_genai4science_logprob(self, text: str) -> float:
+        """P(human) read off the answer token's distribution, no number written.
+
+        The prompt (``system_prompt_for(..., 'logprob')``) asks for exactly one
+        word, ``human`` or ``machine``. One token is generated with
+        ``logprobs=True``; the score is
+        ``P(human) / (P(human) + P(machine))`` summed over the casing/space
+        spellings of each word within the returned ``top_logprobs`` window.
+        Continuous and tie-free -- the point of the mode -- where the parsed
+        score piles onto round numbers.
+
+        Every call is checked before its score is kept (``--mode logprob`` is
+        only as trustworthy as the token it read):
+
+          1. the endpoint actually returned a token distribution;
+          2. the generated token IS one of the two answer words -- not a
+             newline, a quote, a Markdown bullet or a reasoning marker;
+          3. ``human`` + ``machine`` hold at least ``MIN_ANSWER_MASS`` of the
+             window, so the ratio is between two real probabilities.
+
+        A row that fails any of these raises, which sends it back through
+        :func:`judge_row`'s retries and, if it keeps failing, leaves the score
+        Null and counts it in the summary -- exactly like an API error.
+        """
+        from epai.utils.env_utils import qwen3_thinking_off
+
+        messages = qwen3_thinking_off(self.model_id, [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": USER_TEMPLATE.format(text=text)},
+        ])
+        # temperature=0 so the sampled token is the argmax and check 2 below is
+        # deterministic. The returned distribution -- what the score is actually
+        # read from -- does not depend on it. GenAI4Science is vLLM/Ollama and
+        # takes it (unlike the OpenAI reasoning models, see _score_openai).
+        response = self._client.chat.completions.create(
+            model=self.model_id, messages=messages, max_tokens=1, temperature=0,
+            logprobs=True, top_logprobs=LOGPROB_API_TOP_N,
+        )
+        choice = response.choices[0]
+        lp = getattr(choice, "logprobs", None)
+        content = getattr(lp, "content", None) if lp is not None else None
+        if not content or not content[0].top_logprobs:
+            raise ValueError(
+                "endpoint returned no logprobs for the answer token — it may not "
+                "support logprobs=True on this model"
+            )
+        slot = content[0]
+        top_word = _norm_lp_token(slot.token)
+        if top_word not in _LP_HUMAN_SET and top_word not in _LP_MACHINE_SET:
+            raise ValueError(
+                f"answer token {slot.token!r} is neither 'human' nor 'machine' — "
+                "the model did not follow the one-word answer format"
+            )
+        human = sum(
+            math.exp(a.logprob) for a in slot.top_logprobs
+            if _norm_lp_token(a.token) in _LP_HUMAN_SET
+        )
+        machine = sum(
+            math.exp(a.logprob) for a in slot.top_logprobs
+            if _norm_lp_token(a.token) in _LP_MACHINE_SET
+        )
+        mass = human + machine
+        if mass < MIN_ANSWER_MASS:
+            raise ValueError(
+                f"answer mass {mass:.3f} < {MIN_ANSWER_MASS:.2f} (top token "
+                f"{slot.token!r}) — 'human'/'machine' hold too little of the "
+                "distribution for the ratio to mean anything"
+            )
+        with self._g4s_lock:
+            self._g4s_lp_mass.append(mass)
+            self._g4s_lp_token.append(top_word)
+        return human / mass
+
     def diagnostics(self) -> list[str]:
         if self.provider != "genai4science":
             return []
+        if self.mode == MODE_LOGPROB:
+            return self._logprob_diagnostics()
         n = self._g4s_structured + self._g4s_fallback
         if not n:
             return []
@@ -1254,6 +1376,31 @@ class ApiJudge(Judge):
             lines.append(
                 f"    {self._g4s_parsefail} free-text parse failure(s) (retried) "
                 f"— the model is not answering with a probability"
+            )
+        return lines
+
+    def _logprob_diagnostics(self) -> list[str]:
+        """Whether the answer token actually carried the judgement (see
+        :meth:`_score_genai4science_logprob`). Rows that failed the per-call
+        checks are in the summary's failure list, not here."""
+        if not self._g4s_lp_mass:
+            return []
+        mass = np.array(self._g4s_lp_mass, dtype=float)
+        n_human = sum(t in _LP_HUMAN_SET for t in self._g4s_lp_token)
+        n_machine = len(self._g4s_lp_token) - n_human
+        lines = [
+            f"    logprob mode: {len(self._g4s_lp_token)} row(s) scored off the "
+            f"answer token's top-{LOGPROB_API_TOP_N} distribution",
+            f"    answer word: {n_human} 'human', {n_machine} 'machine'",
+            f"    answer mass: mean {mass.mean():.3f}, min {mass.min():.3f} "
+            "(share of the window on the two answer words)",
+        ]
+        weak = int((mass < 0.5).sum())
+        if weak:
+            lines.append(
+                f"    NOTE  {weak} row(s) with answer mass < 0.50 — the model put "
+                "real probability on a third token; the ratio still stands but is "
+                "noisier there"
             )
         return lines
 
