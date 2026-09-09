@@ -1,9 +1,10 @@
 r"""Leave-one-domain-out (LODO) trained detection across the SCRIBE splits,
 with the zero-shot picks for reference — AUROC vs. oracle TPR@1%FPR.
 
-The LODO sibling of ``run_in_domain_performance.py``. Same ONE fixed trained
-config (``emb_roberta`` -> logistic regression). But instead of a random 70/30
-split, each of a split's domains is held out in turn:
+The LODO sibling of ``run_in_domain_performance.py``. Same three trained
+detectors (:mod:`epai.ai_detection.trainv2._trained`: ``emb_roberta`` ->
+logistic, and the two ``emb_roberta`` + judge-cue hybrids). But instead of a
+random 70/30 split, each of a split's domains is held out in turn:
 
     for each domain d in the split:
         train on every OTHER domain's rows (human vs. all AI, the full union)
@@ -58,8 +59,14 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from epai.algs import build_algorithm
-from epai.ai_detection.trainv2.core import auroc, tpr_at_fpr
+from epai.ai_detection.trainv2._trained import (
+    AUX_COL,
+    EMB_COL,
+    TRAINED_SPECS,
+    _stack,
+    eval_on,
+    fit,
+)
 from epai.ai_detection.trainv2.data import GEN_COL, _is_missing
 from epai.ai_detection.trainv2.run_best_zeroshot_performance import (
     DEFAULT_CONFIG,
@@ -76,9 +83,6 @@ DEFAULT_OUT_DIR = BASE_DIR / "results" / "trainv2" / "lodo_performance"
 DEFAULT_SPLITS = ["gb_orig", "gb", "sci"]
 DEFAULT_OOD = ["denario"]
 
-EMB = "emb_roberta"
-ALG = "logistic"
-ALG_PARAMS = {"C": 1.0, "max_iter": 1000}
 DOMAIN_COL = "domain"
 GROUP_COL = "id"
 
@@ -87,46 +91,46 @@ CSV_FIELDS = ["level", "kind", "detector", "split", "held_out_domain", "n_test",
               "tpr_at_fpr_std"]
 
 
-def _load(path: Path, emb: str, human_label: str):
-    df = pd.read_parquet(path, columns=[GROUP_COL, DOMAIN_COL, GEN_COL, emb])
-    df = df[~df[emb].map(_is_missing)].reset_index(drop=True)
-    # A group (a human text + every rewrite of it, sharing GROUP_COL) must sit
-    # in exactly one domain, or a domain-held-out fold would split it.
+def _load(path: Path, human_label: str):
+    """``(X_emb, y, Z_cue, dom, ids)``. Group dropped whole on ANY missing
+    feature; a group must sit in one domain (checked)."""
+    df = pd.read_parquet(path, columns=[GROUP_COL, DOMAIN_COL, GEN_COL,
+                                        EMB_COL, AUX_COL])
+    bad = df[EMB_COL].map(_is_missing) | df[AUX_COL].map(_is_missing)
+    if bad.any():
+        df = df[~df[GROUP_COL].isin(df.loc[bad, GROUP_COL].unique())]
+    df = df.reset_index(drop=True)
     span = df.groupby(GROUP_COL)[DOMAIN_COL].nunique()
     if (span > 1).any():
         raise SystemExit(f"{path.name}: {int((span > 1).sum())} group(s) span "
                          f"more than one domain — LODO would split them")
-    X = np.asarray(np.stack(df[emb].to_numpy()), dtype=np.float32)
+    return (_stack(df[EMB_COL]),
+            (df[GEN_COL].to_numpy() != human_label).astype(int),
+            _stack(df[AUX_COL]), df[DOMAIN_COL].astype(str).to_numpy(),
+            df[GROUP_COL].to_numpy())
+
+
+def _load_ood(path: Path, human_label: str):
+    """Full-corpus eval set (never trained on): (X, y, Z, n_human)."""
+    df = pd.read_parquet(path, columns=[GEN_COL, EMB_COL, AUX_COL])
+    bad = df[EMB_COL].map(_is_missing) | df[AUX_COL].map(_is_missing)
+    df = df[~bad].reset_index(drop=True)
     y = (df[GEN_COL].to_numpy() != human_label).astype(int)
-    dom = df[DOMAIN_COL].astype(str).to_numpy()
-    ids = df[GROUP_COL].to_numpy()
-    return X, y, dom, ids
+    return _stack(df[EMB_COL]), y, _stack(df[AUX_COL]), int((y == 0).sum())
 
 
-def _load_ood(path: Path, emb: str, human_label: str):
-    """Full-corpus eval set (never trained on): (X, y, n_human)."""
-    df = pd.read_parquet(path, columns=[GEN_COL, emb])
-    df = df[~df[emb].map(_is_missing)].reset_index(drop=True)
-    X = np.asarray(np.stack(df[emb].to_numpy()), dtype=np.float32)
-    y = (df[GEN_COL].to_numpy() != human_label).astype(int)
-    return X, y, int((y == 0).sum())
-
-
-def _fold(X, y, tr, te, seeds, fpr, ood_sets) -> dict:
-    """One LODO fold, averaged over seeds. Each fold's model also scores every
-    OOD eval set."""
+def _fold(spec, X, y, Z, groups, tr, te, seeds, fpr, ood_sets) -> dict:
+    """One LODO fold for one spec, averaged over seeds. Each fold's model also
+    scores every OOD eval set."""
     a, t = [], []
     ood: dict[str, list[tuple[float, float]]] = {n: [] for n in ood_sets}
     for seed in seeds:
-        clf = build_algorithm(ALG, seed, **ALG_PARAMS)
-        clf.set_fit_groups(None)
-        clf.fit(X[tr], y[tr])
-        s = clf.decision_score(X[te])
-        a.append(auroc(y[te], s))
-        t.append(tpr_at_fpr(y[te], s, fpr))
-        for name, (oX, oy, _) in ood_sets.items():
-            os_ = clf.decision_score(oX)
-            ood[name].append((auroc(oy, os_), tpr_at_fpr(oy, os_, fpr)))
+        clf = fit(spec, X, y, Z, groups, tr, seed)
+        ia, it = eval_on(clf, spec, X[te], y[te], Z[te], fpr)
+        a.append(ia)
+        t.append(it)
+        for name, (oX, oy, oZ, _) in ood_sets.items():
+            ood[name].append(eval_on(clf, spec, oX, oy, oZ, fpr))
     return {"auroc": float(np.mean(a)), "tpr_at_fpr": float(np.mean(t)),
             "n_test": int(te.sum()), "n_test_human": int((y[te] == 0).sum()),
             "ood": ood}
@@ -137,20 +141,20 @@ def _std(vals: list[float]) -> float:
     return float(np.std(vals)) if len(vals) > 1 else 0.0
 
 
-def compute_trained(splits, ood_splits, embedding, seeds, fpr, human_label,
+def compute_trained(splits, ood_splits, seeds, fpr, human_label,
                     min_domain_rows) -> list[dict]:
-    detector = f"trained/{embedding.removeprefix('emb_')}·{ALG}"
-    rows: list[dict] = []
-    split_folds: dict[str, list[dict]] = {}
-
-    ood_sets = {name: _load_ood(path, embedding, human_label)
-                for name, path in ood_splits}
-    ood_reads: dict[str, list[tuple[float, float]]] = {n: [] for n in ood_sets}
-    for name, (_, oy, n_h) in ood_sets.items():
+    ood_sets = {name: _load_ood(path, human_label) for name, path in ood_splits}
+    for name, (_, oy, _, n_h) in ood_sets.items():
         print(f"  OOD eval corpus {name!r}: {len(oy)} rows, {n_h} human (never trained on)")
 
+    # per split -> per spec -> list of fold dicts
+    all_folds: dict[str, dict[str, list[dict]]] = {}
+    ood_reads: dict[str, dict[str, list]] = {
+        k: {n: [] for n in ood_sets} for k in TRAINED_SPECS
+    }
+
     for split_key, path in tqdm(splits, desc="LODO", unit="split"):
-        X, y, dom, ids = _load(path, embedding, human_label)
+        X, y, Z, dom, ids = _load(path, human_label)
         counts = {d: int((dom == d).sum()) for d in np.unique(dom)}
         domains = sorted(d for d, n in counts.items()
                          if n >= min_domain_rows
@@ -159,14 +163,13 @@ def compute_trained(splits, ood_splits, embedding, seeds, fpr, human_label,
             print(f"  {split_key}: only {len(domains)} usable domain(s) "
                   f"({counts}) — skipped")
             continue
-
         print(f"\n  {split_key}: {len(domains)} domains {domains}")
-        folds = []
+
+        spec_folds = {k: [] for k in TRAINED_SPECS}
         for d in domains:
             tr, te = dom != d, dom == d
-            # LODO invariants: the held-out domain is scored in FULL and never
-            # appears in training; train + test partition the split's rows;
-            # and no group (id = a human text + all its rewrites) straddles.
+            # LODO invariants: held-out domain scored in FULL, never in
+            # training; train + test partition; no group (id) straddles.
             assert d not in set(dom[tr]) and set(dom[te]) == {d}
             assert tr.sum() + te.sum() == len(dom) and not (tr & te).any()
             assert set(ids[tr]).isdisjoint(ids[te]), "a group straddled the fold"
@@ -174,61 +177,69 @@ def compute_trained(splits, ood_splits, embedding, seeds, fpr, human_label,
                   f"(n={tr.sum()}, {len(set(ids[tr]))} groups, human {int((y[tr] == 0).sum())})"
                   f"  eval {d!r} (n={te.sum()}, {len(set(ids[te]))} groups, "
                   f"human {int((y[te] == 0).sum())})")
-            f = _fold(X, y, tr, te, seeds, fpr, ood_sets)
-            f["held_out_domain"] = d
-            for name, reads in f.pop("ood").items():
-                ood_reads[name].extend(reads)
-            folds.append(f)
-            rows.append({
-                "level": "fold", "kind": "trained", "detector": detector,
-                "split": split_key, "held_out_domain": d, "n_test": f["n_test"],
-                "n_folds": "", "n_seeds": len(seeds),
-                "auroc": f["auroc"], "auroc_std": "",
-                "tpr_at_fpr": f["tpr_at_fpr"], "tpr_at_fpr_std": "",
-            })
-        split_folds[split_key] = folds
+            for spec_key, spec in TRAINED_SPECS.items():
+                f = _fold(spec, X, y, Z, ids, tr, te, seeds, fpr, ood_sets)
+                f["held_out_domain"] = d
+                for name, reads in f.pop("ood").items():
+                    ood_reads[spec_key][name].extend(reads)
+                spec_folds[spec_key].append(f)
+        all_folds[split_key] = spec_folds
 
-        ok = [f for f in folds if f["n_test_human"] >= 1 / fpr]
+    if not all_folds:
+        return []
+
+    rows: list[dict] = []
+    for spec_key, spec in TRAINED_SPECS.items():
+        detector = f"trained/{spec['label']}"
+        split_rows: list[dict] = []
+        for split_key, spec_folds in all_folds.items():
+            folds = spec_folds[spec_key]
+            for f in folds:
+                rows.append({
+                    "level": "fold", "kind": "trained", "detector": detector,
+                    "split": split_key, "held_out_domain": f["held_out_domain"],
+                    "n_test": f["n_test"], "n_folds": "", "n_seeds": len(seeds),
+                    "auroc": f["auroc"], "auroc_std": "",
+                    "tpr_at_fpr": f["tpr_at_fpr"], "tpr_at_fpr_std": "",
+                })
+            ok = [f for f in folds if f["n_test_human"] >= 1 / fpr]
+            sr = {
+                "level": "split", "kind": "trained", "detector": detector,
+                "split": split_key, "held_out_domain": "", "n_test": "",
+                "n_folds": len(folds), "n_seeds": len(seeds), "reachable": bool(ok),
+                "auroc": float(np.mean([f["auroc"] for f in folds])),
+                "auroc_std": _std([f["auroc"] for f in folds]),
+                "tpr_at_fpr": float(np.mean([f["tpr_at_fpr"] for f in (ok or folds)])),
+                "tpr_at_fpr_std": _std([f["tpr_at_fpr"] for f in (ok or folds)]),
+            }
+            rows.append(sr)
+            split_rows.append(sr)
+
+        for name, (_, _, _, n_h) in ood_sets.items():
+            reads = ood_reads[spec_key][name]
+            oa, ot = [r[0] for r in reads], [r[1] for r in reads]
+            sr = {
+                "level": "split", "kind": "trained", "detector": detector,
+                "split": name, "held_out_domain": "", "n_test": "",
+                "n_folds": len(reads), "n_seeds": len(seeds),
+                "reachable": bool(n_h >= 1 / fpr),
+                "auroc": float(np.mean(oa)), "auroc_std": _std(oa),
+                "tpr_at_fpr": float(np.mean(ot)), "tpr_at_fpr_std": _std(ot),
+            }
+            rows.append(sr)
+            split_rows.append(sr)
+
+        tpr_ok = [r for r in split_rows if r.get("reachable")]
         rows.append({
-            "level": "split", "kind": "trained", "detector": detector,
-            "split": split_key, "held_out_domain": "", "n_test": "",
-            "n_folds": len(folds), "n_seeds": len(seeds),
-            "reachable": bool(ok),
-            "auroc": float(np.mean([f["auroc"] for f in folds])),
-            "auroc_std": _std([f["auroc"] for f in folds]),
-            "tpr_at_fpr": float(np.mean([f["tpr_at_fpr"] for f in (ok or folds)])),
-            "tpr_at_fpr_std": _std([f["tpr_at_fpr"] for f in (ok or folds)]),
+            "level": "overall", "kind": "trained", "detector": detector,
+            "split": "mean", "held_out_domain": "", "n_test": "",
+            "n_folds": sum(len(all_folds[s][spec_key]) for s in all_folds),
+            "n_seeds": len(seeds),
+            "auroc": float(np.mean([r["auroc"] for r in split_rows])),
+            "auroc_std": float(np.mean([r["auroc_std"] for r in split_rows])),
+            "tpr_at_fpr": float(np.mean([r["tpr_at_fpr"] for r in tpr_ok])) if tpr_ok else float("nan"),
+            "tpr_at_fpr_std": float(np.mean([r["tpr_at_fpr_std"] for r in tpr_ok])) if tpr_ok else float("nan"),
         })
-
-    if not split_folds:
-        return rows
-
-    # OOD corpora: one 'split' row each, mean over every (split, domain, seed)
-    # model. TPR only when the 1%-FPR point is reachable (>= 1/fpr humans).
-    for name, (_, _, n_h) in ood_sets.items():
-        reads = ood_reads[name]
-        oa, ot = [r[0] for r in reads], [r[1] for r in reads]
-        rows.append({
-            "level": "split", "kind": "trained", "detector": detector,
-            "split": name, "held_out_domain": "", "n_test": "",
-            "n_folds": len(reads), "n_seeds": len(seeds),
-            "reachable": bool(n_h >= 1 / fpr),
-            "auroc": float(np.mean(oa)), "auroc_std": _std(oa),
-            "tpr_at_fpr": float(np.mean(ot)), "tpr_at_fpr_std": _std(ot),
-        })
-
-    split_rows = [r for r in rows if r["level"] == "split"]
-    tpr_ok = [r for r in split_rows if r.get("reachable")]
-    rows.append({
-        "level": "overall", "kind": "trained", "detector": detector,
-        "split": "mean", "held_out_domain": "", "n_test": "",
-        "n_folds": sum(len(f) for f in split_folds.values()),
-        "n_seeds": len(seeds),
-        "auroc": float(np.mean([r["auroc"] for r in split_rows])),
-        "auroc_std": float(np.mean([r["auroc_std"] for r in split_rows])),
-        "tpr_at_fpr": float(np.mean([r["tpr_at_fpr"] for r in tpr_ok])) if tpr_ok else float("nan"),
-        "tpr_at_fpr_std": float(np.mean([r["tpr_at_fpr_std"] for r in tpr_ok])) if tpr_ok else float("nan"),
-    })
     return rows
 
 
@@ -256,10 +267,9 @@ def plots_from_csv(csv_path: Path, meta: dict, out_dir: Path) -> None:
     ood = "/".join(meta["ood"])
     zeroshot_scatter(
         rows, meta, out_dir / "lodo.png", key="detector",
-        title=f"Leave-one-domain-out trained ({EMB.removeprefix('emb_')}·{ALG}), "
-              f"plus {ood} as eval-only OOD, vs. zero-shot picks\n"
-              f"AUROC vs. oracle TPR@{meta['fpr'] * 100:g}%FPR — "
-              f"trained mean error bar = mean per-corpus SD",
+        title=f"Leave-one-domain-out trained, plus {ood} as eval-only OOD, "
+              f"vs. zero-shot picks\nAUROC vs. oracle TPR@{meta['fpr'] * 100:g}%FPR "
+              f"— trained mean error bar = mean per-corpus SD",
     )
 
 
@@ -291,7 +301,6 @@ def main() -> None:
                     help=f"SCRIBE splits to LODO over (default: {DEFAULT_SPLITS})")
     ap.add_argument("--ood-splits", nargs="+", default=None, metavar="KEY",
                     help=f"eval-only corpora, never trained on (default: {DEFAULT_OOD})")
-    ap.add_argument("--embedding", default=EMB)
     ap.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2])
     ap.add_argument("--fpr", type=float, default=0.01)
     ap.add_argument("--min-domain-rows", type=int, default=100)
@@ -318,11 +327,11 @@ def main() -> None:
     if missing:
         raise SystemExit(f"parquet(s) not found: {missing}")
 
-    print(f"trained : {args.embedding} -> {ALG} {ALG_PARAMS}, leave-one-domain-out")
+    print(f"trained : {[sp['label'] for sp in TRAINED_SPECS.values()]}, leave-one-domain-out")
     print(f"train on: {[s for s, _ in splits]}   OOD eval: {[s for s, _ in ood_splits]}"
           f"   seeds: {args.seeds}\n")
 
-    rows = compute_trained(splits, ood_splits, args.embedding, args.seeds, args.fpr,
+    rows = compute_trained(splits, ood_splits, args.seeds, args.fpr,
                            args.human_label, args.min_domain_rows)
     if not any(r["level"] == "overall" for r in rows):
         raise SystemExit("no split had >= 2 usable domains")

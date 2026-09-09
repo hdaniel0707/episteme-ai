@@ -2,11 +2,13 @@ r"""In-domain trained detection across the SCRIBE splits, with SCRIBE-Denario
 as an eval-only OOD corpus and the zero-shot picks for reference — AUROC vs.
 oracle TPR@1%FPR on one figure.
 
-ONE fixed trained config (``emb_roberta`` -> logistic regression, the
-run_embedding_effectiveness.py winner). Within each TRAINING split (default
-SCRIBE-GB-orig / -GB / -Sci): a grouped 70/30 train/test split (a document and
-every rewrite of it share an ``id`` and never straddle the cut), repeated over
-N seeds, human vs. every AI row pooled. AUROC / TPR@1%FPR are the seed mean.
+Three trained detectors (:mod:`epai.ai_detection.trainv2._trained`): a plain
+logistic probe on ``emb_roberta``, and the two ``emb_roberta`` + judge
+cue-vector hybrids -- concatenation fusion and a learned gate. Within each
+TRAINING split (default SCRIBE-GB-orig / -GB / -Sci): a grouped 70/30
+train/test split (a document and every rewrite of it share an ``id`` and never
+straddle the cut), repeated over N seeds, human vs. every AI row pooled.
+AUROC / TPR@1%FPR are the seed mean.
 
 Every fitted model is ALSO scored, unchanged, on each ``--ood-splits`` corpus
 in full (default SCRIBE-Denario) — never trained on, an additional held-out
@@ -46,9 +48,8 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from epai.algs import build_algorithm
-from epai.ai_detection.trainv2.core import auroc, grouped_split, tpr_at_fpr
-from epai.ai_detection.trainv2.data import GEN_COL, _is_missing
+from epai.ai_detection.trainv2._trained import TRAINED_SPECS, eval_on, fit, load_features
+from epai.ai_detection.trainv2.core import grouped_split
 from epai.ai_detection.trainv2.run_best_zeroshot_performance import (
     DEFAULT_CONFIG,
     _detector,
@@ -62,9 +63,6 @@ BASE_DIR = Path(__file__).resolve().parents[3]
 PARQUET_DIR = BASE_DIR / "data" / "parquet"
 DEFAULT_OUT_DIR = BASE_DIR / "results" / "trainv2" / "in_domain_performance"
 
-EMB = "emb_roberta"
-ALG = "logistic"
-ALG_PARAMS = {"C": 1.0, "max_iter": 1000}
 DEFAULT_SPLITS = ["gb_orig", "gb", "sci"]
 DEFAULT_OOD = ["denario"]
 
@@ -72,25 +70,9 @@ CSV_FIELDS = ["kind", "detector", "split", "role", "n_train", "n_test",
               "n_seeds", "auroc", "auroc_std", "tpr_at_fpr", "tpr_at_fpr_std"]
 
 
-def _xyg(df: pd.DataFrame, emb: str, group_col: str, human_label: str):
-    sub = df[[group_col, GEN_COL, emb]]
-    bad = sub[emb].map(_is_missing)
-    if bad.any():
-        sub = sub[~sub[group_col].isin(sub.loc[bad, group_col].unique())]
-    sub = sub.reset_index(drop=True)
-    X = np.asarray(np.stack(sub[emb].to_numpy()), dtype=np.float32)
-    y = (sub[GEN_COL].to_numpy() != human_label).astype(int)
-    return X, y, sub[group_col].to_numpy()
-
-
 def _std(v: list[float]) -> float:
     v = [x for x in v if np.isfinite(x)]
     return float(np.std(v)) if len(v) > 1 else 0.0
-
-
-def _score(clf, X, y, fpr) -> tuple[float, float]:
-    s = clf.decision_score(X)
-    return auroc(y, s), tpr_at_fpr(y, s, fpr)
 
 
 def _row(detector, split, role, cell) -> dict:
@@ -116,64 +98,65 @@ def _overall_cell(cells: list[dict], n_seeds: int, fpr: float) -> dict:
     }
 
 
-def compute_trained(train_splits, ood_splits, embedding, seeds, test_size, fpr,
+def compute_trained(train_splits, ood_splits, seeds, test_size, fpr,
                     group_col, human_label) -> list[dict]:
-    detector = f"trained/{embedding.removeprefix('emb_')}·{ALG}"
     ood_sets: dict[str, tuple] = {}
     for name, path in ood_splits:
-        df = pd.read_parquet(path, columns=[group_col, GEN_COL, embedding])
-        X, y, _ = _xyg(df, embedding, group_col, human_label)
-        ood_sets[name] = (X, y, int((y == 0).sum()))
-        print(f"  OOD eval corpus {name!r}: {len(y)} rows, {int((y == 0).sum())} human "
-              f"(never trained on)")
+        oX, oy, oZ, _ = load_features(path, group_col, human_label)
+        ood_sets[name] = (oX, oy, oZ, int((oy == 0).sum()))
+        print(f"  OOD eval corpus {name!r}: {len(oy)} rows, {int((oy == 0).sum())} "
+              f"human (never trained on)")
 
-    cells: list[dict] = []
-    rows: list[dict] = []
-    ood_reads: dict[str, list[tuple[float, float]]] = {n: [] for n in ood_sets}
+    # per spec: in-domain cells (one per training corpus) + OOD read pools
+    cells: dict[str, list[dict]] = {k: [] for k in TRAINED_SPECS}
+    ood_reads: dict[str, dict[str, list]] = {
+        k: {n: [] for n in ood_sets} for k in TRAINED_SPECS
+    }
 
-    for split_key, path in tqdm(train_splits, desc="train", unit="split"):
-        df = pd.read_parquet(path, columns=[group_col, GEN_COL, embedding])
-        X, y, groups = _xyg(df, embedding, group_col, human_label)
+    for split_key, path in tqdm(train_splits, desc="corpus", unit="split"):
+        X, y, Z, groups = load_features(path, group_col, human_label)
         g0, g1 = grouped_split(y, groups, test_size, seeds[0])
         assert set(groups[g0]).isdisjoint(groups[g1])
         print(f"  {split_key}: grouped {int(round((1 - test_size) * 100))}/"
               f"{int(round(test_size * 100))} on {group_col!r} — {len(set(groups))} "
               f"groups -> {len(set(groups[g0]))} train / {len(set(groups[g1]))} test, disjoint")
 
-        a, t = [], []
-        n_tr = n_te = n_te_h = 0
-        for seed in seeds:
-            tr, te = grouped_split(y, groups, test_size, seed)
-            clf = build_algorithm(ALG, seed, **ALG_PARAMS)
-            clf.set_fit_groups(groups[tr])
-            clf.fit(X[tr], y[tr])
-            ia, it = _score(clf, X[te], y[te], fpr)
-            a.append(ia)
-            t.append(it)
-            n_tr, n_te = int(len(tr)), int(len(te))
-            n_te_h = int((y[te] == 0).sum())
-            for name, (oX, oy, _) in ood_sets.items():
-                ood_reads[name].append(_score(clf, oX, oy, fpr))
-
-        cell = {"split": split_key, "n_train": n_tr, "n_test": n_te,
+        for spec_key, spec in TRAINED_SPECS.items():
+            a, t = [], []
+            n_tr = n_te = n_te_h = 0
+            for seed in seeds:
+                tr, te = grouped_split(y, groups, test_size, seed)
+                clf = fit(spec, X, y, Z, groups, tr, seed)
+                ia, it = eval_on(clf, spec, X[te], y[te], Z[te], fpr)
+                a.append(ia)
+                t.append(it)
+                n_tr, n_te, n_te_h = len(tr), len(te), int((y[te] == 0).sum())
+                for name, (oX, oy, oZ, _) in ood_sets.items():
+                    ood_reads[spec_key][name].append(
+                        eval_on(clf, spec, oX, oy, oZ, fpr))
+            cells[spec_key].append({
+                "split": split_key, "n_train": n_tr, "n_test": n_te,
                 "n_test_human": n_te_h, "n_seeds": len(seeds),
                 "auroc": float(np.mean(a)), "auroc_std": _std(a),
-                "tpr_at_fpr": float(np.mean(t)), "tpr_at_fpr_std": _std(t)}
-        cells.append(cell)
-        rows.append(_row(detector, split_key, "in_domain", cell))
+                "tpr_at_fpr": float(np.mean(t)), "tpr_at_fpr_std": _std(t)})
 
-    for name, (_, _, n_h) in ood_sets.items():
-        reads = ood_reads[name]
-        oa, ot = [r[0] for r in reads], [r[1] for r in reads]
-        cell = {"split": name, "n_test": "", "n_test_human": n_h,
-                "n_seeds": len(seeds),
-                "auroc": float(np.mean(oa)), "auroc_std": _std(oa),
-                "tpr_at_fpr": float(np.mean(ot)), "tpr_at_fpr_std": _std(ot)}
-        cells.append(cell)
-        rows.append(_row(detector, name, "ood", cell))
-
-    rows.append(_row(detector, "mean", "overall",
-                     _overall_cell(cells, len(seeds), fpr)))
+    rows: list[dict] = []
+    for spec_key, spec in TRAINED_SPECS.items():
+        detector = f"trained/{spec['label']}"
+        spec_cells = list(cells[spec_key])
+        for c in spec_cells:
+            rows.append(_row(detector, c["split"], "in_domain", c))
+        for name, (_, _, _, n_h) in ood_sets.items():
+            oa = [r[0] for r in ood_reads[spec_key][name]]
+            ot = [r[1] for r in ood_reads[spec_key][name]]
+            c = {"split": name, "n_test": "", "n_test_human": n_h,
+                 "n_seeds": len(seeds),
+                 "auroc": float(np.mean(oa)), "auroc_std": _std(oa),
+                 "tpr_at_fpr": float(np.mean(ot)), "tpr_at_fpr_std": _std(ot)}
+            spec_cells.append(c)
+            rows.append(_row(detector, name, "ood", c))
+        rows.append(_row(detector, "mean", "overall",
+                         _overall_cell(spec_cells, len(seeds), fpr)))
     return rows
 
 
@@ -199,10 +182,9 @@ def plots_from_csv(csv_path: Path, meta: dict, out_dir: Path) -> None:
     ood = "/".join(meta["ood"])
     zeroshot_scatter(
         rows, meta, out_dir / "in_domain.png", key="detector",
-        title=f"In-domain trained ({EMB.removeprefix('emb_')}·{ALG}, 70/30, "
-              f"{meta['n_seeds']} seeds) — held-out test per corpus, plus "
-              f"{ood} as eval-only OOD, vs. zero-shot picks\n"
-              f"AUROC vs. oracle TPR@{meta['fpr'] * 100:g}%FPR",
+        title=f"In-domain trained (70/30, {meta['n_seeds']} seeds) — held-out "
+              f"test per corpus, plus {ood} as eval-only OOD, vs. zero-shot picks"
+              f"\nAUROC vs. oracle TPR@{meta['fpr'] * 100:g}%FPR",
     )
 
 
@@ -231,7 +213,6 @@ def main() -> None:
                     help=f"training splits (default: {DEFAULT_SPLITS})")
     ap.add_argument("--ood-splits", nargs="+", default=None, metavar="KEY",
                     help=f"eval-only corpora, never trained on (default: {DEFAULT_OOD})")
-    ap.add_argument("--embedding", default=EMB)
     ap.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2, 3, 4])
     ap.add_argument("--test-size", type=float, default=0.30)
     ap.add_argument("--fpr", type=float, default=0.01)
@@ -259,12 +240,12 @@ def main() -> None:
     if missing:
         raise SystemExit(f"parquet(s) not found: {missing}")
 
-    print(f"trained : {args.embedding} -> {ALG} {ALG_PARAMS}")
+    print(f"trained : {[s['label'] for s in TRAINED_SPECS.values()]}")
     print(f"train on: {[s for s, _ in train_splits]}   OOD eval: {[s for s, _ in ood_splits]}")
     print(f"seeds   : {args.seeds}   split: {int(round((1 - args.test_size) * 100))}/"
           f"{int(round(args.test_size * 100))} grouped on {args.group_col!r}\n")
 
-    rows = compute_trained(train_splits, ood_splits, args.embedding, args.seeds,
+    rows = compute_trained(train_splits, ood_splits, args.seeds,
                            args.test_size, args.fpr, args.group_col, args.human_label)
     if not args.no_zeroshot:
         cols = _load_columns(args.zeroshot_config)

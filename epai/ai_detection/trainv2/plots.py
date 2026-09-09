@@ -238,21 +238,30 @@ def zeroshot_scatter(
                    color=_tint(hue[r[key]]), edgecolors="#6a6a6a", lw=0.6,
                    zorder=3)
 
-    means = [next((r for r in rows if r[key] == v and r["split"] == "mean"), None)
+    means = [(v, next((r for r in rows if r[key] == v and r["split"] == "mean"), None))
              for v in names]
+    means = [(v, m) for v, m in means if m is not None and np.isfinite(m["tpr_at_fpr"])]
     x_hi = 1.02
-    for v, m in zip(names, means):
-        if m is None or not np.isfinite(m["tpr_at_fpr"]):
-            continue
+    # Stagger labels of means that sit close together (the trained detectors
+    # pile up near the ceiling): sort by position, push each label further out.
+    order = sorted(range(len(means)),
+                   key=lambda i: (means[i][1]["auroc"], means[i][1]["tpr_at_fpr"]))
+    dy_of: dict[int, int] = {}
+    for rank, i in enumerate(order):
+        prev = order[rank - 1] if rank else None
+        close = prev is not None and (
+            abs(means[i][1]["auroc"] - means[prev][1]["auroc"]) < 0.03
+            and abs(means[i][1]["tpr_at_fpr"] - means[prev][1]["tpr_at_fpr"]) < 0.06)
+        dy_of[i] = (dy_of.get(prev, -2) + 12) if close else 4
+
+    for i, (v, m) in enumerate(means):
         xe, ye = _err(m)
         ax.errorbar([m["auroc"]], [m["tpr_at_fpr"]], xerr=xe, yerr=ye,
                     fmt="o", ms=12, mfc=hue[v], mec="#222222", mew=1.0,
                     ecolor="#222222", elinewidth=1.0, capsize=2.5, zorder=5)
-        # Label away from the right edge / the legend column: past 78% of the
-        # x-range it goes to the marker's left instead.
         right = m["auroc"] > 0.45 + 0.78 * (x_hi - 0.45)
         ax.annotate(v, (m["auroc"], m["tpr_at_fpr"]), textcoords="offset points",
-                    xytext=(-9 if right else 9, 4),
+                    xytext=(-9 if right else 9, dy_of[i]),
                     ha="right" if right else "left", fontsize=7.5,
                     color=_INK, zorder=6,
                     path_effects=[pe.withStroke(linewidth=2, foreground="white")])
