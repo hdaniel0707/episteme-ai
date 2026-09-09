@@ -21,11 +21,17 @@ WHAT IT DOES
   2. print them and ask for confirmation — then one ``gpt-5.6-luna`` call per
      missing row (BILLED), same system prompt + domain hint as
      ``cfg/ai_detection/rephrase/rephrase_v1.yaml``. Checkpointed to
-     ``data/science/rephrase_v1_regen.jsonl`` (resumable; ``--retry-failed``).
+     ``data/science/rephrase_v1_regen.jsonl`` (resumable).
   3. clean / QC / length-runaway gate exactly as ``rephrase_build.step_append``.
   4. append the new rows to the parquet (+ ``.bak``), suite columns Null.
 
-A fresh rephrase that is itself a length-runaway is reported, not spliced.
+A fresh rephrase that is itself a length-runaway is reported, not spliced — it
+stays in the shard as a *successful* call (the API answered; the answer was just
+too short), so re-running does nothing. Force another attempt with ``--force``,
+which drops those keys from the shard first. gpt-5.6-luna sometimes *summarises*
+a long or awkward text instead of rephrasing it and will do so on every retry —
+for those, ``--drop`` removes the whole group (the human row too) so the corpus
+stays paired.
 
 Then fill the suite columns on the new (Null) rows and re-check:
 
@@ -34,13 +40,15 @@ Then fill the suite columns on the new (Null) rows and re-check:
 
     uv run python epai/ai_detection/rollout/rephrase_regen.py --dry-run
     uv run python epai/ai_detection/rollout/rephrase_regen.py --yes
-    uv run python epai/ai_detection/rollout/rephrase_regen.py --ids essay:120 wp:865
+    uv run python epai/ai_detection/rollout/rephrase_regen.py --ids essay:120 --force
+    uv run python epai/ai_detection/rollout/rephrase_regen.py --ids wp:865 --drop
 """
 
 from __future__ import annotations
 
 import argparse
 import difflib
+import json
 import shutil
 from collections import Counter
 from pathlib import Path
@@ -114,9 +122,39 @@ def missing_rephrases(t: pa.Table, ids: list[str] | None, label: str) -> list[st
     return out
 
 
+def prune_shard(rids: list[str], label: str) -> int:
+    """Drop these ids' records from the regen shard so a re-run re-issues them.
+
+    ``run_resumable`` treats a completed call — success OR failure — as done; a
+    rephrase that came back too short is a *success* with a bad answer, so this
+    is the only way to make the model try again.
+    """
+    if not SHARD.is_file():
+        return 0
+    drop = {_key(rid, label) for rid in rids}
+    kept, removed = [], 0
+    for line in SHARD.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            kept.append(line)
+            continue
+        if rec.get("key") in drop:
+            removed += 1
+        else:
+            kept.append(line)
+    if removed:
+        shutil.copy2(SHARD, SHARD.with_suffix(SHARD.suffix + ".bak"))
+        SHARD.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+        print(f"{DIM}  pruned {removed} record(s) from {rel(SHARD)}{RESET}")
+    return removed
+
+
 def generate(rids: list[str], human_text: dict[str, str], domains: dict[str, str],
-             system: str, hints: dict[str, str], label: str,
-             workers: int, retry_failed: bool) -> None:
+             system: str, hints: dict[str, str], label: str, workers: int) -> None:
     """One gpt-5.6-luna call per rid — the same wiring as rephrase_build.step_generate."""
     from dotenv import load_dotenv
     from openai import OpenAI
@@ -129,8 +167,25 @@ def generate(rids: list[str], human_text: dict[str, str], domains: dict[str, str
                           human_text[rid], base_url=None))
         for rid in rids
     ]
-    run_resumable(tasks, Shard(SHARD), max_workers=workers, desc="rephrase",
-                  retry_failed=retry_failed)
+    run_resumable(tasks, Shard(SHARD), max_workers=workers, desc="rephrase")
+
+
+def drop_groups(t: pa.Table, rids: list[str], src: Path, out_path: Path) -> int:
+    """Remove every row (human + any rephrase) for these ids from the parquet."""
+    drop = set(rids)
+    keep_mask = [rid not in drop for rid in
+                 (str(x) for x in t.column("id").to_pylist())]
+    kept = t.filter(pa.array(keep_mask))
+    print(f"  dropping {t.num_rows - kept.num_rows} row(s) across {len(drop)} "
+          f"group(s):")
+    for rid in sorted(drop):
+        print(f"    {rid}")
+    bak = src.with_suffix(src.suffix + ".bak")
+    shutil.copy2(src, bak)
+    print(f"{DIM}  backup → {rel(bak)}{RESET}")
+    pq.write_table(kept, out_path)
+    print(f"\n{GREEN}wrote {kept.num_rows} rows{RESET} → {rel(out_path)}")
+    return 0
 
 
 def splice(t: pa.Table, rids: list[str], label: str, family: dict[str, str],
@@ -229,8 +284,12 @@ def main() -> None:
                     help="rows to regenerate (default: auto-detect the missing ones)")
     ap.add_argument("--workers", type=int, default=8, metavar="N",
                     help="concurrent OpenAI calls (default 8)")
-    ap.add_argument("--retry-failed", action="store_true",
-                    help="re-issue calls the regen shard recorded as failed")
+    ap.add_argument("--force", action="store_true",
+                    help="re-issue the target calls even if the shard already "
+                         "has a (too-short) success for them")
+    ap.add_argument("--drop", action="store_true",
+                    help="don't generate — remove the still-missing groups "
+                         "(human row and all) from the parquet")
     ap.add_argument("--splice-only", action="store_true",
                     help="skip generation, splice what the regen shard already has")
     ap.add_argument("--yes", action="store_true")
@@ -270,22 +329,40 @@ def main() -> None:
     for rid in rids:
         print(f"    {rid:<34} {domains[rid]:<16} human {len(human_text[rid].split()):>5}w")
 
+    if args.drop:
+        if args.dry_run:
+            print(f"\n{DIM}dry-run — would drop {len(rids)} group(s) "
+                  f"→ {rel(out_path)}{RESET}")
+            return
+        print(f"\n{YELLOW}{len(rids)} whole group(s) will be removed from the "
+              f"corpus (human rows too).{RESET}")
+        if not args.yes:
+            if input("proceed? [y/N] ").strip().lower() not in ("y", "yes"):
+                raise SystemExit("aborted.")
+        banner("drop", rel(out_path))
+        drop_groups(t, rids, src, out_path)
+        print(f"\n  next — re-check:")
+        print(f"    .venv/bin/python epai/scripts/check_parquet_completeness.py {rel(out_path)}")
+        return
+
     if args.dry_run:
         already = Shard(SHARD).ok_records() if SHARD.is_file() else {}
-        todo = [rid for rid in rids if _key(rid, label) not in already]
-        print(f"\n{DIM}dry-run — would issue {len(todo)} gpt-5.6-luna call(s) "
-              f"({len(rids) - len(todo)} already in {rel(SHARD)}), then append "
+        pending = rids if args.force else [
+            rid for rid in rids if _key(rid, label) not in already]
+        print(f"\n{DIM}dry-run — would issue {len(pending)} gpt-5.6-luna call(s) "
+              f"({len(rids) - len(pending)} already in {rel(SHARD)}), then append "
               f"up to {len(rids)} row(s) → {rel(out_path)}{RESET}")
         return
 
     if not args.splice_only:
+        if args.force:
+            prune_shard(rids, label)
         print(f"\n{YELLOW}{len(rids)} gpt-5.6-luna call(s) will be made (billed).{RESET}")
         if not args.yes:
             if input("proceed? [y/N] ").strip().lower() not in ("y", "yes"):
                 raise SystemExit("aborted.")
         banner("generate", rel(SHARD))
-        generate(rids, human_text, domains, system, hints, label,
-                 args.workers, args.retry_failed)
+        generate(rids, human_text, domains, system, hints, label, args.workers)
 
     ok = Shard(SHARD).ok_records()
 
