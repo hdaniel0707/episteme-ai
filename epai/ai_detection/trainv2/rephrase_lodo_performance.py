@@ -20,7 +20,10 @@ share one ``id`` and one domain, so a fold never straddles them. Each fold is
 averaged over N seeds; the per-corpus number is the mean over the domain folds,
 its SD the spread ACROSS those folds. Every fold's model is also scored on each
 ``--ood-splits`` corpus (default ``mg_den``). The rephrase-GT best zero-shot
-picks (``best_zeroshot.yaml`` minus any gemma judge) are overlaid.
+picks (``best_zeroshot.yaml`` minus any gemma judge) are scored on the SAME rows
+as the trained models -- each held-out domain fold per rephrase corpus (a
+per-corpus mean +- across-fold SD), the full corpus per OOD split (normal GT,
+no error bar) -- not on the whole dataset.
 
 compute -> CSV -> plot from the CSV:
 
@@ -44,17 +47,32 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
+import pyarrow.parquet as pq
+
 from epai.ai_detection.trainv2._reph_trained import REPH_SPLITS, load_reph_features
 from epai.ai_detection.trainv2._trained import TRAINED_SPECS
-from epai.ai_detection.trainv2.rephrase_best_zeroshot_performance import readings as _zs_readings
-from epai.ai_detection.trainv2.run_best_zeroshot_performance import DEFAULT_CONFIG
+from epai.ai_detection.trainv2._zeroshot import (
+    agg_cell,
+    eval_column,
+    orient,
+    overall_cell,
+    resolve_specs,
+)
+from epai.ai_detection.trainv2.core import eff_fpr_level, goodness
+from epai.ai_detection.trainv2.plot_score_histograms import CORPUS_SOURCES
+from epai.ai_detection.trainv2.plot_score_histograms import PARQUET_DIR as REPH_PARQUET_DIR
+from epai.ai_detection.trainv2.rephrase_best_zeroshot_performance import _pick_columns
+from epai.ai_detection.trainv2.run_best_zeroshot_performance import DEFAULT_CONFIG, _detector
 from epai.ai_detection.trainv2.run_lodo_performance import (
     CSV_FIELDS,
     _fold,
     _load_ood,
     _print_table,
     _std,
+    _zs_row,
 )
+from epai.ai_detection.trainv2.run_zeroshot_performance import FAMILIES as ZS_FAMILIES
+from epai.ai_detection.trainv2.run_zeroshot_performance import compute as zeroshot_compute
 from epai.ai_detection.trainv2.splits import resolve as resolve_splits
 
 BASE = Path(__file__).resolve().parents[3]
@@ -159,14 +177,77 @@ def compute_trained(reph_splits, ood_splits, seeds, fpr, min_domain_rows) -> lis
     return rows
 
 
-def compute_zeroshot(config, ood_splits, fpr) -> list[dict]:
-    return [{
-        "level": "overall" if x["split"] == "mean" else "split",
-        "kind": "zeroshot", "detector": x["detector"], "split": x["split"],
-        "held_out_domain": "", "n_test": x["n"], "n_folds": "", "n_seeds": "",
-        "auroc": x["auroc"], "auroc_std": "",
-        "tpr_at_fpr": x["tpr_at_fpr"], "tpr_at_fpr_std": "",
-    } for x in _zs_readings(config, ood_splits, fpr)]
+def compute_zeroshot(config, reph_splits, ood_splits, seeds, fpr,
+                     min_domain_rows) -> list[dict]:
+    """The rephrase-GT best zero-shot picks, scored on the trained models' own
+    eval rows: each held-out domain fold per rephrase corpus (per-corpus reading
+    = mean +- SD across folds), and the full corpus per OOD split (normal GT,
+    one deterministic reading). ``fold`` / ``split`` / ``overall`` rows."""
+    picked = _pick_columns(config)
+    n_seeds = len(seeds)
+    per_det: dict[str, list[dict]] = {}
+    rows: list[dict] = []
+
+    for split_key in reph_splits:
+        c = CORPUS_SOURCES[split_key]
+        avail: set[str] | None = None
+        for pf in (c["full"], c["reph"]):
+            s = set(pq.read_schema(REPH_PARQUET_DIR / pf).names)
+            avail = s if avail is None else (avail & s)
+        specs = resolve_specs(avail, config, columns=picked)
+        if not specs:
+            continue
+        _, y, _, dom, _, raw = load_reph_features(
+            split_key, score_cols=tuple(col for col, _, _ in specs))
+        counts = {d: int((dom == d).sum()) for d in np.unique(dom)}
+        domains = sorted(d for d, n in counts.items()
+                         if n >= min_domain_rows
+                         and np.unique(y[dom == d]).size == 2)
+        if len(domains) < 2:
+            continue
+        for col, det, machine_is_high in specs:
+            o = orient(raw[col], machine_is_high)
+            fold_reads = []
+            for d in domains:
+                te = dom == d
+                a, t, te_ = eval_column(o[te], y[te], fpr)
+                fold_reads.append((a, t, te_))
+                gd = (goodness(a, te_, "hmean")
+                      if np.isfinite(a) and np.isfinite(te_) else float("nan"))
+                rows.append(_zs_row(det, "fold", split_key, d, {
+                    "auroc": a, "tpr_at_fpr": t, "tpr_eff": te_,
+                    "eff_fpr": eff_fpr_level(int((y[te] == 0).sum()), fpr),
+                    "goodness": gd, "n_test": int(te.sum())}, "", n_seeds))
+            cell = agg_cell([r[0] for r in fold_reads], [r[1] for r in fold_reads],
+                            [r[2] for r in fold_reads], "hmean")
+            cell["reachable"] = any(
+                int((y[dom == d] == 0).sum()) >= 1 / fpr for d in domains)
+            cell["eff_fpr"] = float(np.mean(
+                [eff_fpr_level(int((y[dom == d] == 0).sum()), fpr) for d in domains]))
+            rows.append(_zs_row(det, "split", split_key, "", cell,
+                                len(domains), n_seeds))
+            per_det.setdefault(det, []).append({**cell, "split": split_key})
+
+    for name, path in ood_splits:
+        for r in zeroshot_compute([(name, path)], ZS_FAMILIES, picked, fpr, "human"):
+            if r["split"] == "mean":
+                continue
+            det = _detector(r["family"], r["version"])
+            cell = {
+                "auroc": r["auroc"], "auroc_std": float("nan"),
+                "tpr_at_fpr": r["tpr_at_fpr"], "tpr_at_fpr_std": float("nan"),
+                "tpr_eff": r.get("tpr_eff", ""), "tpr_eff_std": float("nan"),
+                "goodness": float("nan"), "goodness_std": float("nan"),
+                "eff_fpr": r.get("eff_fpr", ""), "n_test": r["n"],
+                "reachable": bool(r.get("reachable")),
+            }
+            rows.append(_zs_row(det, "split", r["split"], "", cell, "", n_seeds))
+            per_det.setdefault(det, []).append({**cell, "split": r["split"]})
+
+    for det, cells in per_det.items():
+        rows.append(_zs_row(det, "overall", "mean", "", overall_cell(cells, fpr),
+                            "", n_seeds))
+    return rows
 
 
 def plots_from_csv(csv_path: Path, meta: dict, out_dir: Path) -> None:
@@ -229,7 +310,8 @@ def main() -> int:
     if not any(r["level"] == "overall" for r in rows):
         raise SystemExit("no corpus had >= 2 usable domains")
     if not args.no_zeroshot:
-        rows += compute_zeroshot(args.zeroshot_config, ood_splits, args.fpr)
+        rows += compute_zeroshot(args.zeroshot_config, reph_splits, ood_splits,
+                                 args.seeds, args.fpr, args.min_domain_rows)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     csv_path = args.out_dir / "performance.csv"

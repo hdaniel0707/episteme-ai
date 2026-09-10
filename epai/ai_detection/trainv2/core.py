@@ -123,6 +123,23 @@ def eff_fpr_level(n_human: int, target: float) -> float:
     return min(_EFF_FPR_CAP, max(target, 1.0 / n_human + 1e-9))
 
 
+def goodness(auroc_val: float, tpr: float, how: str = "hmean") -> float:
+    """Fold ranking + operating point into ``[0, 1]``. ``G = 2*AUROC - 1``
+    (Gini, clipped at 0), ``T = TPR`` (clipped at 0), combined by ``how``
+    (``hmean`` weakest-link default, ``gmean``, or ``amean``).
+
+    Shared by the goodness-bar figure (:func:`epai.ai_detection.trainv2.plots.
+    goodness_bars`) and the trained runners, which compute it per seed / fold so
+    the bar can carry a real SD."""
+    g = max(0.0, 2.0 * float(auroc_val) - 1.0)
+    t = max(0.0, float(tpr))
+    if how == "amean":
+        return (g + t) / 2.0
+    if how == "gmean":
+        return (g * t) ** 0.5
+    return 2.0 * g * t / (g + t) if (g + t) > 0 else 0.0
+
+
 # ---------------------------------------------------------------------------
 # Fit + evaluate one variant, over every seed — shared by every runner
 # ---------------------------------------------------------------------------

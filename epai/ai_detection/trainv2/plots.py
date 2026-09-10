@@ -16,6 +16,8 @@ import numpy as np
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+from .core import goodness as _goodness
+
 _PALETTE = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#4a3aa7",
             "#008300", "#e34948"]
 _SURFACE = "#fcfcfb"
@@ -465,18 +467,6 @@ _COMBINE_LABEL = {"hmean": "harmonic mean", "gmean": "geometric mean",
 _COMBINE_EXPR = {"hmean": "HM", "gmean": "GM", "amean": "mean"}
 
 
-def _goodness(auroc: float, tpr: float, how: str) -> float:
-    """Fold ranking + operating point into [0, 1]. ``G = 2*AUROC - 1`` (Gini,
-    clipped at 0), ``T = TPR`` (clipped at 0), combined by ``how``."""
-    g = max(0.0, 2.0 * float(auroc) - 1.0)
-    t = max(0.0, float(tpr))
-    if how == "amean":
-        return (g + t) / 2.0
-    if how == "gmean":
-        return (g * t) ** 0.5
-    return 2.0 * g * t / (g + t) if (g + t) > 0 else 0.0
-
-
 def goodness_bars(
     rows: list[dict], meta: dict, path: Path, *, key: str = "version",
     title: str = "", combine: str = "hmean",
@@ -513,8 +503,18 @@ def goodness_bars(
         return (t if t is not None else _f(c.get("tpr_at_fpr")) or 0.0)
 
     def _score(c: dict) -> float | None:
+        # the runner stores a per-seed / per-fold goodness mean when it has
+        # replicates (in_domain / lodo, trained AND zero-shot); fall back to
+        # recomputing from AUROC + eff-FPR TPR for the CSVs that don't.
+        stored = _f(c.get("goodness"))
+        if stored is not None:
+            return stored
         return None if _f(c.get("auroc")) is None else _goodness(
             c["auroc"], _tpr(c), combine)
+
+    def _score_std(c: dict) -> float | None:
+        sd = _f(c.get("goodness_std"))
+        return sd if sd is not None and sd > 0 else None
 
     # rank detectors by their pooled-'mean' score, else the mean over groups
     def _rank(det: str) -> float:
@@ -535,6 +535,7 @@ def goodness_bars(
         ax.spines[spine].set_visible(False)
 
     loosened: dict[str, float] = {}
+    drew_err = False
     for gi, g in enumerate(groups):
         for di, det in enumerate(dets):
             c = _cell(det, g)
@@ -542,8 +543,12 @@ def goodness_bars(
             if score is None:
                 continue
             x = gi + (di - (n - 1) / 2) * bw
+            sd = _score_std(c)
+            drew_err = drew_err or sd is not None
             ax.bar(x, score, bw * 0.92, color=dcol(det), edgecolor="#222222",
-                   linewidth=0.4, zorder=3)
+                   linewidth=0.4, zorder=3,
+                   yerr=sd, error_kw=dict(ecolor="#222222", elinewidth=0.9,
+                                          capsize=2.0))
             ef = _f(c.get("eff_fpr"))
             if ef is not None and ef > meta["fpr"] + 1e-6:
                 loosened[g] = ef
@@ -575,12 +580,18 @@ def goodness_bars(
     ax.set_title(title or f"detector goodness across the MANUGRAM splits "
                  f"({_COMBINE_LABEL[combine]} of Gini and oracle "
                  f"TPR@{meta['fpr'] * 100:g}%FPR)", fontsize=10.5, color=_INK)
+    notes = []
+    if drew_err:
+        notes.append("error bar = SD of the per-seed / per-fold goodness "
+                     "(zero-shot on the same eval rows as the trained models); "
+                     "the 'mean' group's bar is the mean per-split SD.")
     if loosened:
-        fig.text(0.02, 0.008,
-                 "@ n.nn% FPR: 1%-FPR unreachable on that few humans; TPR read "
-                 "at the smallest achievable FPR (one human flagged).",
+        notes.append("@ n.nn% FPR: 1%-FPR unreachable on that few humans; TPR "
+                     "read at the smallest achievable FPR (one human flagged).")
+    for i, note in enumerate(notes):
+        fig.text(0.02, 0.008 + 0.018 * (len(notes) - 1 - i), note,
                  fontsize=7, color=_MUTED)
-    fig.tight_layout(rect=(0, 0.03 if loosened else 0, 1, 1))
+    fig.tight_layout(rect=(0, 0.03 + 0.02 * (len(notes) - 1) if notes else 0, 1, 1))
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=150, facecolor="white", bbox_inches="tight")
     plt.close(fig)

@@ -44,17 +44,27 @@ def _stack(s: pd.Series) -> np.ndarray:
     return np.asarray(np.stack(s.to_numpy()), dtype=np.float32)
 
 
-def load_features(path: Path, group_col: str, human_label: str):
+def load_features(path: Path, group_col: str, human_label: str,
+                  *, score_cols: tuple[str, ...] = ()):
     """``(X_emb, y, Z_cue, groups)``. A group is dropped whole if ANY of its
     rows is missing EITHER feature, so every spec (aux or not) trains and
-    scores on the identical rows."""
-    df = pd.read_parquet(path, columns=[group_col, GEN_COL, EMB_COL, AUX_COL])
+    scores on the identical rows.
+
+    With ``score_cols`` (raw zero-shot columns, all assumed present in the
+    parquet), a 5th element is returned: ``{col: float_array}`` aligned to the
+    same surviving rows -- so a zero-shot pick can be scored on the trained
+    models' exact eval partition. NaNs are left in place."""
+    cols = list(dict.fromkeys([group_col, GEN_COL, EMB_COL, AUX_COL, *score_cols]))
+    df = pd.read_parquet(path, columns=cols)
     bad = df[EMB_COL].map(_is_missing) | df[AUX_COL].map(_is_missing)
     if bad.any():
         df = df[~df[group_col].isin(df.loc[bad, group_col].unique())]
     df = df.reset_index(drop=True)
     y = (df[GEN_COL].to_numpy() != human_label).astype(int)
-    return _stack(df[EMB_COL]), y, _stack(df[AUX_COL]), df[group_col].to_numpy()
+    feats = (_stack(df[EMB_COL]), y, _stack(df[AUX_COL]), df[group_col].to_numpy())
+    if score_cols:
+        return (*feats, {c: df[c].to_numpy(dtype=float) for c in score_cols})
+    return feats
 
 
 def fit(spec: dict, X, y, Z, groups, idx, seed: int):

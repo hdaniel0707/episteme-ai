@@ -100,33 +100,6 @@ def compute(df: pd.DataFrame, columns: list[str], fpr: float) -> list[dict]:
     return rows
 
 
-def readings(config: Path, ood_splits: list, fpr: float) -> list[dict]:
-    """``{detector, split, n, auroc, tpr_at_fpr}`` for overlaying the best
-    zero-shot picks on the trained figures: rephrase-GT on MG-GB / MG-Sci (+ the
-    ``mean``), and normal GT (human vs. that generator) on each OOD split."""
-    from epai.ai_detection.trainv2.run_zeroshot_performance import (
-        FAMILIES as _ZSF,
-    )
-    from epai.ai_detection.trainv2.run_zeroshot_performance import compute as _zsc
-
-    cols = _pick_columns(config)
-    out: list[dict] = []
-    for r in compute(build(cols), cols, fpr):
-        if r["split"] == "all":
-            continue
-        out.append({"detector": r["detector"], "split": r["split"],
-                    "n": r.get("n", ""), "auroc": r["auroc"],
-                    "tpr_at_fpr": r["tpr_at_fpr"]})
-    for name, path in ood_splits:
-        for r in _zsc([(name, path)], _ZSF, cols, fpr, "human"):
-            if r["split"] == "mean":
-                continue
-            out.append({"detector": _detector(r["family"], r["version"]),
-                        "split": r["split"], "n": r["n"],
-                        "auroc": r["auroc"], "tpr_at_fpr": r["tpr_at_fpr"]})
-    return out
-
-
 def plots_from_csv(csv_path: Path, meta: dict, out_dir: Path) -> None:
     from epai.ai_detection.trainv2.plots import zeroshot_scatter
 

@@ -14,8 +14,10 @@ over N seeds. The label:
 
 Every fitted model is ALSO scored, unchanged, on each ``--ood-splits`` corpus
 (default ``mg_den`` -- human vs. denario, never trained on). The rephrase-GT
-best zero-shot picks (``best_zeroshot.yaml`` minus any gemma judge) are overlaid
-for reference.
+best zero-shot picks (``best_zeroshot.yaml`` minus any gemma judge) are scored
+on the SAME rows as the trained models -- each seed's 70/30 test partition per
+rephrase corpus (a seed mean +- SD, like a trained point), the full corpus per
+OOD split (normal GT, no error bar) -- not on the whole dataset.
 
 compute -> CSV -> plot from the CSV:
 
@@ -39,11 +41,22 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
+import pyarrow.parquet as pq
+
 from epai.ai_detection.trainv2._reph_trained import REPH_SPLITS, load_reph_features
 from epai.ai_detection.trainv2._trained import TRAINED_SPECS, eval_on, fit, load_features
+from epai.ai_detection.trainv2._zeroshot import (
+    agg_cell,
+    eval_column,
+    orient,
+    overall_cell,
+    resolve_specs,
+)
 from epai.ai_detection.trainv2.core import grouped_split
-from epai.ai_detection.trainv2.rephrase_best_zeroshot_performance import readings as _zs_readings
-from epai.ai_detection.trainv2.run_best_zeroshot_performance import DEFAULT_CONFIG
+from epai.ai_detection.trainv2.plot_score_histograms import CORPUS_SOURCES
+from epai.ai_detection.trainv2.plot_score_histograms import PARQUET_DIR as REPH_PARQUET_DIR
+from epai.ai_detection.trainv2.rephrase_best_zeroshot_performance import _pick_columns
+from epai.ai_detection.trainv2.run_best_zeroshot_performance import DEFAULT_CONFIG, _detector
 from epai.ai_detection.trainv2.run_in_domain_performance import (
     CSV_FIELDS,
     _overall_cell,
@@ -51,6 +64,8 @@ from epai.ai_detection.trainv2.run_in_domain_performance import (
     _row,
     _std,
 )
+from epai.ai_detection.trainv2.run_zeroshot_performance import FAMILIES as ZS_FAMILIES
+from epai.ai_detection.trainv2.run_zeroshot_performance import compute as zeroshot_compute
 from epai.ai_detection.trainv2.splits import resolve as resolve_splits
 
 BASE = Path(__file__).resolve().parents[3]
@@ -119,14 +134,59 @@ def compute_trained(reph_splits, ood_splits, seeds, test_size, fpr) -> list[dict
     return rows
 
 
-def compute_zeroshot(config, ood_splits, fpr) -> list[dict]:
-    return [{
-        "kind": "zeroshot", "detector": x["detector"], "split": x["split"],
-        "role": "overall" if x["split"] == "mean" else "eval",
-        "n_train": "", "n_test": x["n"], "n_seeds": "",
-        "auroc": x["auroc"], "auroc_std": "",
-        "tpr_at_fpr": x["tpr_at_fpr"], "tpr_at_fpr_std": "",
-    } for x in _zs_readings(config, ood_splits, fpr)]
+def compute_zeroshot(config, reph_splits, ood_splits, seeds, test_size, fpr) -> list[dict]:
+    """The rephrase-GT best zero-shot picks, scored on the trained models' own
+    eval rows: each seed's 70/30 test partition per rephrase corpus (mean +- SD
+    over seeds, rephrase-as-human label), and the full corpus per OOD split
+    (normal GT, one deterministic reading)."""
+    picked = _pick_columns(config)
+    per_det: dict[str, list[dict]] = {}
+
+    def _add(det: str, cell: dict) -> None:
+        per_det.setdefault(det, []).append(cell)
+
+    for split_key in reph_splits:
+        c = CORPUS_SOURCES[split_key]
+        avail: set[str] | None = None
+        for pf in (c["full"], c["reph"]):
+            s = set(pq.read_schema(REPH_PARQUET_DIR / pf).names)
+            avail = s if avail is None else (avail & s)
+        specs = resolve_specs(avail, config, columns=picked)
+        if not specs:
+            continue
+        _, y, _, _, groups, raw = load_reph_features(
+            split_key, score_cols=tuple(col for col, _, _ in specs))
+        te_by_seed = [grouped_split(y, groups, test_size, s)[1] for s in seeds]
+        n_te = int(len(te_by_seed[0]))
+        for col, det, machine_is_high in specs:
+            o = orient(raw[col], machine_is_high)
+            reads = [eval_column(o[te], y[te], fpr) for te in te_by_seed]
+            cell = agg_cell([r[0] for r in reads], [r[1] for r in reads],
+                            [r[2] for r in reads], "hmean")
+            cell.update(split=split_key, role="eval", n_test=n_te,
+                        n_seeds=len(seeds))
+            _add(det, cell)
+
+    for name, path in ood_splits:
+        for r in zeroshot_compute([(name, path)], ZS_FAMILIES, picked, fpr, "human"):
+            if r["split"] == "mean":
+                continue
+            _add(_detector(r["family"], r["version"]), {
+                "split": r["split"], "role": "ood", "n_test": r["n"],
+                "n_seeds": len(seeds),
+                "auroc": r["auroc"], "auroc_std": float("nan"),
+                "tpr_at_fpr": r["tpr_at_fpr"], "tpr_at_fpr_std": float("nan"),
+                "tpr_eff": r.get("tpr_eff", ""), "tpr_eff_std": float("nan"),
+            })
+
+    out: list[dict] = []
+    for det, cells in per_det.items():
+        for cc in cells:
+            out.append(_row(det, cc["split"], cc["role"], cc, kind="zeroshot"))
+        mean = overall_cell(cells, fpr)
+        mean.update(n_seeds=len(seeds))
+        out.append(_row(det, "mean", "overall", mean, kind="zeroshot"))
+    return out
 
 
 def plots_from_csv(csv_path, meta, out_dir) -> None:
@@ -187,7 +247,8 @@ def main() -> int:
 
     rows = compute_trained(reph_splits, ood_splits, args.seeds, args.test_size, args.fpr)
     if not args.no_zeroshot:
-        rows += compute_zeroshot(args.zeroshot_config, ood_splits, args.fpr)
+        rows += compute_zeroshot(args.zeroshot_config, reph_splits, ood_splits,
+                                 args.seeds, args.test_size, args.fpr)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     csv_path = args.out_dir / "performance.csv"

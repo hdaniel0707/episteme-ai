@@ -32,15 +32,22 @@ Only splits with >= 2 domains of at least ``--min-domain-rows`` rows are used
 is GB-orig / MG-GB / MG-Sci, 3 domains each.
 
 The zero-shot picks from ``cfg/ai_detection/trainv2/best_zeroshot.yaml`` are
-scored on each full split (no folding — nothing is trained) and overlaid for
-reference, with no error bars.
+scored on the SAME rows as the trained models: each held-out domain fold per
+LODO split (per-split reading = mean +- SD across the domain folds, exactly
+like a trained one), and the full corpus per OOD split (one deterministic
+reading, no error bar). Not on the whole dataset — so the two detector kinds
+are compared on identical data.
+
+The goodness bar folds AUROC + oracle TPR into one score PER FOLD, so its bar
+carries the across-fold SD too (``goodness`` / ``goodness_std`` in the CSV).
 
 compute -> CSV -> plot from the CSV:
 
     results/trainv2/lodo_performance/
         performance.csv   level (fold/split/overall), kind, detector, split,
                           held_out_domain, n_test, n_folds, n_seeds,
-                          auroc, auroc_std, tpr_at_fpr, tpr_at_fpr_std
+                          auroc(_std), tpr_at_fpr(_std), tpr_eff(_std), eff_fpr,
+                          goodness(_std)
         lodo.png
 
 Run:
@@ -67,15 +74,16 @@ from epai.ai_detection.trainv2._trained import (
     eval_on,
     fit,
 )
-from epai.ai_detection.trainv2.core import eff_fpr_level
-from epai.ai_detection.trainv2.data import GEN_COL, _is_missing
-from epai.ai_detection.trainv2.run_best_zeroshot_performance import (
-    DEFAULT_CONFIG,
-    _detector,
-    _load_columns,
+from epai.ai_detection.trainv2._zeroshot import (
+    agg_cell,
+    eval_column,
+    orient,
+    overall_cell,
+    resolve_specs,
 )
-from epai.ai_detection.trainv2.run_zeroshot_performance import FAMILIES
-from epai.ai_detection.trainv2.run_zeroshot_performance import compute as zeroshot_compute
+from epai.ai_detection.trainv2.core import eff_fpr_level, goodness
+from epai.ai_detection.trainv2.data import GEN_COL, _is_missing
+from epai.ai_detection.trainv2.run_best_zeroshot_performance import DEFAULT_CONFIG
 from epai.ai_detection.trainv2.splits import resolve as resolve_splits
 
 BASE_DIR = Path(__file__).resolve().parents[3]
@@ -89,14 +97,20 @@ GROUP_COL = "id"
 
 CSV_FIELDS = ["level", "kind", "detector", "split", "held_out_domain", "n_test",
               "n_folds", "n_seeds", "auroc", "auroc_std", "tpr_at_fpr",
-              "tpr_at_fpr_std", "tpr_eff", "tpr_eff_std", "eff_fpr"]
+              "tpr_at_fpr_std", "tpr_eff", "tpr_eff_std", "eff_fpr",
+              "goodness", "goodness_std"]
 
 
-def _load(path: Path, human_label: str):
+def _load(path: Path, human_label: str, *, score_cols: tuple[str, ...] = ()):
     """``(X_emb, y, Z_cue, dom, ids)``. Group dropped whole on ANY missing
-    feature; a group must sit in one domain (checked)."""
-    df = pd.read_parquet(path, columns=[GROUP_COL, DOMAIN_COL, GEN_COL,
-                                        EMB_COL, AUX_COL])
+    feature; a group must sit in one domain (checked).
+
+    With ``score_cols`` (raw zero-shot columns, all present in the parquet), a
+    6th element ``{col: float_array}`` aligned to the surviving rows is
+    returned -- for scoring a zero-shot pick on each held-out domain fold."""
+    cols = list(dict.fromkeys([GROUP_COL, DOMAIN_COL, GEN_COL, EMB_COL, AUX_COL,
+                               *score_cols]))
+    df = pd.read_parquet(path, columns=cols)
     bad = df[EMB_COL].map(_is_missing) | df[AUX_COL].map(_is_missing)
     if bad.any():
         df = df[~df[GROUP_COL].isin(df.loc[bad, GROUP_COL].unique())]
@@ -105,19 +119,28 @@ def _load(path: Path, human_label: str):
     if (span > 1).any():
         raise SystemExit(f"{path.name}: {int((span > 1).sum())} group(s) span "
                          f"more than one domain — LODO would split them")
-    return (_stack(df[EMB_COL]),
-            (df[GEN_COL].to_numpy() != human_label).astype(int),
-            _stack(df[AUX_COL]), df[DOMAIN_COL].astype(str).to_numpy(),
-            df[GROUP_COL].to_numpy())
+    out = (_stack(df[EMB_COL]),
+           (df[GEN_COL].to_numpy() != human_label).astype(int),
+           _stack(df[AUX_COL]), df[DOMAIN_COL].astype(str).to_numpy(),
+           df[GROUP_COL].to_numpy())
+    if score_cols:
+        return (*out, {c: df[c].to_numpy(dtype=float) for c in score_cols})
+    return out
 
 
-def _load_ood(path: Path, human_label: str):
-    """Full-corpus eval set (never trained on): (X, y, Z, n_human)."""
-    df = pd.read_parquet(path, columns=[GEN_COL, EMB_COL, AUX_COL])
+def _load_ood(path: Path, human_label: str, *, score_cols: tuple[str, ...] = ()):
+    """Full-corpus eval set (never trained on): (X, y, Z, n_human). With
+    ``score_cols``, a 5th element ``{col: float_array}`` aligned to the same
+    rows (feature-missing rows dropped) is returned."""
+    cols = list(dict.fromkeys([GEN_COL, EMB_COL, AUX_COL, *score_cols]))
+    df = pd.read_parquet(path, columns=cols)
     bad = df[EMB_COL].map(_is_missing) | df[AUX_COL].map(_is_missing)
     df = df[~bad].reset_index(drop=True)
     y = (df[GEN_COL].to_numpy() != human_label).astype(int)
-    return _stack(df[EMB_COL]), y, _stack(df[AUX_COL]), int((y == 0).sum())
+    out = _stack(df[EMB_COL]), y, _stack(df[AUX_COL]), int((y == 0).sum())
+    if score_cols:
+        return (*out, {c: df[c].to_numpy(dtype=float) for c in score_cols})
+    return out
 
 
 def _fold(spec, X, y, Z, groups, tr, te, seeds, fpr, ood_sets) -> dict:
@@ -145,7 +168,7 @@ def _std(vals: list[float]) -> float:
 
 
 def compute_trained(splits, ood_splits, seeds, fpr, human_label,
-                    min_domain_rows) -> list[dict]:
+                    min_domain_rows, combine) -> list[dict]:
     ood_sets = {name: _load_ood(path, human_label) for name, path in ood_splits}
     for name, (_, oy, _, n_h) in ood_sets.items():
         print(f"  OOD eval corpus {name!r}: {len(oy)} rows, {n_h} human (never trained on)")
@@ -197,7 +220,8 @@ def compute_trained(splits, ood_splits, seeds, fpr, human_label,
         split_rows: list[dict] = []
         for split_key, spec_folds in all_folds.items():
             folds = spec_folds[spec_key]
-            for f in folds:
+            gf = [goodness(f["auroc"], f["tpr_eff"], combine) for f in folds]
+            for f, gfi in zip(folds, gf):
                 rows.append({
                     "level": "fold", "kind": "trained", "detector": detector,
                     "split": split_key, "held_out_domain": f["held_out_domain"],
@@ -205,7 +229,7 @@ def compute_trained(splits, ood_splits, seeds, fpr, human_label,
                     "auroc": f["auroc"], "auroc_std": "",
                     "tpr_at_fpr": f["tpr_at_fpr"], "tpr_at_fpr_std": "",
                     "tpr_eff": f["tpr_eff"], "tpr_eff_std": "",
-                    "eff_fpr": f["eff_fpr"],
+                    "eff_fpr": f["eff_fpr"], "goodness": gfi, "goodness_std": "",
                 })
             ok = [f for f in folds if f["n_test_human"] >= 1 / fpr]
             sr = {
@@ -219,6 +243,7 @@ def compute_trained(splits, ood_splits, seeds, fpr, human_label,
                 "tpr_eff": float(np.mean([f["tpr_eff"] for f in folds])),
                 "tpr_eff_std": _std([f["tpr_eff"] for f in folds]),
                 "eff_fpr": float(np.mean([f["eff_fpr"] for f in folds])),
+                "goodness": float(np.mean(gf)), "goodness_std": _std(gf),
             }
             rows.append(sr)
             split_rows.append(sr)
@@ -227,6 +252,7 @@ def compute_trained(splits, ood_splits, seeds, fpr, human_label,
             reads = ood_reads[spec_key][name]
             oa, ot = [r[0] for r in reads], [r[1] for r in reads]
             ote = [r[2] for r in reads]
+            og = [goodness(a, te, combine) for a, te in zip(oa, ote)]
             sr = {
                 "level": "split", "kind": "trained", "detector": detector,
                 "split": name, "held_out_domain": "", "n_test": "",
@@ -236,6 +262,7 @@ def compute_trained(splits, ood_splits, seeds, fpr, human_label,
                 "tpr_at_fpr": float(np.mean(ot)), "tpr_at_fpr_std": _std(ot),
                 "tpr_eff": float(np.mean(ote)), "tpr_eff_std": _std(ote),
                 "eff_fpr": eff_fpr_level(n_h, fpr),
+                "goodness": float(np.mean(og)), "goodness_std": _std(og),
             }
             rows.append(sr)
             split_rows.append(sr)
@@ -253,25 +280,108 @@ def compute_trained(splits, ood_splits, seeds, fpr, human_label,
             "tpr_eff": float(np.mean([r["tpr_eff"] for r in split_rows])),
             "tpr_eff_std": float(np.mean([r["tpr_eff_std"] for r in split_rows])),
             "eff_fpr": fpr,
+            "goodness": float(np.mean([r["goodness"] for r in split_rows])),
+            "goodness_std": float(np.mean([r["goodness_std"] for r in split_rows])),
         })
     return rows
 
 
-def compute_zeroshot(splits, cols, fpr, human_label) -> list[dict]:
-    out: list[dict] = []
-    for r in zeroshot_compute(splits, FAMILIES, cols, fpr, human_label):
-        out.append({
-            "level": "overall" if r["split"] == "mean" else "split",
-            "kind": "zeroshot", "detector": _detector(r["family"], r["version"]),
-            "split": r["split"], "held_out_domain": "",
-            "n_test": r["n"] if r["split"] != "mean" else "",
-            "n_folds": "", "n_seeds": "",
-            "auroc": r["auroc"], "auroc_std": "",
-            "tpr_at_fpr": r["tpr_at_fpr"], "tpr_at_fpr_std": "",
-            "tpr_eff": r.get("tpr_eff", ""), "tpr_eff_std": "",
-            "eff_fpr": r.get("eff_fpr", ""),
-        })
-    return out
+def _zs_row(det: str, level: str, split: str, domain: str, cell: dict,
+            n_folds, n_seeds) -> dict:
+    return {
+        "level": level, "kind": "zeroshot", "detector": det, "split": split,
+        "held_out_domain": domain, "n_test": cell.get("n_test", ""),
+        "n_folds": n_folds, "n_seeds": n_seeds,
+        "auroc": cell["auroc"], "auroc_std": cell.get("auroc_std", ""),
+        "tpr_at_fpr": cell["tpr_at_fpr"], "tpr_at_fpr_std": cell.get("tpr_at_fpr_std", ""),
+        "tpr_eff": cell.get("tpr_eff", ""), "tpr_eff_std": cell.get("tpr_eff_std", ""),
+        "eff_fpr": cell.get("eff_fpr", ""),
+        "goodness": cell.get("goodness", ""), "goodness_std": cell.get("goodness_std", ""),
+    }
+
+
+def compute_zeroshot(splits, ood_splits, config, seeds, fpr, human_label,
+                     min_domain_rows, combine) -> list[dict]:
+    """The ``best_zeroshot.yaml`` picks, scored on the trained models' own eval
+    rows: each held-out domain fold per LODO split (per-split reading = mean +-
+    SD across the domain folds, matching the trained per-split SD), and the full
+    corpus per OOD split (one deterministic reading). ``fold`` / ``split`` /
+    ``overall`` rows, same as ``compute_trained``."""
+    import pyarrow.parquet as pq
+
+    n_seeds = len(seeds)
+    per_det: dict[str, list[dict]] = {}
+
+    def _add(det: str, cell: dict) -> None:
+        per_det.setdefault(det, []).append(cell)
+
+    rows: list[dict] = []
+
+    for split_key, path in splits:
+        specs = resolve_specs(pq.read_schema(path).names, config)
+        if not specs:
+            continue
+        _, y, _, dom, _, raw = _load(
+            path, human_label, score_cols=tuple(c for c, _, _ in specs))
+        counts = {d: int((dom == d).sum()) for d in np.unique(dom)}
+        domains = sorted(d for d, n in counts.items()
+                         if n >= min_domain_rows
+                         and np.unique(y[dom == d]).size == 2)
+        if len(domains) < 2:
+            continue
+        for col, det, machine_is_high in specs:
+            o = orient(raw[col], machine_is_high)
+            fold_reads, per_fold_rows = [], []
+            for d in domains:
+                te = dom == d
+                a, t, te_ = eval_column(o[te], y[te], fpr)
+                fold_reads.append((a, t, te_))
+                gd = (goodness(a, te_, combine)
+                      if np.isfinite(a) and np.isfinite(te_) else float("nan"))
+                per_fold_rows.append(_zs_row(
+                    det, "fold", split_key, d,
+                    {"auroc": a, "tpr_at_fpr": t, "tpr_eff": te_,
+                     "eff_fpr": eff_fpr_level(int((y[te] == 0).sum()), fpr),
+                     "goodness": gd, "n_test": int(te.sum())}, "", n_seeds))
+            rows.extend(per_fold_rows)
+            cell = agg_cell([r[0] for r in fold_reads], [r[1] for r in fold_reads],
+                            [r[2] for r in fold_reads], combine)
+            cell["reachable"] = any(
+                int((y[dom == d] == 0).sum()) >= 1 / fpr for d in domains)
+            cell["eff_fpr"] = float(np.mean(
+                [eff_fpr_level(int((y[dom == d] == 0).sum()), fpr) for d in domains]))
+            rows.append(_zs_row(det, "split", split_key, "", cell,
+                                len(domains), n_seeds))
+            _add(det, {**cell, "split": split_key})
+
+    for split_key, path in ood_splits:
+        specs = resolve_specs(pq.read_schema(path).names, config)
+        if not specs:
+            continue
+        # same rows as the trained OOD reading (_load_ood: feature-missing rows
+        # dropped), plus the score columns aligned.
+        _, y2, _, _, raw = _load_ood(
+            path, human_label, score_cols=tuple(c for c, _, _ in specs))
+        for col, det, machine_is_high in specs:
+            a, t, te_ = eval_column(orient(raw[col], machine_is_high), y2, fpr)
+            gd = (goodness(a, te_, combine)
+                  if np.isfinite(a) and np.isfinite(te_) else float("nan"))
+            cell = {
+                "auroc": a, "auroc_std": float("nan"),
+                "tpr_at_fpr": t, "tpr_at_fpr_std": float("nan"),
+                "tpr_eff": te_, "tpr_eff_std": float("nan"),
+                "goodness": gd, "goodness_std": float("nan"),
+                "eff_fpr": eff_fpr_level(int((y2 == 0).sum()), fpr),
+                "n_test": int(len(y2)),
+                "reachable": int((y2 == 0).sum()) >= 1 / fpr,
+            }
+            rows.append(_zs_row(det, "split", split_key, "", cell, "", n_seeds))
+            _add(det, {**cell, "split": split_key})
+
+    for det, cells in per_det.items():
+        mean = overall_cell(cells, fpr)
+        rows.append(_zs_row(det, "overall", "mean", "", mean, "", n_seeds))
+    return rows
 
 
 def plots_from_csv(csv_path: Path, meta: dict, out_dir: Path) -> None:
@@ -287,9 +397,10 @@ def plots_from_csv(csv_path: Path, meta: dict, out_dir: Path) -> None:
     ood = "/".join(meta["ood"])
     zeroshot_scatter(
         rows, meta, out_dir / "lodo.png", key="detector",
-        title=f"Leave-one-domain-out trained, plus {ood} as eval-only OOD, "
-              f"vs. zero-shot picks\nAUROC vs. oracle TPR@{meta['fpr'] * 100:g}%FPR "
-              f"— trained mean error bar = mean per-corpus SD",
+        title=f"Leave-one-domain-out, plus {ood} as eval-only OOD — trained vs. "
+              f"zero-shot picks on the same eval rows\nAUROC vs. oracle "
+              f"TPR@{meta['fpr'] * 100:g}%FPR — per-split bar = across-fold SD, "
+              f"mean marker = mean per-split SD",
     )
     goodness_bars(
         rows, meta, out_dir / "lodo_goodness.png", key="detector",
@@ -365,14 +476,16 @@ def main() -> None:
           f"   seeds: {args.seeds}\n")
 
     rows = compute_trained(splits, ood_splits, args.seeds, args.fpr,
-                           args.human_label, args.min_domain_rows)
+                           args.human_label, args.min_domain_rows, args.combine)
     if not any(r["level"] == "overall" for r in rows):
         raise SystemExit("no split had >= 2 usable domains")
 
     if not args.no_zeroshot:
-        cols = _load_columns(args.zeroshot_config)
-        print(f"zero-shot: {cols}")
-        rows += compute_zeroshot(splits + ood_splits, cols, args.fpr, args.human_label)
+        print(f"zero-shot: {args.zeroshot_config} "
+              f"(scored on the held-out domain folds)")
+        rows += compute_zeroshot(splits, ood_splits, args.zeroshot_config,
+                                 args.seeds, args.fpr, args.human_label,
+                                 args.min_domain_rows, args.combine)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     csv_path = args.out_dir / "performance.csv"

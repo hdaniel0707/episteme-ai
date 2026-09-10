@@ -55,9 +55,10 @@ from epai.ai_detection.trainv2.core import grouped_split
 from epai.ai_detection.trainv2.run_best_zeroshot_performance import (
     DEFAULT_CONFIG as ZEROSHOT_CONFIG,
 )
-from epai.ai_detection.trainv2.run_best_zeroshot_performance import _load_columns
-from epai.ai_detection.trainv2.run_in_domain_performance import compute_zeroshot
+from epai.ai_detection.trainv2.run_best_zeroshot_performance import _detector, _load_columns
 from epai.ai_detection.trainv2.run_lodo_performance import _load, _load_ood, _std
+from epai.ai_detection.trainv2.run_zeroshot_performance import FAMILIES as ZS_FAMILIES
+from epai.ai_detection.trainv2.run_zeroshot_performance import compute as zeroshot_compute
 from epai.ai_detection.trainv2.splits import resolve as resolve_splits
 from epai.algs import build_algorithm
 
@@ -310,9 +311,15 @@ def compute_lodo(splits, ood_splits, seeds, fpr, human_label,
 
 
 def compute_zeroshot_ood(ood_splits, cols, fpr, human_label, regimes) -> list[dict]:
+    """Zero-shot reference points on the OOD corpus in full (the DR figure only
+    ever plots the OOD panel, so no matched-eval-row subset is needed here)."""
     ood_keys = {k for k, _ in ood_splits}
-    base = [r for r in compute_zeroshot(ood_splits, cols, fpr, human_label)
-            if r["split"] in ood_keys]
+    base = [
+        {"detector": _detector(r["family"], r["version"]), "split": r["split"],
+         "auroc": r["auroc"], "tpr_at_fpr": r["tpr_at_fpr"]}
+        for r in zeroshot_compute(ood_splits, ZS_FAMILIES, cols, fpr, human_label)
+        if r["split"] in ood_keys
+    ]
     out = []
     for regime in regimes:
         for r in base:

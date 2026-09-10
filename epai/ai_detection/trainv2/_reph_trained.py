@@ -33,15 +33,20 @@ REPHRASE_GEN = "gpt56luna:0908R"
 REPH_SPLITS = list(CORPUS_SOURCES)  # ["mg_gb", "mg_sci"]
 
 
-def load_reph_features(corpus_key: str):
+def load_reph_features(corpus_key: str, *, score_cols: tuple[str, ...] = ()):
     """``(X_emb, y, Z_cue, domain, groups)`` for one rephrase corpus.
 
     ``human`` / ``rewritten`` come from the full parquet, ``rephrase`` from the
     rephrase half; ``y`` counts rephrase as human. A group is dropped whole if
     any of its rows is missing either feature; a group must sit in one domain.
+
+    With ``score_cols`` (raw zero-shot columns present in BOTH halves), a 6th
+    element ``{col: float_array}`` aligned to the surviving rows is returned --
+    for scoring a zero-shot pick on the trained models' exact eval rows, with
+    the rephrase-as-human label.
     """
     c = CORPUS_SOURCES[corpus_key]
-    cols = [GROUP_COL, DOMAIN_COL, GEN_COL, EMB_COL, AUX_COL]
+    cols = [GROUP_COL, DOMAIN_COL, GEN_COL, EMB_COL, AUX_COL, *score_cols]
     full = pd.read_parquet(PARQUET_DIR / c["full"], columns=cols)
     reph = pd.read_parquet(PARQUET_DIR / c["reph"], columns=cols)
     picks = pd.concat(
@@ -65,10 +70,13 @@ def load_reph_features(corpus_key: str):
         )
 
     y = (picks["_cls"] == "rewritten").to_numpy().astype(int)
-    return (
+    out = (
         _stack(picks[EMB_COL]),
         y,
         _stack(picks[AUX_COL]),
         picks[DOMAIN_COL].astype(str).to_numpy(),
         picks[GROUP_COL].to_numpy(),
     )
+    if score_cols:
+        return (*out, {c: picks[c].to_numpy(dtype=float) for c in score_cols})
+    return out

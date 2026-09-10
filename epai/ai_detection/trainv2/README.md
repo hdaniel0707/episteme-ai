@@ -258,9 +258,17 @@ include.
 ### F. Trained detection
 
 The three `_trained.py` detectors, AUROC vs. oracle TPR@1%FPR, with the
-`best_zeroshot.yaml` picks overlaid for reference (no error bars). Every fitted
-model is also scored, unchanged, on each `--ood-splits` corpus in full (default
-`mg_den`) — never trained on.
+`best_zeroshot.yaml` picks overlaid. Every fitted model is also scored,
+unchanged, on each `--ood-splits` corpus in full (default `mg_den`) — never
+trained on.
+
+The zero-shot picks are scored on **the same rows as the trained models** —
+each seed's 70/30 test partition (in-domain) or the held-out domain fold
+(LODO), the full corpus per OOD split — not on the whole dataset. So every
+per-corpus point (bar the OOD zero-shot one, a single deterministic reading)
+carries a seed / fold SD, and the goodness bar folds AUROC + TPR into one score
+*per replicate* so its bar carries an SD too (`goodness` / `goodness_std` in the
+CSV).
 
 **`run_in_domain_performance.py`** — random grouped 70/30 within each training
 split (default `gb_orig mg_gb mg_sci`), N seeds, human vs. all-AI pooled.
@@ -276,7 +284,8 @@ Outputs (`results/trainv2/in_domain_performance/`): `performance.csv`,
 **`run_lodo_performance.py`** — leave-one-domain-out instead of a random split:
 each domain of a split is held out in turn, trained on the rest, scored on the
 held-out domain in full. Per-split SD is the spread *across* domain folds
-(domain-transfer robustness). Only splits with ≥2 domains of ≥`--min-domain-rows`
+(domain-transfer robustness) — for the zero-shot picks too, scored on each of
+those same folds. Only splits with ≥2 domains of ≥`--min-domain-rows`
 (default 100) rows qualify — so `gb_orig mg_gb mg_sci`, 3 domains each.
 
 ```bash
@@ -437,7 +446,9 @@ label change:
 * zero-shot overlay: the `best_zeroshot.yaml` picks minus any gemma judge —
   `binoculars_score_llama31_8b`, `fastdetect_crit_llama31_8b`,
   `llm_judge_score_gpt56luna_v3` — rephrase-GT on the training corpora, normal
-  GT on the OOD split
+  GT on the OOD split; scored on the **same eval rows as the trained models**
+  (per-seed test partition / per-fold held-out domain), so they carry the same
+  seed / fold SD (OOD point excepted)
 
 ```bash
 uv run python epai/ai_detection/trainv2/rephrase_in_domain_performance.py
