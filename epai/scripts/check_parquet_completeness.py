@@ -12,6 +12,19 @@ distinct values overall — is flagged even when it is nowhere near constant (th
 losing token falling outside the endpoint's ``top_logprobs`` window re-clumps
 the score at 0 / 1).
 
+A **raw logprob-window column** (``llm_judge_logprobs_<model>_v3_{words,scale}``,
+``list<struct{token, logprob}>`` — the ranked answer-position window from
+``capture_judge_logprobs.py``, ``window[0]`` the sampled token) is checked as
+what it is, not as a generic list: coverage (an empty window is a row the judge
+never answered — the analogue of a null), struct integrity (finite, non-positive
+logprobs; non-empty tokens; the window actually ranked by descending logprob),
+whether ``window[0]`` is a valid answer for the mode (``human`` / ``machine`` for
+``words``, ``A``–``E`` for ``scale`` — a row answered off-format cannot be
+scored), and whether the sampled-answer distribution is degenerate (every row
+the same answer is a collapsed judge, the same failure a constant score column
+shows). Window size and the ``P(top) > 0.98`` share are reported so you can see
+how graded the stored signal is.
+
 The other thing a null count misses is a **failed call written as content**: an
 API error body, a refused completion, or leaked model scaffolding (``<think>``,
 ``<|channel|>``) saved into a ``text`` / ``abstract`` column. That row is not
@@ -132,6 +145,29 @@ LOGPROB_MIN_DISTINCT_FRAC = 0.50   # below → WARN (not behaving tie-free)
 LOGPROB_MAX_TIE_FRAC = 0.25        # one identical value on ≥ this share → WARN
 LOGPROB_DEAD_DISTINCT = 5          # ≤ this many distinct values → ERROR
 
+# A raw logprob-window column — ``llm_judge_logprobs_<model>_v3_{words,scale}``,
+# ``list<struct{token: string, logprob: double}>`` from capture_judge_logprobs.py.
+# The window is the ranked top-k at the answer position; ``window[0]`` is the
+# sampled token (temperature 0). An empty list is a row the judge never answered.
+LOGPROB_WINDOW_PREFIX = "llm_judge_logprobs_"
+# Normalised valid first-token vocabulary per answer mode (the column's suffix).
+LOGPROB_WINDOW_VOCAB = {"words": {"human", "machine"}, "scale": set("ABCDE")}
+# An empty window is the analogue of a null. merge_captured_logprobs.py already
+# gates at 95 % coverage; these are the backstop shares for this checker.
+LOGPROB_EMPTY_WARN_FRAC = 0.02
+LOGPROB_EMPTY_ERROR_FRAC = 0.10
+# Share of answered rows whose sampled token is not a valid answer for the mode.
+LOGPROB_OFFFORMAT_WARN_FRAC = 0.02
+LOGPROB_OFFFORMAT_ERROR_FRAC = 0.20
+# A multi-generator split is legitimately machine-heavy (4 machine arms : 1
+# human), so a judge's argmax is *expected* to sit near the corpus's own
+# machine share. Only flag an argmax skew this far past that class prior — a
+# judge more one-sided than the data it is judging.
+LOGPROB_SKEW_MARGIN = 0.10
+# A sampled token's logprob is 0; endpoints round that to a tiny +/- value
+# (seen: +4e-6 from OpenAI). Past this a positive "log-probability" is malformed.
+LOGPROB_POSITIVE_TOL = 1e-4
+
 # Text columns whose emptiness is a real problem, and whose length is worth a
 # distribution.
 TEXTISH = ("text", "text_raw", "text_preclean", "abstract", "abstract_raw")
@@ -198,6 +234,17 @@ def _is_vector(name: str) -> bool:
     return (name.startswith(VECTOR_PREFIXES)
             or name.endswith(VECTOR_SUFFIXES)
             or any(s in name for s in VECTOR_CONTAINS))
+
+
+def _is_logprob_window(name: str) -> bool:
+    return name.startswith(LOGPROB_WINDOW_PREFIX)
+
+
+def _norm_answer(token: str | None, mode: str) -> str:
+    """Same fold capture_judge_logprobs.py applies: strip non-letters, then
+    lowercase for ``words`` / uppercase for ``scale``."""
+    s = "".join(ch for ch in (token or "") if ch.isalpha())
+    return s.lower() if mode == "words" else s.upper()
 
 
 class Report:
@@ -780,6 +827,127 @@ def check_list(name: str, arr: pa.ChunkedArray, n: int, rep: Report) -> dict:
     return info
 
 
+def check_logprob_window(name: str, arr: pa.ChunkedArray, n: int,
+                         rep: Report) -> dict:
+    """An LLM-judge answer-token logprob window: ``list<struct{token, logprob}>``,
+    ranked by descending logprob, ``window[0]`` the sampled token. Empty = a row
+    the judge never answered (the analogue of a null here)."""
+    info: dict = {"nulls": arr.null_count}
+    mode = name.rsplit("_", 1)[-1]
+    vocab = LOGPROB_WINDOW_VOCAB.get(mode)
+
+    rows = arr.to_pylist()
+    filled = [w for w in rows if w]
+    n_empty = n - len(filled)
+    info["empty_windows"] = n_empty
+    if n_empty == n:
+        rep.error(f"{name}: every window is empty ({n} rows) — the capture wrote nothing")
+        return info
+    if n_empty:
+        frac = n_empty / n
+        line = (f"{name}: {n_empty}/{n} window(s) empty ({frac:.1%}) — "
+                f"rows the judge never answered")
+        (rep.error if frac >= LOGPROB_EMPTY_ERROR_FRAC
+         else rep.warn if frac >= LOGPROB_EMPTY_WARN_FRAC
+         else rep.detail)(line)
+
+    # struct integrity. window[0] is the sampled token and must be a real
+    # entry; deeper in the top-k window an empty-string token is endpoint noise
+    # (Gemma emits one at the tail sometimes) — counted, not flagged. A
+    # null / non-finite / positive logprob, or a window not ranked by
+    # descending logprob, is malformed anywhere.
+    head_bad = bad_lp = positive = unsorted = tail_empty_tok = 0
+    sizes: list[int] = []
+    for w in filled:
+        sizes.append(len(w))
+        h = w[0]
+        if not isinstance(h.get("token"), str) or h.get("token") == "":
+            head_bad += 1
+        lps: list[float] = []
+        for j, s in enumerate(w):
+            tok = s.get("token")
+            lp = s.get("logprob")
+            if j and (not isinstance(tok, str) or tok == ""):
+                tail_empty_tok += 1
+            if lp is None or not math.isfinite(lp):
+                bad_lp += 1
+            else:
+                lps.append(lp)
+                if lp > LOGPROB_POSITIVE_TOL:
+                    positive += 1
+        if any(a < b - LOGPROB_POSITIVE_TOL for a, b in zip(lps, lps[1:])):
+            unsorted += 1
+    if head_bad:
+        rep.error(f"{name}: {head_bad} window(s) whose sampled token (window[0]) "
+                  f"is missing / non-string / empty")
+    if bad_lp:
+        rep.error(f"{name}: {bad_lp} window entry/entries with a null / non-finite logprob")
+    if positive:
+        rep.error(f"{name}: {positive} window entry/entries with logprob > 0 — not a log-probability")
+    if unsorted:
+        rep.error(f"{name}: {unsorted} window(s) not ranked by descending logprob")
+    if tail_empty_tok:
+        info["tail_empty_tokens"] = tail_empty_tok
+        rep.detail(f"{name}: {tail_empty_tok} empty-string token(s) past window[0] "
+                   f"(endpoint noise in the top-k tail — ignored by scoring)")
+
+    sz = np.array(sizes)
+    info.update(size_min=int(sz.min()), size_med=int(np.median(sz)),
+                size_max=int(sz.max()), size1=int((sz == 1).sum()))
+    if int((sz == 1).sum()) == len(filled):
+        rep.warn(f"{name}: every window is size 1 — no runner-up token stored, "
+                 f"the losing answer's probability is unrecoverable for scoring")
+
+    # sampled-answer distribution
+    top = [_norm_answer(w[0].get("token"), mode) for w in filled]
+    top_counts = Counter(top)
+    info["argmax"] = dict(top_counts.most_common())
+    if vocab is not None:
+        off = sum(c for k, c in top_counts.items() if k not in vocab)
+        info["off_format"] = off
+        if off:
+            frac = off / len(filled)
+            line = (f"{name}: {off}/{len(filled)} sampled token(s) not a valid "
+                    f"{mode} answer ({sorted(vocab)}) — {frac:.1%}; those rows "
+                    f"cannot be scored")
+            (rep.error if frac >= LOGPROB_OFFFORMAT_ERROR_FRAC
+             else rep.warn if frac >= LOGPROB_OFFFORMAT_WARN_FRAC
+             else rep.detail)(line)
+
+    top_frac = max(top_counts.values()) / len(filled)
+    info["top_answer_frac"] = top_frac
+    # The corpus's own class prior — a machine-heavy multi-generator split
+    # should produce a machine-heavy argmax without that being a fault.
+    prior = None
+    if rep.gen is not None and len(rep.gen) == n:
+        mach = sum(1 for g in rep.gen if str(g) != "human")
+        prior = max(mach, n - mach) / n
+        info["label_major_frac"] = prior
+    warn_bar = max(SUSPICIOUS_FRAC, (prior + LOGPROB_SKEW_MARGIN) if prior else 0.0)
+    if len(top_counts) == 1:
+        rep.error(f"{name}: every answered row is {next(iter(top_counts))!r} — "
+                  f"the judge gave one answer to all {len(filled)} rows")
+    elif top_frac >= CONSTANT_FRAC:
+        rep.error(f"{name}: {top_frac:.0%} of answered rows share one answer — "
+                  f"judge effectively collapsed")
+    elif top_frac >= warn_bar:
+        tail = (f" — the split's own class prior is {prior:.0%}"
+                if prior is not None else " (or the split is one-sided)")
+        rep.warn(f"{name}: {top_frac:.0%} of answered rows share one answer "
+                 f"({len(top_counts)} distinct){tail}; check the judge graded")
+
+    sat = sum(1 for w in filled
+              if isinstance(w[0].get("logprob"), float)
+              and math.isfinite(w[0]["logprob"])
+              and math.exp(w[0]["logprob"]) > 0.98)
+    info["saturated_frac"] = sat / len(filled)
+    rep.detail(f"{name}: {len(filled)} window(s), size [{sz.min()}, {sz.max()}] "
+               f"med {int(np.median(sz))} (size-1: {info['size1']}), "
+               f"argmax {dict(top_counts.most_common(6))}, "
+               f"P(top)>0.98 on {sat}/{len(filled)} ({info['saturated_frac']:.0%})")
+    return info
+
+
 def check_class_balance(path: Path, schema, rep: Report) -> dict:
     """The domain × generated_by count matrix, printed, plus a balance check.
 
@@ -926,7 +1094,10 @@ def check_file(path: Path, reference_cols: set[str] | None,
     for field in schema:
         arr = pq.read_table(path, columns=[field.name]).column(0)
         if pa.types.is_list(arr.type) or pa.types.is_large_list(arr.type):
-            col_info[field.name] = check_list(field.name, arr, n, rep)
+            if _is_logprob_window(field.name):
+                col_info[field.name] = check_logprob_window(field.name, arr, n, rep)
+            else:
+                col_info[field.name] = check_list(field.name, arr, n, rep)
         else:
             col_info[field.name] = check_scalar(
                 field.name, arr, n, rep, args.max_essay_human_blanks
