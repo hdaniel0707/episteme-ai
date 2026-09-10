@@ -179,7 +179,7 @@ def _seed_loop(spec, X, y, Z, groups, splitter, seeds, fpr, ood_sets, cfg, varia
     for seed in seeds:
         tr, te = splitter(seed)
         clf = _fit_variant(spec, X, y, Z, groups, tr, seed, cfg, variant)
-        ia, it = eval_on(clf, spec, X[te], y[te], Z[te], fpr)
+        ia, it, _ = eval_on(clf, spec, X[te], y[te], Z[te], fpr)
         a.append(ia)
         t.append(it)
         for name, (oX, oy, oZ, _) in ood_sets.items():

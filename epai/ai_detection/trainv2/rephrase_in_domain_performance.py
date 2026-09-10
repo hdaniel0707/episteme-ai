@@ -87,7 +87,7 @@ def compute_trained(reph_splits, ood_splits, seeds, test_size, fpr) -> list[dict
             for seed in seeds:
                 tr, te = grouped_split(y, groups, test_size, seed)
                 clf = fit(spec, X, y, Z, groups, tr, seed)
-                ia, it = eval_on(clf, spec, X[te], y[te], Z[te], fpr)
+                ia, it, _ = eval_on(clf, spec, X[te], y[te], Z[te], fpr)
                 a.append(ia)
                 t.append(it)
                 n_tr, n_te, n_te_h = len(tr), len(te), int((y[te] == 0).sum())

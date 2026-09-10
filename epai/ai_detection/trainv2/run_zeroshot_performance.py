@@ -55,6 +55,7 @@ from epai.utils.cd_core import (
     roc_point_at_fpr,
 )
 
+from epai.ai_detection.trainv2.core import eff_fpr_level
 from epai.ai_detection.trainv2.splits import resolve as resolve_splits
 
 BASE_DIR = Path(__file__).resolve().parents[3]
@@ -85,12 +86,28 @@ FAMILIES: dict[str, dict] = {
                        label=_fastdetect_label, exclude=frozenset()),
     "judge": dict(prefix="llm_judge_score_", machine_is_high=False,
                   label=_judge_label,
-                  exclude=frozenset({"llm_judge_score_sonnet5_v3"})),
+                  exclude=frozenset({
+                      "llm_judge_score_sonnet5_v3",
+                      # Superseded logprob-window scoring experiments -- the
+                      # comparison kept the winners (`_wlp` per model + the
+                      # soft-min ensemble at T=0.05). `_slp` / `_sbc` / `_lp`
+                      # and the other `_smin_*` taus lost; see
+                      # epai/ai_detection/score/score_logprob_windows.md.
+                      # Pass any of them via --cols to plot it anyway.
+                      "llm_judge_score_gemma4_31b_v3_lp",
+                      "llm_judge_score_gemma4_31b_v3_slp",
+                      "llm_judge_score_gemma4_31b_v3_sbc",
+                      "llm_judge_score_gpt56luna_v3_slp",
+                      "llm_judge_score_gpt56luna_v3_sbc",
+                      "llm_judge_score_ens_v3_smin_0p1",
+                      "llm_judge_score_ens_v3_smin_0p15",
+                      "llm_judge_score_ens_v3_smin_0p2",
+                  })),
 }
 
 CSV_FIELDS = [
     "family", "version", "column", "split", "n", "n_human", "n_machine",
-    "auroc", "tpr_at_fpr", "fpr_at_fpr", "reachable",
+    "auroc", "tpr_at_fpr", "fpr_at_fpr", "reachable", "tpr_eff", "eff_fpr",
 ]
 
 
@@ -129,6 +146,8 @@ def compute(
                 tpr, thr = roc_point_at_fpr(y, oriented, fpr)
                 _, fpr_act = rates_at_threshold(y, oriented, thr)
                 n_h = int((y == 0).sum())
+                eff = eff_fpr_level(n_h, fpr)
+                tpr_eff, _ = roc_point_at_fpr(y, oriented, eff)
                 rows.append({
                     "family": fam_key, "version": spec["label"](col), "column": col,
                     "split": split_key, "n": int(len(y)), "n_human": n_h,
@@ -136,6 +155,7 @@ def compute(
                     "auroc": float(auroc_score(y, oriented)),
                     "tpr_at_fpr": float(tpr), "fpr_at_fpr": float(fpr_act),
                     "reachable": bool(n_h * fpr >= 1.0 and np.isfinite(thr)),
+                    "tpr_eff": float(tpr_eff), "eff_fpr": float(eff),
                 })
 
     grouped: dict[tuple, list[dict]] = defaultdict(list)
@@ -143,12 +163,14 @@ def compute(
         grouped[(r["family"], r["version"], r["column"])].append(r)
     for (fam, ver, col), cells in grouped.items():
         tprs = [c["tpr_at_fpr"] for c in cells if c["reachable"]]
+        effs = [c["tpr_eff"] for c in cells]
         rows.append({
             "family": fam, "version": ver, "column": col, "split": "mean",
             "n": "", "n_human": "", "n_machine": "",
             "auroc": float(np.mean([c["auroc"] for c in cells])),
             "tpr_at_fpr": float(np.mean(tprs)) if tprs else float("nan"),
             "fpr_at_fpr": "", "reachable": "",
+            "tpr_eff": float(np.mean(effs)) if effs else float("nan"), "eff_fpr": fpr,
         })
     return rows
 
@@ -180,16 +202,21 @@ _FAMILY_TITLE = {"binoculars": "Binoculars pairs", "fastdetect": "Fast-DetectGPT
 
 def plots_from_csv(csv_path: Path, meta: dict, out_dir: Path) -> None:
     rows = pd.read_csv(csv_path).to_dict("records")
-    from epai.ai_detection.trainv2.plots import zeroshot_scatter
+    from epai.ai_detection.trainv2.plots import goodness_bars, zeroshot_scatter
 
     out_dir.mkdir(parents=True, exist_ok=True)
     fpr = meta["fpr"] * 100
+    combine = meta.get("combine", "hmean")
     for family in sorted({r["family"] for r in rows}):
         fam_rows = [r for r in rows if r["family"] == family]
         title = (f"{_FAMILY_TITLE.get(family, family)} — zero-shot AUROC vs. "
                  f"oracle TPR@{fpr:g}%FPR across the MANUGRAM splits")
         zeroshot_scatter(fam_rows, meta, out_dir / f"{family}.png",
                          key="version", title=title)
+        goodness_bars(fam_rows, meta, out_dir / f"{family}_goodness.png",
+                      key="version", combine=combine,
+                      title=f"{_FAMILY_TITLE.get(family, family)} — goodness "
+                            f"across the MANUGRAM splits")
 
 
 def main() -> None:
@@ -204,6 +231,9 @@ def main() -> None:
                     help="score columns (default: every one of each family's "
                          "prefix, minus the family's exclude list)")
     ap.add_argument("--fpr", type=float, default=0.01)
+    ap.add_argument("--combine", choices=("hmean", "gmean", "amean"), default="hmean",
+                    help="goodness-bar score = this mean of Gini and oracle TPR "
+                         "(default: harmonic)")
     ap.add_argument("--human-label", default="human")
     ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     ap.add_argument("--no-plots", action="store_true")
@@ -212,7 +242,8 @@ def main() -> None:
     args = ap.parse_args()
 
     splits = resolve_splits(args.splits or [], PARQUET_DIR)
-    meta = {"fpr": args.fpr, "splits": [s for s, _ in splits]}
+    meta = {"fpr": args.fpr, "splits": [s for s, _ in splits],
+            "combine": args.combine}
 
     if args.replot is not None:
         plots_from_csv(args.replot, meta, args.replot.parent)

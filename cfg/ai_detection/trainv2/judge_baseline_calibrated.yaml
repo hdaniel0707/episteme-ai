@@ -4,6 +4,22 @@
 # Read by cd_core.baseline_entries().
 llm_judge_baseline:
   columns:
+  - column: llm_judge_score_ens_v3_smin_0p05
+    threshold: 0.000602
+    threshold_youden: 0.036099
+    label: ens_smin_0p05
+  - column: llm_judge_score_ens_v3_smin_0p1
+    threshold: 0.000603
+    threshold_youden: 0.07076
+    label: ens_smin_0p1
+  - column: llm_judge_score_ens_v3_smin_0p15
+    threshold: 0.000604
+    threshold_youden: 0.105229
+    label: ens_smin_0p15
+  - column: llm_judge_score_ens_v3_smin_0p2
+    threshold: 0.000605
+    threshold_youden: 0.138726
+    label: ens_smin_0p2
   - column: llm_judge_score_gemma4_31b_v3
     threshold: 0.12
     threshold_youden: 0.43

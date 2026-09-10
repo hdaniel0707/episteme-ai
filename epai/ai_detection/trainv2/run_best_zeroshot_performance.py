@@ -72,13 +72,19 @@ def _load_columns(path: Path) -> list[str]:
 
 def plots_from_csv(csv_path: Path, meta: dict, out_dir: Path) -> None:
     rows = pd.read_csv(csv_path).to_dict("records")
-    from epai.ai_detection.trainv2.plots import zeroshot_scatter
+    from epai.ai_detection.trainv2.plots import goodness_bars, zeroshot_scatter
 
     out_dir.mkdir(parents=True, exist_ok=True)
     zeroshot_scatter(
         rows, meta, out_dir / "best_zeroshot.png", key="detector",
         title=f"Best zero-shot detector per family — AUROC vs. oracle "
               f"TPR@{meta['fpr'] * 100:g}%FPR across the MANUGRAM splits",
+    )
+    goodness_bars(
+        rows, meta, out_dir / "best_zeroshot_goodness.png", key="detector",
+        combine=meta.get("combine", "hmean"),
+        title="Best zero-shot detector per family — goodness across the "
+              "MANUGRAM splits",
     )
 
 
@@ -89,6 +95,8 @@ def main() -> None:
     ap.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     ap.add_argument("--splits", nargs="+", default=None, metavar="KEY")
     ap.add_argument("--fpr", type=float, default=0.01)
+    ap.add_argument("--combine", choices=("hmean", "gmean", "amean"), default="hmean",
+                    help="goodness-bar score = this mean of Gini and oracle TPR")
     ap.add_argument("--human-label", default="human")
     ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     ap.add_argument("--no-plots", action="store_true")
@@ -96,7 +104,8 @@ def main() -> None:
     args = ap.parse_args()
 
     splits = resolve_splits(args.splits or [], PARQUET_DIR)
-    meta = {"fpr": args.fpr, "splits": [s for s, _ in splits]}
+    meta = {"fpr": args.fpr, "splits": [s for s, _ in splits],
+            "combine": args.combine}
 
     if args.replot is not None:
         plots_from_csv(args.replot, meta, args.replot.parent)

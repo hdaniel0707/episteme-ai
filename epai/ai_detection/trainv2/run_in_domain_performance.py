@@ -49,7 +49,7 @@ import pandas as pd
 from tqdm import tqdm
 
 from epai.ai_detection.trainv2._trained import TRAINED_SPECS, eval_on, fit, load_features
-from epai.ai_detection.trainv2.core import grouped_split
+from epai.ai_detection.trainv2.core import eff_fpr_level, grouped_split
 from epai.ai_detection.trainv2.run_best_zeroshot_performance import (
     DEFAULT_CONFIG,
     _detector,
@@ -67,7 +67,8 @@ DEFAULT_SPLITS = ["gb_orig", "mg_gb", "mg_sci"]
 DEFAULT_OOD = ["mg_den"]
 
 CSV_FIELDS = ["kind", "detector", "split", "role", "n_train", "n_test",
-              "n_seeds", "auroc", "auroc_std", "tpr_at_fpr", "tpr_at_fpr_std"]
+              "n_seeds", "auroc", "auroc_std", "tpr_at_fpr", "tpr_at_fpr_std",
+              "tpr_eff", "tpr_eff_std", "eff_fpr"]
 
 
 def _std(v: list[float]) -> float:
@@ -82,19 +83,26 @@ def _row(detector, split, role, cell) -> dict:
         "n_seeds": cell["n_seeds"],
         "auroc": cell["auroc"], "auroc_std": cell["auroc_std"],
         "tpr_at_fpr": cell["tpr_at_fpr"], "tpr_at_fpr_std": cell["tpr_at_fpr_std"],
+        "tpr_eff": cell.get("tpr_eff", ""), "tpr_eff_std": cell.get("tpr_eff_std", ""),
+        "eff_fpr": cell.get("eff_fpr", ""),
     }
 
 
 def _overall_cell(cells: list[dict], n_seeds: int, fpr: float) -> dict:
-    """Mean over every per-corpus cell; TPR mean skips a corpus whose 1%-FPR
-    point is unreachable (< 1/fpr humans). SD is the mean per-corpus SD."""
+    """Mean over every per-corpus cell; the 1%-FPR TPR mean skips a corpus whose
+    point is unreachable (< 1/fpr humans), the eff-FPR TPR mean uses them all.
+    SD is the mean per-corpus SD."""
     ok = [c for c in cells if c["n_test_human"] >= 1 / fpr]
+    eff = [c for c in cells if "tpr_eff" in c]
     return {
         "n_seeds": n_seeds,
         "auroc": float(np.mean([c["auroc"] for c in cells])),
         "auroc_std": float(np.mean([c["auroc_std"] for c in cells])),
         "tpr_at_fpr": float(np.mean([c["tpr_at_fpr"] for c in ok])) if ok else float("nan"),
         "tpr_at_fpr_std": float(np.mean([c["tpr_at_fpr_std"] for c in ok])) if ok else float("nan"),
+        "tpr_eff": float(np.mean([c["tpr_eff"] for c in eff])) if eff else float("nan"),
+        "tpr_eff_std": float(np.mean([c["tpr_eff_std"] for c in eff])) if eff else float("nan"),
+        "eff_fpr": fpr,
     }
 
 
@@ -122,14 +130,15 @@ def compute_trained(train_splits, ood_splits, seeds, test_size, fpr,
               f"groups -> {len(set(groups[g0]))} train / {len(set(groups[g1]))} test, disjoint")
 
         for spec_key, spec in TRAINED_SPECS.items():
-            a, t = [], []
+            a, t, te_ = [], [], []
             n_tr = n_te = n_te_h = 0
             for seed in seeds:
                 tr, te = grouped_split(y, groups, test_size, seed)
                 clf = fit(spec, X, y, Z, groups, tr, seed)
-                ia, it = eval_on(clf, spec, X[te], y[te], Z[te], fpr)
+                ia, it, ite = eval_on(clf, spec, X[te], y[te], Z[te], fpr)
                 a.append(ia)
                 t.append(it)
+                te_.append(ite)
                 n_tr, n_te, n_te_h = len(tr), len(te), int((y[te] == 0).sum())
                 for name, (oX, oy, oZ, _) in ood_sets.items():
                     ood_reads[spec_key][name].append(
@@ -138,7 +147,9 @@ def compute_trained(train_splits, ood_splits, seeds, test_size, fpr,
                 "split": split_key, "n_train": n_tr, "n_test": n_te,
                 "n_test_human": n_te_h, "n_seeds": len(seeds),
                 "auroc": float(np.mean(a)), "auroc_std": _std(a),
-                "tpr_at_fpr": float(np.mean(t)), "tpr_at_fpr_std": _std(t)})
+                "tpr_at_fpr": float(np.mean(t)), "tpr_at_fpr_std": _std(t),
+                "tpr_eff": float(np.mean(te_)), "tpr_eff_std": _std(te_),
+                "eff_fpr": eff_fpr_level(n_te_h, fpr)})
 
     rows: list[dict] = []
     for spec_key, spec in TRAINED_SPECS.items():
@@ -149,10 +160,13 @@ def compute_trained(train_splits, ood_splits, seeds, test_size, fpr,
         for name, (_, _, _, n_h) in ood_sets.items():
             oa = [r[0] for r in ood_reads[spec_key][name]]
             ot = [r[1] for r in ood_reads[spec_key][name]]
+            ote = [r[2] for r in ood_reads[spec_key][name]]
             c = {"split": name, "n_test": "", "n_test_human": n_h,
                  "n_seeds": len(seeds),
                  "auroc": float(np.mean(oa)), "auroc_std": _std(oa),
-                 "tpr_at_fpr": float(np.mean(ot)), "tpr_at_fpr_std": _std(ot)}
+                 "tpr_at_fpr": float(np.mean(ot)), "tpr_at_fpr_std": _std(ot),
+                 "tpr_eff": float(np.mean(ote)), "tpr_eff_std": _std(ote),
+                 "eff_fpr": eff_fpr_level(n_h, fpr)}
             spec_cells.append(c)
             rows.append(_row(detector, name, "ood", c))
         rows.append(_row(detector, "mean", "overall",
@@ -170,13 +184,19 @@ def compute_zeroshot(splits, cols, fpr, human_label) -> list[dict]:
             "n_seeds": "",
             "auroc": r["auroc"], "auroc_std": "",
             "tpr_at_fpr": r["tpr_at_fpr"], "tpr_at_fpr_std": "",
+            "tpr_eff": r.get("tpr_eff", ""), "tpr_eff_std": "",
+            "eff_fpr": r.get("eff_fpr", ""),
         })
     return out
 
 
 def plots_from_csv(csv_path: Path, meta: dict, out_dir: Path) -> None:
     rows = pd.read_csv(csv_path).to_dict("records")
-    from epai.ai_detection.trainv2.plots import denario_scatter, zeroshot_scatter
+    from epai.ai_detection.trainv2.plots import (
+        denario_scatter,
+        goodness_bars,
+        zeroshot_scatter,
+    )
 
     out_dir.mkdir(parents=True, exist_ok=True)
     ood = "/".join(meta["ood"])
@@ -185,6 +205,12 @@ def plots_from_csv(csv_path: Path, meta: dict, out_dir: Path) -> None:
         title=f"In-domain trained (70/30, {meta['n_seeds']} seeds) — held-out "
               f"test per corpus, plus {ood} as eval-only OOD, vs. zero-shot picks"
               f"\nAUROC vs. oracle TPR@{meta['fpr'] * 100:g}%FPR",
+    )
+    goodness_bars(
+        rows, meta, out_dir / "in_domain_goodness.png", key="detector",
+        combine=meta.get("combine", "hmean"),
+        title=f"In-domain trained (70/30, {meta['n_seeds']} seeds) + zero-shot "
+              f"picks — goodness across the MANUGRAM splits",
     )
     denario_scatter(
         rows, meta, out_dir / "in_domain_denario.png",
@@ -222,6 +248,8 @@ def main() -> None:
     ap.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2, 3, 4])
     ap.add_argument("--test-size", type=float, default=0.30)
     ap.add_argument("--fpr", type=float, default=0.01)
+    ap.add_argument("--combine", choices=("hmean", "gmean", "amean"), default="hmean",
+                    help="goodness-bar score = this mean of Gini and oracle TPR")
     ap.add_argument("--group-col", default="id")
     ap.add_argument("--human-label", default="human")
     ap.add_argument("--zeroshot-config", type=Path, default=DEFAULT_CONFIG)
@@ -233,7 +261,7 @@ def main() -> None:
 
     train_splits = resolve_splits(args.splits or DEFAULT_SPLITS, PARQUET_DIR)
     ood_splits = resolve_splits(args.ood_splits or DEFAULT_OOD, PARQUET_DIR)
-    meta = {"fpr": args.fpr, "n_seeds": len(args.seeds),
+    meta = {"fpr": args.fpr, "n_seeds": len(args.seeds), "combine": args.combine,
             "ood": [s for s, _ in ood_splits],
             "splits": [s for s, _ in train_splits] + [s for s, _ in ood_splits]}
 

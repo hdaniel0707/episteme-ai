@@ -14,7 +14,6 @@ import matplotlib
 import numpy as np
 
 matplotlib.use("Agg")
-import matplotlib.patheffects as pe
 import matplotlib.pyplot as plt
 
 _PALETTE = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#4a3aa7",
@@ -195,6 +194,45 @@ def _tint(hex_colour: str, t: float = 0.42) -> str:
            f"{int(255 - (255 - b) * t):02x}"
 
 
+def _shade(hex_colour: str, f: float = 0.72) -> str:
+    """A darker version of ``hex_colour`` (channels x ``f``, ``f`` < 1) -- a
+    base judge that has a ``_wlp`` twin draws in this darker shade; the ``_wlp``
+    keeps the plain hue."""
+    r, g, b = (int(hex_colour[i:i + 2], 16) for i in (1, 3, 5))
+    return f"#{int(r * f):02x}{int(g * f):02x}{int(b * f):02x}"
+
+
+def _f(v):
+    """``float(v)`` if finite, else ``None`` -- for reading maybe-blank CSV cells."""
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return None
+    return v if np.isfinite(v) else None
+
+
+def _variant_palette(names, suffix: str = "_wlp"):
+    """Colour rule shared by the AUROC-vs-TPR scatters: a detector ``<x><suffix>``
+    is a readout variant of ``<x>`` -- the pair shares a hue, and the *base*
+    draws one shade darker so the variant reads as the lighter twin. Returns
+    ``(base_of, dcol)`` where ``base_of[variant] = base`` and ``dcol(name)`` is
+    that name's display colour."""
+    base_of = {n: n[: -len(suffix)] for n in names
+               if n.endswith(suffix) and n[: -len(suffix)] in names}
+    paired_base = set(base_of.values())
+    hue: dict[str, str] = {}
+    for v in names:  # non-variants take palette slots in order
+        if v not in base_of:
+            hue[v] = _PALETTE[len(hue) % len(_PALETTE)]
+    for v, b in base_of.items():  # variants inherit their base's colour
+        hue[v] = hue[b]
+
+    def dcol(v: str) -> str:
+        return _shade(hue[v]) if v in paired_base else hue[v]
+
+    return base_of, dcol
+
+
 def zeroshot_scatter(
     rows: list[dict], meta: dict, path: Path, *, key: str = "version", title: str = ""
 ) -> None:
@@ -203,7 +241,13 @@ def zeroshot_scatter(
 
     names = sorted({r[key] for r in rows})
     splits = [s for s in meta["splits"] if s in {r["split"] for r in rows}]
-    hue = {v: _PALETTE[i % len(_PALETTE)] for i, v in enumerate(names)}
+
+    # A ``_wlp`` detector is a readout variant of its base judge: shared hue,
+    # base a shade darker, the two means joined by a connector. Every detector
+    # draws as a filled circle -- trained and zero-shot alike -- distinguished
+    # only by colour + the seed-SD error bar (trained rows carry one).
+    base_of, _dcol = _variant_palette(names)
+
     marker = {s: _split_marker(s) for s in splits}
     fpr = meta["fpr"]
 
@@ -229,42 +273,33 @@ def zeroshot_scatter(
             return None, None
         return (xe if np.isfinite(xe) else None, ye if np.isfinite(ye) else None)
 
-    # Light per-split points: bare markers, no error bars.
+    # Light per-split points: bare markers, no error bars, no labels -- the
+    # legend carries every name.
     for r in rows:
         if r["split"] == "mean" or not np.isfinite(r["tpr_at_fpr"]):
             continue
-        ax.scatter([r["auroc"]], [r["tpr_at_fpr"]], s=42,
+        ax.scatter([r["auroc"]], [r["tpr_at_fpr"]], s=34,
                    marker=marker.get(r["split"], "P"),
-                   color=_tint(hue[r[key]]), edgecolors="#6a6a6a", lw=0.6,
+                   color=_tint(_dcol(r[key])), edgecolors="#6a6a6a", lw=0.6,
                    zorder=3)
 
     means = [(v, next((r for r in rows if r[key] == v and r["split"] == "mean"), None))
              for v in names]
     means = [(v, m) for v, m in means if m is not None and np.isfinite(m["tpr_at_fpr"])]
-    x_hi = 1.02
-    # Stagger labels of means that sit close together (the trained detectors
-    # pile up near the ceiling): sort by position, push each label further out.
-    order = sorted(range(len(means)),
-                   key=lambda i: (means[i][1]["auroc"], means[i][1]["tpr_at_fpr"]))
-    dy_of: dict[int, int] = {}
-    for rank, i in enumerate(order):
-        prev = order[rank - 1] if rank else None
-        close = prev is not None and (
-            abs(means[i][1]["auroc"] - means[prev][1]["auroc"]) < 0.03
-            and abs(means[i][1]["tpr_at_fpr"] - means[prev][1]["tpr_at_fpr"]) < 0.06)
-        dy_of[i] = (dy_of.get(prev, -2) + 12) if close else 4
+    mean_xy = {v: (m["auroc"], m["tpr_at_fpr"]) for v, m in means}
 
-    for i, (v, m) in enumerate(means):
+    # base -> wlp connectors, drawn behind the mean markers
+    for v, b in base_of.items():
+        if v in mean_xy and b in mean_xy:
+            (xv, yv), (xb, yb) = mean_xy[v], mean_xy[b]
+            ax.plot([xb, xv], [yb, yv], color=_dcol(b), lw=1.1, alpha=0.6,
+                    zorder=4)
+
+    for v, m in means:
         xe, ye = _err(m)
         ax.errorbar([m["auroc"]], [m["tpr_at_fpr"]], xerr=xe, yerr=ye,
-                    fmt="o", ms=12, mfc=hue[v], mec="#222222", mew=1.0,
-                    ecolor="#222222", elinewidth=1.0, capsize=2.5, zorder=5)
-        right = m["auroc"] > 0.45 + 0.78 * (x_hi - 0.45)
-        ax.annotate(v, (m["auroc"], m["tpr_at_fpr"]), textcoords="offset points",
-                    xytext=(-9 if right else 9, dy_of[i]),
-                    ha="right" if right else "left", fontsize=7.5,
-                    color=_INK, zorder=6,
-                    path_effects=[pe.withStroke(linewidth=2, foreground="white")])
+                    fmt="o", ms=7, mfc=_dcol(v), mec="#222222", mew=1.0,
+                    ecolor="#222222", elinewidth=1.0, capsize=2.0, zorder=5)
 
     aurocs = [r["auroc"] for r in rows if np.isfinite(r["auroc"])]
     x_lo = min(0.45, (min(aurocs) - 0.03) if aurocs else 0.45)
@@ -275,8 +310,10 @@ def zeroshot_scatter(
     ax.grid(True, lw=0.4, alpha=0.4)
     ax.tick_params(labelsize=8, colors=_MUTED)
 
-    handles = [plt.Line2D([], [], marker="o", ls="", ms=8, color=hue[v], label=v)
-               for v in names]
+    # Colour key: one entry per detector, in name order so a base and its _wlp
+    # variant land next to each other (base darker, variant plain hue).
+    handles = [plt.Line2D([], [], marker="o", ls="", ms=7, color=_dcol(v),
+                          label=v) for v in names]
     handles.append(plt.Line2D([], [], ls="", label=""))
     handles += [plt.Line2D([], [], marker=marker[s], ls="", ms=7,
                            color="#8a8a8a", label=_sd(s)) for s in splits]
@@ -301,8 +338,8 @@ def zeroshot_scatter(
 # run_lodo_performance.py, alongside their main scatter). A dedicated zoom on
 # MG-Den -- the one point the main scatters bury against the ceiling: every
 # trained detector (marker carries the SD across the source models) and every
-# zero-shot pick (open diamond, reference only), one point each. Reads the same
-# CSV records; keeps the full 0-1 TPR axis so the drop from the in-domain
+# zero-shot pick (a filled circle with no error bar), one point each. Reads the
+# same CSV records; keeps the full 0-1 TPR axis so the drop from the in-domain
 # ceiling stays visible.
 # ---------------------------------------------------------------------------
 
@@ -333,10 +370,10 @@ def denario_scatter(
         print(f"denario_scatter: no OOD rows for {sorted(ood_keys)} — skipped")
         return
 
-    # Same colour per detector as the main scatter: identical assignment rule
-    # (sorted detector names -> palette slots) over the identical row set.
+    # Same colour rule as the main scatter (over the identical row set), incl.
+    # the _wlp base -> variant pairing.
     names = sorted({r["detector"] for r in rows})
-    hue = {v: _PALETTE[i % len(_PALETTE)] for i, v in enumerate(names)}
+    base_of, dcol = _variant_palette(names)
 
     fig, ax = plt.subplots(figsize=(7.6, 5.6))
     ax.set_facecolor(_SURFACE)
@@ -355,16 +392,22 @@ def denario_scatter(
     # No in-plot point labels: on MG-Den every detector piles into the same
     # corner, so a name next to each mark is an unreadable stack. The legend
     # carries the colour -> detector key instead.
-    for r in zshot:
-        ax.scatter([_f(r["auroc"])], [_f(r["tpr_at_fpr"])], s=80, marker="D",
-                   facecolors="none", edgecolors=hue[r["detector"]],
-                   linewidths=1.5, zorder=3)
+    xy_of = {r["detector"]: (_f(r["auroc"]), _f(r["tpr_at_fpr"])) for r in pts}
+    for v, b in base_of.items():  # base -> _wlp connector
+        if v in xy_of and b in xy_of and None not in (*xy_of[v], *xy_of[b]):
+            (xv, yv), (xb, yb) = xy_of[v], xy_of[b]
+            ax.plot([xb, xv], [yb, yv], color=dcol(b), lw=1.1, alpha=0.55, zorder=2)
+
+    for r in zshot:  # filled circle, no error bar -- a reference point
+        ax.scatter([_f(r["auroc"])], [_f(r["tpr_at_fpr"])], s=38, marker="o",
+                   color=dcol(r["detector"]), edgecolors="#222222",
+                   linewidths=1.0, zorder=4)
 
     for r in trained:
         ax.errorbar([_f(r["auroc"])], [_f(r["tpr_at_fpr"])],
                     xerr=_f(r.get("auroc_std")), yerr=_f(r.get("tpr_at_fpr_std")),
-                    fmt="o", ms=12, mfc=hue[r["detector"]], mec="#222222",
-                    mew=1.0, ecolor="#222222", elinewidth=1.0, capsize=2.5,
+                    fmt="o", ms=7, mfc=dcol(r["detector"]), mec="#222222",
+                    mew=1.0, ecolor="#222222", elinewidth=1.0, capsize=2.0,
                     zorder=5)
 
     ax.set_xlim(x_lo, x_hi)
@@ -374,16 +417,16 @@ def denario_scatter(
     ax.set_xlabel("AUROC (machine = positive)", fontsize=9, color=_INK)
     ax.set_ylabel(f"oracle TPR @ {fpr * 100:g}% FPR", fontsize=9, color=_INK)
 
-    # One coloured entry per detector, exactly as the main scatter's legend,
-    # then the marker-shape key (fill = trained, outline = zero-shot) + chance.
-    handles = [plt.Line2D([], [], marker="o", ls="", ms=8, color=hue[v], label=v)
+    # One coloured entry per detector, then the trained / zero-shot key (both
+    # filled circles; trained carries the SD error bar) + chance.
+    handles = [plt.Line2D([], [], marker="o", ls="", ms=7, color=dcol(v), label=v)
                for v in names]
     handles.append(plt.Line2D([], [], ls="", label=""))
     handles += [
-        plt.Line2D([], [], marker="o", ls="", ms=9, mfc="#8a8a8a",
+        plt.Line2D([], [], marker="o", ls="", ms=8, mfc="#8a8a8a",
                    mec="#222222", label="trained  (bars = SD across source models)"),
-        plt.Line2D([], [], marker="D", ls="", ms=9, mfc="none", mec="#8a8a8a",
-                   label="zero-shot pick  (reference)"),
+        plt.Line2D([], [], marker="o", ls="", ms=8, mfc="#8a8a8a",
+                   mec="#222222", label="zero-shot  (no error bar)"),
         plt.Line2D([], [], marker="x", ls="", color="#b5495b",
                    label=f"chance  (0.5, {fpr * 100:g}%)"),
     ]
@@ -399,6 +442,145 @@ def denario_scatter(
              f"grid point floors at FPR=0, so TPR here is a lower bound, not an "
              f"estimate.", fontsize=7, color=_MUTED)
     fig.tight_layout(rect=(0, 0.035, 1, 1))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=150, facecolor="white", bbox_inches="tight")
+    plt.close(fig)
+    print(f"wrote {path}")
+
+
+# ---------------------------------------------------------------------------
+# Goodness bars (run_zeroshot_performance / run_best_zeroshot_performance /
+# run_in_domain_performance / run_lodo_performance). One grouped bar chart:
+# x = dataset, a bar per detector, height = a single "goodness" score that
+# folds ranking (Gini = 2*AUROC - 1) and the operating point (oracle
+# TPR@1%FPR, or at the smallest reachable FPR on a split too small for 1%)
+# into one number. Default combine is the harmonic mean -- weakest-link, like
+# F1: a detector useless on either axis scores ~0. Reads the run's CSV
+# records; uses `tpr_eff` / `eff_fpr` so MG-Den (80 humans, 1% unreachable) is
+# a real bar at ~1.25% FPR, annotated.
+# ---------------------------------------------------------------------------
+
+_COMBINE_LABEL = {"hmean": "harmonic mean", "gmean": "geometric mean",
+                  "amean": "arithmetic mean"}
+_COMBINE_EXPR = {"hmean": "HM", "gmean": "GM", "amean": "mean"}
+
+
+def _goodness(auroc: float, tpr: float, how: str) -> float:
+    """Fold ranking + operating point into [0, 1]. ``G = 2*AUROC - 1`` (Gini,
+    clipped at 0), ``T = TPR`` (clipped at 0), combined by ``how``."""
+    g = max(0.0, 2.0 * float(auroc) - 1.0)
+    t = max(0.0, float(tpr))
+    if how == "amean":
+        return (g + t) / 2.0
+    if how == "gmean":
+        return (g * t) ** 0.5
+    return 2.0 * g * t / (g + t) if (g + t) > 0 else 0.0
+
+
+def goodness_bars(
+    rows: list[dict], meta: dict, path: Path, *, key: str = "version",
+    title: str = "", combine: str = "hmean",
+) -> None:
+    from .splits import display as _sd
+
+    rows = [r for r in rows if r.get("kind") != "trained"
+            or r.get("split") is not None] if rows else []
+    # dataset groups: the per-split rows in the run's order, then the pooled
+    # 'mean' (shown last).
+    present = {r["split"] for r in rows}
+    # dict.fromkeys dedupes while keeping order -- meta["splits"] may already
+    # carry the OOD split (in_domain / lodo concatenate it in).
+    order = list(dict.fromkeys(
+        list(meta.get("splits", [])) + list(meta.get("ood", []))))
+    groups = [s for s in order if s in present]
+    for s in sorted(present):  # any split not named in meta, e.g. mg_den
+        if s not in groups and s != "mean":
+            groups.append(s)
+    if "mean" in present:
+        groups.append("mean")
+    if not groups:
+        print("goodness_bars: no rows — skipped")
+        return
+
+    names = sorted({r[key] for r in rows})
+    base_of, dcol = _variant_palette(names)
+
+    def _cell(det: str, split: str) -> dict | None:
+        return next((r for r in rows if r[key] == det and r["split"] == split), None)
+
+    def _tpr(c: dict) -> float:  # eff-FPR TPR, or the plain 1%-FPR one (old CSV)
+        t = _f(c.get("tpr_eff"))
+        return (t if t is not None else _f(c.get("tpr_at_fpr")) or 0.0)
+
+    def _score(c: dict) -> float | None:
+        return None if _f(c.get("auroc")) is None else _goodness(
+            c["auroc"], _tpr(c), combine)
+
+    # rank detectors by their pooled-'mean' score, else the mean over groups
+    def _rank(det: str) -> float:
+        m = _cell(det, "mean")
+        if m is not None and _score(m) is not None:
+            return _score(m)
+        vals = [s for g in groups if (c := _cell(det, g)) is not None
+                and (s := _score(c)) is not None]
+        return float(np.mean(vals)) if vals else -1.0
+
+    dets = sorted(names, key=_rank, reverse=True)
+    n = len(dets)
+    bw = 0.8 / max(n, 1)
+
+    fig, ax = plt.subplots(figsize=(max(1.5, 0.26 * n) * len(groups) + 2.6, 5.0))
+    ax.set_facecolor(_SURFACE)
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+
+    loosened: dict[str, float] = {}
+    for gi, g in enumerate(groups):
+        for di, det in enumerate(dets):
+            c = _cell(det, g)
+            score = None if c is None else _score(c)
+            if score is None:
+                continue
+            x = gi + (di - (n - 1) / 2) * bw
+            ax.bar(x, score, bw * 0.92, color=dcol(det), edgecolor="#222222",
+                   linewidth=0.4, zorder=3)
+            ef = _f(c.get("eff_fpr"))
+            if ef is not None and ef > meta["fpr"] + 1e-6:
+                loosened[g] = ef
+
+    ax.set_xlim(-0.5, len(groups) - 0.5)
+    ax.set_xticks(range(len(groups)))
+    xlabels = []
+    for g in groups:
+        lab = "MG-All" if g == "mean" else _sd(g)
+        if g in loosened:
+            lab += f"\n@ {loosened[g] * 100:.2f}% FPR"
+        xlabels.append(lab)
+    ax.set_xticklabels(xlabels, fontsize=8.5, color=_INK)
+    ax.set_ylim(0, 1.0)
+    ax.set_ylabel(
+        f"goodness = {_COMBINE_EXPR[combine]}(2·AUROC−1,  oracle TPR@"
+        f"{meta['fpr'] * 100:g}%FPR)", fontsize=9, color=_INK)
+    ax.tick_params(axis="y", labelsize=8, colors=_MUTED)
+    ax.grid(axis="y", lw=0.4, alpha=0.4)
+    for gi in range(1, len(groups)):
+        ax.axvline(gi - 0.5, color="#dddddd", lw=0.8, zorder=0)
+
+    handles = [plt.Line2D([], [], marker="s", ls="", ms=8, color=dcol(d), label=d)
+               for d in dets]
+    ax.legend(handles=handles, fontsize=8, loc="upper left",
+              bbox_to_anchor=(1.01, 1.0), framealpha=0.9, borderaxespad=0.0,
+              title=f"bars ranked by MG-All\n{_COMBINE_LABEL[combine]}")
+
+    ax.set_title(title or f"detector goodness across the MANUGRAM splits "
+                 f"({_COMBINE_LABEL[combine]} of Gini and oracle "
+                 f"TPR@{meta['fpr'] * 100:g}%FPR)", fontsize=10.5, color=_INK)
+    if loosened:
+        fig.text(0.02, 0.008,
+                 "@ n.nn% FPR: 1%-FPR unreachable on that few humans; TPR read "
+                 "at the smallest achievable FPR (one human flagged).",
+                 fontsize=7, color=_MUTED)
+    fig.tight_layout(rect=(0, 0.03 if loosened else 0, 1, 1))
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=150, facecolor="white", bbox_inches="tight")
     plt.close(fig)

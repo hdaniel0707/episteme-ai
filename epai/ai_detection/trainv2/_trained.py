@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 
 from epai.algs import build_algorithm
-from epai.ai_detection.trainv2.core import auroc, tpr_at_fpr
+from epai.ai_detection.trainv2.core import auroc, eff_fpr_level, tpr_at_fpr
 from epai.ai_detection.trainv2.data import GEN_COL, _is_missing
 
 EMB_COL = "emb_roberta"
@@ -68,8 +68,13 @@ def fit(spec: dict, X, y, Z, groups, idx, seed: int):
     return clf
 
 
-def eval_on(clf, spec: dict, X, y, Z, fpr: float) -> tuple[float, float]:
-    """AUROC + oracle TPR@fpr on the rows passed in (already the eval subset).
-    ``decision_score`` is already oriented high = machine."""
+def eval_on(clf, spec: dict, X, y, Z,
+            fpr: float) -> tuple[float, float, float]:
+    """``(auroc, tpr@fpr, tpr@eff_fpr)`` on the rows passed in (already the eval
+    subset). ``decision_score`` is already oriented high = machine. The third
+    value reads the operating point at the smallest FPR the ROC grid can hit
+    (``eff_fpr_level``) -- a real number even on a split too small for 1% FPR."""
     s = clf.decision_score(X, Z) if spec["aux"] else clf.decision_score(X)
-    return float(auroc(y, s)), float(tpr_at_fpr(y, s, fpr))
+    n_h = int((np.asarray(y) == 0).sum())
+    return (float(auroc(y, s)), float(tpr_at_fpr(y, s, fpr)),
+            float(tpr_at_fpr(y, s, eff_fpr_level(n_h, fpr))))

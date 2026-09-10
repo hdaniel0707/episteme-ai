@@ -105,6 +105,24 @@ def tpr_at_fpr(y: np.ndarray, scores: np.ndarray, level: float) -> float:
     return float(tpr[idx])
 
 
+#: A split whose 1%-FPR point is unreachable (< 100 human rows) doesn't get a
+#: 1%-FPR reading -- the ROC grid steps by 1/n_human. `eff_fpr_level` loosens
+#: the target to the smallest FPR the grid CAN hit (one human flagged), so
+#: every split yields a real operating-point TPR; capped so a tiny split
+#: doesn't loosen without limit.
+_EFF_FPR_CAP = 0.05
+
+
+def eff_fpr_level(n_human: int, target: float) -> float:
+    """``target`` where the FPR grid can reach it, else ``1/n_human`` (one human
+    flagged), capped at ``_EFF_FPR_CAP``. Use this instead of ``target`` when a
+    reading is wanted on every split (e.g. the goodness-score figure); the
+    caller should record which level was actually used."""
+    if n_human <= 0:
+        return target
+    return min(_EFF_FPR_CAP, max(target, 1.0 / n_human + 1e-9))
+
+
 # ---------------------------------------------------------------------------
 # Fit + evaluate one variant, over every seed — shared by every runner
 # ---------------------------------------------------------------------------
