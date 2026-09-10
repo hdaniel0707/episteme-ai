@@ -175,6 +175,45 @@ Run `run_zeroshot_performance.py --families judge` and
 `calibrate_judge_baseline.py --corpora all` after writing `sbc` for the AUROC /
 TPR@1%FPR verdict.
 
+## Ensembling across models
+
+`wlp` is the per-model column; the two models are **complementary by domain** —
+gemma owns prose (GB-orig, MG-GB), gpt56luna owns science (MG-Sci) — and their
+`wlp` scores correlate only r ≈ 0.2–0.4 within class. So there is real ensemble
+headroom, but it is **disjunctive** ("trust whichever model is more alarmed"),
+not additive: any symmetric *average* (arithmetic, geometric = mean log-odds =
+product-of-experts, rank, z-scored) lets a confidently-wrong model cancel a
+correct one and plateaus at TPR@1%FPR ≈ 0.60. A trained *linear* combiner is
+worse still (≈ 0.45) — it cannot express "min".
+
+`ensemble_judge_scores.py` writes the **soft-min**:
+
+```
+s = −T · log( (1/M) Σ_m exp( −s_m / T ) )     over the member P(human) columns
+```
+
+Symmetric in the members, extends to any M, and — like mean-log-odds — robust to
+adding a weak member (a near-chance score is rarely the minimum). `T → 0` is the
+hard min, `T → ∞` the mean; **T ≈ 0.1** is the knee.
+
+Mean over the 4 splits (AUROC / mean TPR@1%FPR, TPR incl. the MG-Den floor):
+
+| combine (on `gemma_wlp`, `gpt56luna_wlp`) | M=2 | M=4 (+ parsed `_v3`) | M=6 (+ 2 near-chance judges) |
+|---|---|---|---|
+| mean log-odds ("sum the logprobs") | 0.974 / 0.60 | 0.977 / 0.63 | 0.968 / 0.58 |
+| arithmetic / rank / z-mean | 0.975 / 0.59–0.61 | 0.979 / 0.67–0.74 | **breaks: 0.44–0.52** |
+| **soft-min, T = 0.1** | 0.977 / 0.59 | 0.982 / 0.65 | 0.977 / 0.64 |
+| hard min | 0.983 / 0.71 | 0.984 / 0.71 | 0.981 / 0.71 |
+| *best single (`gpt56luna_wlp`)* | *0.981 / 0.68* | | |
+
+Hard `min` gives the highest mean TPR but drags MG-Sci's low-FPR operating point
+(per-split TPR 0.26 vs 0.68 for `gpt56luna_wlp` alone — gemma is noisy on MG-Sci
+humans). Soft-min at T ≈ 0.1 recovers most of that (MG-Sci ≈ 0.39) and stays
+robust as members are added.
+
+Output column `llm_judge_score_<name>_v3_smin_<tau>` (`.` → `p` in `<tau>`:
+`smin_0p1`), P(human), auto-picked by the trainv2 `llm_judge_score_` prefix.
+
 ## Next
 
 Raw feature-vector columns (`words`: `[p_h, p_m, logit_diff, answer_mass, …]`;
