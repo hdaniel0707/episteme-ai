@@ -11,29 +11,35 @@ This reads a detection score off each window and writes it as a plain scalar
 column, so the trainv2 judge comparison picks it up by the ``llm_judge_score_``
 prefix like every other judge::
 
-    llm_judge_score_<model>_v3_wlp    from _words   (w-ords l-og p-rob)
-    llm_judge_score_<model>_v3_slp    from _scale   (s-cale l-og p-rob)
+    llm_judge_score_<model>_v3_wlp    from _words   words, contrast readout
+    llm_judge_score_<model>_v3_slp    from _scale   scale, expected-value readout
+    llm_judge_score_<model>_v3_sbc    from _scale   scale, contrast readout
 
 All scores are **P(human)**: 1.0 human, 0.0 machine, ``machine_is_high=False``.
 
 Formulation -- see ``score_logprob_windows.md`` for the derivation:
 
-  words   p_h, p_m = summed probability of the ``human`` / ``machine`` tokens in
-          the window (over casing / leading-space spellings). Score is
-              s = (1 + p_h - p_m) / 2
-          i.e. the answer distribution's expected human-ness with the leftover
-          (non-answer) mass counted as 0.5 -- uninformative. Continuous, always
-          in [0, 1], and equal to the renormalised ratio p_h / (p_h + p_m)
-          whenever the two answer words hold all the mass (they nearly always
-          do here). No window-edge floor, no branching on which words are
-          present.
+  wlp   p_h, p_m = summed probability of the ``human`` / ``machine`` tokens in
+        the window (over casing / leading-space spellings). Score is
+            s = (1 + p_h - p_m) / 2
+        i.e. the answer distribution's expected human-ness with the leftover
+        (non-answer) mass counted as 0.5 -- uninformative. Continuous, always
+        in [0, 1], and equal to the renormalised ratio p_h / (p_h + p_m)
+        whenever the two answer words hold all the mass (they nearly always
+        do here). No window-edge floor, no branching on which words are present.
 
-  scale   p_A .. p_E = summed probability of each letter. Renormalise over the
-          letters present (q_k = p_k / Σ p_j) and take the expected value
-              s = Σ q_k · v(k),   v = (A 1.0, B 0.75, C 0.5, D 0.25, E 0.0)
-          The ordered rating spreads a confident judge across neighbouring
-          letters, which is the graded signal ``_words`` cannot give over a
-          top-k window.
+  slp   p_A .. p_E = summed probability of each letter. Renormalise over the
+        letters present (q_k = p_k / Σ p_j) and take the expected value
+            s = Σ q_k · v(k),   v = (A 1.0, B 0.75, C 0.5, D 0.25, E 0.0)
+        The ordered rating was meant to spread a confident judge across
+        neighbouring letters; in practice the fixed ruler + first-letter bias
+        cost ranking vs ``wlp`` (see the .md), so ``sbc`` is the alternative.
+
+  sbc   score the scale prompt with the ``wlp`` formula: {A, B} vs {D, E},
+            s = (1 + (p_A + p_B) - (p_D + p_E)) / 2
+        C and non-letter mass -> 0.5. Drops the ordinal ruler entirely. Same
+        functional form as ``wlp``, so ``sbc`` vs ``wlp`` isolates the prompt
+        (5-level rating vs binary) from the scoring.
 
 Edge cases, both modes:
 
@@ -68,7 +74,6 @@ CORE_STEMS = ["ghostbuster_orig", "manugram_gb", "manugram_sci", "manugram_den"]
 
 IN_PREFIX = "llm_judge_logprobs_"
 MODE_SUFFIX = {"_v3_words": "words", "_v3_scale": "scale"}
-OUT_SUFFIX = {"words": "_v3_wlp", "scale": "_v3_slp"}
 
 # A = human end, E = machine end -- P(human) direction, so A scores 1.0.
 SCALE_VALUES = {"A": 1.0, "B": 0.75, "C": 0.5, "D": 0.25, "E": 0.0}
@@ -88,40 +93,69 @@ def _norm(token: str | None, mode: str) -> str:
     return s.lower() if mode == "words" else s.upper()
 
 
-def score_window(window, mode: str) -> float | None:
-    """P(human) for one window, or None if the window is empty (failed row)."""
+def _answer_probs(window, mode: str) -> dict[str, float] | None:
+    """Summed probability per answer token in the window. ``words`` ->
+    ``{'human': p, 'machine': p}``; ``scale`` -> ``{'A': p, ..., 'E': p}``.
+    Non-finite logprobs skipped. ``None`` for an empty window (failed row)."""
     if not window:
         return None
-
-    if mode == "words":
-        p_h = p_m = 0.0
-        for s in window:
-            lp = s.get("logprob")
-            if lp is None or not math.isfinite(lp):
-                continue
-            tok = _norm(s.get("token"), mode)
-            if tok == "human":
-                p_h += math.exp(lp)
-            elif tok == "machine":
-                p_m += math.exp(lp)
-        if p_h + p_m < MIN_ANSWER_MASS:
-            return 0.5
-        return float(np.clip((1.0 + p_h - p_m) / 2.0, 0.0, 1.0))
-
-    # scale
-    p = dict.fromkeys(_LETTERS, 0.0)
+    keys = ("human", "machine") if mode == "words" else _LETTERS
+    p = dict.fromkeys(keys, 0.0)
     for s in window:
         lp = s.get("logprob")
         if lp is None or not math.isfinite(lp):
             continue
         tok = _norm(s.get("token"), mode)
-        if tok in _LETTERS:
+        if tok in p:
             p[tok] += math.exp(lp)
+    return p
+
+
+def _contrast(p_h: float, p_m: float) -> float:
+    """P(human) from a two-outcome probability split, leftover mass = 0.5
+    (uninformative). Continuous, bounded, no renormalisation floor."""
+    if p_h + p_m < MIN_ANSWER_MASS:
+        return 0.5
+    return float(np.clip((1.0 + p_h - p_m) / 2.0, 0.0, 1.0))
+
+
+def score_words(window) -> float | None:
+    """``wlp``: P(human) from the ``human`` / ``machine`` answer tokens."""
+    p = _answer_probs(window, "words")
+    return None if p is None else _contrast(p["human"], p["machine"])
+
+
+def score_scale_ev(window) -> float | None:
+    """``slp``: expected value of the A..E rating, renormalised over the
+    letters present, against the fixed scale ``SCALE_VALUES``."""
+    p = _answer_probs(window, "scale")
+    if p is None:
+        return None
     total = sum(p.values())
     if total < MIN_ANSWER_MASS:
         return 0.5
     return float(np.clip(
         sum(p[k] / total * SCALE_VALUES[k] for k in _LETTERS), 0.0, 1.0))
+
+
+def score_scale_contrast(window) -> float | None:
+    """``sbc``: score the scale prompt like the words prompt -- {A, B} vs
+    {D, E}, dropping the ordinal ruler. C and any non-letter mass count as 0.5
+    (uncertain). Same functional form as ``wlp``, so a ``sbc`` vs ``wlp`` gap
+    is purely the prompt (5-level rating vs binary), not the scoring."""
+    p = _answer_probs(window, "scale")
+    if p is None:
+        return None
+    return _contrast(p["A"] + p["B"], p["D"] + p["E"])
+
+
+#: (input mode, output column suffix, scorer). A ``_scale`` window feeds two
+#: output columns.
+SCORERS: tuple[tuple[str, str, "callable"], ...] = (
+    ("words", "_v3_wlp", score_words),
+    ("scale", "_v3_slp", score_scale_ev),
+    ("scale", "_v3_sbc", score_scale_contrast),
+)
 
 
 def _parse_column(name: str) -> tuple[str, str] | None:
@@ -159,26 +193,31 @@ def process_stem(stem: str, args: argparse.Namespace) -> None:
         return
 
     schema = pq.read_schema(src)
-    todo: list[tuple[str, str, str]] = []  # (in_col, out_col, mode)
+    todo: list[tuple[str, str, "callable"]] = []  # (in_col, out_col, scorer)
     for name in schema.names:
         parsed = _parse_column(name)
         if parsed is None:
             continue
         model, mode = parsed
-        out_col = f"llm_judge_score_{model}{OUT_SUFFIX[mode]}"
-        if out_col in schema.names and not args.overwrite:
-            print(f"  {out_col} already present -- pass --overwrite; skipped")
-            continue
-        todo.append((name, out_col, mode))
+        for smode, suffix, fn in SCORERS:
+            if smode != mode:
+                continue
+            out_col = f"llm_judge_score_{model}{suffix}"
+            if out_col in schema.names and not args.overwrite:
+                print(f"  {out_col} already present -- pass --overwrite; skipped")
+                continue
+            todo.append((name, out_col, fn))
 
     if not todo:
         print("  nothing to do")
         return
 
+    windows: dict[str, list] = {}
     computed: dict[str, list[float | None]] = {}
-    for in_col, out_col, mode in todo:
-        windows = pq.read_table(src, columns=[in_col]).column(0).to_pylist()
-        scores = [score_window(w, mode) for w in windows]
+    for in_col, out_col, fn in todo:
+        if in_col not in windows:
+            windows[in_col] = pq.read_table(src, columns=[in_col]).column(0).to_pylist()
+        scores = [fn(w) for w in windows[in_col]]
         computed[out_col] = scores
         print(f"  {in_col}  ->  {out_col}")
         print(_distribution(scores))
@@ -201,7 +240,7 @@ def main() -> None:
     ap.add_argument("--out-dir", type=Path, default=None,
                     help="write scored <stem>.parquet here instead of in place")
     ap.add_argument("--overwrite", action="store_true",
-                    help="replace an llm_judge_score_*_wlp / _slp column that exists")
+                    help="replace an llm_judge_score_*_{wlp,slp,sbc} column that exists")
     ap.add_argument("--dry-run", action="store_true",
                     help="compute and print the score distributions, write nothing")
     args = ap.parse_args()

@@ -12,6 +12,10 @@ llm_judge_baseline:
     threshold: 2.6e-05
     threshold_youden: 0.999972
     label: gemma4_31b_lp
+  - column: llm_judge_score_gemma4_31b_v3_sbc
+    threshold: 1.6e-05
+    threshold_youden: 0.956108
+    label: gemma4_31b_sbc
   - column: llm_judge_score_gemma4_31b_v3_slp
     threshold: 0.003824
     threshold_youden: 0.718428
@@ -24,6 +28,10 @@ llm_judge_baseline:
     threshold: 0.07
     threshold_youden: 0.18
     label: gpt56luna
+  - column: llm_judge_score_gpt56luna_v3_sbc
+    threshold: 8.0e-06
+    threshold_youden: 0.010728
+    label: gpt56luna_sbc
   - column: llm_judge_score_gpt56luna_v3_wlp
     threshold: 7.8e-05
     threshold_youden: 0.003901
