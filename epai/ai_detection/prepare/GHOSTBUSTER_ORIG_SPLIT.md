@@ -61,10 +61,13 @@ Ghostbuster human originals + the raw `gpt35t` machine rows, scored on the same
   empty on rows where the judge named no cue of that polarity. Partial ≠ broken.
 * **`llm_judge_score_sonnet5_v3`** — sonnet5 was retired 2026-09-03 and was
   **not** run on the `gpt35ts` rows. It would be 50 % null in `_stand`, and in
-  `_orig` the human half must be re-scored (a billed API call) or the column
-  dropped. It is already excluded from trainv2's default judge family — **drop
-  it** with `--drop-cols llm_judge_score_sonnet5_v3` (below) unless you
-  specifically want it.
+  `_orig` the human half would need re-scoring. Excluded from trainv2's default
+  judge family — **drop it** (below).
+* **`llm_judge_score_gemma4_31b_v3_lp`** — the gemma logprob-mode judge. The
+  re-score pipeline does **not** run it (`run_gemma_logprob_judge.py` removed),
+  so the human half of this column would stay null and fail the final `verify`.
+  Also excluded from trainv2's judge family — **drop it** too. (`_wlp` / `_slp` /
+  `_sbc` are kept: the pipeline recomputes them from the logprob windows.)
 
 ## Caveat: boilerplate lineage
 
@@ -95,10 +98,11 @@ column full except the known quirks above, and `llm_judge_score_<m>_base` at
 ## Step 1 — split
 
 ```bash
-uv run python epai/ai_detection/prepare/split_ghostbuster_orig.py --dry-run
+DROP="llm_judge_score_sonnet5_v3 llm_judge_score_gemma4_31b_v3_lp"
 
-uv run python epai/ai_detection/prepare/split_ghostbuster_orig.py \
-    --drop-cols llm_judge_score_sonnet5_v3
+uv run python epai/ai_detection/prepare/split_ghostbuster_orig.py --dry-run --drop-cols $DROP
+
+uv run python epai/ai_detection/prepare/split_ghostbuster_orig.py --drop-cols $DROP
 ```
 
 Writes:

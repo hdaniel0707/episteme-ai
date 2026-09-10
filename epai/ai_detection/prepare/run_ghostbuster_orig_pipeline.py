@@ -117,8 +117,9 @@ def build_stages(args: argparse.Namespace) -> list[Stage]:
     if args.split:
         stages.append(Stage(
             "split", SPLIT_SCRIPT,
-            ["--variant", "orig", "--drop-cols", "llm_judge_score_sonnet5_v3",
-             "--force"],
+            ["--variant", "orig", "--force", "--drop-cols",
+             "llm_judge_score_sonnet5_v3",       # retired, absent on gpt35ts
+             "llm_judge_score_gemma4_31b_v3_lp"],  # this pipeline does not refill _lp
             produces=[], reads_text=False,
         ))
 
@@ -258,9 +259,9 @@ def _check_split_done() -> None:
     if gens != {"human", "gpt35t:0000A"}:
         raise SystemExit(
             f"{RED}{rel(OUT)} has classes {sorted(gens)} — this is not the raw "
-            f"2-class variant.{RESET}\nRun  "
-            f"epai/ai_detection/prepare/split_ghostbuster_orig.py --drop-cols "
-            f"llm_judge_score_sonnet5_v3  first, or add --split."
+            f"2-class variant.{RESET}\nRun  split_ghostbuster_orig.py --variant "
+            f"orig --drop-cols llm_judge_score_sonnet5_v3 "
+            f"llm_judge_score_gemma4_31b_v3_lp  first, or add --split."
         )
 
 

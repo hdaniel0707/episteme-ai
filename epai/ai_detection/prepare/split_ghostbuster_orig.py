@@ -48,10 +48,11 @@ WHAT THIS WRITES
                                       GHOSTBUSTER_ORIG_SPLIT.md.
 
 Run:
-    uv run python epai/ai_detection/prepare/split_ghostbuster_orig.py --dry-run
-    uv run python epai/ai_detection/prepare/split_ghostbuster_orig.py
+    uv run python epai/ai_detection/prepare/split_ghostbuster_orig.py --dry-run \
+        --drop-cols llm_judge_score_sonnet5_v3 llm_judge_score_gemma4_31b_v3_lp
+    uv run python epai/ai_detection/prepare/split_ghostbuster_orig.py \
+        --drop-cols llm_judge_score_sonnet5_v3 llm_judge_score_gemma4_31b_v3_lp
     uv run python epai/ai_detection/prepare/split_ghostbuster_orig.py --variant stand
-    uv run python epai/ai_detection/prepare/split_ghostbuster_orig.py --force
 """
 
 from __future__ import annotations
@@ -222,9 +223,11 @@ def main() -> int:
                     help="untouched copy of the source (default: %(default)s)")
     ap.add_argument("--out-dir", type=Path, default=PARQUET_DIR)
     ap.add_argument("--drop-cols", nargs="+", default=[], metavar="COL",
-                    help="columns to drop from BOTH variants before writing "
-                         "(e.g. llm_judge_score_sonnet5_v3 — see "
-                         "GHOSTBUSTER_ORIG_SPLIT.md)")
+                    help="columns to drop from BOTH variants before writing. "
+                         "Recommended: llm_judge_score_sonnet5_v3 (retired, "
+                         "absent on gpt35ts) and llm_judge_score_gemma4_31b_v3_lp "
+                         "(the re-score pipeline does not refill it). See "
+                         "GHOSTBUSTER_ORIG_SPLIT.md.")
     ap.add_argument("--variant", choices=("both", "stand", "orig"), default="both")
     ap.add_argument("--force", action="store_true",
                     help="overwrite outputs that already exist")
