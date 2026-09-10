@@ -56,16 +56,24 @@ def eval_column(oriented: np.ndarray, y: np.ndarray,
     """``(auroc, tpr@fpr, tpr@eff_fpr)`` for one oriented column on the rows
     passed in. Rows with a non-finite score are dropped (per-column, like
     ``run_zeroshot_performance``); returns all-NaN if < 2 classes survive."""
+    au, per = eval_column_fprs(oriented, y, (fpr,))
+    return (au, *per[fpr])
+
+
+def eval_column_fprs(oriented: np.ndarray, y: np.ndarray,
+                     fprs) -> tuple[float, dict]:
+    """``(auroc, {fpr: (tpr@fpr, tpr@eff_fpr)})`` -- ``eval_column`` at several
+    FPR levels at once (the NaN drop + AUROC done a single time)."""
     oriented = np.asarray(oriented, dtype=float)
     y = np.asarray(y)
     m = np.isfinite(oriented)
     oriented, y = oriented[m], y[m]
     if np.unique(y).size < 2:
-        return float("nan"), float("nan"), float("nan")
+        return float("nan"), {f: (float("nan"), float("nan")) for f in fprs}
     n_h = int((y == 0).sum())
-    return (auroc(y, oriented),
-            tpr_at_fpr(y, oriented, fpr),
-            tpr_at_fpr(y, oriented, eff_fpr_level(n_h, fpr)))
+    per = {f: (tpr_at_fpr(y, oriented, f),
+               tpr_at_fpr(y, oriented, eff_fpr_level(n_h, f))) for f in fprs}
+    return auroc(y, oriented), per
 
 
 def _nanmean(v) -> float:
@@ -101,10 +109,10 @@ def overall_cell(cells: list[dict], fpr: float) -> dict:
     ok = [c for c in cells if c.get("reachable", True)]
 
     def m(k: str, src=cells) -> float:
-        return _nanmean([c[k] for c in src])
+        return _nanmean([c.get(k, float("nan")) for c in src])
 
     def msd(k: str, src=cells) -> float:
-        vals = [c[k] for c in src if np.isfinite(c.get(k, float("nan")))]
+        vals = [v for c in src if np.isfinite(v := c.get(k, float("nan")))]
         return float(np.mean(vals)) if vals else 0.0
 
     return {

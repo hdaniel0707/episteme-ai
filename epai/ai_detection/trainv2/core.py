@@ -123,6 +123,23 @@ def eff_fpr_level(n_human: int, target: float) -> float:
     return min(_EFF_FPR_CAP, max(target, 1.0 / n_human + 1e-9))
 
 
+def fpr_tag(fpr: float) -> str:
+    """``0.01 -> '1pct'``, ``0.05 -> '5pct'`` -- the filename suffix that keeps
+    a run's per-FPR figure sets apart."""
+    return f"{fpr * 100:g}pct"
+
+
+def rows_at_fpr(rows: list[dict], fpr: float) -> list[dict]:
+    """The CSV records for one FPR level. Raises a clear error (rather than a
+    ``KeyError`` deep in a plot) on a ``performance.csv`` written before ``--fpr``
+    became a list -- those have no ``fpr`` column and must be regenerated."""
+    if rows and "fpr" not in rows[0]:
+        raise SystemExit(
+            "this performance.csv predates the multi-FPR change (no 'fpr' "
+            "column) — re-run the script without --replot to regenerate it")
+    return [r for r in rows if float(r["fpr"]) == fpr]
+
+
 def goodness(auroc_val: float, tpr: float, how: str = "hmean") -> float:
     """Fold ranking + operating point into ``[0, 1]``. ``G = 2*AUROC - 1``
     (Gini, clipped at 0), ``T = TPR`` (clipped at 0), combined by ``how``

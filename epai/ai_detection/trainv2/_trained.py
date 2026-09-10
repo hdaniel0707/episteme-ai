@@ -84,7 +84,17 @@ def eval_on(clf, spec: dict, X, y, Z,
     subset). ``decision_score`` is already oriented high = machine. The third
     value reads the operating point at the smallest FPR the ROC grid can hit
     (``eff_fpr_level``) -- a real number even on a split too small for 1% FPR."""
+    au, per = eval_on_fprs(clf, spec, X, y, Z, (fpr,))
+    return (au, *per[fpr])
+
+
+def eval_on_fprs(clf, spec: dict, X, y, Z,
+                 fprs) -> tuple[float, dict]:
+    """``(auroc, {fpr: (tpr@fpr, tpr@eff_fpr)})`` -- the ``eval_on`` reading at
+    several FPR levels at once, ``decision_score`` computed a single time.
+    AUROC is threshold-free, so it is shared across the levels."""
     s = clf.decision_score(X, Z) if spec["aux"] else clf.decision_score(X)
     n_h = int((np.asarray(y) == 0).sum())
-    return (float(auroc(y, s)), float(tpr_at_fpr(y, s, fpr)),
-            float(tpr_at_fpr(y, s, eff_fpr_level(n_h, fpr))))
+    per = {f: (float(tpr_at_fpr(y, s, f)),
+               float(tpr_at_fpr(y, s, eff_fpr_level(n_h, f)))) for f in fprs}
+    return float(auroc(y, s)), per

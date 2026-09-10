@@ -8,13 +8,19 @@ TPR@1%FPR -- the threshold read off THAT split's own ROC
 (``cd_core.roc_point_at_fpr``), an upper bound on the operating point and the
 one reading that needs no calibration slice.
 
-compute -> CSV -> 3 plots drawn from the CSV:
+``--fpr`` takes one or more oracle FPR levels (default 1% and 5%); the CSV
+carries an ``fpr`` column and each level gets its own figure set, suffixed
+``_1pct`` / ``_5pct``.
+
+compute -> CSV -> plots drawn from the CSV (one scatter + one goodness bar per
+family per FPR level):
 
     results/trainv2/zeroshot_performance/
-        performance.csv    one row per (family, version, split) AND (…, 'mean')
-        binoculars.png     AUROC vs oracle TPR@1%FPR, Binoculars pairs
-        fastdetect.png     … Fast-DetectGPT pairs
-        judge.png          … LLM judges
+        performance.csv      one row per (family, version, split, fpr) AND (…, 'mean')
+        binoculars_1pct.png  AUROC vs oracle TPR@1%FPR, Binoculars pairs
+        binoculars_5pct.png  … at 5% FPR
+        fastdetect_1pct.png  … Fast-DetectGPT pairs
+        judge_1pct.png       … LLM judges
 
 In each plot: colour = detector version, marker shape = MANUGRAM split, and a
 bold filled circle = that version's mean across the splits (the answer; the
@@ -55,8 +61,10 @@ from epai.utils.cd_core import (
     roc_point_at_fpr,
 )
 
-from epai.ai_detection.trainv2.core import eff_fpr_level
+from epai.ai_detection.trainv2.core import eff_fpr_level, fpr_tag, rows_at_fpr
 from epai.ai_detection.trainv2.splits import resolve as resolve_splits
+
+DEFAULT_FPRS = [0.01, 0.05]
 
 BASE_DIR = Path(__file__).resolve().parents[3]
 PARQUET_DIR = BASE_DIR / "data" / "parquet"
@@ -106,7 +114,7 @@ FAMILIES: dict[str, dict] = {
 }
 
 CSV_FIELDS = [
-    "family", "version", "column", "split", "n", "n_human", "n_machine",
+    "family", "version", "column", "split", "fpr", "n", "n_human", "n_machine",
     "auroc", "tpr_at_fpr", "fpr_at_fpr", "reachable", "tpr_eff", "eff_fpr",
 ]
 
@@ -122,9 +130,12 @@ def compute(
     splits: list[tuple[str, Path]],
     families: dict[str, dict],
     cols_arg: list[str] | None,
-    fpr: float,
+    fprs: list[float],
     human_label: str,
 ) -> list[dict]:
+    """One row per (family, version, column, split, **fpr**) plus the per-fpr
+    ``split='mean'`` row. AUROC is threshold-free so it repeats across a
+    column's fpr rows; ``tpr_at_fpr`` / ``reachable`` / ``tpr_eff`` are per-fpr."""
     import pyarrow.parquet as pq
 
     rows: list[dict] = []
@@ -143,29 +154,31 @@ def compute(
                 if np.unique(y).size < 2 or len(y) < 10:
                     continue
                 oriented = oriented_scores(raw, spec["machine_is_high"])
-                tpr, thr = roc_point_at_fpr(y, oriented, fpr)
-                _, fpr_act = rates_at_threshold(y, oriented, thr)
+                auroc_v = float(auroc_score(y, oriented))
                 n_h = int((y == 0).sum())
-                eff = eff_fpr_level(n_h, fpr)
-                tpr_eff, _ = roc_point_at_fpr(y, oriented, eff)
-                rows.append({
-                    "family": fam_key, "version": spec["label"](col), "column": col,
-                    "split": split_key, "n": int(len(y)), "n_human": n_h,
-                    "n_machine": int((y == 1).sum()),
-                    "auroc": float(auroc_score(y, oriented)),
-                    "tpr_at_fpr": float(tpr), "fpr_at_fpr": float(fpr_act),
-                    "reachable": bool(n_h * fpr >= 1.0 and np.isfinite(thr)),
-                    "tpr_eff": float(tpr_eff), "eff_fpr": float(eff),
-                })
+                for fpr in fprs:
+                    tpr, thr = roc_point_at_fpr(y, oriented, fpr)
+                    _, fpr_act = rates_at_threshold(y, oriented, thr)
+                    eff = eff_fpr_level(n_h, fpr)
+                    tpr_eff, _ = roc_point_at_fpr(y, oriented, eff)
+                    rows.append({
+                        "family": fam_key, "version": spec["label"](col), "column": col,
+                        "split": split_key, "fpr": fpr, "n": int(len(y)), "n_human": n_h,
+                        "n_machine": int((y == 1).sum()),
+                        "auroc": auroc_v,
+                        "tpr_at_fpr": float(tpr), "fpr_at_fpr": float(fpr_act),
+                        "reachable": bool(n_h * fpr >= 1.0 and np.isfinite(thr)),
+                        "tpr_eff": float(tpr_eff), "eff_fpr": float(eff),
+                    })
 
     grouped: dict[tuple, list[dict]] = defaultdict(list)
     for r in rows:
-        grouped[(r["family"], r["version"], r["column"])].append(r)
-    for (fam, ver, col), cells in grouped.items():
+        grouped[(r["family"], r["version"], r["column"], r["fpr"])].append(r)
+    for (fam, ver, col, fpr), cells in grouped.items():
         tprs = [c["tpr_at_fpr"] for c in cells if c["reachable"]]
         effs = [c["tpr_eff"] for c in cells]
         rows.append({
-            "family": fam, "version": ver, "column": col, "split": "mean",
+            "family": fam, "version": ver, "column": col, "split": "mean", "fpr": fpr,
             "n": "", "n_human": "", "n_machine": "",
             "auroc": float(np.mean([c["auroc"] for c in cells])),
             "tpr_at_fpr": float(np.mean(tprs)) if tprs else float("nan"),
@@ -179,21 +192,21 @@ def _sorted_rows(rows: list[dict], split_order: list[str]) -> list[dict]:
     fam_ix = {f: i for i, f in enumerate(FAMILIES)}
     split_ix = {s: i for i, s in enumerate([*split_order, "mean"])}
     return sorted(rows, key=lambda r: (fam_ix.get(r["family"], 9), r["version"],
-                                       split_ix.get(r["split"], 9)))
+                                       float(r["fpr"]), split_ix.get(r["split"], 9)))
 
 
-def _print_table(rows: list[dict], fpr: float) -> None:
-    pct = f"{fpr * 100:g}"
-    print(f"\n{'family':<12}{'version':<14}{'split':<12}{'n':>7}{'auroc':>8}"
-          f"{f'  TPR@{pct}%':>11}{'  fpr':>7}")
+def _print_table(rows: list[dict], fprs: list[float]) -> None:
+    print(f"\n{'family':<12}{'version':<14}{'split':<12}{'FPR':>6}{'n':>7}"
+          f"{'auroc':>8}{'  TPR':>9}{'  fpr':>7}")
     for r in rows:
         star = "" if r["reachable"] or r["split"] == "mean" else " (floor)"
         n = r["n"] if r["split"] != "mean" else ""
         tpr = "--" if not np.isfinite(r["tpr_at_fpr"]) else f"{r['tpr_at_fpr']:.3f}"
         fp = "" if r["split"] == "mean" else f"{r['fpr_at_fpr']:.3f}"
         mark = "  <<" if r["split"] == "mean" else ""
-        print(f"{r['family']:<12}{r['version']:<14}{r['split']:<12}{str(n):>7}"
-              f"{r['auroc']:>8.3f}{tpr:>11}{fp:>7}{mark}{star}")
+        print(f"{r['family']:<12}{r['version']:<14}{r['split']:<12}"
+              f"{float(r['fpr']) * 100:>5g}%{str(n):>7}"
+              f"{r['auroc']:>8.3f}{tpr:>9}{fp:>7}{mark}{star}")
 
 
 _FAMILY_TITLE = {"binoculars": "Binoculars pairs", "fastdetect": "Fast-DetectGPT pairs",
@@ -205,18 +218,21 @@ def plots_from_csv(csv_path: Path, meta: dict, out_dir: Path) -> None:
     from epai.ai_detection.trainv2.plots import goodness_bars, zeroshot_scatter
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    fpr = meta["fpr"] * 100
     combine = meta.get("combine", "hmean")
-    for family in sorted({r["family"] for r in rows}):
-        fam_rows = [r for r in rows if r["family"] == family]
-        title = (f"{_FAMILY_TITLE.get(family, family)} — zero-shot AUROC vs. "
-                 f"oracle TPR@{fpr:g}%FPR across the MANUGRAM splits")
-        zeroshot_scatter(fam_rows, meta, out_dir / f"{family}.png",
-                         key="version", title=title)
-        goodness_bars(fam_rows, meta, out_dir / f"{family}_goodness.png",
-                      key="version", combine=combine,
-                      title=f"{_FAMILY_TITLE.get(family, family)} — goodness "
-                            f"across the MANUGRAM splits")
+    for fpr in meta["fprs"]:
+        fmeta = {**meta, "fpr": fpr}
+        tag = fpr_tag(fpr)
+        frows = rows_at_fpr(rows, fpr)
+        for family in sorted({r["family"] for r in frows}):
+            fam_rows = [r for r in frows if r["family"] == family]
+            title = (f"{_FAMILY_TITLE.get(family, family)} — zero-shot AUROC vs. "
+                     f"oracle TPR@{fpr * 100:g}%FPR across the MANUGRAM splits")
+            zeroshot_scatter(fam_rows, fmeta, out_dir / f"{family}_{tag}.png",
+                             key="version", title=title)
+            goodness_bars(fam_rows, fmeta, out_dir / f"{family}_goodness_{tag}.png",
+                          key="version", combine=combine,
+                          title=f"{_FAMILY_TITLE.get(family, family)} — goodness "
+                                f"(TPR@{fpr * 100:g}%FPR) across the MANUGRAM splits")
 
 
 def main() -> None:
@@ -230,7 +246,10 @@ def main() -> None:
     ap.add_argument("--cols", nargs="+", default=None,
                     help="score columns (default: every one of each family's "
                          "prefix, minus the family's exclude list)")
-    ap.add_argument("--fpr", type=float, default=0.01)
+    ap.add_argument("--fpr", nargs="+", type=float, default=DEFAULT_FPRS,
+                    metavar="LEVEL",
+                    help=f"oracle FPR level(s); one figure set per level "
+                         f"(default: {DEFAULT_FPRS})")
     ap.add_argument("--combine", choices=("hmean", "gmean", "amean"), default="hmean",
                     help="goodness-bar score = this mean of Gini and oracle TPR "
                          "(default: harmonic)")
@@ -242,7 +261,7 @@ def main() -> None:
     args = ap.parse_args()
 
     splits = resolve_splits(args.splits or [], PARQUET_DIR)
-    meta = {"fpr": args.fpr, "splits": [s for s, _ in splits],
+    meta = {"fprs": args.fpr, "splits": [s for s, _ in splits],
             "combine": args.combine}
 
     if args.replot is not None:
@@ -257,7 +276,8 @@ def main() -> None:
 
     print(f"families : {list(families)}")
     print(f"splits   : {[s for s, _ in splits]}")
-    print(f"metric   : AUROC (oriented), oracle TPR@{args.fpr * 100:g}%FPR")
+    print(f"metric   : AUROC (oriented), oracle TPR@"
+          f"{[f'{f * 100:g}%' for f in args.fpr]}FPR")
 
     rows = _sorted_rows(
         compute(splits, families, args.cols, args.fpr, args.human_label),

@@ -18,11 +18,15 @@ The curated-picks companion to ``run_zeroshot_performance.py`` -- that sweeps
 every column of every family; this scores just the hand-picked list and puts
 them on one figure.
 
+``--fpr`` takes one or more oracle FPR levels (default 1% and 5%); each gets its
+own figure set, suffixed ``_1pct`` / ``_5pct``.
+
 compute -> CSV -> plot from the CSV:
 
     results/trainv2/best_zeroshot_performance/
-        performance.csv     one row per (detector, split) AND (detector, 'mean')
-        best_zeroshot.png
+        performance.csv       one row per (detector, split, fpr) AND (…, 'mean')
+        best_zeroshot_1pct.png / best_zeroshot_5pct.png
+        best_zeroshot_goodness_1pct.png / …_5pct.png
 
 Run:
     uv run python epai/ai_detection/trainv2/run_best_zeroshot_performance.py
@@ -38,8 +42,10 @@ from pathlib import Path
 import pandas as pd
 import yaml
 
+from epai.ai_detection.trainv2.core import fpr_tag, rows_at_fpr
 from epai.ai_detection.trainv2.run_zeroshot_performance import (
     CSV_FIELDS,
+    DEFAULT_FPRS,
     FAMILIES,
     compute,
 )
@@ -75,17 +81,21 @@ def plots_from_csv(csv_path: Path, meta: dict, out_dir: Path) -> None:
     from epai.ai_detection.trainv2.plots import goodness_bars, zeroshot_scatter
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    zeroshot_scatter(
-        rows, meta, out_dir / "best_zeroshot.png", key="detector",
-        title=f"Best zero-shot detector per family — AUROC vs. oracle "
-              f"TPR@{meta['fpr'] * 100:g}%FPR across the MANUGRAM splits",
-    )
-    goodness_bars(
-        rows, meta, out_dir / "best_zeroshot_goodness.png", key="detector",
-        combine=meta.get("combine", "hmean"),
-        title="Best zero-shot detector per family — goodness across the "
-              "MANUGRAM splits",
-    )
+    for fpr in meta["fprs"]:
+        fmeta = {**meta, "fpr": fpr}
+        tag = fpr_tag(fpr)
+        frows = rows_at_fpr(rows, fpr)
+        zeroshot_scatter(
+            frows, fmeta, out_dir / f"best_zeroshot_{tag}.png", key="detector",
+            title=f"Best zero-shot detector per family — AUROC vs. oracle "
+                  f"TPR@{fpr * 100:g}%FPR across the MANUGRAM splits",
+        )
+        goodness_bars(
+            frows, fmeta, out_dir / f"best_zeroshot_goodness_{tag}.png",
+            key="detector", combine=meta.get("combine", "hmean"),
+            title=f"Best zero-shot detector per family — goodness "
+                  f"(TPR@{fpr * 100:g}%FPR) across the MANUGRAM splits",
+        )
 
 
 def main() -> None:
@@ -94,7 +104,10 @@ def main() -> None:
     )
     ap.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     ap.add_argument("--splits", nargs="+", default=None, metavar="KEY")
-    ap.add_argument("--fpr", type=float, default=0.01)
+    ap.add_argument("--fpr", nargs="+", type=float, default=DEFAULT_FPRS,
+                    metavar="LEVEL",
+                    help=f"oracle FPR level(s); one figure set per level "
+                         f"(default: {DEFAULT_FPRS})")
     ap.add_argument("--combine", choices=("hmean", "gmean", "amean"), default="hmean",
                     help="goodness-bar score = this mean of Gini and oracle TPR")
     ap.add_argument("--human-label", default="human")
@@ -104,7 +117,7 @@ def main() -> None:
     args = ap.parse_args()
 
     splits = resolve_splits(args.splits or [], PARQUET_DIR)
-    meta = {"fpr": args.fpr, "splits": [s for s, _ in splits],
+    meta = {"fprs": args.fpr, "splits": [s for s, _ in splits],
             "combine": args.combine}
 
     if args.replot is not None:
@@ -120,20 +133,22 @@ def main() -> None:
     print(f"config : {args.config}")
     print(f"columns: {cols}")
     print(f"splits : {[s for s, _ in splits]}")
-    print(f"metric : AUROC (oriented), oracle TPR@{args.fpr * 100:g}%FPR\n")
+    print(f"metric : AUROC (oriented), oracle TPR@"
+          f"{[f'{f * 100:g}%' for f in args.fpr]}FPR\n")
 
     rows = compute(splits, FAMILIES, cols, args.fpr, args.human_label)
     for r in rows:
         r["detector"] = _detector(r["family"], r["version"])
     order = {c: i for i, c in enumerate(cols)}
     split_ix = {s: i for i, s in enumerate([*meta["splits"], "mean"])}
-    rows.sort(key=lambda r: (order.get(r["column"], 9), split_ix.get(r["split"], 9)))
+    rows.sort(key=lambda r: (order.get(r["column"], 9), float(r["fpr"]),
+                             split_ix.get(r["split"], 9)))
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     csv_path = args.out_dir / "performance.csv"
     pd.DataFrame(rows, columns=OUT_FIELDS).to_csv(csv_path, index=False)
-    print(pd.DataFrame(rows, columns=["detector", "split", "auroc", "tpr_at_fpr",
-                                      "reachable"]).to_string(index=False))
+    print(pd.DataFrame(rows, columns=["detector", "split", "fpr", "auroc",
+                                      "tpr_at_fpr", "reachable"]).to_string(index=False))
     print(f"\nwrote {csv_path}")
 
     if not args.no_plots:

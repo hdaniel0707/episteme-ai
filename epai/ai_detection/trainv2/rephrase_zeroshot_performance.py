@@ -16,13 +16,17 @@ per family:
     colour = detector version, marker shape = corpus,
     bold filled circle = mean across MG-GB and MG-Sci
 
+``--fpr`` takes one or more oracle FPR levels (default 1% and 5%); the CSV
+carries an ``fpr`` column and each level gets its own ``_1pct`` / ``_5pct``
+figure set.
+
 compute -> CSV -> plots from the CSV:
 
     results/trainv2/rephrase_zeroshot_performance/
-        performance.csv   one row per (family, version, split) AND (..., 'mean');
+        performance.csv   one row per (family, version, split, fpr) AND (…, 'mean');
                           split in {mg_gb, mg_sci, all}
-        binoculars.png
-        fastdetect.png
+        binoculars_1pct.png / binoculars_5pct.png
+        fastdetect_1pct.png / fastdetect_5pct.png
 
 Run:
     uv run python epai/ai_detection/trainv2/rephrase_zeroshot_performance.py
@@ -45,11 +49,13 @@ from epai.utils.cd_core import (
     roc_point_at_fpr,
 )
 
+from epai.ai_detection.trainv2.core import fpr_tag, rows_at_fpr
 from epai.ai_detection.trainv2.plot_score_histograms import (
     CORPUS_SOURCES,
     PARQUET_DIR,
     build,
 )
+from epai.ai_detection.trainv2.run_zeroshot_performance import DEFAULT_FPRS
 from epai.ai_detection.trainv2.run_zeroshot_performance import FAMILIES as _ZS_FAMILIES
 
 BASE = Path(__file__).resolve().parents[3]
@@ -63,7 +69,7 @@ SPLITS = ["mg_gb", "mg_sci"]          # the real corpora; the 'mean' is over the
 CORPORA = [*SPLITS, "all"]            # + pooled (CSV only, not plotted)
 
 CSV_FIELDS = [
-    "family", "version", "column", "split", "n", "n_human", "n_machine",
+    "family", "version", "column", "split", "fpr", "n", "n_human", "n_machine",
     "auroc", "tpr_at_fpr", "fpr_at_fpr", "reachable",
 ]
 
@@ -75,67 +81,73 @@ def _cols(spec: dict, names: set[str]) -> list[str]:
                   and c not in spec.get("exclude", frozenset()))
 
 
-def _cell(sub: pd.DataFrame, column: str, machine_is_high: bool, fpr: float) -> dict | None:
-    """One (corpus, column) reading: rephrase + human vs. the full rewrite."""
+def _cell(sub: pd.DataFrame, column: str, machine_is_high: bool,
+          fprs: list[float]) -> list[dict]:
+    """One (corpus, column) reading at each FPR level: rephrase + human vs. the
+    full rewrite. ``[]`` on a degenerate slice."""
     v = sub[column].to_numpy(dtype=float)
     cls = sub["cls"].to_numpy()
     ok = np.isfinite(v)
     v, cls = v[ok], cls[ok]
     y = (cls == "rewritten").astype(int)  # human and rephrase -> 0
     if np.unique(y).size < 2 or len(y) < 10:
-        return None
+        return []
     oriented = oriented_scores(v, machine_is_high)
-    tpr, thr = roc_point_at_fpr(y, oriented, fpr)
-    _, fpr_act = rates_at_threshold(y, oriented, thr)
+    auroc_v = float(auroc_score(y, oriented))
     n_h = int((y == 0).sum())
-    return {
-        "n": int(len(y)), "n_human": n_h, "n_machine": int((y == 1).sum()),
-        "auroc": float(auroc_score(y, oriented)),
-        "tpr_at_fpr": float(tpr), "fpr_at_fpr": float(fpr_act),
-        "reachable": bool(n_h * fpr >= 1.0 and np.isfinite(thr)),
-    }
+    out: list[dict] = []
+    for fpr in fprs:
+        tpr, thr = roc_point_at_fpr(y, oriented, fpr)
+        _, fpr_act = rates_at_threshold(y, oriented, thr)
+        out.append({
+            "fpr": fpr, "n": int(len(y)), "n_human": n_h,
+            "n_machine": int((y == 1).sum()), "auroc": auroc_v,
+            "tpr_at_fpr": float(tpr), "fpr_at_fpr": float(fpr_act),
+            "reachable": bool(n_h * fpr >= 1.0 and np.isfinite(thr)),
+        })
+    return out
 
 
-def compute(df: pd.DataFrame, fpr: float) -> list[dict]:
+def compute(df: pd.DataFrame, fprs: list[float]) -> list[dict]:
     names = set(df.columns)
     rows: list[dict] = []
     for fam, spec in FAMILIES.items():
         for col in _cols(spec, names):
             ver = spec["label"](col)
-            cells: dict[str, dict] = {}
+            cells: dict[tuple, dict] = {}
             for corpus in CORPORA:
-                r = _cell(df[df.corpus == corpus], col, spec["machine_is_high"], fpr)
-                if r is None:
+                for r in _cell(df[df.corpus == corpus], col,
+                               spec["machine_is_high"], fprs):
+                    rows.append({"family": fam, "version": ver, "column": col,
+                                 "split": corpus, **r})
+                    cells[(corpus, r["fpr"])] = r
+            for f in fprs:
+                real = [cells[(s, f)] for s in SPLITS if (s, f) in cells]
+                if not real:
                     continue
-                rows.append({"family": fam, "version": ver, "column": col,
-                             "split": corpus, **r})
-                cells[corpus] = r
-            real = [cells[s] for s in SPLITS if s in cells]
-            if not real:
-                continue
-            tprs = [c["tpr_at_fpr"] for c in real if c["reachable"]]
-            rows.append({
-                "family": fam, "version": ver, "column": col, "split": "mean",
-                "n": "", "n_human": "", "n_machine": "",
-                "auroc": float(np.mean([c["auroc"] for c in real])),
-                "tpr_at_fpr": float(np.mean(tprs)) if tprs else float("nan"),
-                "fpr_at_fpr": "", "reachable": "",
-            })
+                tprs = [c["tpr_at_fpr"] for c in real if c["reachable"]]
+                rows.append({
+                    "family": fam, "version": ver, "column": col, "split": "mean",
+                    "fpr": f, "n": "", "n_human": "", "n_machine": "",
+                    "auroc": float(np.mean([c["auroc"] for c in real])),
+                    "tpr_at_fpr": float(np.mean(tprs)) if tprs else float("nan"),
+                    "fpr_at_fpr": "", "reachable": "",
+                })
     return rows
 
 
-def _print_table(rows: list[dict], fpr: float) -> None:
-    pct = f"{fpr * 100:g}"
-    print(f"\n{'family':<12}{'version':<14}{'split':<9}{'n':>7}{'auroc':>8}"
-          f"{f'  TPR@{pct}%':>11}{'  fpr':>7}")
+def _print_table(rows: list[dict], fprs: list[float]) -> None:
+    print(f"\n{'family':<12}{'version':<14}{'split':<9}{'FPR':>6}{'n':>7}"
+          f"{'auroc':>8}{'  TPR':>9}{'  fpr':>7}")
     for r in rows:
         tpr = "--" if not np.isfinite(r["tpr_at_fpr"]) else f"{r['tpr_at_fpr']:.3f}"
         fp = "" if r["split"] == "mean" else f"{r['fpr_at_fpr']:.3f}"
         mark = "  <<" if r["split"] == "mean" else (
             "" if r["reachable"] or r["split"] == "mean" else " (floor)")
         n = "" if r["split"] == "mean" else r["n"]
-        print(f"{r['family']:<12}{r['version']:<14}{r['split']:<9}{str(n):>7}"
-              f"{r['auroc']:>8.3f}{tpr:>11}{fp:>7}{mark}")
+        print(f"{r['family']:<12}{r['version']:<14}{r['split']:<9}"
+              f"{float(r['fpr']) * 100:>5g}%{str(n):>7}"
+              f"{r['auroc']:>8.3f}{tpr:>9}{fp:>7}{mark}")
 
 
 def plots_from_csv(csv_path: Path, meta: dict, out_dir: Path) -> None:
@@ -144,26 +156,33 @@ def plots_from_csv(csv_path: Path, meta: dict, out_dir: Path) -> None:
     all_rows = pd.read_csv(csv_path).to_dict("records")
     rows = [r for r in all_rows if r["split"] in (*meta["splits"], "mean")]
     out_dir.mkdir(parents=True, exist_ok=True)
-    for family in sorted({r["family"] for r in rows}):
-        fam_rows = [r for r in rows if r["family"] == family]
-        title = (f"{_TITLE.get(family, family)} — rephrase counted as human — "
-                 f"zero-shot AUROC vs. oracle TPR@{meta['fpr'] * 100:g}%FPR")
-        zeroshot_scatter(fam_rows, meta, out_dir / f"{family}.png",
-                         key="version", title=title)
+    for fpr in meta["fprs"]:
+        fmeta = {**meta, "fpr": fpr}
+        tag = fpr_tag(fpr)
+        frows = rows_at_fpr(rows, fpr)
+        for family in sorted({r["family"] for r in frows}):
+            fam_rows = [r for r in frows if r["family"] == family]
+            title = (f"{_TITLE.get(family, family)} — rephrase counted as human — "
+                     f"zero-shot AUROC vs. oracle TPR@{fpr * 100:g}%FPR")
+            zeroshot_scatter(fam_rows, fmeta, out_dir / f"{family}_{tag}.png",
+                             key="version", title=title)
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("--fpr", type=float, default=0.01)
+    ap.add_argument("--fpr", nargs="+", type=float, default=DEFAULT_FPRS,
+                    metavar="LEVEL",
+                    help=f"oracle FPR level(s); one figure set per level "
+                         f"(default: {DEFAULT_FPRS})")
     ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     ap.add_argument("--no-plots", action="store_true")
     ap.add_argument("--replot", type=Path, default=None, metavar="PERFORMANCE_CSV",
                     help="skip scoring; redraw the PNGs from an existing CSV")
     args = ap.parse_args()
 
-    meta = {"fpr": args.fpr, "splits": SPLITS}
+    meta = {"fprs": args.fpr, "splits": SPLITS}
 
     if args.replot is not None:
         plots_from_csv(args.replot, meta, args.replot.parent)
@@ -185,7 +204,8 @@ def main() -> int:
         raise SystemExit("no binoculars_score* / fastdetect_crit_* columns present")
     print(f"columns : {columns}")
     print(f"target  : y=1 the full gpt56luna generation; human AND rephrase -> y=0")
-    print(f"metric  : AUROC (oriented), oracle TPR@{args.fpr * 100:g}%FPR\n")
+    print(f"metric  : AUROC (oriented), oracle TPR@"
+          f"{[f'{f * 100:g}%' for f in args.fpr]}FPR\n")
 
     df = build(columns)
     rows = compute(df, args.fpr)

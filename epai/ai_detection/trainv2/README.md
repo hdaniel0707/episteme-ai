@@ -212,8 +212,14 @@ Outputs (`results/trainv2/embedding_effectiveness/`): `per_seed.csv`,
 
 ### D. Zero-shot detector performance
 
-No training, no calibrated cutoff. AUROC (oriented) vs. **oracle** TPR@1%FPR
+No training, no calibrated cutoff. AUROC (oriented) vs. **oracle** TPR@FPR
 (threshold refit on each split's own ROC).
+
+All four performance runners (this section + F) take `--fpr` as a **list** of
+oracle FPR levels — default `0.01 0.05`. The `performance.csv` gains an `fpr`
+column and every figure is emitted once per level, suffixed `_1pct` / `_5pct`.
+For the trained runners the models are fit once; the extra level is only a
+different ROC readout. (`run_dr_transfer.py` keeps a scalar `--fpr`.)
 
 **`run_zeroshot_performance.py`** — every score column of each family
 (Binoculars / Fast-DetectGPT / judge), one scatter per family: colour = detector
@@ -224,8 +230,8 @@ uv run python epai/ai_detection/trainv2/run_zeroshot_performance.py
 uv run python epai/ai_detection/trainv2/run_zeroshot_performance.py --families judge --splits mg_gb gb_orig
 uv run python epai/ai_detection/trainv2/run_zeroshot_performance.py --replot results/trainv2/zeroshot_performance/performance.csv
 ```
-Outputs (`results/trainv2/zeroshot_performance/`): `performance.csv`,
-`binoculars.png`, `fastdetect.png`, `judge.png`.
+Outputs (`results/trainv2/zeroshot_performance/`): `performance.csv`, and per
+FPR level `{binoculars,fastdetect,judge}_{1pct,5pct}.png` (+ `_goodness_`).
 
 **`run_best_zeroshot_performance.py`** — the **hand-picked** best of each family
 (a flat `columns:` list in `cfg/ai_detection/trainv2/best_zeroshot.yaml`), all
@@ -236,7 +242,7 @@ uv run python epai/ai_detection/trainv2/run_best_zeroshot_performance.py
 uv run python epai/ai_detection/trainv2/run_best_zeroshot_performance.py --replot results/trainv2/best_zeroshot_performance/performance.csv
 ```
 Outputs (`results/trainv2/best_zeroshot_performance/`): `performance.csv`,
-`best_zeroshot.png`.
+`best_zeroshot_{1pct,5pct}.png` (+ `_goodness_`).
 
 ### E. Judge × generator — `run_judge_by_generator.py`
 
@@ -279,7 +285,7 @@ uv run python epai/ai_detection/trainv2/run_in_domain_performance.py --splits mg
 uv run python epai/ai_detection/trainv2/run_in_domain_performance.py --replot results/trainv2/in_domain_performance/performance.csv
 ```
 Outputs (`results/trainv2/in_domain_performance/`): `performance.csv`,
-`in_domain.png`.
+`in_domain_{1pct,5pct}.png` (+ `_goodness_`, `_denario_`).
 
 **`run_lodo_performance.py`** — leave-one-domain-out instead of a random split:
 each domain of a split is held out in turn, trained on the rest, scored on the
@@ -293,7 +299,8 @@ uv run python epai/ai_detection/trainv2/run_lodo_performance.py
 uv run python epai/ai_detection/trainv2/run_lodo_performance.py --seeds 0 1 2
 uv run python epai/ai_detection/trainv2/run_lodo_performance.py --replot results/trainv2/lodo_performance/performance.csv
 ```
-Outputs (`results/trainv2/lodo_performance/`): `performance.csv`, `lodo.png`.
+Outputs (`results/trainv2/lodo_performance/`): `performance.csv`,
+`lodo_{1pct,5pct}.png` (+ `_goodness_`, `_denario_`).
 
 ### G. Domain randomization → MG-Den transfer (opt-in)
 
@@ -405,10 +412,11 @@ uv run python epai/ai_detection/trainv2/rephrase_zeroshot_performance.py
 uv run python epai/ai_detection/trainv2/rephrase_zeroshot_performance.py \
     --replot results/trainv2/rephrase_zeroshot_performance/performance.csv
 ```
-Options: `--fpr` (default `0.01`), `--out-dir`, `--no-plots`.
-Outputs (`results/trainv2/rephrase_zeroshot_performance/`): `binoculars.png`,
-`fastdetect.png`, `performance.csv` (row per family × version × split — split ∈
-`mg_gb` / `mg_sci` / `all` / `mean`; `all` is pooled and kept in the CSV only).
+Options: `--fpr` (list, default `0.01 0.05`), `--out-dir`, `--no-plots`.
+Outputs (`results/trainv2/rephrase_zeroshot_performance/`):
+`{binoculars,fastdetect}_{1pct,5pct}.png`, `performance.csv` (row per family ×
+version × split × fpr — split ∈ `mg_gb` / `mg_sci` / `all` / `mean`; `all` is
+pooled and kept in the CSV only).
 
 ### 4. Best-of-family on one figure, rephrase = human — `rephrase_best_zeroshot_performance.py`
 
@@ -426,9 +434,11 @@ uv run python epai/ai_detection/trainv2/rephrase_best_zeroshot_performance.py
 uv run python epai/ai_detection/trainv2/rephrase_best_zeroshot_performance.py \
     --replot results/trainv2/rephrase_best_zeroshot_performance/performance.csv
 ```
-Options: `--config`, `--fpr` (default `0.01`), `--out-dir`, `--no-plots`.
+Options: `--config`, `--fpr` (list, default `0.01 0.05`), `--out-dir`,
+`--no-plots`. Columns in the config that the rephrase parquets weren't scored on
+(the logprob-window / ensemble judges) are dropped automatically.
 Outputs (`results/trainv2/rephrase_best_zeroshot_performance/`):
-`best_zeroshot.png`, `performance.csv`.
+`best_zeroshot_{1pct,5pct}.png`, `performance.csv`.
 
 ### 5. Trained detection, rephrase = human — `rephrase_{in_domain,lodo}_performance.py`
 
@@ -458,10 +468,10 @@ uv run python epai/ai_detection/trainv2/rephrase_lodo_performance.py \
     --replot results/trainv2/rephrase_lodo_performance/performance.csv
 ```
 Options: `--splits` (`mg_gb` / `mg_sci`), `--ood-splits`, `--seeds`,
-`--test-size` (in-domain), `--min-domain-rows` (LODO), `--fpr`,
-`--zeroshot-config`, `--no-zeroshot`, `--out-dir`, `--no-plots`.
-Outputs: `results/trainv2/rephrase_in_domain_performance/{performance.csv,in_domain.png}`
-and `results/trainv2/rephrase_lodo_performance/{performance.csv,lodo.png}`.
+`--test-size` (in-domain), `--min-domain-rows` (LODO), `--fpr` (list, default
+`0.01 0.05`), `--zeroshot-config`, `--no-zeroshot`, `--out-dir`, `--no-plots`.
+Outputs: `results/trainv2/rephrase_in_domain_performance/{performance.csv,in_domain_{1pct,5pct}.png}`
+and `results/trainv2/rephrase_lodo_performance/{performance.csv,lodo_{1pct,5pct}.png}`.
 
 ### 6. Run the whole pipeline — `rebuild_rephrase.py`
 
@@ -536,6 +546,8 @@ uv run python epai/ai_detection/trainv2/run_binox_youden_calibration.py      dat
 uv run python epai/ai_detection/trainv2/run_fastdetect_youden_calibration.py data/parquet/manugram_sci.parquet
 ```
 
-Common flags across the runners: `--fpr` / `--fpr-target` (default `0.01`),
-`--seeds`, `--test-size` (default `0.30`), `--human-label` (default `human`),
+Common flags across the runners: `--fpr` / `--fpr-target` (default `0.01`; the
+four D/F performance runners take a **list**, default `0.01 0.05`, and emit a
+`_1pct` / `_5pct` figure set per level), `--seeds`, `--test-size` (default
+`0.30`), `--human-label` (default `human`),
 `--group-col` (default `id`), `--no-plots` / `--no-plot`, `--replot <csv>`.

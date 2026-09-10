@@ -317,7 +317,7 @@ def compute_zeroshot_ood(ood_splits, cols, fpr, human_label, regimes) -> list[di
     base = [
         {"detector": _detector(r["family"], r["version"]), "split": r["split"],
          "auroc": r["auroc"], "tpr_at_fpr": r["tpr_at_fpr"]}
-        for r in zeroshot_compute(ood_splits, ZS_FAMILIES, cols, fpr, human_label)
+        for r in zeroshot_compute(ood_splits, ZS_FAMILIES, cols, [fpr], human_label)
         if r["split"] in ood_keys
     ]
     out = []

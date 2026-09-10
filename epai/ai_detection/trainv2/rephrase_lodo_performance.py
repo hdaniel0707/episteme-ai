@@ -53,12 +53,12 @@ from epai.ai_detection.trainv2._reph_trained import REPH_SPLITS, load_reph_featu
 from epai.ai_detection.trainv2._trained import TRAINED_SPECS
 from epai.ai_detection.trainv2._zeroshot import (
     agg_cell,
-    eval_column,
+    eval_column_fprs,
     orient,
     overall_cell,
     resolve_specs,
 )
-from epai.ai_detection.trainv2.core import eff_fpr_level, goodness
+from epai.ai_detection.trainv2.core import eff_fpr_level, fpr_tag, goodness, rows_at_fpr
 from epai.ai_detection.trainv2.plot_score_histograms import CORPUS_SOURCES
 from epai.ai_detection.trainv2.plot_score_histograms import PARQUET_DIR as REPH_PARQUET_DIR
 from epai.ai_detection.trainv2.rephrase_best_zeroshot_performance import _pick_columns
@@ -71,6 +71,7 @@ from epai.ai_detection.trainv2.run_lodo_performance import (
     _std,
     _zs_row,
 )
+from epai.ai_detection.trainv2.run_zeroshot_performance import DEFAULT_FPRS
 from epai.ai_detection.trainv2.run_zeroshot_performance import FAMILIES as ZS_FAMILIES
 from epai.ai_detection.trainv2.run_zeroshot_performance import compute as zeroshot_compute
 from epai.ai_detection.trainv2.splits import resolve as resolve_splits
@@ -81,14 +82,14 @@ DEFAULT_OUT_DIR = BASE / "results" / "trainv2" / "rephrase_lodo_performance"
 DEFAULT_OOD = ["mg_den"]
 
 
-def compute_trained(reph_splits, ood_splits, seeds, fpr, min_domain_rows) -> list[dict]:
+def compute_trained(reph_splits, ood_splits, seeds, fprs, min_domain_rows) -> list[dict]:
     ood_sets = {name: _load_ood(path, "human") for name, path in ood_splits}
     for name, (_, oy, _, n_h) in ood_sets.items():
         print(f"  OOD eval corpus {name!r}: {len(oy)} rows, {n_h} human (never trained on)")
 
     all_folds: dict[str, dict[str, list[dict]]] = {}
-    ood_reads: dict[str, dict[str, list]] = {
-        k: {n: [] for n in ood_sets} for k in TRAINED_SPECS
+    ood_reads: dict[str, dict[str, dict[float, list]]] = {
+        k: {n: {f: [] for f in fprs} for n in ood_sets} for k in TRAINED_SPECS
     }
 
     for split_key in tqdm(reph_splits, desc="LODO", unit="split"):
@@ -112,11 +113,12 @@ def compute_trained(reph_splits, ood_splits, seeds, fpr, min_domain_rows) -> lis
                   f"  eval {d!r} (n={te.sum()}, {len(set(ids[te]))} groups, "
                   f"y0 {int((y[te] == 0).sum())})")
             for spec_key, spec in TRAINED_SPECS.items():
-                f = _fold(spec, X, y, Z, ids, tr, te, seeds, fpr, ood_sets)
-                f["held_out_domain"] = d
-                for name, reads in f.pop("ood").items():
-                    ood_reads[spec_key][name].extend(reads)
-                spec_folds[spec_key].append(f)
+                fd = _fold(spec, X, y, Z, ids, tr, te, seeds, fprs, ood_sets)
+                fd["held_out_domain"] = d
+                for name, by_fpr in fd.pop("ood").items():
+                    for f in fprs:
+                        ood_reads[spec_key][name][f].extend(by_fpr[f])
+                spec_folds[spec_key].append(fd)
         all_folds[split_key] = spec_folds
 
     if not all_folds:
@@ -125,68 +127,77 @@ def compute_trained(reph_splits, ood_splits, seeds, fpr, min_domain_rows) -> lis
     rows: list[dict] = []
     for spec_key, spec in TRAINED_SPECS.items():
         detector = f"trained/{spec['label']}"
-        split_rows: list[dict] = []
-        for split_key, spec_folds in all_folds.items():
-            folds = spec_folds[spec_key]
-            for f in folds:
-                rows.append({
-                    "level": "fold", "kind": "trained", "detector": detector,
-                    "split": split_key, "held_out_domain": f["held_out_domain"],
-                    "n_test": f["n_test"], "n_folds": "", "n_seeds": len(seeds),
-                    "auroc": f["auroc"], "auroc_std": "",
-                    "tpr_at_fpr": f["tpr_at_fpr"], "tpr_at_fpr_std": "",
-                })
-            ok = [f for f in folds if f["n_test_human"] >= 1 / fpr]
-            sr = {
-                "level": "split", "kind": "trained", "detector": detector,
-                "split": split_key, "held_out_domain": "", "n_test": "",
-                "n_folds": len(folds), "n_seeds": len(seeds), "reachable": bool(ok),
-                "auroc": float(np.mean([f["auroc"] for f in folds])),
-                "auroc_std": _std([f["auroc"] for f in folds]),
-                "tpr_at_fpr": float(np.mean([f["tpr_at_fpr"] for f in (ok or folds)])),
-                "tpr_at_fpr_std": _std([f["tpr_at_fpr"] for f in (ok or folds)]),
-            }
-            rows.append(sr)
-            split_rows.append(sr)
+        for fpr in fprs:
+            split_rows: list[dict] = []
+            for split_key, spec_folds in all_folds.items():
+                folds = spec_folds[spec_key]
+                for fd in folds:
+                    bf = fd["by_fpr"][fpr]
+                    rows.append({
+                        "level": "fold", "kind": "trained", "detector": detector,
+                        "split": split_key, "held_out_domain": fd["held_out_domain"],
+                        "fpr": fpr, "n_test": fd["n_test"], "n_folds": "",
+                        "n_seeds": len(seeds),
+                        "auroc": fd["auroc"], "auroc_std": "",
+                        "tpr_at_fpr": bf["tpr_at_fpr"], "tpr_at_fpr_std": "",
+                    })
+                ok = [fd for fd in folds if fd["n_test_human"] >= 1 / fpr]
+                use = ok or folds
+                sr = {
+                    "level": "split", "kind": "trained", "detector": detector,
+                    "split": split_key, "held_out_domain": "", "fpr": fpr,
+                    "n_test": "", "n_folds": len(folds), "n_seeds": len(seeds),
+                    "reachable": bool(ok),
+                    "auroc": float(np.mean([fd["auroc"] for fd in folds])),
+                    "auroc_std": _std([fd["auroc"] for fd in folds]),
+                    "tpr_at_fpr": float(np.mean([fd["by_fpr"][fpr]["tpr_at_fpr"] for fd in use])),
+                    "tpr_at_fpr_std": _std([fd["by_fpr"][fpr]["tpr_at_fpr"] for fd in use]),
+                }
+                rows.append(sr)
+                split_rows.append(sr)
 
-        for name, (_, _, _, n_h) in ood_sets.items():
-            reads = ood_reads[spec_key][name]
-            oa, ot = [r[0] for r in reads], [r[1] for r in reads]
-            sr = {
-                "level": "split", "kind": "trained", "detector": detector,
-                "split": name, "held_out_domain": "", "n_test": "",
-                "n_folds": len(reads), "n_seeds": len(seeds),
-                "reachable": bool(n_h >= 1 / fpr),
-                "auroc": float(np.mean(oa)), "auroc_std": _std(oa),
-                "tpr_at_fpr": float(np.mean(ot)), "tpr_at_fpr_std": _std(ot),
-            }
-            rows.append(sr)
-            split_rows.append(sr)
+            for name, (_, _, _, n_h) in ood_sets.items():
+                reads = ood_reads[spec_key][name][fpr]
+                oa, ot = [r[0] for r in reads], [r[1] for r in reads]
+                sr = {
+                    "level": "split", "kind": "trained", "detector": detector,
+                    "split": name, "held_out_domain": "", "fpr": fpr, "n_test": "",
+                    "n_folds": len(reads), "n_seeds": len(seeds),
+                    "reachable": bool(n_h >= 1 / fpr),
+                    "auroc": float(np.mean(oa)), "auroc_std": _std(oa),
+                    "tpr_at_fpr": float(np.mean(ot)), "tpr_at_fpr_std": _std(ot),
+                }
+                rows.append(sr)
+                split_rows.append(sr)
 
-        tpr_ok = [r for r in split_rows if r.get("reachable")]
-        rows.append({
-            "level": "overall", "kind": "trained", "detector": detector,
-            "split": "mean", "held_out_domain": "", "n_test": "",
-            "n_folds": sum(len(all_folds[s][spec_key]) for s in all_folds),
-            "n_seeds": len(seeds),
-            "auroc": float(np.mean([r["auroc"] for r in split_rows])),
-            "auroc_std": float(np.mean([r["auroc_std"] for r in split_rows])),
-            "tpr_at_fpr": float(np.mean([r["tpr_at_fpr"] for r in tpr_ok])) if tpr_ok else float("nan"),
-            "tpr_at_fpr_std": float(np.mean([r["tpr_at_fpr_std"] for r in tpr_ok])) if tpr_ok else float("nan"),
-        })
+            tpr_ok = [r for r in split_rows if r.get("reachable")]
+            rows.append({
+                "level": "overall", "kind": "trained", "detector": detector,
+                "split": "mean", "held_out_domain": "", "fpr": fpr, "n_test": "",
+                "n_folds": sum(len(all_folds[s][spec_key]) for s in all_folds),
+                "n_seeds": len(seeds),
+                "auroc": float(np.mean([r["auroc"] for r in split_rows])),
+                "auroc_std": float(np.mean([r["auroc_std"] for r in split_rows])),
+                "tpr_at_fpr": float(np.mean([r["tpr_at_fpr"] for r in tpr_ok])) if tpr_ok else float("nan"),
+                "tpr_at_fpr_std": float(np.mean([r["tpr_at_fpr_std"] for r in tpr_ok])) if tpr_ok else float("nan"),
+            })
     return rows
 
 
-def compute_zeroshot(config, reph_splits, ood_splits, seeds, fpr,
+def compute_zeroshot(config, reph_splits, ood_splits, seeds, fprs,
                      min_domain_rows) -> list[dict]:
     """The rephrase-GT best zero-shot picks, scored on the trained models' own
     eval rows: each held-out domain fold per rephrase corpus (per-corpus reading
     = mean +- SD across folds), and the full corpus per OOD split (normal GT,
-    one deterministic reading). ``fold`` / ``split`` / ``overall`` rows."""
+    one deterministic reading). ``fold`` / ``split`` / ``overall`` rows per FPR
+    level."""
     picked = _pick_columns(config)
     n_seeds = len(seeds)
-    per_det: dict[str, list[dict]] = {}
+    per_det: dict[str, dict[float, list[dict]]] = {}
     rows: list[dict] = []
+
+    def _hum(y, mask):
+        return int((y[mask] == 0).sum())
 
     for split_key in reph_splits:
         c = CORPUS_SOURCES[split_key]
@@ -207,34 +218,39 @@ def compute_zeroshot(config, reph_splits, ood_splits, seeds, fpr,
             continue
         for col, det, machine_is_high in specs:
             o = orient(raw[col], machine_is_high)
-            fold_reads = []
-            for d in domains:
-                te = dom == d
-                a, t, te_ = eval_column(o[te], y[te], fpr)
-                fold_reads.append((a, t, te_))
-                gd = (goodness(a, te_, "hmean")
-                      if np.isfinite(a) and np.isfinite(te_) else float("nan"))
-                rows.append(_zs_row(det, "fold", split_key, d, {
-                    "auroc": a, "tpr_at_fpr": t, "tpr_eff": te_,
-                    "eff_fpr": eff_fpr_level(int((y[te] == 0).sum()), fpr),
-                    "goodness": gd, "n_test": int(te.sum())}, "", n_seeds))
-            cell = agg_cell([r[0] for r in fold_reads], [r[1] for r in fold_reads],
-                            [r[2] for r in fold_reads], "hmean")
-            cell["reachable"] = any(
-                int((y[dom == d] == 0).sum()) >= 1 / fpr for d in domains)
-            cell["eff_fpr"] = float(np.mean(
-                [eff_fpr_level(int((y[dom == d] == 0).sum()), fpr) for d in domains]))
-            rows.append(_zs_row(det, "split", split_key, "", cell,
-                                len(domains), n_seeds))
-            per_det.setdefault(det, []).append({**cell, "split": split_key})
+            dom_reads = {d: eval_column_fprs(o[dom == d], y[dom == d], fprs)
+                         for d in domains}
+            for f in fprs:
+                fold_reads = []
+                for d in domains:
+                    au, per = dom_reads[d]
+                    tpr, teff = per[f]
+                    fold_reads.append((au, tpr, teff))
+                    gd = (goodness(au, teff, "hmean")
+                          if np.isfinite(au) and np.isfinite(teff) else float("nan"))
+                    rows.append(_zs_row(det, "fold", split_key, d, {
+                        "auroc": au, "tpr_at_fpr": tpr, "tpr_eff": teff, "fpr": f,
+                        "eff_fpr": eff_fpr_level(_hum(y, dom == d), f),
+                        "goodness": gd, "n_test": int((dom == d).sum())}, "", n_seeds))
+                cell = agg_cell([r[0] for r in fold_reads],
+                                [r[1] for r in fold_reads],
+                                [r[2] for r in fold_reads], "hmean")
+                cell["fpr"] = f
+                cell["reachable"] = any(_hum(y, dom == d) >= 1 / f for d in domains)
+                cell["eff_fpr"] = float(np.mean(
+                    [eff_fpr_level(_hum(y, dom == d), f) for d in domains]))
+                rows.append(_zs_row(det, "split", split_key, "", cell,
+                                    len(domains), n_seeds))
+                per_det.setdefault(det, {}).setdefault(f, []).append(
+                    {**cell, "split": split_key})
 
     for name, path in ood_splits:
-        for r in zeroshot_compute([(name, path)], ZS_FAMILIES, picked, fpr, "human"):
+        for r in zeroshot_compute([(name, path)], ZS_FAMILIES, picked, fprs, "human"):
             if r["split"] == "mean":
                 continue
             det = _detector(r["family"], r["version"])
             cell = {
-                "auroc": r["auroc"], "auroc_std": float("nan"),
+                "fpr": r["fpr"], "auroc": r["auroc"], "auroc_std": float("nan"),
                 "tpr_at_fpr": r["tpr_at_fpr"], "tpr_at_fpr_std": float("nan"),
                 "tpr_eff": r.get("tpr_eff", ""), "tpr_eff_std": float("nan"),
                 "goodness": float("nan"), "goodness_std": float("nan"),
@@ -242,27 +258,33 @@ def compute_zeroshot(config, reph_splits, ood_splits, seeds, fpr,
                 "reachable": bool(r.get("reachable")),
             }
             rows.append(_zs_row(det, "split", r["split"], "", cell, "", n_seeds))
-            per_det.setdefault(det, []).append({**cell, "split": r["split"]})
+            per_det.setdefault(det, {}).setdefault(r["fpr"], []).append(
+                {**cell, "split": r["split"]})
 
-    for det, cells in per_det.items():
-        rows.append(_zs_row(det, "overall", "mean", "", overall_cell(cells, fpr),
-                            "", n_seeds))
+    for det, by_fpr in per_det.items():
+        for f, cells in by_fpr.items():
+            mean = overall_cell(cells, f)
+            mean["fpr"] = f
+            rows.append(_zs_row(det, "overall", "mean", "", mean, "", n_seeds))
     return rows
 
 
 def plots_from_csv(csv_path: Path, meta: dict, out_dir: Path) -> None:
     from epai.ai_detection.trainv2.plots import zeroshot_scatter
 
-    rows = [r for r in pd.read_csv(csv_path).to_dict("records")
-            if r["level"] in ("split", "overall")]
+    all_rows = [r for r in pd.read_csv(csv_path).to_dict("records")
+                if r["level"] in ("split", "overall")]
     out_dir.mkdir(parents=True, exist_ok=True)
     ood = "/".join(meta["ood"])
-    zeroshot_scatter(
-        rows, meta, out_dir / "lodo.png", key="detector",
-        title=f"Rephrase leave-one-domain-out trained — rephrase counted as "
-              f"human — plus {ood} OOD, vs. zero-shot picks\nAUROC vs. oracle "
-              f"TPR@{meta['fpr'] * 100:g}%FPR — trained mean error bar = mean per-corpus SD",
-    )
+    for fpr in meta["fprs"]:
+        frows = rows_at_fpr(all_rows, fpr)
+        zeroshot_scatter(
+            frows, {**meta, "fpr": fpr}, out_dir / f"lodo_{fpr_tag(fpr)}.png",
+            key="detector",
+            title=f"Rephrase leave-one-domain-out trained — rephrase counted as "
+                  f"human — plus {ood} OOD, vs. zero-shot picks\nAUROC vs. oracle "
+                  f"TPR@{fpr * 100:g}%FPR — per-split bar = across-fold SD",
+        )
 
 
 def main() -> int:
@@ -274,7 +296,10 @@ def main() -> int:
     ap.add_argument("--ood-splits", nargs="+", default=None, metavar="KEY",
                     help=f"eval-only corpora, never trained on (default: {DEFAULT_OOD})")
     ap.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2])
-    ap.add_argument("--fpr", type=float, default=0.01)
+    ap.add_argument("--fpr", nargs="+", type=float, default=DEFAULT_FPRS,
+                    metavar="LEVEL",
+                    help=f"oracle FPR level(s); one figure set per level "
+                         f"(default: {DEFAULT_FPRS})")
     ap.add_argument("--min-domain-rows", type=int, default=100)
     ap.add_argument("--zeroshot-config", type=Path, default=DEFAULT_CONFIG)
     ap.add_argument("--no-zeroshot", action="store_true")
@@ -288,7 +313,7 @@ def main() -> int:
     if bad:
         raise SystemExit(f"unknown rephrase corpus {bad}; choose from {REPH_SPLITS}")
     ood_splits = resolve_splits(args.ood_splits or DEFAULT_OOD, PARQUET_DIR)
-    meta = {"fpr": args.fpr, "n_seeds": len(args.seeds),
+    meta = {"fprs": args.fpr, "n_seeds": len(args.seeds),
             "ood": [s for s, _ in ood_splits],
             "splits": [*reph_splits] + [s for s, _ in ood_splits]}
 
