@@ -196,7 +196,7 @@ def _sorted_rows(rows: list[dict], split_order: list[str]) -> list[dict]:
 
 
 def _print_table(rows: list[dict], fprs: list[float]) -> None:
-    print(f"\n{'family':<12}{'version':<14}{'split':<12}{'FPR':>6}{'n':>7}"
+    print(f"\n{'family':<12}{'version':<18}{'split':<11}{'FPR':>6}{'n':>7}"
           f"{'auroc':>8}{'  TPR':>9}{'  fpr':>7}")
     for r in rows:
         star = "" if r["reachable"] or r["split"] == "mean" else " (floor)"
@@ -204,7 +204,7 @@ def _print_table(rows: list[dict], fprs: list[float]) -> None:
         tpr = "--" if not np.isfinite(r["tpr_at_fpr"]) else f"{r['tpr_at_fpr']:.3f}"
         fp = "" if r["split"] == "mean" else f"{r['fpr_at_fpr']:.3f}"
         mark = "  <<" if r["split"] == "mean" else ""
-        print(f"{r['family']:<12}{r['version']:<14}{r['split']:<12}"
+        print(f"{r['family']:<12}{r['version']:<18}{r['split']:<11}"
               f"{float(r['fpr']) * 100:>5g}%{str(n):>7}"
               f"{r['auroc']:>8.3f}{tpr:>9}{fp:>7}{mark}{star}")
 
