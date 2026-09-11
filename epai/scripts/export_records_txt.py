@@ -56,6 +56,7 @@ DEFAULT_HUMAN_LABEL = "human"
 HEADER_FIELDS = [
     "uid",
     "domain",
+    "ai_author",
     "title",
     "year",
     "venue",
@@ -64,6 +65,7 @@ HEADER_FIELDS = [
     "citation_count",
     "fwci",
     "query",
+    "source_url",
 ]
 
 WIDTH = 80
