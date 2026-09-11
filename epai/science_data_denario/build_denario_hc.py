@@ -202,7 +202,13 @@ def main() -> None:
                 "title": h["title"], "year": year, "oa_id": oa,
             })
             rows.append({
-                "uid": m["uid"], "id": m["id"], "domain": slug,
+                # `id` = the SAME `hid` as its matched human row, not the
+                # machine's own original id -- this is the pair key every
+                # other corpus in the repo shares between a human row and its
+                # generated counterpart (e.g. Ghostbuster's human/gpt35t), and
+                # what groups the two into one record in export_records_txt.py
+                # / any group_col-keyed split. `uid` stays unique per row.
+                "uid": f"{hid}:{m['generated_by']}", "id": hid, "domain": slug,
                 "text": m["text"], "generated_by": m["generated_by"],
                 "title": m["title"], "year": m["year"], "oa_id": "",
             })
