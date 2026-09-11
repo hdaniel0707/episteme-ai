@@ -236,7 +236,8 @@ def _variant_palette(names, suffix: str = "_wlp"):
 
 
 def zeroshot_scatter(
-    rows: list[dict], meta: dict, path: Path, *, key: str = "version", title: str = ""
+    rows: list[dict], meta: dict, path: Path, *, key: str = "version", title: str = "",
+    variant_suffix: str = "_wlp",
 ) -> None:
     from .splits import display as _sd
     from .splits import marker as _split_marker
@@ -244,11 +245,13 @@ def zeroshot_scatter(
     names = sorted({r[key] for r in rows})
     splits = [s for s in meta["splits"] if s in {r["split"] for r in rows}]
 
-    # A ``_wlp`` detector is a readout variant of its base judge: shared hue,
-    # base a shade darker, the two means joined by a connector. Every detector
-    # draws as a filled circle -- trained and zero-shot alike -- distinguished
-    # only by colour + the seed-SD error bar (trained rows carry one).
-    base_of, _dcol = _variant_palette(names)
+    # A ``variant_suffix`` detector is a readout variant of its base (default
+    # ``_wlp``, a judge's logprob-window score; ``run_dr_transfer.py`` passes
+    # ``_dr`` for its domain-randomized twin): shared hue, base a shade darker,
+    # the two means joined by a connector. Every detector draws as a filled
+    # circle -- trained and zero-shot alike -- distinguished only by colour +
+    # the seed-SD error bar (trained rows carry one).
+    base_of, _dcol = _variant_palette(names, suffix=variant_suffix)
 
     marker = {s: _split_marker(s) for s in splits}
     fpr = meta["fpr"]
@@ -347,7 +350,8 @@ def zeroshot_scatter(
 
 
 def denario_scatter(
-    rows: list[dict], meta: dict, path: Path, *, title: str = ""
+    rows: list[dict], meta: dict, path: Path, *, title: str = "",
+    variant_suffix: str = "_wlp",
 ) -> None:
     """AUROC vs. oracle TPR@FPR on the ``meta["ood"]`` corpus alone (MG-AI-Sci by
     default). Built for the single-corpus default; with several OOD corpora each
@@ -373,9 +377,9 @@ def denario_scatter(
         return
 
     # Same colour rule as the main scatter (over the identical row set), incl.
-    # the _wlp base -> variant pairing.
+    # the base -> variant pairing.
     names = sorted({r["detector"] for r in rows})
-    base_of, dcol = _variant_palette(names)
+    base_of, dcol = _variant_palette(names, suffix=variant_suffix)
 
     fig, ax = plt.subplots(figsize=(7.6, 5.6))
     ax.set_facecolor(_SURFACE)
@@ -471,7 +475,7 @@ _COMBINE_EXPR = {"hmean": "HM", "gmean": "GM", "amean": "mean"}
 
 def goodness_bars(
     rows: list[dict], meta: dict, path: Path, *, key: str = "version",
-    title: str = "", combine: str = "hmean",
+    title: str = "", combine: str = "hmean", variant_suffix: str = "_wlp",
 ) -> None:
     from .splits import display as _sd
 
@@ -495,7 +499,7 @@ def goodness_bars(
         return
 
     names = sorted({r[key] for r in rows})
-    base_of, dcol = _variant_palette(names)
+    base_of, dcol = _variant_palette(names, suffix=variant_suffix)
 
     def _cell(det: str, split: str) -> dict | None:
         return next((r for r in rows if r[key] == det and r["split"] == split), None)
@@ -594,122 +598,6 @@ def goodness_bars(
         fig.text(0.02, 0.008 + 0.018 * (len(notes) - 1 - i), note,
                  fontsize=7, color=_MUTED)
     fig.tight_layout(rect=(0, 0.03 + 0.02 * (len(notes) - 1) if notes else 0, 1, 1))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=150, facecolor="white", bbox_inches="tight")
-    plt.close(fig)
-    print(f"wrote {path}")
-
-
-# ---------------------------------------------------------------------------
-# Domain randomization -> MG-AI-Sci transfer (run_dr_transfer.py). Per training
-# regime a panel; per detector a base (filled circle) and its domain-randomized
-# twin (hollow ring, same colour) joined by a faint connector, so the eye reads
-# the base -> twin shift. Zero-shot picks are open diamonds (reference). Reads
-# the run_dr_transfer performance.csv records (dicts). Colour rule matches
-# zeroshot_scatter / denario_scatter so the figures agree.
-# ---------------------------------------------------------------------------
-
-
-def dr_scatter(rows: list[dict], meta: dict, path: Path, *, title: str = "") -> None:
-    fpr = meta["fpr"]
-
-    def _f(v):
-        try:
-            v = float(v)
-        except (TypeError, ValueError):
-            return None
-        return v if np.isfinite(v) else None
-
-    regimes = [rg for rg in ("in_domain", "lodo")
-               if any(r.get("regime") == rg for r in rows)]
-    if not regimes:
-        print("dr_scatter: no in_domain / lodo rows — skipped")
-        return
-    panel_title = {"in_domain": "in-domain 70/30 -> MG-AI-Sci",
-                   "lodo": "LODO -> MG-AI-Sci"}
-
-    names = sorted({r["detector"] for r in rows})
-    hue = {v: _PALETTE[i % len(_PALETTE)] for i, v in enumerate(names)}
-
-    ood = [r for r in rows if r.get("role") == "ood"]
-    aurocs = [_f(r["auroc"]) for r in ood if _f(r["auroc"]) is not None]
-    x_lo = max(0.0, min(aurocs) - 0.05) if aurocs else 0.80
-    x_hi = 1.01
-
-    fig, axes = plt.subplots(1, len(regimes), figsize=(6.4 * len(regimes), 5.6),
-                             sharex=True, sharey=True, squeeze=False)
-    axes = list(axes[0])
-
-    for ax, regime in zip(axes, regimes):
-        ax.set_facecolor(_SURFACE)
-        for spine in ("top", "right"):
-            ax.spines[spine].set_visible(False)
-        ax.axvline(0.5, color="#b5495b", lw=1.0, ls=":", alpha=0.6, zorder=0)
-        ax.axhline(fpr, color="#b5495b", lw=1.0, ls=":", alpha=0.6, zorder=0)
-        ax.scatter([0.5], [fpr], s=120, color="#b5495b", marker="x", lw=1.8,
-                   alpha=0.6, zorder=0)
-
-        pr = [r for r in ood if r.get("regime") == regime]
-        by_det: dict[str, dict[str, dict]] = {}
-        for r in pr:
-            if r.get("kind") == "trained":
-                by_det.setdefault(r["detector"], {})[r["variant"]] = r
-
-        for v, pair in by_det.items():
-            b, d = pair.get("base"), pair.get("dr")
-            if b and d:
-                ax.plot([_f(b["auroc"]), _f(d["auroc"])],
-                        [_f(b["tpr_at_fpr"]), _f(d["tpr_at_fpr"])],
-                        color=hue[v], lw=1.0, alpha=0.45, zorder=2)
-            if b:
-                ax.errorbar([_f(b["auroc"])], [_f(b["tpr_at_fpr"])],
-                            xerr=_f(b.get("auroc_std")), yerr=_f(b.get("tpr_at_fpr_std")),
-                            fmt="o", ms=12, mfc=hue[v], mec="#222222", mew=1.0,
-                            ecolor="#222222", elinewidth=1.0, capsize=2.5, zorder=5)
-            if d:
-                ax.errorbar([_f(d["auroc"])], [_f(d["tpr_at_fpr"])],
-                            xerr=_f(d.get("auroc_std")), yerr=_f(d.get("tpr_at_fpr_std")),
-                            fmt="o", ms=12, mfc="none", mec=hue[v], mew=2.4,
-                            ecolor=hue[v], elinewidth=1.0, capsize=2.5, zorder=6)
-
-        for r in pr:
-            if r.get("variant") == "ref":
-                ax.scatter([_f(r["auroc"])], [_f(r["tpr_at_fpr"])], s=80,
-                           marker="D", facecolors="none",
-                           edgecolors=hue[r["detector"]], linewidths=1.5, zorder=3)
-
-        ax.set_xlim(x_lo, x_hi)
-        ax.set_ylim(-0.04, 1.04)
-        ax.grid(True, lw=0.4, alpha=0.4)
-        ax.tick_params(labelsize=8, colors=_MUTED)
-        ax.set_xlabel("AUROC (machine = positive)", fontsize=9, color=_INK)
-        ax.set_title(panel_title[regime], fontsize=9.5, color=_INK)
-    axes[0].set_ylabel(f"oracle TPR @ {fpr * 100:g}% FPR", fontsize=9, color=_INK)
-
-    handles = [plt.Line2D([], [], marker="o", ls="", ms=8, color=hue[v], label=v)
-               for v in names]
-    handles.append(plt.Line2D([], [], ls="", label=""))
-    handles += [
-        plt.Line2D([], [], marker="o", ls="", ms=9, mfc="#8a8a8a", mec="#222222",
-                   label="base  (embeddings unperturbed)"),
-        plt.Line2D([], [], marker="o", ls="", ms=9, mfc="none", mec="#8a8a8a",
-                   mew=2.2, label="domain-randomized twin"),
-        plt.Line2D([], [], marker="D", ls="", ms=9, mfc="none", mec="#8a8a8a",
-                   label="zero-shot pick  (reference)"),
-        plt.Line2D([], [], marker="x", ls="", color="#b5495b",
-                   label=f"chance  (0.5, {fpr * 100:g}%)"),
-    ]
-    axes[-1].legend(handles=handles, fontsize=8, loc="upper left",
-                    bbox_to_anchor=(1.01, 1.0), framealpha=0.9, borderaxespad=0.0,
-                    title=f"colour = detector\n{meta.get('dr', '')}")
-
-    fig.suptitle(title or "domain randomization -> MG-AI-Sci transfer",
-                 fontsize=10.5, color=_INK)
-    fig.text(0.02, 0.008,
-             f"MG-AI-Sci: never trained on, 100 human rows -> the {fpr * 100:g}%-FPR "
-             "grid point sits right at the reachable floor. Read the base -> twin "
-             "delta, not the absolute TPR.", fontsize=7, color=_MUTED)
-    fig.tight_layout(rect=(0, 0.035, 1, 0.96))
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=150, facecolor="white", bbox_inches="tight")
     plt.close(fig)

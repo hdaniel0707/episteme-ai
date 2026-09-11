@@ -89,6 +89,7 @@ class ClfAlgorithm(ABC):
         self.seed = int(seed)
         self.params = dict(params)
         self.fit_groups_: np.ndarray | None = None
+        self.fit_domains_: np.ndarray | None = None
         self._check_param_names()
 
     @classmethod
@@ -142,6 +143,17 @@ class ClfAlgorithm(ABC):
         every existing algorithm is unaffected.
         """
         self.fit_groups_ = None if groups is None else np.asarray(groups)
+
+    def set_fit_domains(self, domains: np.ndarray | None) -> None:
+        """Tell the algorithm which *environment* each training row belongs to
+        (e.g. the MANUGRAM split-internal domain a LODO fold trains on).
+
+        Optional context, not data, exactly like :meth:`set_fit_groups`: only an
+        algorithm with a domain-invariance penalty (``robust_mlp``'s
+        ``domain_penalty``) reads it. The attribute stays ``None`` when the
+        caller does not set it, so every other algorithm is unaffected.
+        """
+        self.fit_domains_ = None if domains is None else np.asarray(domains)
 
     @abstractmethod
     def fit(self, X: np.ndarray, y: np.ndarray) -> "ClfAlgorithm":

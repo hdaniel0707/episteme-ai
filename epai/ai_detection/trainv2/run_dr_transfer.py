@@ -9,10 +9,19 @@ embeddings that have been perturbed with Gaussian noise (config:
 ``cfg/ai_detection/trainv2/domain_randomization.yaml``). The question is whether
 the twin's MG-AI-Sci AUROC / oracle TPR@1%FPR beats the base detector's.
 
-What it does NOT do: touch ``_trained.py``, ``core.py``, the ``run_*_performance``
-runners, ``epai/algs/*``, ``splits.py`` or ``rebuild_all.py``. When this script is
-not invoked the pipeline runs byte-identical. It is deliberately absent from
-``rebuild_all.TASKS`` -- same treatment as the MG-Reph family.
+Output shape and plots now match ``run_in_domain_performance.py`` /
+``run_lodo_performance.py`` exactly -- same CSV schema, same figures
+(``zeroshot_scatter`` / ``goodness_bars`` / ``denario_scatter``), not a bespoke
+figure. The twin is folded in as a same-hue, one-shade-darker variant of its
+base (``trained/<label>`` base, ``trained/<label>_dr`` twin), the same
+colour convention ``zeroshot_scatter`` already uses for a judge's ``_wlp``
+readout variant. Every row-building / zero-shot / table-printing helper below
+is imported, unmodified, from the two main runners -- this script only adds
+the domain-randomized fit and the variant-suffixed detector label; ``_trained.py``,
+``core.py``, ``splits.py``, the two main runners and ``rebuild_all.py`` are
+never edited or imported for anything but their pure functions. Deliberately
+absent from ``rebuild_all.TASKS`` -- same treatment as the MG-Reph family.
+When this script is not invoked the pipeline runs byte-identical.
 
 Noise touches TRAINING rows only. Every eval set (in-domain held-out test, LODO
 held-out domain, MG-AI-Sci) is scored on clean embeddings. Only the RoBERTa
@@ -29,20 +38,19 @@ still-noisy single-threshold reading (the achievable FPR grid is 0%, 1%, 2%,
 ... at n=100; it was 0%, 1.25%, 2.5%, ... at n=80). Read the **base -> twin
 delta** either way, not the absolute.
 
-compute -> CSV -> plot from the CSV:
+compute -> CSV -> plot from the CSV, one regime = one CSV = one figure set,
+same layout as the main runners:
 
     results/trainv2/dr_transfer/
-        performance.csv   regime, variant (base|dr|ref), kind, detector, split,
-                          role (source|ood), n_source_models, n_seeds,
-                          auroc, auroc_std, tpr_at_fpr, tpr_at_fpr_std
-        dr_transfer.png
+        in_domain_performance.csv, in_domain_{1pct,5pct}.png (+ _goodness_, _denario_)
+        lodo_performance.csv, lodo_{1pct,5pct}.png (+ _goodness_, _denario_)
 
 Run (sandbox has no ``uv`` -- use ``.venv/bin/python`` directly):
 
     .venv/bin/python epai/ai_detection/trainv2/run_dr_transfer.py
     .venv/bin/python epai/ai_detection/trainv2/run_dr_transfer.py --regimes in_domain --seeds 0 1
     .venv/bin/python epai/ai_detection/trainv2/run_dr_transfer.py \
-        --replot results/trainv2/dr_transfer/performance.csv
+        --replot results/trainv2/dr_transfer
 """
 
 from __future__ import annotations
@@ -55,15 +63,37 @@ import pandas as pd
 import yaml
 from tqdm import tqdm
 
-from epai.ai_detection.trainv2._trained import TRAINED_SPECS, eval_on, fit, load_features
-from epai.ai_detection.trainv2.core import grouped_split
+from epai.ai_detection.trainv2._trained import TRAINED_SPECS, eval_on_fprs, fit, load_features
+from epai.ai_detection.trainv2.core import (
+    eff_fpr_level,
+    fpr_tag,
+    goodness,
+    grouped_split,
+    rows_at_fpr,
+)
 from epai.ai_detection.trainv2.run_best_zeroshot_performance import (
     DEFAULT_CONFIG as ZEROSHOT_CONFIG,
 )
-from epai.ai_detection.trainv2.run_best_zeroshot_performance import _detector, _load_columns
-from epai.ai_detection.trainv2.run_lodo_performance import _load, _load_ood, _std
-from epai.ai_detection.trainv2.run_zeroshot_performance import FAMILIES as ZS_FAMILIES
-from epai.ai_detection.trainv2.run_zeroshot_performance import compute as zeroshot_compute
+from epai.ai_detection.trainv2.run_in_domain_performance import (
+    CSV_FIELDS as CSV_FIELDS_IN_DOMAIN,
+)
+from epai.ai_detection.trainv2.run_in_domain_performance import (
+    _overall_cell,
+    _print_table as _print_table_in_domain,
+    _row,
+)
+from epai.ai_detection.trainv2.run_in_domain_performance import (
+    compute_zeroshot as compute_zeroshot_in_domain,
+)
+from epai.ai_detection.trainv2.run_lodo_performance import CSV_FIELDS as CSV_FIELDS_LODO
+from epai.ai_detection.trainv2.run_lodo_performance import (
+    _load,
+    _load_ood,
+    _print_table as _print_table_lodo,
+    _std,
+)
+from epai.ai_detection.trainv2.run_lodo_performance import compute_zeroshot as compute_zeroshot_lodo
+from epai.ai_detection.trainv2.run_zeroshot_performance import DEFAULT_FPRS
 from epai.ai_detection.trainv2.splits import resolve as resolve_splits
 from epai.algs import build_algorithm
 
@@ -76,9 +106,12 @@ DEFAULT_SPLITS = ["gb_orig", "mg_gb", "mg_sci"]
 DEFAULT_OOD = ["mg_aisci"]
 REGIMES = ("in_domain", "lodo")
 
-CSV_FIELDS = ["regime", "variant", "kind", "detector", "split", "role",
-              "n_source_models", "n_seeds", "auroc", "auroc_std",
-              "tpr_at_fpr", "tpr_at_fpr_std"]
+#: the twin's detector label is its base's + this suffix -- the exact pattern
+#: plots.py's ``_variant_palette`` already reads for a judge's ``_wlp`` readout
+#: variant, so passing ``variant_suffix="_dr"`` makes the DR twin draw one
+#: shade darker's *base* and the plain hue's *twin*, same colour, same figure
+#: types as every other trained-detector run.
+VARIANT_SUFFIX = "_dr"
 
 
 # ---------------------------------------------------------------------------
@@ -175,65 +208,18 @@ def _fit_variant(spec, X, y, Z, groups, idx, seed, cfg, variant: str):
     return fit_dr(spec, X, y, Z, groups, idx, seed, cfg)
 
 
-def _seed_loop(spec, X, y, Z, groups, splitter, seeds, fpr, ood_sets, cfg, variant):
-    """One (split | LODO fold): fit base-or-DR per seed on ``splitter(seed) ->
-    (tr, te)``, eval on the clean held-out rows and on every clean OOD set.
-    Returns ``(src_auroc_mean, src_tpr_mean, {ood_name: [(auroc, tpr), ...]})``.
-    """
-    a, t = [], []
-    ood: dict[str, list[tuple[float, float]]] = {n: [] for n in ood_sets}
-    for seed in seeds:
-        tr, te = splitter(seed)
-        clf = _fit_variant(spec, X, y, Z, groups, tr, seed, cfg, variant)
-        ia, it, _ = eval_on(clf, spec, X[te], y[te], Z[te], fpr)
-        a.append(ia)
-        t.append(it)
-        for name, (oX, oy, oZ, _) in ood_sets.items():
-            ood[name].append(eval_on(clf, spec, oX, oy, oZ, fpr))
-    return float(np.mean(a)), float(np.mean(t)), ood
+def _dr_label(spec: dict, variant: str) -> str:
+    return spec["label"] + (VARIANT_SUFFIX if variant == "dr" else "")
 
 
 # ---------------------------------------------------------------------------
-# Row assembly, shared by both regimes
+# Regime: in-domain 70/30 -- same row shape as
+# run_in_domain_performance.compute_trained, variant-suffixed detector label
 # ---------------------------------------------------------------------------
 
 
-def _rows_for_variant(regime, variant, seeds, src_of, ood_reads):
-    """``src_of[spec_key]`` = list of ``(auroc, tpr)`` source seed-means (one per
-    split or fold). ``ood_reads[spec_key][name]`` = every source-model read.
-    Emits one ``role=source`` + one ``role=ood`` row per (spec, ood corpus)."""
-    rows = []
-    for spec_key, spec in TRAINED_SPECS.items():
-        detector = f"trained/{spec['label']}"
-        sa = [v[0] for v in src_of[spec_key]]
-        st = [v[1] for v in src_of[spec_key]]
-        rows.append({
-            "regime": regime, "variant": variant, "kind": "trained",
-            "detector": detector, "split": "pooled", "role": "source",
-            "n_source_models": len(src_of[spec_key]), "n_seeds": len(seeds),
-            "auroc": float(np.mean(sa)), "auroc_std": _std(sa),
-            "tpr_at_fpr": float(np.mean(st)), "tpr_at_fpr_std": _std(st),
-        })
-        for name, reads in ood_reads[spec_key].items():
-            oa = [r[0] for r in reads]
-            ot = [r[1] for r in reads]
-            rows.append({
-                "regime": regime, "variant": variant, "kind": "trained",
-                "detector": detector, "split": name, "role": "ood",
-                "n_source_models": len(reads), "n_seeds": len(seeds),
-                "auroc": float(np.mean(oa)), "auroc_std": _std(oa),
-                "tpr_at_fpr": float(np.mean(ot)), "tpr_at_fpr_std": _std(ot),
-            })
-    return rows
-
-
-# ---------------------------------------------------------------------------
-# Regime: in-domain 70/30
-# ---------------------------------------------------------------------------
-
-
-def compute_in_domain(train_splits, ood_splits, seeds, test_size, fpr,
-                      group_col, human_label, cfg) -> list[dict]:
+def compute_in_domain(train_splits, ood_splits, seeds, test_size, fprs,
+                      group_col, human_label, combine, dr_cfg) -> list[dict]:
     ood_sets: dict[str, tuple] = {}
     for name, path in ood_splits:
         oX, oy, oZ, _ = load_features(path, group_col, human_label)
@@ -245,29 +231,106 @@ def compute_in_domain(train_splits, ood_splits, seeds, test_size, fpr,
 
     rows: list[dict] = []
     for variant in ("base", "dr"):
-        src = {k: [] for k in TRAINED_SPECS}
-        ood_reads = {k: {n: [] for n in ood_sets} for k in TRAINED_SPECS}
+        cells: dict[str, dict[float, list[dict]]] = {
+            k: {f: [] for f in fprs} for k in TRAINED_SPECS}
+        ood_reads: dict[str, dict[str, dict[float, list]]] = {
+            k: {n: {f: [] for f in fprs} for n in ood_sets} for k in TRAINED_SPECS}
+
         for split_key, (X, y, Z, groups) in tqdm(
                 loaded, desc=f"in_domain/{variant}", unit="split"):
-            def splitter(seed, y=y, groups=groups):
-                return grouped_split(y, groups, test_size, seed)
             for spec_key, spec in TRAINED_SPECS.items():
-                sa, st, ood = _seed_loop(spec, X, y, Z, groups, splitter,
-                                         seeds, fpr, ood_sets, cfg, variant)
-                src[spec_key].append((sa, st))
-                for name, reads in ood.items():
-                    ood_reads[spec_key][name].extend(reads)
-        rows += _rows_for_variant("in_domain", variant, seeds, src, ood_reads)
+                a: list[float] = []
+                t = {f: [] for f in fprs}
+                te_ = {f: [] for f in fprs}
+                n_tr = n_te = n_te_h = 0
+                for seed in seeds:
+                    tr, te = grouped_split(y, groups, test_size, seed)
+                    clf = _fit_variant(spec, X, y, Z, groups, tr, seed, dr_cfg, variant)
+                    au, per = eval_on_fprs(clf, spec, X[te], y[te], Z[te], fprs)
+                    a.append(au)
+                    for f in fprs:
+                        t[f].append(per[f][0])
+                        te_[f].append(per[f][1])
+                    n_tr, n_te, n_te_h = len(tr), len(te), int((y[te] == 0).sum())
+                    for name, (oX, oy, oZ, _) in ood_sets.items():
+                        oau, oper = eval_on_fprs(clf, spec, oX, oy, oZ, fprs)
+                        for f in fprs:
+                            ood_reads[spec_key][name][f].append(
+                                (oau, oper[f][0], oper[f][1]))
+                for f in fprs:
+                    g = [goodness(ai, ei, combine) for ai, ei in zip(a, te_[f])]
+                    cells[spec_key][f].append({
+                        "split": split_key, "fpr": f, "n_train": n_tr, "n_test": n_te,
+                        "n_test_human": n_te_h, "n_seeds": len(seeds),
+                        "auroc": float(np.mean(a)), "auroc_std": _std(a),
+                        "tpr_at_fpr": float(np.mean(t[f])), "tpr_at_fpr_std": _std(t[f]),
+                        "tpr_eff": float(np.mean(te_[f])), "tpr_eff_std": _std(te_[f]),
+                        "goodness": float(np.mean(g)), "goodness_std": _std(g),
+                        "eff_fpr": eff_fpr_level(n_te_h, f)})
+
+        for spec_key, spec in TRAINED_SPECS.items():
+            detector = f"trained/{_dr_label(spec, variant)}"
+            for f in fprs:
+                spec_cells = list(cells[spec_key][f])
+                for c in spec_cells:
+                    rows.append(_row(detector, c["split"], "in_domain", c))
+                for name, (_, _, _, n_h) in ood_sets.items():
+                    reads = ood_reads[spec_key][name][f]
+                    oa = [r[0] for r in reads]
+                    ot = [r[1] for r in reads]
+                    ote = [r[2] for r in reads]
+                    og = [goodness(ai, ei, combine) for ai, ei in zip(oa, ote)]
+                    c = {"split": name, "fpr": f, "n_test": "", "n_test_human": n_h,
+                         "n_seeds": len(seeds),
+                         "auroc": float(np.mean(oa)), "auroc_std": _std(oa),
+                         "tpr_at_fpr": float(np.mean(ot)), "tpr_at_fpr_std": _std(ot),
+                         "tpr_eff": float(np.mean(ote)), "tpr_eff_std": _std(ote),
+                         "goodness": float(np.mean(og)), "goodness_std": _std(og),
+                         "eff_fpr": eff_fpr_level(n_h, f)}
+                    spec_cells.append(c)
+                    rows.append(_row(detector, name, "ood", c))
+                rows.append(_row(detector, "mean", "overall",
+                                 _overall_cell(spec_cells, len(seeds), f)))
     return rows
 
 
 # ---------------------------------------------------------------------------
-# Regime: leave-one-domain-out
+# Regime: leave-one-domain-out -- same row shape as
+# run_lodo_performance.compute_trained, variant-suffixed detector label
 # ---------------------------------------------------------------------------
 
 
-def compute_lodo(splits, ood_splits, seeds, fpr, human_label,
-                 min_domain_rows, cfg) -> list[dict]:
+def _fold_variant(spec, X, y, Z, groups, tr, te, seeds, fprs, ood_sets,
+                  cfg, variant: str) -> dict:
+    """Mirror of ``run_lodo_performance._fold``, fit through ``_fit_variant``
+    instead of ``_trained.fit`` so the LODO training slice can be the
+    domain-randomized twin."""
+    a: list[float] = []
+    t = {f: [] for f in fprs}
+    te_ = {f: [] for f in fprs}
+    ood: dict[str, dict[float, list]] = {n: {f: [] for f in fprs} for n in ood_sets}
+    for seed in seeds:
+        clf = _fit_variant(spec, X, y, Z, groups, tr, seed, cfg, variant)
+        au, per = eval_on_fprs(clf, spec, X[te], y[te], Z[te], fprs)
+        a.append(au)
+        for f in fprs:
+            t[f].append(per[f][0])
+            te_[f].append(per[f][1])
+        for name, (oX, oy, oZ, _) in ood_sets.items():
+            oau, oper = eval_on_fprs(clf, spec, oX, oy, oZ, fprs)
+            for f in fprs:
+                ood[name][f].append((oau, oper[f][0], oper[f][1]))
+    n_h = int((y[te] == 0).sum())
+    return {
+        "auroc": float(np.mean(a)),
+        "by_fpr": {f: {"tpr_at_fpr": float(np.mean(t[f])),
+                       "tpr_eff": float(np.mean(te_[f])),
+                       "eff_fpr": eff_fpr_level(n_h, f)} for f in fprs},
+        "n_test": int(te.sum()), "n_test_human": n_h, "ood": ood}
+
+
+def compute_lodo(splits, ood_splits, seeds, fprs, human_label,
+                 min_domain_rows, combine, dr_cfg) -> list[dict]:
     ood_sets = {name: _load_ood(path, human_label) for name, path in ood_splits}
     for name, (_, oy, _, n_h) in ood_sets.items():
         print(f"  OOD eval corpus {name!r}: {len(oy)} rows, {n_h} human "
@@ -292,50 +355,106 @@ def compute_lodo(splits, ood_splits, seeds, fpr, human_label,
 
     rows: list[dict] = []
     for variant in ("base", "dr"):
-        src = {k: [] for k in TRAINED_SPECS}
-        ood_reads = {k: {n: [] for n in ood_sets} for k in TRAINED_SPECS}
+        all_folds: dict[str, dict[str, list[dict]]] = {}
+        ood_reads: dict[str, dict[str, dict[float, list]]] = {
+            k: {n: {f: [] for f in fprs} for n in ood_sets} for k in TRAINED_SPECS
+        }
+
         for split_key, X, y, Z, dom, ids, domains in tqdm(
                 loaded, desc=f"lodo/{variant}", unit="split"):
+            spec_folds = {k: [] for k in TRAINED_SPECS}
             for d in domains:
                 tr, te = dom != d, dom == d
+                # LODO invariants: held-out domain scored in FULL, never in
+                # training; train + test partition; no group (id) straddles.
+                assert d not in set(dom[tr]) and set(dom[te]) == {d}
+                assert tr.sum() + te.sum() == len(dom) and not (tr & te).any()
                 assert set(ids[tr]).isdisjoint(ids[te]), "a group straddled the fold"
-                splitter = lambda seed, tr=tr, te=te: (tr, te)  # noqa: E731
                 for spec_key, spec in TRAINED_SPECS.items():
-                    sa, st, ood = _seed_loop(spec, X, y, Z, ids, splitter,
-                                             seeds, fpr, ood_sets, cfg, variant)
-                    src[spec_key].append((sa, st))
-                    for name, reads in ood.items():
-                        ood_reads[spec_key][name].extend(reads)
-        rows += _rows_for_variant("lodo", variant, seeds, src, ood_reads)
+                    fd = _fold_variant(spec, X, y, Z, ids, tr, te, seeds, fprs,
+                                       ood_sets, dr_cfg, variant)
+                    fd["held_out_domain"] = d
+                    for name, by_fpr in fd.pop("ood").items():
+                        for f in fprs:
+                            ood_reads[spec_key][name][f].extend(by_fpr[f])
+                    spec_folds[spec_key].append(fd)
+            all_folds[split_key] = spec_folds
+
+        for spec_key, spec in TRAINED_SPECS.items():
+            detector = f"trained/{_dr_label(spec, variant)}"
+            for fpr in fprs:
+                split_rows: list[dict] = []
+                for split_key, spec_folds in all_folds.items():
+                    folds = spec_folds[spec_key]
+                    gf = [goodness(fd["auroc"], fd["by_fpr"][fpr]["tpr_eff"], combine)
+                          for fd in folds]
+                    for fd, gfi in zip(folds, gf):
+                        bf = fd["by_fpr"][fpr]
+                        rows.append({
+                            "level": "fold", "kind": "trained", "detector": detector,
+                            "split": split_key, "held_out_domain": fd["held_out_domain"],
+                            "fpr": fpr, "n_test": fd["n_test"], "n_folds": "",
+                            "n_seeds": len(seeds),
+                            "auroc": fd["auroc"], "auroc_std": "",
+                            "tpr_at_fpr": bf["tpr_at_fpr"], "tpr_at_fpr_std": "",
+                            "tpr_eff": bf["tpr_eff"], "tpr_eff_std": "",
+                            "eff_fpr": bf["eff_fpr"], "goodness": gfi, "goodness_std": "",
+                        })
+                    ok = [fd for fd in folds if fd["n_test_human"] >= 1 / fpr]
+                    use = ok or folds
+                    sr = {
+                        "level": "split", "kind": "trained", "detector": detector,
+                        "split": split_key, "held_out_domain": "", "fpr": fpr,
+                        "n_test": "", "n_folds": len(folds), "n_seeds": len(seeds),
+                        "reachable": bool(ok),
+                        "auroc": float(np.mean([fd["auroc"] for fd in folds])),
+                        "auroc_std": _std([fd["auroc"] for fd in folds]),
+                        "tpr_at_fpr": float(np.mean([fd["by_fpr"][fpr]["tpr_at_fpr"] for fd in use])),
+                        "tpr_at_fpr_std": _std([fd["by_fpr"][fpr]["tpr_at_fpr"] for fd in use]),
+                        "tpr_eff": float(np.mean([fd["by_fpr"][fpr]["tpr_eff"] for fd in folds])),
+                        "tpr_eff_std": _std([fd["by_fpr"][fpr]["tpr_eff"] for fd in folds]),
+                        "eff_fpr": float(np.mean([fd["by_fpr"][fpr]["eff_fpr"] for fd in folds])),
+                        "goodness": float(np.mean(gf)), "goodness_std": _std(gf),
+                    }
+                    rows.append(sr)
+                    split_rows.append(sr)
+
+                for name, (_, _, _, n_h) in ood_sets.items():
+                    reads = ood_reads[spec_key][name][fpr]
+                    oa, ot = [r[0] for r in reads], [r[1] for r in reads]
+                    ote = [r[2] for r in reads]
+                    og = [goodness(a_, te, combine) for a_, te in zip(oa, ote)]
+                    sr = {
+                        "level": "split", "kind": "trained", "detector": detector,
+                        "split": name, "held_out_domain": "", "fpr": fpr, "n_test": "",
+                        "n_folds": len(reads), "n_seeds": len(seeds),
+                        "reachable": bool(n_h >= 1 / fpr),
+                        "auroc": float(np.mean(oa)), "auroc_std": _std(oa),
+                        "tpr_at_fpr": float(np.mean(ot)), "tpr_at_fpr_std": _std(ot),
+                        "tpr_eff": float(np.mean(ote)), "tpr_eff_std": _std(ote),
+                        "eff_fpr": eff_fpr_level(n_h, fpr),
+                        "goodness": float(np.mean(og)), "goodness_std": _std(og),
+                    }
+                    rows.append(sr)
+                    split_rows.append(sr)
+
+                tpr_ok = [r for r in split_rows if r.get("reachable")]
+                rows.append({
+                    "level": "overall", "kind": "trained", "detector": detector,
+                    "split": "mean", "held_out_domain": "", "fpr": fpr, "n_test": "",
+                    "n_folds": sum(len(all_folds[s][spec_key]) for s in all_folds),
+                    "n_seeds": len(seeds),
+                    "auroc": float(np.mean([r["auroc"] for r in split_rows])),
+                    "auroc_std": float(np.mean([r["auroc_std"] for r in split_rows])),
+                    "tpr_at_fpr": float(np.mean([r["tpr_at_fpr"] for r in tpr_ok])) if tpr_ok else float("nan"),
+                    "tpr_at_fpr_std": float(np.mean([r["tpr_at_fpr_std"] for r in tpr_ok])) if tpr_ok else float("nan"),
+                    "tpr_eff": float(np.mean([r["tpr_eff"] for r in split_rows])),
+                    "tpr_eff_std": float(np.mean([r["tpr_eff_std"] for r in split_rows])),
+                    "eff_fpr": fpr,
+                    "goodness": float(np.mean([r["goodness"] for r in split_rows])),
+                    "goodness_std": float(np.mean([r["goodness_std"] for r in split_rows])),
+                })
     return rows
-
-
-# ---------------------------------------------------------------------------
-# Zero-shot reference on the OOD corpus
-# ---------------------------------------------------------------------------
-
-
-def compute_zeroshot_ood(ood_splits, cols, fpr, human_label, regimes) -> list[dict]:
-    """Zero-shot reference points on the OOD corpus in full (the DR figure only
-    ever plots the OOD panel, so no matched-eval-row subset is needed here)."""
-    ood_keys = {k for k, _ in ood_splits}
-    base = [
-        {"detector": _detector(r["family"], r["version"]), "split": r["split"],
-         "auroc": r["auroc"], "tpr_at_fpr": r["tpr_at_fpr"]}
-        for r in zeroshot_compute(ood_splits, ZS_FAMILIES, cols, [fpr], human_label)
-        if r["split"] in ood_keys
-    ]
-    out = []
-    for regime in regimes:
-        for r in base:
-            out.append({
-                "regime": regime, "variant": "ref", "kind": "zeroshot",
-                "detector": r["detector"], "split": r["split"], "role": "ood",
-                "n_source_models": "", "n_seeds": "",
-                "auroc": r["auroc"], "auroc_std": "",
-                "tpr_at_fpr": r["tpr_at_fpr"], "tpr_at_fpr_std": "",
-            })
-    return out
 
 
 # ---------------------------------------------------------------------------
@@ -343,44 +462,71 @@ def compute_zeroshot_ood(ood_splits, cols, fpr, human_label, regimes) -> list[di
 # ---------------------------------------------------------------------------
 
 
-def _fmt(v, sd) -> str:
-    try:
-        v = float(v)
-    except (TypeError, ValueError):
-        return "--"
-    if not np.isfinite(v):
-        return "--"
-    try:
-        sd = float(sd)
-        bare = not np.isfinite(sd)
-    except (TypeError, ValueError):
-        bare = True
-    return f"{v:.3f}" if bare else f"{v:.3f} ± {sd:.3f}"
-
-
-def _print_table(rows: list[dict], fpr: float) -> None:
-    pct = f"{fpr * 100:g}"
-    print(f"\n{'regime':<11}{'variant':<8}{'detector':<26}{'role':<8}"
-          f"{'auroc':>16}{f'TPR@{pct}%':>16}")
-    order = {("in_domain", "source"): 0, ("in_domain", "ood"): 1,
-             ("lodo", "source"): 2, ("lodo", "ood"): 3}
-    for r in sorted(rows, key=lambda r: (order.get((r["regime"], r["role"]), 9),
-                                         r["detector"], r["variant"])):
-        print(f"{r['regime']:<11}{r['variant']:<8}{r['detector']:<26}{r['role']:<8}"
-              f"{_fmt(r['auroc'], r['auroc_std']):>16}"
-              f"{_fmt(r['tpr_at_fpr'], r['tpr_at_fpr_std']):>16}")
-
-
-def plots_from_csv(csv_path: Path, meta: dict, out_dir: Path) -> None:
+def plots_in_domain(csv_path: Path, meta: dict, out_dir: Path) -> None:
     rows = pd.read_csv(csv_path).to_dict("records")
-    from epai.ai_detection.trainv2.plots import dr_scatter
+    from epai.ai_detection.trainv2.plots import denario_scatter, goodness_bars, zeroshot_scatter
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    dr_scatter(
-        rows, meta, out_dir / "dr_transfer.png",
-        title="Domain randomization on the training embeddings -> MG-AI-Sci transfer\n"
-              f"AUROC vs. oracle TPR@{meta['fpr'] * 100:g}%FPR, {meta['n_seeds']} seeds",
-    )
+    ood = "/".join(meta["ood"])
+    n_seeds = meta["n_seeds"]
+    dr = meta.get("dr", "")
+    for fpr in meta["fprs"]:
+        fmeta = {**meta, "fpr": fpr}
+        tag = fpr_tag(fpr)
+        frows = rows_at_fpr(rows, fpr)
+        zeroshot_scatter(
+            frows, fmeta, out_dir / f"in_domain_{tag}.png", key="detector",
+            variant_suffix=VARIANT_SUFFIX,
+            title=f"In-domain (70/30, {n_seeds} seeds) — base vs. domain-"
+                  f"randomized twin, plus {ood} as eval-only OOD\nAUROC vs. "
+                  f"oracle TPR@{fpr * 100:g}%FPR — {dr}",
+        )
+        goodness_bars(
+            frows, fmeta, out_dir / f"in_domain_goodness_{tag}.png", key="detector",
+            combine=meta.get("combine", "hmean"), variant_suffix=VARIANT_SUFFIX,
+            title=f"In-domain (70/30, {n_seeds} seeds) — base vs. twin — "
+                  f"goodness (TPR@{fpr * 100:g}%FPR) across the MANUGRAM splits",
+        )
+        denario_scatter(
+            frows, fmeta, out_dir / f"in_domain_denario_{tag}.png",
+            variant_suffix=VARIANT_SUFFIX,
+            title=f"In-domain (70/30, {n_seeds} seeds) on {ood} (eval-only OOD)"
+                  f"\nbase vs. domain-randomized twin — AUROC vs. oracle "
+                  f"TPR@{fpr * 100:g}%FPR",
+        )
+
+
+def plots_lodo(csv_path: Path, meta: dict, out_dir: Path) -> None:
+    all_rows = [r for r in pd.read_csv(csv_path).to_dict("records")
+               if r["level"] in ("split", "overall")]
+    from epai.ai_detection.trainv2.plots import denario_scatter, goodness_bars, zeroshot_scatter
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ood = "/".join(meta["ood"])
+    dr = meta.get("dr", "")
+    for fpr in meta["fprs"]:
+        fmeta = {**meta, "fpr": fpr}
+        tag = fpr_tag(fpr)
+        rows = rows_at_fpr(all_rows, fpr)
+        zeroshot_scatter(
+            rows, fmeta, out_dir / f"lodo_{tag}.png", key="detector",
+            variant_suffix=VARIANT_SUFFIX,
+            title=f"Leave-one-domain-out — base vs. domain-randomized twin, "
+                  f"plus {ood} as eval-only OOD\nAUROC vs. oracle "
+                  f"TPR@{fpr * 100:g}%FPR — {dr}",
+        )
+        goodness_bars(
+            rows, fmeta, out_dir / f"lodo_goodness_{tag}.png", key="detector",
+            combine=meta.get("combine", "hmean"), variant_suffix=VARIANT_SUFFIX,
+            title=f"Leave-one-domain-out — base vs. twin — goodness "
+                  f"(TPR@{fpr * 100:g}%FPR) across the MANUGRAM splits",
+        )
+        denario_scatter(
+            rows, fmeta, out_dir / f"lodo_denario_{tag}.png",
+            variant_suffix=VARIANT_SUFFIX,
+            title=f"Leave-one-domain-out on {ood} (eval-only OOD)\nbase vs. "
+                  f"domain-randomized twin — AUROC vs. oracle TPR@{fpr * 100:g}%FPR",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -401,23 +547,37 @@ def main() -> None:
     ap.add_argument("--zeroshot-config", type=Path, default=ZEROSHOT_CONFIG)
     ap.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2])
     ap.add_argument("--test-size", type=float, default=0.30)
-    ap.add_argument("--fpr", type=float, default=0.01)
+    ap.add_argument("--fpr", nargs="+", type=float, default=DEFAULT_FPRS, metavar="LEVEL",
+                    help=f"oracle FPR level(s); one figure set per level "
+                         f"(default: {DEFAULT_FPRS})")
+    ap.add_argument("--combine", choices=("hmean", "gmean", "amean"), default="hmean")
     ap.add_argument("--min-domain-rows", type=int, default=100)
     ap.add_argument("--group-col", default="id")
     ap.add_argument("--human-label", default="human")
     ap.add_argument("--no-zeroshot", action="store_true")
     ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     ap.add_argument("--no-plots", action="store_true")
-    ap.add_argument("--replot", type=Path, default=None, metavar="PERFORMANCE_CSV")
+    ap.add_argument("--replot", type=Path, default=None, metavar="OUT_DIR",
+                    help="re-plot from an existing out-dir's CSV(s), no compute")
     args = ap.parse_args()
 
     dr_cfg = _load_dr_config(args.config)
+    train_splits = resolve_splits(args.splits or DEFAULT_SPLITS, PARQUET_DIR)
     ood_splits = resolve_splits(args.ood_splits or DEFAULT_OOD, PARQUET_DIR)
-    meta = {"fpr": args.fpr, "n_seeds": len(args.seeds), "regimes": args.regimes,
-            "ood": [s for s, _ in ood_splits], "dr": _dr_summary(dr_cfg)}
+    meta = {"fprs": args.fpr, "n_seeds": len(args.seeds), "combine": args.combine,
+            "regimes": args.regimes, "ood": [s for s, _ in ood_splits],
+            "splits": [s for s, _ in train_splits] + [s for s, _ in ood_splits],
+            "dr": _dr_summary(dr_cfg)}
 
     if args.replot is not None:
-        plots_from_csv(args.replot, meta, args.replot.parent)
+        id_csv = args.replot / "in_domain_performance.csv"
+        lodo_csv = args.replot / "lodo_performance.csv"
+        if id_csv.exists():
+            plots_in_domain(id_csv, meta, args.replot)
+        if lodo_csv.exists():
+            plots_lodo(lodo_csv, meta, args.replot)
+        if not id_csv.exists() and not lodo_csv.exists():
+            raise SystemExit(f"no performance.csv under {args.replot}")
         print(f"replotted from {args.replot}")
         return
 
@@ -425,7 +585,6 @@ def main() -> None:
         print("!! domain randomization is OFF in the config — the 'dr' twin will "
               "coincide with 'base' (null control).")
 
-    train_splits = resolve_splits(args.splits or DEFAULT_SPLITS, PARQUET_DIR)
     missing = [str(p) for _, p in [*train_splits, *ood_splits] if not p.exists()]
     if missing:
         raise SystemExit(f"parquet(s) not found: {missing}")
@@ -435,29 +594,38 @@ def main() -> None:
     print(f"train on  : {[s for s, _ in train_splits]}   OOD: {[s for s, _ in ood_splits]}"
           f"   seeds: {args.seeds}\n")
 
-    rows: list[dict] = []
-    if "in_domain" in args.regimes:
-        rows += compute_in_domain(train_splits, ood_splits, args.seeds,
-                                  args.test_size, args.fpr, args.group_col,
-                                  args.human_label, dr_cfg)
-    if "lodo" in args.regimes:
-        rows += compute_lodo(train_splits, ood_splits, args.seeds, args.fpr,
-                             args.human_label, args.min_domain_rows, dr_cfg)
-
-    if not args.no_zeroshot:
-        cols = _load_columns(args.zeroshot_config)
-        print(f"zero-shot : {cols}")
-        rows += compute_zeroshot_ood(ood_splits, cols, args.fpr,
-                                     args.human_label, args.regimes)
-
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    csv_path = args.out_dir / "performance.csv"
-    pd.DataFrame(rows, columns=CSV_FIELDS).to_csv(csv_path, index=False)
-    _print_table(rows, args.fpr)
-    print(f"\nwrote {csv_path}")
 
-    if not args.no_plots:
-        plots_from_csv(csv_path, meta, args.out_dir)
+    if "in_domain" in args.regimes:
+        rows = compute_in_domain(train_splits, ood_splits, args.seeds,
+                                 args.test_size, args.fpr, args.group_col,
+                                 args.human_label, args.combine, dr_cfg)
+        if not args.no_zeroshot:
+            rows += compute_zeroshot_in_domain(
+                train_splits, ood_splits, args.zeroshot_config, args.seeds,
+                args.test_size, args.fpr, args.group_col, args.human_label,
+                args.combine)
+        csv_path = args.out_dir / "in_domain_performance.csv"
+        pd.DataFrame(rows, columns=CSV_FIELDS_IN_DOMAIN).to_csv(csv_path, index=False)
+        _print_table_in_domain(rows, args.fpr)
+        print(f"\nwrote {csv_path}")
+        if not args.no_plots:
+            plots_in_domain(csv_path, meta, args.out_dir)
+
+    if "lodo" in args.regimes:
+        rows = compute_lodo(train_splits, ood_splits, args.seeds, args.fpr,
+                            args.human_label, args.min_domain_rows,
+                            args.combine, dr_cfg)
+        if not args.no_zeroshot:
+            rows += compute_zeroshot_lodo(
+                train_splits, ood_splits, args.zeroshot_config, args.seeds,
+                args.fpr, args.human_label, args.min_domain_rows, args.combine)
+        csv_path = args.out_dir / "lodo_performance.csv"
+        pd.DataFrame(rows, columns=CSV_FIELDS_LODO).to_csv(csv_path, index=False)
+        _print_table_lodo(rows, args.fpr)
+        print(f"\nwrote {csv_path}")
+        if not args.no_plots:
+            plots_lodo(csv_path, meta, args.out_dir)
 
 
 if __name__ == "__main__":

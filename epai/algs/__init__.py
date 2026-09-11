@@ -14,6 +14,7 @@ from .fusion_mlp import FusionMLPAlg
 from .gated_mlp import GatedMLPAlg
 from .gradient_boosting import GradientBoostingAlg
 from .logistic import LogisticAlg
+from .robust_mlp import RobustMLPAlg
 from .svm import SVMAlg
 from .simple_mlp import SimpleMLPAlg
 
@@ -25,6 +26,7 @@ ALGORITHMS: dict[str, type[ClfAlgorithm]] = {
     BinoxMLPAlg.name: BinoxMLPAlg,
     FusionMLPAlg.name: FusionMLPAlg,
     GatedMLPAlg.name: GatedMLPAlg,
+    RobustMLPAlg.name: RobustMLPAlg,
 }
 
 
@@ -47,6 +49,7 @@ __all__ = [
     "GatedMLPAlg",
     "GradientBoostingAlg",
     "LogisticAlg",
+    "RobustMLPAlg",
     "SVMAlg",
     "SimpleMLPAlg",
     "build_algorithm",

@@ -45,6 +45,7 @@ from dataclasses import asdict, dataclass, field, fields
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import GroupShuffleSplit, ShuffleSplit
 from sklearn.preprocessing import StandardScaler
@@ -115,6 +116,17 @@ class TrainHParams:
     # --- preprocessing ---
     normalize: str = "standard"
 
+    # --- tail-aware loss / domain-invariance (epai/algs/robust_mlp.py) ---
+    # See epai/ai_detection/trainv2/improving_sota_ideas.md for the method and
+    # citations. Every default here reproduces plain cross-entropy training
+    # with no domain penalty, so no existing algorithm/config is affected.
+    loss_kind: str = "ce"  # ce | toppush
+    push_frac: float = 0.05  # fraction of a batch's human rows to push against
+    push_weight: float = 1.0  # weight of the push term when loss_kind='toppush'
+    push_margin: float = 1.0  # hinge margin, in logit-margin units
+    domain_penalty: str = "none"  # none | coral | vrex
+    domain_penalty_weight: float = 0.0
+
     def __post_init__(self) -> None:
         # Coerce before validating: a YAML ``1e-3`` parses as a string in some
         # writings, and a swept value arrives as whatever json.loads made of it.
@@ -130,8 +142,33 @@ class TrainHParams:
             "input_dropout",
             "label_smoothing",
             "mixup_alpha",
+            "push_frac",
+            "push_weight",
+            "push_margin",
+            "domain_penalty_weight",
         ):
             setattr(self, name, float(getattr(self, name)))
+
+        if self.loss_kind not in ("ce", "toppush"):
+            raise ValueError(f"loss_kind must be 'ce' or 'toppush', got {self.loss_kind!r}")
+        if not 0.0 < self.push_frac <= 1.0:
+            raise ValueError(f"push_frac must be in (0, 1], got {self.push_frac}")
+        if self.push_weight < 0:
+            raise ValueError(f"push_weight must be >= 0, got {self.push_weight}")
+        if self.domain_penalty not in ("none", "coral", "vrex"):
+            raise ValueError(
+                f"domain_penalty must be 'none', 'coral' or 'vrex', got "
+                f"{self.domain_penalty!r}"
+            )
+        if self.domain_penalty_weight < 0:
+            raise ValueError(
+                f"domain_penalty_weight must be >= 0, got {self.domain_penalty_weight}"
+            )
+        if self.mixup_alpha > 0 and (self.loss_kind == "toppush" or self.domain_penalty != "none"):
+            raise ValueError(
+                "mixup_alpha > 0 is not supported together with loss_kind="
+                "'toppush' or domain_penalty != 'none'"
+            )
 
         if self.val_metric not in VAL_METRICS:
             raise ValueError(
@@ -518,6 +555,76 @@ def _mixup(xs: list[torch.Tensor], alpha: float, rng: np.random.Generator):
     return [lam * x + (1.0 - lam) * x[perm] for x in xs], perm, lam
 
 
+# ---------------------------------------------------------------------------
+# Tail-aware loss (TopPush) + domain-invariance penalties (CORAL / V-REx)
+#
+# See epai/ai_detection/trainv2/improving_sota_ideas.md (#1, #2) for the
+# method and citations. Only ``robust_mlp.RobustMLPAlg`` sets ``loss_kind`` /
+# ``domain_penalty`` away from their defaults, so these branches are dead code
+# for every other algorithm in this package.
+# ---------------------------------------------------------------------------
+
+
+def _margin(logits: torch.Tensor) -> torch.Tensor:
+    """Differentiable machine-minus-human logit margin (keeps grad; contrast
+    with :func:`logit_margin`, which detaches to numpy)."""
+    return logits[:, 1] - logits[:, 0]
+
+
+def _push_loss(logits: torch.Tensor, y: torch.Tensor, push_frac: float,
+               margin: float) -> torch.Tensor:
+    """TopPush: a pairwise hinge between every machine row and only the
+    *hardest* (highest-scoring) ``push_frac`` fraction of the batch's human
+    rows -- the surrogate for TPR@low-FPR, not for full AUROC. ``topk`` keeps
+    gradient through the selected human scores."""
+    s = _margin(logits)
+    hum, mach = s[y == 0], s[y == 1]
+    if hum.numel() == 0 or mach.numel() == 0:
+        return torch.zeros((), device=logits.device)
+    k = min(hum.numel(), max(1, int(np.ceil(push_frac * hum.numel()))))
+    hard_hum = torch.topk(hum, k).values
+    diff = mach.unsqueeze(1) - hard_hum.unsqueeze(0)  # (n_mach, k)
+    return F.softplus(margin - diff).mean()
+
+
+def _domain_codes(domains: np.ndarray) -> np.ndarray:
+    """String/mixed domain labels -> stable small-int codes."""
+    _, codes = np.unique(np.asarray(domains), return_inverse=True)
+    return codes.astype(np.int64)
+
+
+def _coral_penalty(features: torch.Tensor, domains: torch.Tensor) -> torch.Tensor:
+    """Deep CORAL: mean pairwise squared Frobenius distance between domains'
+    feature covariance matrices, computed over whatever domains happen to be
+    present in this batch. A domain with < 2 rows in the batch is skipped (no
+    covariance); < 2 domains present -> zero penalty for this batch."""
+    uniq = torch.unique(domains)
+    covs = []
+    for d in uniq:
+        f = features[domains == d]
+        if f.shape[0] < 2:
+            continue
+        f = f - f.mean(dim=0, keepdim=True)
+        covs.append((f.T @ f) / (f.shape[0] - 1))
+    if len(covs) < 2:
+        return torch.zeros((), device=features.device)
+    d2 = features.shape[1] ** 2
+    terms = [((covs[i] - covs[j]) ** 2).sum() / (4 * d2)
+             for i in range(len(covs)) for j in range(i + 1, len(covs))]
+    return torch.stack(terms).mean()
+
+
+def _vrex_penalty(per_row_loss: torch.Tensor, domains: torch.Tensor) -> torch.Tensor:
+    """V-REx: variance of the per-domain mean loss within this batch. A domain
+    with 0 rows in the batch is skipped; < 2 domains present -> zero."""
+    uniq = torch.unique(domains)
+    means = [per_row_loss[domains == d].mean() for d in uniq
+             if (domains == d).any()]
+    if len(means) < 2:
+        return torch.zeros((), device=per_row_loss.device)
+    return torch.stack(means).var(unbiased=False)
+
+
 def train_torch_model(
     model: nn.Module,
     inputs: list[np.ndarray],
@@ -526,6 +633,7 @@ def train_torch_model(
     device: torch.device,
     seed: int,
     groups: np.ndarray | None = None,
+    domains: np.ndarray | None = None,
 ) -> TrainHistory:
     """Fit ``model`` under ``hp``. Shared by every torch algorithm here.
 
@@ -538,6 +646,16 @@ def train_torch_model(
     the training loss, which is what this package did before and is kept as the
     default so old configs reproduce -- see the module docstring for why it is
     not really regularisation.
+
+    ``domains``, when given AND ``hp.domain_penalty != "none"``, is one
+    environment label per row of ``y`` (see
+    ``epai/ai_detection/trainv2/improving_sota_ideas.md`` #2). In that case
+    ``model.forward`` is called with ``return_features=True`` inside the batch
+    loop (and only there -- inference elsewhere still gets plain logits), so a
+    model that wants the domain penalty must accept that keyword and return
+    ``(logits, features)``. Every model in this package except
+    ``robust_mlp._RobustMLP`` is unaffected, since nothing else sets
+    ``domain_penalty``.
     """
     n = len(y)
     train_idx, val_idx, fallback = split_train_val(n, hp, seed, groups, y)
@@ -547,9 +665,14 @@ def train_torch_model(
     tensors = [torch.from_numpy(np.ascontiguousarray(x)).to(device) for x in inputs]
     y_t = torch.from_numpy(y_arr).to(device)
 
+    has_dom = domains is not None and hp.domain_penalty != "none"
+    if has_dom:
+        dom_t = torch.from_numpy(_domain_codes(domains)).to(device)
+
     tr = torch.from_numpy(train_idx).to(device)
     train_tensors = [t[tr] for t in tensors]
     y_train = y_t[tr]
+    dom_train = dom_t[tr] if has_dom else None
     if use_val:
         va = torch.from_numpy(val_idx).to(device)
         val_tensors = [t[va] for t in tensors]
@@ -557,8 +680,10 @@ def train_torch_model(
 
     opt = torch.optim.AdamW(model.parameters(), lr=hp.lr, weight_decay=hp.weight_decay)
     loss_fn = nn.CrossEntropyLoss(label_smoothing=hp.label_smoothing)
+    use_push = hp.loss_kind == "toppush"
+    dataset_tensors = [*train_tensors, y_train] + ([dom_train] if has_dom else [])
     loader = DataLoader(
-        TensorDataset(*train_tensors, y_train),
+        TensorDataset(*dataset_tensors),
         batch_size=hp.batch_size,
         shuffle=True,
     )
@@ -580,14 +705,35 @@ def train_torch_model(
         model.train()
         epoch_loss = 0.0
         for batch in loader:
-            xb, yb = list(batch[:-1]), batch[-1]
+            if has_dom:
+                xb, yb, db = list(batch[:-2]), batch[-2], batch[-1]
+            else:
+                xb, yb, db = list(batch[:-1]), batch[-1], None
             opt.zero_grad()
             if hp.mixup_alpha > 0 and len(yb) > 1:
+                # Guaranteed not combined with has_dom/use_push -- see
+                # TrainHParams.__post_init__.
                 xb, perm, lam = _mixup(xb, hp.mixup_alpha, rng)
                 out = model(*xb)
                 loss = lam * loss_fn(out, yb) + (1.0 - lam) * loss_fn(out, yb[perm])
             else:
-                loss = loss_fn(model(*xb), yb)
+                out, feats = model(*xb, return_features=True) if has_dom else (model(*xb), None)
+                per_row = None
+                if has_dom and hp.domain_penalty == "vrex":
+                    # V-REx reads the per-domain mean of the SAME per-row CE
+                    # this batch's base loss uses, so compute it un-reduced.
+                    per_row = F.cross_entropy(out, yb, reduction="none",
+                                              label_smoothing=hp.label_smoothing)
+                    loss = per_row.mean()
+                else:
+                    loss = loss_fn(out, yb)
+                if use_push:
+                    loss = loss + hp.push_weight * _push_loss(
+                        out, yb, hp.push_frac, hp.push_margin)
+                if has_dom:
+                    pen = (_coral_penalty(feats, db) if hp.domain_penalty == "coral"
+                          else _vrex_penalty(per_row, db))
+                    loss = loss + hp.domain_penalty_weight * pen
             loss.backward()
             if hp.grad_clip:
                 nn.utils.clip_grad_norm_(model.parameters(), hp.grad_clip)

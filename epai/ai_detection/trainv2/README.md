@@ -324,18 +324,62 @@ clean. Only the RoBERTa embedding is noised — the cue vector is tiled verbatim
 Nothing in the main pipeline is touched; when the script is not run the pipeline
 is byte-identical.
 
+Output shape and figures now match section F exactly (one CSV + one figure set
+per regime, `zeroshot_scatter` / `goodness_bars` / `denario_scatter`) instead of
+a bespoke plot — the twin is a `_dr`-suffixed variant of its base detector's
+name, drawn one shade darker for the base / plain hue for the twin, the same
+convention the figures already use for a judge's `_wlp` readout variant.
+
 ```bash
 .venv/bin/python epai/ai_detection/trainv2/run_dr_transfer.py
 .venv/bin/python epai/ai_detection/trainv2/run_dr_transfer.py --regimes in_domain --seeds 0 1
-.venv/bin/python epai/ai_detection/trainv2/run_dr_transfer.py --replot results/trainv2/dr_transfer/performance.csv
+.venv/bin/python epai/ai_detection/trainv2/run_dr_transfer.py --replot results/trainv2/dr_transfer
 ```
-Outputs (`results/trainv2/dr_transfer/`): `performance.csv`, `dr_transfer.png`
-(per regime a panel; base = filled circle, twin = hollow ring of the same
-colour, joined by a connector). MG-AI-Sci has 100 human rows now (was 80,
-pre-merge with the ai_scientist corpus) — right at the 1%-FPR reachability
-boundary rather than clearly below it, so its oracle TPR@1%FPR is still a
-noisy single-threshold reading rather than a stable one — read the
-**base → twin delta**, not the absolute.
+Outputs (`results/trainv2/dr_transfer/`): `in_domain_performance.csv` +
+`in_domain_{1pct,5pct}.png` (+ `_goodness_`, `_denario_`), and
+`lodo_performance.csv` + `lodo_{1pct,5pct}.png` (+ `_goodness_`, `_denario_`).
+MG-AI-Sci has 100 human rows now (was 80, pre-merge with the ai_scientist
+corpus) — right at the 1%-FPR reachability boundary rather than clearly below
+it, so its oracle TPR@1%FPR is still a noisy single-threshold reading rather
+than a stable one — read the **base → twin delta**, not the absolute.
+
+### H. Tail-aware loss + domain-invariance regularizers (opt-in)
+
+**`run_robust_performance.py`** — an opt-in add-on, never in `rebuild_all.py`.
+Same in-domain 70/30 + LODO measurements as section F, but adds five new
+`robust_mlp` arms (:mod:`epai.algs.robust_mlp`) alongside the existing three
+trained detectors and the zero-shot picks, all on the same figures: a TopPush
+partial-AUC loss and CORAL / V-REx domain-invariance penalties, every arm a
+linear probe on `emb_roberta` so only the loss/regularizer varies. See
+`improving_sota_ideas.md` (#1, #2) for the method, the diagnosis it answers,
+and the citations.
+
+```bash
+.venv/bin/python epai/ai_detection/trainv2/run_robust_performance.py
+.venv/bin/python epai/ai_detection/trainv2/run_robust_performance.py --regimes lodo --seeds 0 1
+.venv/bin/python epai/ai_detection/trainv2/run_robust_performance.py --replot results/trainv2/robust_performance
+```
+Outputs (`results/trainv2/robust_performance/`): same two-CSV / two-figure-set
+shape as section G.
+
+### I. Judge-anchored cascade (opt-in)
+
+**`run_cascade_performance.py`** — an opt-in add-on, never in `rebuild_all.py`.
+LODO only. Escalates the cheap `trained/roberta·logistic` detector's
+least-confident rows (a split-conformal-style margin band, calibrated on a
+held-out slice of each fold's training union) to the zero-shot judge
+(`llm_judge_score_gpt56luna_v3_wlp`), at a few fixed escalation budgets
+(`cascade@5pct` / `cascade@10pct` / `cascade@20pct` by default), reported
+alongside the existing trained detectors and zero-shot picks. See
+`improving_sota_ideas.md` (#3) for the method and citations.
+
+```bash
+.venv/bin/python epai/ai_detection/trainv2/run_cascade_performance.py
+.venv/bin/python epai/ai_detection/trainv2/run_cascade_performance.py --alphas 0.05 0.1 0.2 0.3
+.venv/bin/python epai/ai_detection/trainv2/run_cascade_performance.py --replot results/trainv2/cascade_performance/lodo_performance.csv
+```
+Outputs (`results/trainv2/cascade_performance/`): `lodo_performance.csv`,
+`lodo_{1pct,5pct}.png` (+ `_goodness_`, `_denario_`).
 
 ---
 
