@@ -293,7 +293,18 @@ def build_stages(args: argparse.Namespace) -> list[Stage]:
 
     stages.append(Stage(
         "verify", "epai/scripts/check_parquet_completeness.py",
-        [out, "--fail-on", "error"],
+        # --allow-incomplete-groups: this corpus pairs ONE human to ONE
+        # specific generator per group (sakana xor sakanav2 xor
+        # cycleresearcher xor zochi -- never more than one), unlike mg_gb/
+        # mg_sci where every human has a version from every generator. The
+        # checker's "every group should carry its domain's full generator
+        # set" rule assumes the latter shape and would otherwise ERROR on
+        # every group for correctly NOT having the other three generators --
+        # not a real gap, nothing to regenerate. mg_den never hits this
+        # because it only ever has one generator label (denario) per domain;
+        # this is the first corpus with >1 generator inside a 1:1-matched
+        # structure.
+        [out, "--fail-on", "error", "--allow-incomplete-groups"],
         produces=[], reads_text=False,
     ))
     return stages
