@@ -13,3 +13,4 @@ columns:
   - llm_judge_score_gpt56luna_v3_wlp  # LLM judge       -> gpt56luna (words logprob)
   - llm_judge_score_gemma4_31b_v3_wlp # LLM judge       -> gemma4_31b (words logprob)
   - llm_judge_score_ens_v3_smin_0p05  # LLM judge       -> gemma4_31b+gpt56luna soft-min ensemble (T=0.05)
+  - detector_score_radar              # Pretrained det. -> RADAR

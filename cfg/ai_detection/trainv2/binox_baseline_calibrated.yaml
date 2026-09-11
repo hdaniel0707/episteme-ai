@@ -10,11 +10,11 @@ binoculars_baseline:
     label: falcon-7b
   - column: binoculars_score_falcon3_7b
     threshold: 0.895694
-    threshold_youden: 0.96678
+    threshold_youden: 0.965394
     label: falcon3-7b
   - column: binoculars_score_llama31_8b
     threshold: 0.860231
-    threshold_youden: 0.930275
+    threshold_youden: 0.924987
     label: llama31-8b
   - column: binoculars_score_mistral_v03
     threshold: 0.881331

@@ -28,7 +28,11 @@ POOLED = "all"  #: the pooled-over-everything pseudo-split
 #: halves), then the Denario OOD holdout. The pooled column ('all' / 'mean')
 #: always comes last, after these.
 SPLITS: dict[str, str] = {
-    "gb_orig": "ghostbuster_orig.parquet",
+    # TEMP (2026-09-11): server rescore of ghostbuster_orig.parquet (raw text)
+    # is still running. Using the standardized twin in the meantime -- same
+    # schema/labels (human, gpt35t:0000A), just standardized features/text.
+    # Switch back to "ghostbuster_orig.parquet" once the rescore lands.
+    "gb_orig": "ghostbuster_orig_stand.parquet",
     "mg_gb": "manugram_gb.parquet",
     "mg_sci": "manugram_sci.parquet",
     "mg_reph": "manugram_reph.parquet",

@@ -222,8 +222,9 @@ For the trained runners the models are fit once; the extra level is only a
 different ROC readout. (`run_dr_transfer.py` keeps a scalar `--fpr`.)
 
 **`run_zeroshot_performance.py`** — every score column of each family
-(Binoculars / Fast-DetectGPT / judge), one scatter per family: colour = detector
-version, marker = split, bold circle = mean across splits.
+(Binoculars / Fast-DetectGPT / judge / pretrained detector), one scatter per
+family: colour = detector version, marker = split, bold circle = mean across
+splits.
 
 ```bash
 uv run python epai/ai_detection/trainv2/run_zeroshot_performance.py
@@ -231,7 +232,7 @@ uv run python epai/ai_detection/trainv2/run_zeroshot_performance.py --families j
 uv run python epai/ai_detection/trainv2/run_zeroshot_performance.py --replot results/trainv2/zeroshot_performance/performance.csv
 ```
 Outputs (`results/trainv2/zeroshot_performance/`): `performance.csv`, and per
-FPR level `{binoculars,fastdetect,judge}_{1pct,5pct}.png` (+ `_goodness_`).
+FPR level `{binoculars,fastdetect,judge,detector}_{1pct,5pct}.png` (+ `_goodness_`).
 
 **`run_best_zeroshot_performance.py`** — the **hand-picked** best of each family
 (a flat `columns:` list in `cfg/ai_detection/trainv2/best_zeroshot.yaml`), all

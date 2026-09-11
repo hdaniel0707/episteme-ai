@@ -56,7 +56,8 @@ PARQUET_DIR = BASE_DIR / "data" / "parquet"
 DEFAULT_CONFIG = BASE_DIR / "cfg" / "ai_detection" / "trainv2" / "best_zeroshot.yaml"
 DEFAULT_OUT_DIR = BASE_DIR / "results" / "trainv2" / "best_zeroshot_performance"
 
-_FAMILY_ABBR = {"binoculars": "binox", "fastdetect": "fastdetect", "judge": "judge"}
+_FAMILY_ABBR = {"binoculars": "binox", "fastdetect": "fastdetect", "judge": "judge",
+                 "detector": "detector"}
 OUT_FIELDS = ["detector", *CSV_FIELDS]
 
 

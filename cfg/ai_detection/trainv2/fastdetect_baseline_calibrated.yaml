@@ -10,15 +10,15 @@ fastdetect_baseline:
     label: falcon3-7b
   - column: fastdetect_crit_falcon_7b
     threshold: 2.538524
-    threshold_youden: 1.78726
+    threshold_youden: 1.78178
     label: falcon-7b
   - column: fastdetect_crit_llama31_8b
     threshold: 2.403521
-    threshold_youden: 1.428845
+    threshold_youden: 1.506681
     label: llama31-8b
   - column: fastdetect_crit_mistral_v03
     threshold: 2.02951
-    threshold_youden: 0.987082
+    threshold_youden: 1.115
     label: mistral-v03
   - column: fastdetect_crit_qwen25_7b
     threshold: 1.892195

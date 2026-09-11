@@ -6,19 +6,19 @@ llm_judge_baseline:
   columns:
   - column: llm_judge_score_ens_v3_smin_0p05
     threshold: 0.000602
-    threshold_youden: 0.036099
+    threshold_youden: 0.036584
     label: ens_smin_0p05
   - column: llm_judge_score_ens_v3_smin_0p1
     threshold: 0.000603
-    threshold_youden: 0.07076
+    threshold_youden: 0.071064
     label: ens_smin_0p1
   - column: llm_judge_score_ens_v3_smin_0p15
     threshold: 0.000604
-    threshold_youden: 0.105229
+    threshold_youden: 0.105473
     label: ens_smin_0p15
   - column: llm_judge_score_ens_v3_smin_0p2
     threshold: 0.000605
-    threshold_youden: 0.138726
+    threshold_youden: 0.139211
     label: ens_smin_0p2
   - column: llm_judge_score_gemma4_31b_base
     threshold: 0.12
@@ -29,8 +29,8 @@ llm_judge_baseline:
     threshold_youden: 0.43
     label: gemma4_31b
   - column: llm_judge_score_gemma4_31b_v3_lp
-    threshold: 2.6e-05
-    threshold_youden: 0.999972
+    threshold: 1.6e-05
+    threshold_youden: 0.999965
     label: gemma4_31b_lp
   - column: llm_judge_score_gemma4_31b_v3_sbc
     threshold: 1.6e-05
@@ -38,7 +38,7 @@ llm_judge_baseline:
     label: gemma4_31b_sbc
   - column: llm_judge_score_gemma4_31b_v3_slp
     threshold: 0.003824
-    threshold_youden: 0.718428
+    threshold_youden: 0.727209
     label: gemma4_31b_slp
   - column: llm_judge_score_gemma4_31b_v3_wlp
     threshold: 2.3e-05
@@ -46,11 +46,11 @@ llm_judge_baseline:
     label: gemma4_31b_wlp
   - column: llm_judge_score_gpt56luna_base
     threshold: 0.07
-    threshold_youden: 0.27
+    threshold_youden: 0.29
     label: gpt56luna_base
   - column: llm_judge_score_gpt56luna_v3
     threshold: 0.07
-    threshold_youden: 0.18
+    threshold_youden: 0.24
     label: gpt56luna
   - column: llm_judge_score_gpt56luna_v3_sbc
     threshold: 8.0e-06
@@ -58,11 +58,11 @@ llm_judge_baseline:
     label: gpt56luna_sbc
   - column: llm_judge_score_gpt56luna_v3_wlp
     threshold: 7.8e-05
-    threshold_youden: 0.003901
+    threshold_youden: 0.005972
     label: gpt56luna_wlp
   - column: llm_judge_score_gptoss_120b_v3
     threshold: 0.17
-    threshold_youden: 0.64
+    threshold_youden: 0.66
     label: gptoss_120b
   - column: llm_judge_score_llama33_70b_v3
     threshold: 0.18

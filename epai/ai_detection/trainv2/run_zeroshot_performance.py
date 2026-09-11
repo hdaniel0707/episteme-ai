@@ -21,6 +21,7 @@ family per FPR level):
         binoculars_5pct.png  … at 5% FPR
         fastdetect_1pct.png  … Fast-DetectGPT pairs
         judge_1pct.png       … LLM judges
+        detector_1pct.png    … pretrained detectors (RADAR)
 
 In each plot: colour = detector version, marker shape = MANUGRAM split, and a
 bold filled circle = that version's mean across the splits (the answer; the
@@ -86,6 +87,10 @@ def _judge_label(c: str) -> str:
     return c.removeprefix("llm_judge_score_").replace("_v3", "")
 
 
+def _detector_label(c: str) -> str:
+    return c.removeprefix("detector_score_").replace("_", "-")
+
+
 #: prefix / orientation / label / default-excluded columns per family.
 FAMILIES: dict[str, dict] = {
     "binoculars": dict(prefix="binoculars_score", machine_is_high=False,
@@ -111,6 +116,8 @@ FAMILIES: dict[str, dict] = {
                       "llm_judge_score_ens_v3_smin_0p15",
                       "llm_judge_score_ens_v3_smin_0p2",
                   })),
+    "detector": dict(prefix="detector_score_", machine_is_high=True,
+                     label=_detector_label, exclude=frozenset()),
 }
 
 CSV_FIELDS = [
@@ -210,7 +217,7 @@ def _print_table(rows: list[dict], fprs: list[float]) -> None:
 
 
 _FAMILY_TITLE = {"binoculars": "Binoculars pairs", "fastdetect": "Fast-DetectGPT pairs",
-                 "judge": "LLM judges"}
+                 "judge": "LLM judges", "detector": "Pretrained detectors"}
 
 
 def plots_from_csv(csv_path: Path, meta: dict, out_dir: Path) -> None:
@@ -240,7 +247,7 @@ def main() -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     ap.add_argument("--families", nargs="+", default=None, choices=list(FAMILIES),
-                    help="detector families (default: all three)")
+                    help="detector families (default: all four)")
     ap.add_argument("--splits", nargs="+", default=None, metavar="KEY",
                     help="MANUGRAM splits (default: all)")
     ap.add_argument("--cols", nargs="+", default=None,
