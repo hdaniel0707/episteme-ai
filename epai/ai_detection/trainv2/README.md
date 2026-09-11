@@ -78,7 +78,7 @@ lands in a CSV's `split` column; the display name is for figure labels.
 | `gb_orig` | `ghostbuster_orig.parquet`  | GB-orig  | `gpt35t`, `gpt35ts` (GPT-3.5, legacy)               | ~9.0k  | wp, reuter, essay                    | multi-generator |
 | `mg_gb`   | `manugram_gb.parquet`       | MG-GB    | `gpt56luna`, `gptoss120b`, `gemma431b`, `llama3370b`| ~15.0k | wp, reuter, essay                    | multi-generator |
 | `mg_sci`  | `manugram_sci.parquet`      | MG-Sci   | `gpt56luna`, `gptoss120b`, `gemma431b`, `llama3370b`| ~15.0k | computer_science, mathematics, sociology | multi-generator |
-| `mg_den`  | `manugram_den.parquet`      | MG-Den   | `denario`                                          | 160 (80 human) | 9 scientific domains, ~10–35 rows each | single-generator, **eval-only OOD** |
+| `mg_aisci`  | `manugram_aiscientist.parquet`      | MG-AI-Sci   | `denario`, `sakana`, `sakanav2`, `cycleresearcher`, `zochi` | 200 (100 human) | 9 scientific domains + computer_science, ~1–80 rows each | multi-generator, 1:1-matched, **eval-only OOD** |
 
 **Opt-in splits** — registered, but never in a default sweep; pass by name only:
 
@@ -92,16 +92,24 @@ lands in a CSV's `split` column; the display name is for figure labels.
 ([MG-Reph experiments](#mg-reph-experiments-opt-in)).
 
 Fixed left-to-right order everywhere: `gb_orig → mg_gb → mg_sci → mg_reph →
-mg_reph_sci → mg_reph_gb → mg_den`, then the pooled column (`all` / `mean`) last.
+mg_reph_sci → mg_reph_gb → mg_aisci`, then the pooled column (`all` / `mean`) last.
 
-**Single-generator caveat.** `MG-Den` and the `MG-Reph` family have one
-non-human label each, so the multi-generator scripts skip them:
-`run_judge_by_generator.py` needs ≥2 generators, and `data.load_multi` rejects a
-file with fewer than two. Column-based scripts (calibration, embedding
-effectiveness, zero-shot, trained) treat them as *human vs. all-AI* and run
-fine. `MG-Den`'s 80 human rows can't place a 1%-FPR threshold on ≥1 row, so its
-TPR@1%FPR is a **floor**, not a measurement — kept in AUROC means, dropped from
-TPR means, throughout.
+**Single-generator caveat.** The `MG-Reph` family has one non-human label
+each, so the multi-generator scripts skip it: `run_judge_by_generator.py`
+needs ≥2 generators, and `data.load_multi` rejects a file with fewer than two.
+`MG-AI-Sci` technically has five now (`denario`, `sakana`, `sakanav2`,
+`cycleresearcher`, `zochi`, since the 2026-09-11 merge with the ai_scientist
+corpus) but stays out of the multi-generator scripts by default too — it is a
+1:1-matched eval-only holdout (one human per ONE specific generator, not one
+human x every generator), so most of those five have only a handful of rows
+(zochi: 1, sakanav2: 3, cycleresearcher: 6) — too sparse for a real
+per-generator matrix. Column-based scripts (calibration, embedding
+effectiveness, zero-shot, trained) treat it as *human vs. all-AI* and run
+fine. `MG-AI-Sci`'s 100 human rows (was 80 pre-merge) sit right at the
+reachability boundary for a 1%-FPR threshold (`n_human * fpr >= 1.0`) rather
+than clearly below it — its TPR@1%FPR is still effectively a **floor**, not a
+stable measurement, even though it may now register as `reachable = True` in
+the CSV.
 
 **Why MG-Reph is opt-in.** One generator, and only the **`gpt56luna` judge** is
 scored on both classes — the `gemma4_31b` / `qwen3_14b` / `gptoss_120b` /
@@ -188,7 +196,7 @@ reported on the same rows.
 ```bash
 uv run python epai/ai_detection/trainv2/run_judge_youden_calibration.py data/parquet/manugram_sci.parquet
 uv run python epai/ai_detection/trainv2/run_binox_youden_calibration.py data/parquet/manugram_gb.parquet --cols binoculars_score binoculars_score_qwen25_7b
-uv run python epai/ai_detection/trainv2/run_fastdetect_youden_calibration.py data/parquet/manugram_den.parquet --no-plots
+uv run python epai/ai_detection/trainv2/run_fastdetect_youden_calibration.py data/parquet/manugram_aiscientist.parquet --no-plots
 ```
 
 Outputs: `<stem>_thresholds.csv` and `fig/<stem>/<column>.png`.
@@ -266,7 +274,7 @@ include.
 
 The three `_trained.py` detectors, AUROC vs. oracle TPR@1%FPR, with the
 `best_zeroshot.yaml` picks overlaid. Every fitted model is also scored,
-unchanged, on each `--ood-splits` corpus in full (default `mg_den`) — never
+unchanged, on each `--ood-splits` corpus in full (default `mg_aisci`) — never
 trained on.
 
 The zero-shot picks are scored on **the same rows as the trained models** —
@@ -282,7 +290,7 @@ split (default `gb_orig mg_gb mg_sci`), N seeds, human vs. all-AI pooled.
 
 ```bash
 uv run python epai/ai_detection/trainv2/run_in_domain_performance.py
-uv run python epai/ai_detection/trainv2/run_in_domain_performance.py --splits mg_gb mg_sci --ood-splits mg_den --seeds 0 1 2 3 4
+uv run python epai/ai_detection/trainv2/run_in_domain_performance.py --splits mg_gb mg_sci --ood-splits mg_aisci --seeds 0 1 2 3 4
 uv run python epai/ai_detection/trainv2/run_in_domain_performance.py --replot results/trainv2/in_domain_performance/performance.csv
 ```
 Outputs (`results/trainv2/in_domain_performance/`): `performance.csv`,
@@ -303,10 +311,10 @@ uv run python epai/ai_detection/trainv2/run_lodo_performance.py --replot results
 Outputs (`results/trainv2/lodo_performance/`): `performance.csv`,
 `lodo_{1pct,5pct}.png` (+ `_goodness_`, `_denario_`).
 
-### G. Domain randomization → MG-Den transfer (opt-in)
+### G. Domain randomization → MG-AI-Sci transfer (opt-in)
 
 **`run_dr_transfer.py`** — an opt-in add-on, never in `rebuild_all.py`. Re-runs
-both transfer measurements above (in-domain 70/30 and LODO, scored on `mg_den`)
+both transfer measurements above (in-domain 70/30 and LODO, scored on `mg_aisci`)
 and for every `_trained.py` detector also trains a **domain-randomized twin**:
 the same algorithm fit on training embeddings perturbed with Gaussian noise
 (config `cfg/ai_detection/trainv2/domain_randomization.yaml` — `sigma`,
@@ -323,8 +331,11 @@ is byte-identical.
 ```
 Outputs (`results/trainv2/dr_transfer/`): `performance.csv`, `dr_transfer.png`
 (per regime a panel; base = filled circle, twin = hollow ring of the same
-colour, joined by a connector). MG-Den has 80 human rows, so its oracle
-TPR@1%FPR floors at FPR=0 — read the **base → twin delta**, not the absolute.
+colour, joined by a connector). MG-AI-Sci has 100 human rows now (was 80,
+pre-merge with the ai_scientist corpus) — right at the 1%-FPR reachability
+boundary rather than clearly below it, so its oracle TPR@1%FPR is still a
+noisy single-threshold reading rather than a stable one — read the
+**base → twin delta**, not the absolute.
 
 ---
 
@@ -453,7 +464,7 @@ label change:
 * corpora: MG-GB (= MG-GB + MG-Reph-GB) and MG-Sci (= MG-Sci + MG-Reph-Sci); a
   document's human / rephrase / full-generation rows share one `id`
 * label: `y=1` the full gpt56luna generation, **`y=0` human AND rephrase**
-* OOD (default `mg_den`, `--ood-splits`): scored normally (human vs. denario)
+* OOD (default `mg_aisci`, `--ood-splits`): scored normally (human vs. all-AI)
 * zero-shot overlay: the `best_zeroshot.yaml` picks minus any gemma judge —
   `binoculars_score_llama31_8b`, `fastdetect_crit_llama31_8b`,
   `llm_judge_score_gpt56luna_v3` — rephrase-GT on the training corpora, normal

@@ -16,7 +16,7 @@ and one domain (checked on load), so holding out a domain holds out those
 whole groups — a (human, gen1..genN) set is never split across the fold.
 
 Every fold's model is ALSO scored, unchanged, on each ``--ood-splits`` corpus
-in full (default MG-Den) — never trained on, an additional held-out
+in full (default MG-AI-Sci) — never trained on, an additional held-out
 test corpus. Its reading is the mean over every (training split, held-out
 domain, seed) model.
 
@@ -28,8 +28,9 @@ robustness. The 'overall' row is the mean across splits; its SD is the typical
 per-split fold SD (mean of them), never the spread across splits.
 
 Only splits with >= 2 domains of at least ``--min-domain-rows`` rows are used
-(MG-Den's domains are ~15 rows each — no LODO there), so the default
-is GB-orig / MG-GB / MG-Sci, 3 domains each.
+(MG-AI-Sci's domains run ~8-40 rows each, post-merge with the ai_scientist
+corpus -- still no LODO there), so the default is GB-orig / MG-GB / MG-Sci,
+3 domains each.
 
 The zero-shot picks from ``cfg/ai_detection/trainv2/best_zeroshot.yaml`` are
 scored on the SAME rows as the trained models: each held-out domain fold per
@@ -96,7 +97,7 @@ BASE_DIR = Path(__file__).resolve().parents[3]
 PARQUET_DIR = BASE_DIR / "data" / "parquet"
 DEFAULT_OUT_DIR = BASE_DIR / "results" / "trainv2" / "lodo_performance"
 DEFAULT_SPLITS = ["gb_orig", "mg_gb", "mg_sci"]
-DEFAULT_OOD = ["mg_den"]
+DEFAULT_OOD = ["mg_aisci"]
 
 DOMAIN_COL = "domain"
 GROUP_COL = "id"

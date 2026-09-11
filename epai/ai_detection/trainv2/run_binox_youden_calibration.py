@@ -36,7 +36,7 @@ Run:
     uv run python epai/ai_detection/trainv2/run_binox_youden_calibration.py data/parquet/manugram_sci.parquet
     uv run python epai/ai_detection/trainv2/run_binox_youden_calibration.py data/parquet/ghostbuster_multi_sci3.parquet \
         --cols binoculars_score binoculars_score_qwen25_7b
-    uv run python epai/ai_detection/trainv2/run_binox_youden_calibration.py data/parquet/manugram_den.parquet --no-plots
+    uv run python epai/ai_detection/trainv2/run_binox_youden_calibration.py data/parquet/manugram_aiscientist.parquet --no-plots
 """
 
 from __future__ import annotations

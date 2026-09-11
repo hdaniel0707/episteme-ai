@@ -13,7 +13,7 @@ over N seeds. The label:
     y = 0   human AND rephrase (gpt56luna:0908R)
 
 Every fitted model is ALSO scored, unchanged, on each ``--ood-splits`` corpus
-(default ``mg_den`` -- human vs. denario, never trained on). The rephrase-GT
+(default ``mg_aisci`` -- human vs. denario, never trained on). The rephrase-GT
 best zero-shot picks (``best_zeroshot.yaml`` minus any gemma judge) are scored
 on the SAME rows as the trained models -- each seed's 70/30 test partition per
 rephrase corpus (a seed mean +- SD, like a trained point), the full corpus per
@@ -77,7 +77,7 @@ from epai.ai_detection.trainv2.splits import resolve as resolve_splits
 BASE = Path(__file__).resolve().parents[3]
 PARQUET_DIR = BASE / "data" / "parquet"
 DEFAULT_OUT_DIR = BASE / "results" / "trainv2" / "rephrase_in_domain_performance"
-DEFAULT_OOD = ["mg_den"]
+DEFAULT_OOD = ["mg_aisci"]
 
 
 def compute_trained(reph_splits, ood_splits, seeds, test_size, fprs) -> list[dict]:

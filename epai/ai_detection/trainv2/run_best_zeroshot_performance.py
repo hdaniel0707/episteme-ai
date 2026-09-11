@@ -10,9 +10,14 @@ all on one AUROC-vs-TPR@1%FPR scatter:
     marker shape = MANUGRAM split (splits.MARKER)
     bold filled circle = that detector's mean across the splits
 
-MG-Den (80 human) can't reach 1% FPR, so its cells are kept in the
-mean's AUROC but left out of the mean's TPR -- same rule as
-``run_zeroshot_performance.py``.
+MG-AI-Sci now has 100 human rows (was 80, pre-merge with the ai_scientist
+corpus). At exactly 100 rows, ``reachable = n_human * fpr >= 1.0`` flips TRUE
+for the 1%-FPR level -- unlike the old 80-row file, its TPR@1%FPR now DOES
+count toward the pooled mean's TPR, not just its AUROC (the exclusion rule
+below, inherited from ``run_zeroshot_performance.py``, still applies verbatim
+-- it is the input that changed, not the rule). Read a lone MG-AI-Sci
+TPR@1%FPR reading as a floor regardless: one threshold's worth of headroom is
+still not a stable operating point.
 
 The curated-picks companion to ``run_zeroshot_performance.py`` -- that sweeps
 every column of every family; this scores just the hand-picked list and puts

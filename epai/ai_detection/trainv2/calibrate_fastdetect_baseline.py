@@ -19,12 +19,11 @@ ONE dataset, POOLED over every domain ('all'), fixes ONE threshold per pair --
 not per domain, not per dataset -- because the point of calibrating is to
 apply the SAME cutoff to every corpus a later comparison looks at, not to
 refit a new one per corpus. A small corpus is a bad calibration source:
-``manugram_den.parquet``'s 80 human rows would place a 1%-FPR cut on well
-under one row, which is not a
-threshold, it is noise.
+``manugram_aiscientist.parquet``'s 100 human rows would place a 1%-FPR cut on
+right around one row, which is still too noisy to trust as a threshold.
 
 ``--corpora`` calibrates on each MANUGRAM split (``gb_orig``,
-``mg_gb``, ``mg_sci``, ``mg_den``) AND on all of them
+``mg_gb``, ``mg_sci``, ``mg_aisci``) AND on all of them
 pooled ('all'), prints a per-corpus AUROC / threshold / rate / percentile
 table, drops one distribution PNG per pair, and writes the YAML from the
 pooled 'all' row:

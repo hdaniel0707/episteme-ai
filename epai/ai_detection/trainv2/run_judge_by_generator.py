@@ -55,7 +55,12 @@ GEN_COL = "generated_by"
 # The judge writes P(human): a LOW score means machine. Matches cd_core's
 # llm_judge BaselineKind.
 MACHINE_IS_HIGH = False
-#: the multi-generator splits -- MG-Den has one generator, no matrix.
+#: the multi-generator splits. MG-AI-Sci now HAS multiple generators (Denario,
+#: sakana, sakanav2, cycleresearcher, zochi, post-merge) but stays out of the
+#: default here regardless -- it is the eval-only OOD holdout, matched 1:1
+#: (one human per specific generator) rather than one human x every
+#: generator, so its "matrix" would be mostly-empty cells, not a real grid.
+#: Pass it explicitly (``--splits mg_aisci``) if you want that reading anyway.
 DEFAULT_SPLITS = ["gb_orig", "mg_gb", "mg_sci"]
 
 CSV_FIELDS = ["split", "judge", "generator", "gen_model", "n", "auroc",

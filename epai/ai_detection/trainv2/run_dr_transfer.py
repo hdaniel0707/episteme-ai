@@ -1,12 +1,13 @@
-r"""Domain randomization on the training embeddings -> MG-Den transfer.
+r"""Domain randomization on the training embeddings -> MG-AI-Sci transfer.
 
 An **opt-in add-on**, run by hand. It re-runs the two transfer measurements the
 main runners already do -- in-domain 70/30 and leave-one-domain-out, each scored
-on the MG-Den (Denario) OOD corpus -- but for every trained detector it also
+on the MG-AI-Sci OOD corpus (Denario + Sakana AI-Scientist / CycleResearcher /
+Zochi, merged) -- but for every trained detector it also
 trains a **domain-randomized twin**: the same algorithm, fit on training
 embeddings that have been perturbed with Gaussian noise (config:
 ``cfg/ai_detection/trainv2/domain_randomization.yaml``). The question is whether
-the twin's MG-Den AUROC / oracle TPR@1%FPR beats the base detector's.
+the twin's MG-AI-Sci AUROC / oracle TPR@1%FPR beats the base detector's.
 
 What it does NOT do: touch ``_trained.py``, ``core.py``, the ``run_*_performance``
 runners, ``epai/algs/*``, ``splits.py`` or ``rebuild_all.py``. When this script is
@@ -14,15 +15,19 @@ not invoked the pipeline runs byte-identical. It is deliberately absent from
 ``rebuild_all.TASKS`` -- same treatment as the MG-Reph family.
 
 Noise touches TRAINING rows only. Every eval set (in-domain held-out test, LODO
-held-out domain, MG-Den) is scored on clean embeddings. Only the RoBERTa
+held-out domain, MG-AI-Sci) is scored on clean embeddings. Only the RoBERTa
 embedding ``X`` is noised; the 11-dim cue vector ``Z`` is tiled verbatim (Gaussian
 noise on multi-hot bits is meaningless). One caveat for the torch specs
 (``fusion_mlp`` / ``gated_mlp``): their internal early-stopping validation split
 is carved out AFTER augmentation, so it watches a noised-val AUROC -- consistent
 with "train under domain randomization", but worth knowing.
 
-MG-Den has 80 human rows (< 1/fpr), so its oracle TPR@1%FPR point floors at
-FPR=0: read the **base -> twin delta**, not the absolute.
+MG-AI-Sci has 100 human rows now (was 80, pre-merge with the ai_scientist
+corpus) -- right at 1/fpr for the 1% level rather than clearly under it, so its
+oracle TPR@1%FPR point is no longer a guaranteed floor at FPR=0, just a
+still-noisy single-threshold reading (the achievable FPR grid is 0%, 1%, 2%,
+... at n=100; it was 0%, 1.25%, 2.5%, ... at n=80). Read the **base -> twin
+delta** either way, not the absolute.
 
 compute -> CSV -> plot from the CSV:
 
@@ -68,7 +73,7 @@ DR_CONFIG = BASE_DIR / "cfg" / "ai_detection" / "trainv2" / "domain_randomizatio
 DEFAULT_OUT_DIR = BASE_DIR / "results" / "trainv2" / "dr_transfer"
 
 DEFAULT_SPLITS = ["gb_orig", "mg_gb", "mg_sci"]
-DEFAULT_OOD = ["mg_den"]
+DEFAULT_OOD = ["mg_aisci"]
 REGIMES = ("in_domain", "lodo")
 
 CSV_FIELDS = ["regime", "variant", "kind", "detector", "split", "role",
@@ -373,7 +378,7 @@ def plots_from_csv(csv_path: Path, meta: dict, out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     dr_scatter(
         rows, meta, out_dir / "dr_transfer.png",
-        title="Domain randomization on the training embeddings -> MG-Den transfer\n"
+        title="Domain randomization on the training embeddings -> MG-AI-Sci transfer\n"
               f"AUROC vs. oracle TPR@{meta['fpr'] * 100:g}%FPR, {meta['n_seeds']} seeds",
     )
 

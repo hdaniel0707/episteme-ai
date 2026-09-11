@@ -9,7 +9,7 @@ partition (in-domain) or the held-out domain fold (LODO) -- so the two detector
 kinds are compared on identical data and the zero-shot points pick up the same
 seed / fold SD.
 
-The eval-only OOD corpus (MG-Den) is the exception: there the trained models
+The eval-only OOD corpus (MG-AI-Sci) is the exception: there the trained models
 score the full corpus, so the zero-shot picks do too -- a single deterministic
 reading, no error bar.
 """

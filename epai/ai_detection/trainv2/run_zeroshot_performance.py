@@ -28,10 +28,13 @@ bold filled circle = that version's mean across the splits (the answer; the
 small shape-coded points are the per-split evidence).
 
 Two notes on the mean:
-  * MG-Den has 80 human rows, so a 1%-FPR threshold sits on < 1 of
-    them -- its TPR@1%FPR is a floor, not a measurement. Those cells are kept
-    in the CSV (``reachable = False``) but left OUT of the mean's TPR (still
-    in the mean's AUROC).
+  * MG-AI-Sci has 100 human rows (post-merge with the ai_scientist corpus --
+    was 80), which puts a 1%-FPR threshold right AT the reachability boundary
+    (``reachable = n_human * fpr >= 1.0``) instead of clearly below it, so its
+    TPR@1%FPR cells now count in the CSV (``reachable = True``) and toward the
+    mean's TPR too, not just its AUROC. Still read it as a floor, not a
+    measurement -- one row's worth of margin either way flips the whole
+    number.
   * ``llm_judge_score_sonnet5_v3`` is absent on MG-Sci and dropped by
     default -- pass it via ``--cols`` to include it.
 

@@ -7,7 +7,7 @@ which is the problem: no single run is legible.
 
 trainv2 restarts from the opposite end. One experiment per script, over the
 core splits of the **MANUGRAM** benchmark (:mod:`.splits` — GB-orig, MG-GB,
-MG-Sci, MG-Den; the MG-Reph family is opt-in), two metrics, one figure family:
+MG-Sci, MG-AI-Sci; the MG-Reph family is opt-in), two metrics, one figure family:
 
   * metrics — AUROC and TPR@1%FPR (**oracle** where there is no calibration
     slice: threshold fit on the evaluation rows themselves).

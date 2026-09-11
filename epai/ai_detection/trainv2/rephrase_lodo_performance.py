@@ -19,7 +19,7 @@ The split is group-wise: a document's human / rephrase / full-generation rows
 share one ``id`` and one domain, so a fold never straddles them. Each fold is
 averaged over N seeds; the per-corpus number is the mean over the domain folds,
 its SD the spread ACROSS those folds. Every fold's model is also scored on each
-``--ood-splits`` corpus (default ``mg_den``). The rephrase-GT best zero-shot
+``--ood-splits`` corpus (default ``mg_aisci``). The rephrase-GT best zero-shot
 picks (``best_zeroshot.yaml`` minus any gemma judge) are scored on the SAME rows
 as the trained models -- each held-out domain fold per rephrase corpus (a
 per-corpus mean +- across-fold SD), the full corpus per OOD split (normal GT,
@@ -79,7 +79,7 @@ from epai.ai_detection.trainv2.splits import resolve as resolve_splits
 BASE = Path(__file__).resolve().parents[3]
 PARQUET_DIR = BASE / "data" / "parquet"
 DEFAULT_OUT_DIR = BASE / "results" / "trainv2" / "rephrase_lodo_performance"
-DEFAULT_OOD = ["mg_den"]
+DEFAULT_OOD = ["mg_aisci"]
 
 
 def compute_trained(reph_splits, ood_splits, seeds, fprs, min_domain_rows) -> list[dict]:

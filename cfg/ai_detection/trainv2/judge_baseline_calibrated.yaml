@@ -1,23 +1,23 @@
-# Calibrated by calibrate_judge_baseline.py on MG-All (gb_orig+mg_gb+mg_sci+mg_den), pooled ('all')
+# Calibrated by calibrate_judge_baseline.py on MG-All (gb_orig+mg_gb+mg_sci+mg_aisci), pooled ('all')
 # 'threshold' = 0.01-FPR cut, pooled over every domain ('all').
 # 'threshold_youden' = Youden's J cut (recorded; cd_core reads 'threshold').
 # Read by cd_core.baseline_entries().
 llm_judge_baseline:
   columns:
   - column: llm_judge_score_ens_v3_smin_0p05
-    threshold: 0.000602
+    threshold: 0.000574
     threshold_youden: 0.036584
     label: ens_smin_0p05
   - column: llm_judge_score_ens_v3_smin_0p1
-    threshold: 0.000603
+    threshold: 0.000576
     threshold_youden: 0.071064
     label: ens_smin_0p1
   - column: llm_judge_score_ens_v3_smin_0p15
-    threshold: 0.000604
+    threshold: 0.000576
     threshold_youden: 0.105473
     label: ens_smin_0p15
   - column: llm_judge_score_ens_v3_smin_0p2
-    threshold: 0.000605
+    threshold: 0.000576
     threshold_youden: 0.139211
     label: ens_smin_0p2
   - column: llm_judge_score_gemma4_31b_base
@@ -33,15 +33,15 @@ llm_judge_baseline:
     threshold_youden: 0.999965
     label: gemma4_31b_lp
   - column: llm_judge_score_gemma4_31b_v3_sbc
-    threshold: 1.6e-05
+    threshold: 1.4e-05
     threshold_youden: 0.956108
     label: gemma4_31b_sbc
   - column: llm_judge_score_gemma4_31b_v3_slp
-    threshold: 0.003824
+    threshold: 0.003108
     threshold_youden: 0.727209
     label: gemma4_31b_slp
   - column: llm_judge_score_gemma4_31b_v3_wlp
-    threshold: 2.3e-05
+    threshold: 1.7e-05
     threshold_youden: 0.999981
     label: gemma4_31b_wlp
   - column: llm_judge_score_gpt56luna_base
@@ -57,7 +57,7 @@ llm_judge_baseline:
     threshold_youden: 0.010728
     label: gpt56luna_sbc
   - column: llm_judge_score_gpt56luna_v3_wlp
-    threshold: 7.8e-05
+    threshold: 7.6e-05
     threshold_youden: 0.005972
     label: gpt56luna_wlp
   - column: llm_judge_score_gptoss_120b_v3

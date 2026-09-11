@@ -14,12 +14,12 @@ ONE dataset, POOLED over every domain ('all'), fixes ONE threshold per judge
 -- not per domain, not per dataset -- because the point of calibrating is to
 apply the SAME cutoff to every corpus a later comparison looks at, not to
 refit a new one per corpus. A small
-corpus is a bad calibration source: ``manugram_den.parquet``'s 80 human rows
-would place a 1%-FPR cut on well under one row, which is not a threshold, it
-is noise.
+corpus is a bad calibration source: ``manugram_aiscientist.parquet``'s 100 human rows
+would place a 1%-FPR cut on right around one row, which is still too noisy to
+trust as a threshold.
 
 ``--corpora`` calibrates on each MANUGRAM split (``gb_orig``,
-``mg_gb``, ``mg_sci``, ``mg_den``) AND on all of them
+``mg_gb``, ``mg_sci``, ``mg_aisci``) AND on all of them
 pooled ('all'), prints a per-corpus AUROC / threshold / rate / percentile
 table, drops one distribution PNG per judge, and writes the YAML from the
 pooled 'all' row:
@@ -44,7 +44,7 @@ from epai.ai_detection.trainv2.calibrate_common import DEFAULT_OUT_DIR, PARQUET_
 
 JUDGE_PREFIX = "llm_judge_score_"
 
-# sonnet5 is scored on MG-GB / MG-Den but not on MG-Sci,
+# sonnet5 is scored on MG-GB / MG-AI-Sci but not on MG-Sci,
 # and is not part of the trainv2 judge suite -- keep it out of the calibrated
 # baseline. Pass it explicitly via --cols to calibrate it anyway.
 JUDGE_EXCLUDE = frozenset({"llm_judge_score_sonnet5_v3"})

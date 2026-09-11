@@ -338,7 +338,7 @@ def zeroshot_scatter(
 # ---------------------------------------------------------------------------
 # The eval-only OOD corpus on its own (run_in_domain_performance.py /
 # run_lodo_performance.py, alongside their main scatter). A dedicated zoom on
-# MG-Den -- the one point the main scatters bury against the ceiling: every
+# MG-AI-Sci -- the one point the main scatters bury against the ceiling: every
 # trained detector (marker carries the SD across the source models) and every
 # zero-shot pick (a filled circle with no error bar), one point each. Reads the
 # same CSV records; keeps the full 0-1 TPR axis so the drop from the in-domain
@@ -349,11 +349,11 @@ def zeroshot_scatter(
 def denario_scatter(
     rows: list[dict], meta: dict, path: Path, *, title: str = ""
 ) -> None:
-    """AUROC vs. oracle TPR@FPR on the ``meta["ood"]`` corpus alone (MG-Den by
+    """AUROC vs. oracle TPR@FPR on the ``meta["ood"]`` corpus alone (MG-AI-Sci by
     default). Built for the single-corpus default; with several OOD corpora each
     detector gets one point per corpus, colour-coded by detector only."""
     fpr = meta["fpr"]
-    ood_keys = set(meta.get("ood") or ["mg_den"])
+    ood_keys = set(meta.get("ood") or ["mg_aisci"])
 
     def _f(v):
         try:
@@ -391,7 +391,7 @@ def denario_scatter(
     aurocs = [_f(r["auroc"]) for r in trained + zshot]
     x_lo, x_hi = max(0.0, min(aurocs) - 0.05), 1.01
 
-    # No in-plot point labels: on MG-Den every detector piles into the same
+    # No in-plot point labels: on MG-AI-Sci every detector piles into the same
     # corner, so a name next to each mark is an unreadable stack. The legend
     # carries the colour -> detector key instead.
     xy_of = {r["detector"]: (_f(r["auroc"]), _f(r["tpr_at_fpr"])) for r in pts}
@@ -458,8 +458,10 @@ def denario_scatter(
 # TPR@1%FPR, or at the smallest reachable FPR on a split too small for 1%)
 # into one number. Default combine is the harmonic mean -- weakest-link, like
 # F1: a detector useless on either axis scores ~0. Reads the run's CSV
-# records; uses `tpr_eff` / `eff_fpr` so MG-Den (80 humans, 1% unreachable) is
-# a real bar at ~1.25% FPR, annotated.
+# records; uses `tpr_eff` / `eff_fpr` so a split too small to reach the target
+# FPR exactly (MG-AI-Sci, 100 humans -- 1% sits right at the n_human=100 floor
+# of core.eff_fpr_level) still gets a real bar at its own reachable FPR,
+# annotated.
 # ---------------------------------------------------------------------------
 
 _COMBINE_LABEL = {"hmean": "harmonic mean", "gmean": "geometric mean",
@@ -483,7 +485,7 @@ def goodness_bars(
     order = list(dict.fromkeys(
         list(meta.get("splits", [])) + list(meta.get("ood", []))))
     groups = [s for s in order if s in present]
-    for s in sorted(present):  # any split not named in meta, e.g. mg_den
+    for s in sorted(present):  # any split not named in meta, e.g. mg_aisci
         if s not in groups and s != "mean":
             groups.append(s)
     if "mean" in present:
@@ -599,7 +601,7 @@ def goodness_bars(
 
 
 # ---------------------------------------------------------------------------
-# Domain randomization -> MG-Den transfer (run_dr_transfer.py). Per training
+# Domain randomization -> MG-AI-Sci transfer (run_dr_transfer.py). Per training
 # regime a panel; per detector a base (filled circle) and its domain-randomized
 # twin (hollow ring, same colour) joined by a faint connector, so the eye reads
 # the base -> twin shift. Zero-shot picks are open diamonds (reference). Reads
@@ -623,8 +625,8 @@ def dr_scatter(rows: list[dict], meta: dict, path: Path, *, title: str = "") -> 
     if not regimes:
         print("dr_scatter: no in_domain / lodo rows — skipped")
         return
-    panel_title = {"in_domain": "in-domain 70/30 -> MG-Den",
-                   "lodo": "LODO -> MG-Den"}
+    panel_title = {"in_domain": "in-domain 70/30 -> MG-AI-Sci",
+                   "lodo": "LODO -> MG-AI-Sci"}
 
     names = sorted({r["detector"] for r in rows})
     hue = {v: _PALETTE[i % len(_PALETTE)] for i, v in enumerate(names)}
@@ -701,12 +703,12 @@ def dr_scatter(rows: list[dict], meta: dict, path: Path, *, title: str = "") -> 
                     bbox_to_anchor=(1.01, 1.0), framealpha=0.9, borderaxespad=0.0,
                     title=f"colour = detector\n{meta.get('dr', '')}")
 
-    fig.suptitle(title or "domain randomization -> MG-Den transfer",
+    fig.suptitle(title or "domain randomization -> MG-AI-Sci transfer",
                  fontsize=10.5, color=_INK)
     fig.text(0.02, 0.008,
-             f"MG-Den: never trained on, 80 human rows -> the {fpr * 100:g}%-FPR "
-             "grid point floors at FPR=0. Read the base -> twin delta, not the "
-             "absolute TPR.", fontsize=7, color=_MUTED)
+             f"MG-AI-Sci: never trained on, 100 human rows -> the {fpr * 100:g}%-FPR "
+             "grid point sits right at the reachable floor. Read the base -> twin "
+             "delta, not the absolute TPR.", fontsize=7, color=_MUTED)
     fig.tight_layout(rect=(0, 0.035, 1, 0.96))
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=150, facecolor="white", bbox_inches="tight")

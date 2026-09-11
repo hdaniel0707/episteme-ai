@@ -32,7 +32,7 @@ Two modes, both through :func:`run`:
 
 ``--corpora all`` (and a bare run) uses the four core splits, in the fixed
 left-to-right order used everywhere: ``gb_orig`` (GB-orig), ``mg_gb`` (MG-GB),
-``mg_sci`` (MG-Sci), ``mg_den`` (MG-Den); pooled is ``all`` (MG-All), always
+``mg_sci`` (MG-Sci), ``mg_aisci`` (MG-AI-Sci); pooled is ``all`` (MG-All), always
 last. The MG-Reph family (``mg_reph`` / ``mg_reph_sci`` / ``mg_reph_gb``) is
 registered but opt-in only -- pass it by name (``--corpora mg_reph_sci`` …).
 

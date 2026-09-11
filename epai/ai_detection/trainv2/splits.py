@@ -25,8 +25,8 @@ POOLED = "all"  #: the pooled-over-everything pseudo-split
 #: the fixed left-to-right order every table and figure uses: the original
 #: Ghostbuster split (GPT-3.5), then the modern Ghostbuster suite, then the
 #: scholarly split, then the rephrase split (+ its ghostbuster / science
-#: halves), then the Denario OOD holdout. The pooled column ('all' / 'mean')
-#: always comes last, after these.
+#: halves), then the Manugram-AI-Scientist OOD holdout. The pooled column
+#: ('all' / 'mean') always comes last, after these.
 SPLITS: dict[str, str] = {
     # TEMP (2026-09-11): server rescore of ghostbuster_orig.parquet (raw text)
     # is still running. Using the standardized twin in the meantime -- same
@@ -38,13 +38,21 @@ SPLITS: dict[str, str] = {
     "mg_reph": "manugram_reph.parquet",
     "mg_reph_sci": "manugram_reph_sci.parquet",
     "mg_reph_gb": "manugram_reph_gb.parquet",
-    "mg_den": "manugram_den.parquet",
+    # Was "mg_den" -> manugram_den.parquet (Denario only, 80+80). Switched
+    # 2026-09-11 to the merged Manugram-AI-Scientist corpus (200 rows, 100+100):
+    # Denario's original 80+80 plus 20 more human-matched pairs against Sakana
+    # AI-Scientist v1/v2, CycleResearcher and Zochi (see trainv2's
+    # MODEL_BIAS.md and epai/ai_detection/fetch/fetch_ai_scientist_papers.py).
+    # The key is renamed too, not just the file, so a `--splits mg_den` typo
+    # from an old command fails loudly instead of silently resolving to
+    # different data than it used to.
+    "mg_aisci": "manugram_aiscientist.parquet",
 }
 
 #: what an empty / ``["all"]`` ``--splits`` / ``--corpora`` expands to, and what
 #: ``rebuild_all.py`` runs. The MG-Reph family is deliberately absent -- see the
 #: module docstring.
-DEFAULT: tuple[str, ...] = ("gb_orig", "mg_gb", "mg_sci", "mg_den")
+DEFAULT: tuple[str, ...] = ("gb_orig", "mg_gb", "mg_sci", "mg_aisci")
 
 #: short key -> paper-facing name, for plot titles / legends only.
 DISPLAY: dict[str, str] = {
@@ -54,7 +62,7 @@ DISPLAY: dict[str, str] = {
     "mg_reph": "MG-Reph",
     "mg_reph_sci": "MG-Reph-Sci",
     "mg_reph_gb": "MG-Reph-GB",
-    "mg_den": "MG-Den",
+    "mg_aisci": "MG-AI-Sci",
     "all": "MG-All",
     "mean": "mean",
 }
@@ -62,7 +70,7 @@ DISPLAY: dict[str, str] = {
 #: short key -> matplotlib marker, for any figure that encodes the split as a
 #: point shape. The two Ghostbuster splits are a triangle pair (up = original
 #: GPT-3.5, down = modern suite); ``mg_sci`` is a square, the ``mg_reph`` family
-#: an x / plus / star, ``mg_den`` a diamond; the pooled column ('all' / 'mean')
+#: an x / plus / star, ``mg_aisci`` a diamond; the pooled column ('all' / 'mean')
 #: is a circle -- reserved, so a per-split point never collides with the mean
 #: marker.
 MARKER: dict[str, str] = {
@@ -72,7 +80,7 @@ MARKER: dict[str, str] = {
     "mg_reph": "X",
     "mg_reph_sci": "P",
     "mg_reph_gb": "*",
-    "mg_den": "D",
+    "mg_aisci": "D",
     "all": "o",
     "mean": "o",
 }

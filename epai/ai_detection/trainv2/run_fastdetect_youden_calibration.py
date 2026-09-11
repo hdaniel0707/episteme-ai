@@ -40,7 +40,7 @@ Output:
 
 Run:
     uv run python epai/ai_detection/trainv2/run_fastdetect_youden_calibration.py data/parquet/manugram_sci.parquet
-    uv run python epai/ai_detection/trainv2/run_fastdetect_youden_calibration.py data/parquet/manugram_den.parquet --no-plots
+    uv run python epai/ai_detection/trainv2/run_fastdetect_youden_calibration.py data/parquet/manugram_aiscientist.parquet --no-plots
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-# Calibrated by calibrate_fastdetect_baseline.py on MG-All (gb_orig+mg_gb+mg_sci+mg_den), pooled ('all')
+# Calibrated by calibrate_fastdetect_baseline.py on MG-All (gb_orig+mg_gb+mg_sci+mg_aisci), pooled ('all')
 # 'threshold' = 0.01-FPR cut, pooled over every domain ('all').
 # 'threshold_youden' = Youden's J cut (recorded; cd_core reads 'threshold').
 # Read by cd_core.baseline_entries().
@@ -9,7 +9,7 @@ fastdetect_baseline:
     threshold_youden: 0.575574
     label: falcon3-7b
   - column: fastdetect_crit_falcon_7b
-    threshold: 2.538524
+    threshold: 2.542868
     threshold_youden: 1.78178
     label: falcon-7b
   - column: fastdetect_crit_llama31_8b

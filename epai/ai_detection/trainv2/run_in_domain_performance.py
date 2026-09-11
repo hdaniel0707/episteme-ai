@@ -1,4 +1,4 @@
-r"""In-domain trained detection across the MANUGRAM splits, with MG-Den
+r"""In-domain trained detection across the MANUGRAM splits, with MG-AI-Sci
 as an eval-only OOD corpus and the zero-shot picks for reference — AUROC vs.
 oracle TPR@1%FPR on one figure.
 
@@ -11,7 +11,7 @@ straddle the cut), repeated over N seeds, human vs. every AI row pooled.
 AUROC / TPR@1%FPR are the seed mean.
 
 Every fitted model is ALSO scored, unchanged, on each ``--ood-splits`` corpus
-in full (default MG-Den) — never trained on, an additional held-out
+in full (default MG-AI-Sci) — never trained on, an additional held-out
 test corpus. Its reading is the mean over every (training split, seed) model.
 
 The zero-shot picks from ``cfg/ai_detection/trainv2/best_zeroshot.yaml`` are
@@ -34,8 +34,11 @@ are trained once; each level is just a different ROC readout. The CSV carries an
 ``fpr`` column (one row per detector/corpus/level) and each level gets its own
 figure set, suffixed ``_1pct`` / ``_5pct``.
 
-MG-Den has < 100 humans, so its 1%-FPR point is a floor: kept in the AUROC mean,
-left out of the TPR mean. At 5% FPR it clears the floor (needs only 20 humans).
+MG-AI-Sci has 100 humans now (was 80, pre-merge with the ai_scientist corpus)
+-- exactly at the 1%-FPR reachability boundary rather than clearly under it,
+so its 1%-FPR point may now register as reachable but is still a floor in
+practice, not a stable measurement. At 5% FPR it clears the floor with room
+to spare (needs only 20 humans).
 
 compute -> CSV -> plot from the CSV:
 
@@ -48,7 +51,7 @@ compute -> CSV -> plot from the CSV:
 Run:
     uv run python epai/ai_detection/trainv2/run_in_domain_performance.py
     uv run python epai/ai_detection/trainv2/run_in_domain_performance.py \
-        --splits mg_gb mg_sci --ood-splits mg_den --seeds 0 1 2 3 4
+        --splits mg_gb mg_sci --ood-splits mg_aisci --seeds 0 1 2 3 4
     uv run python epai/ai_detection/trainv2/run_in_domain_performance.py \
         --replot results/trainv2/in_domain_performance/performance.csv
 """
@@ -91,7 +94,7 @@ PARQUET_DIR = BASE_DIR / "data" / "parquet"
 DEFAULT_OUT_DIR = BASE_DIR / "results" / "trainv2" / "in_domain_performance"
 
 DEFAULT_SPLITS = ["gb_orig", "mg_gb", "mg_sci"]
-DEFAULT_OOD = ["mg_den"]
+DEFAULT_OOD = ["mg_aisci"]
 
 CSV_FIELDS = ["kind", "detector", "split", "role", "fpr", "n_train", "n_test",
               "n_seeds", "auroc", "auroc_std", "tpr_at_fpr", "tpr_at_fpr_std",

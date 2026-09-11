@@ -21,7 +21,7 @@ Binoculars / Fast-DetectGPT / judge siblings: apply the SAME cutoff to every
 corpus a later comparison looks at, not a fresh one per corpus.
 
 ``--corpora`` calibrates on each MANUGRAM split (``gb_orig``,
-``mg_gb``, ``mg_sci``, ``mg_den``) AND on all of them
+``mg_gb``, ``mg_sci``, ``mg_aisci``) AND on all of them
 pooled ('all'), prints a per-corpus AUROC / threshold / rate / percentile
 table, drops one distribution PNG per detector column, and writes the YAML
 from the pooled 'all' row:
