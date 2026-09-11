@@ -16,12 +16,16 @@ the same thing the science pipeline feeds to ``standardize_text`` — NOT
 re-extracted from a PDF. The remaining machine-vs-human asymmetry (Denario text
 came out of a PDF) is what ``ocr_clean.py`` removes next.
 
-OUTPUT  data/parquet/denario_hc_raw.parquet
+OUTPUT  data/parquet/denario_hc_raw.parquet (or wherever ``-o`` points)
     uid, id, domain, text, generated_by, title, year, oa_id
 
-    machine rows  generated_by = 'denario', id/uid/text from denario_detect
-                  (``text`` = ``text_raw``, the raw PDF-extracted abstract)
-    human rows    generated_by = 'human',   id = 'denhc:<domain>:<oa_id>'
+    machine rows  generated_by carried through as-is from ``--denario``'s own
+                  column (so a multi-generator source like
+                  ai_scientist_detect.parquet keeps each row's real generator
+                  -- 'sakana' / 'sakanav2' / 'cycleresearcher' / 'zochi' --
+                  rather than being collapsed to one label); id/uid/text from
+                  the source (``text`` = ``text_raw`` if present, else ``text``)
+    human rows    generated_by = 'human',   id = '<--id-prefix>:<domain>:<oa_id>'
 
 ``oa_id`` is kept on every row (empty for machine) so the 80 human OpenAlex work
 ids can be excluded from a later training fetch — science_v5 / Track 2 adds
@@ -85,9 +89,21 @@ def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("--denario", type=Path, default=DEFAULT_DENARIO)
+    ap.add_argument("--denario", type=Path, default=DEFAULT_DENARIO,
+                    help="the machine-side detect-schema parquet (uid/id/domain/"
+                         "text[/text_raw]/generated_by/title/year) -- despite the "
+                         "flag name, any corpus in this schema works, not just "
+                         "Denario's own.")
     ap.add_argument("--candidates", type=Path, default=DEFAULT_CANDIDATES)
     ap.add_argument("-o", "--out", type=Path, default=DEFAULT_OUT)
+    ap.add_argument("--id-prefix", default="denhc",
+                    help="prefix for the synthesized human row id, "
+                         "'<prefix>:<domain>:<oa_id>' (default 'denhc' -- change "
+                         "this for a different --denario source so its ids don't "
+                         "collide with the Denario human-control run)")
+    ap.add_argument("--report-dir", type=Path, default=REPORT_DIR,
+                    help="where match_report.csv is written (default: "
+                         f"{REPORT_DIR.relative_to(BASE_DIR)})")
     ap.add_argument("--emb-type", default="specter2",
                     help="topic embedding for the match (default specter2)")
     ap.add_argument("--w-length", type=float, default=1.0)
@@ -117,10 +133,18 @@ def main() -> None:
 
     excl = Exclusion() if args.no_exclude_check else load_exclusion(args.exclude_parquet)
 
-    machine = load_parquet(args.denario)[
-        ["id", "uid", "domain", "title", "year", "text_raw"]
+    machine_full = load_parquet(args.denario)
+    # `text_raw` (pre-standardization) if the source already has it -- Denario's
+    # does, by the time this stage runs, because run_holdout_pipeline.py's
+    # standardize_text already ran on it for the main scoring pipeline (see the
+    # module docstring). A source that hasn't been standardized yet (e.g. a
+    # freshly-fetched corpus with no separate raw/standardized split) has no
+    # such column, and its `text` IS already the raw text -- use that instead.
+    text_col = "text_raw" if "text_raw" in machine_full.columns else "text"
+    machine = machine_full[
+        ["id", "uid", "domain", "title", "year", "generated_by", text_col]
     ].reset_index(drop=True)
-    machine = machine.rename(columns={"text_raw": "text"})
+    machine = machine.rename(columns={text_col: "text"})
     machine["abstract"] = machine["text"]
     machine["n_words"] = machine["text"].str.split().str.len()
     machine["_pos"] = np.arange(len(machine))
@@ -170,7 +194,7 @@ def main() -> None:
             m = grp.iloc[ri]
             h = pool.iloc[ci]
             oa = str(h["oa_id"])
-            hid = f"denhc:{slug}:{oa}"
+            hid = f"{args.id_prefix}:{slug}:{oa}"
             year = int(h["year"]) if pd.notna(h["year"]) else pd.NA
             rows.append({
                 "uid": f"{hid}:human", "id": hid, "domain": slug,
@@ -179,12 +203,12 @@ def main() -> None:
             })
             rows.append({
                 "uid": m["uid"], "id": m["id"], "domain": slug,
-                "text": m["text"], "generated_by": "denario",
+                "text": m["text"], "generated_by": m["generated_by"],
                 "title": m["title"], "year": m["year"], "oa_id": "",
             })
             report.append({
-                "denario_id": m["id"], "oa_id": oa, "domain": slug,
-                "len_denario": int(m["n_words"]), "len_human": int(h["n_words"]),
+                "machine_id": m["id"], "oa_id": oa, "domain": slug,
+                "len_machine": int(m["n_words"]), "len_human": int(h["n_words"]),
                 "len_delta": int(abs(m["n_words"] - h["n_words"])),
                 "cosine": float(Em[m["_pos"]] @ Ec[h["_pos"]]),
             })
@@ -214,17 +238,18 @@ def main() -> None:
     save_parquet(out, args.out)
 
     rep = pd.DataFrame(report)
-    REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    rep.to_csv(REPORT_DIR / "match_report.csv", index=False)
+    args.report_dir.mkdir(parents=True, exist_ok=True)
+    rep.to_csv(args.report_dir / "match_report.csv", index=False)
 
     n_h = int((out["generated_by"] == "human").sum())
-    n_m = int((out["generated_by"] == "denario").sum())
+    n_m = len(out) - n_h
     print(f"\n{GREEN}{len(out)} rows ({n_m} machine, {n_h} human) → {args.out}{RESET}")
+    print(f"  machine generators: {out.loc[out['generated_by'] != 'human', 'generated_by'].value_counts().to_dict()}")
     print(f"  |len delta|  median {rep['len_delta'].median():.0f}  "
           f"p90 {rep['len_delta'].quantile(0.9):.0f}  max {rep['len_delta'].max():.0f}")
     print(f"  topic cosine median {rep['cosine'].median():.3f}  "
           f"min {rep['cosine'].min():.3f}")
-    print(f"  match report → {REPORT_DIR / 'match_report.csv'}")
+    print(f"  match report → {args.report_dir / 'match_report.csv'}")
 
     labelled = out.loc[
         (out["generated_by"] == "human") & out["text"].apply(
@@ -237,10 +262,9 @@ def main() -> None:
               f"re-run fetch_human_candidates.py with --strip-structured-labels "
               f"and rebuild.{RESET}")
 
-    print(f"\n{YELLOW}Before training on any science_v5 corpus that includes "
-          f"astronomy/neuroscience, exclude these OpenAlex ids:{RESET}")
-    print(f"  {args.out.parent / 'denario_hc_raw.parquet'} → column 'oa_id' "
-          f"(non-empty rows)")
+    print(f"\n{YELLOW}Before training on any future corpus that could overlap "
+          f"this run's domain(s), exclude these OpenAlex ids:{RESET}")
+    print(f"  {args.out} → column 'oa_id' (non-empty rows)")
 
 
 if __name__ == "__main__":

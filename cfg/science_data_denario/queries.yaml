@@ -76,3 +76,18 @@ queries_domains:
     - "organic synthesis"
     - "electrochemistry energy storage materials"
     - "spectroscopy molecular structure"
+
+  # Added for the ai_scientist_detect human control (Sakana AI-Scientist /
+  # CycleResearcher / Zochi -- 20 ML-systems papers, all tagged domain
+  # "computer_science" by fetch_ai_scientist_papers.py). Spread across the
+  # actual subject mix of those 20: generalization theory / grokking,
+  # generative models, RL / reward modeling, language modeling, model
+  # compression, adversarial robustness, applied deep learning.
+  computer_science:
+    - "deep neural network generalization theory"
+    - "generative adversarial network image synthesis"
+    - "reinforcement learning reward shaping policy optimization"
+    - "recurrent neural network language modeling"
+    - "neural network model compression quantization"
+    - "adversarial examples robustness neural networks"
+    - "convolutional neural network image classification"

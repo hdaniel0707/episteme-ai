@@ -35,7 +35,13 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 
 #: What the human control is checked against by default. A list, so science_v5
 #: can be appended without a code change once it exists.
-DEFAULT_EXCLUDE = [BASE_DIR / "data" / "parquet" / "science_v3_gpt56luna_0811A.parquet"]
+#
+# NOTE (2026-09-11): was `science_v3_gpt56luna_0811A.parquet`, which no longer
+# exists on disk -- superseded by the MANUGRAM rename (see trainv2's
+# MODEL_BIAS.md / scribe-benchmark-naming memory). manugram_sci.parquet is the
+# current, authoritative MG-Sci corpus and carries the same id/doi/title
+# columns, so it is the direct replacement, not a guess.
+DEFAULT_EXCLUDE = [BASE_DIR / "data" / "parquet" / "manugram_sci.parquet"]
 
 _OA_ID_RE = re.compile(r"W\d+", re.IGNORECASE)
 
