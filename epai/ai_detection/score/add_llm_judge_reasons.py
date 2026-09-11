@@ -307,6 +307,15 @@ DEFAULT_CONFIDENT_BAND = 0.40
 MAX_TOKENS = 700
 LOCAL_MAX_NEW_TOKENS = 400
 
+# _explain_openai's own cap, separate from MAX_TOKENS above (which is the
+# Anthropic path's -- see add_llm_judge_scores.py's OPENAI_MAX_TOKENS for the
+# full reasoning). A reasoning-capable OpenAI model spends hidden
+# reasoning-channel tokens out of the SAME budget as the visible rationale, so
+# 700 (generous for the visible text alone) can still starve the model before
+# it writes anything -- this needs the same generous ceiling as the scoring
+# path, not the Anthropic value.
+OPENAI_MAX_TOKENS = 16384
+
 # Rationale length asked for and enforced. Long enough for the evidence, short
 # enough to read a hundred of them.
 MAX_RATIONALE_CHARS = 400
@@ -500,6 +509,8 @@ class ApiExplainer(ApiJudge):
         return self._explain_gemini(text)
 
     def _explain_openai(self, text: str) -> Explanation:
+        # max_completion_tokens (not max_tokens -- rejected for a reasoning
+        # model on the real API): see OPENAI_MAX_TOKENS above.
         response = self._client.chat.completions.parse(
             model=self.model_id,
             messages=[
@@ -507,6 +518,7 @@ class ApiExplainer(ApiJudge):
                 {"role": "user", "content": USER_TEMPLATE.format(text=text)},
             ],
             response_format=Explanation,
+            max_completion_tokens=OPENAI_MAX_TOKENS,
         )
         parsed = response.choices[0].message.parsed
         if parsed is None:

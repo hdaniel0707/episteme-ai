@@ -56,7 +56,7 @@ BASE_DIR = Path(__file__).resolve().parents[3]
 PARQUET_DIR = BASE_DIR / "data" / "parquet"
 CAPTURE_DIR = PARQUET_DIR / "tmp" / "judge_scores"  # data/ is gitignored
 
-CORE_STEMS = ["ghostbuster_orig", "manugram_gb", "manugram_sci", "manugram_den"]
+CORE_STEMS = ["ghostbuster_orig", "manugram_gb", "manugram_sci", "manugram_den", "ai_scientist_hc"]
 TEXT_COL = "text"
 KEY_COL = "uid"
 DEFAULT_PROMPT = "base"

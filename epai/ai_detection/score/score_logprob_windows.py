@@ -70,7 +70,7 @@ from epai.utils.parquet_utils import load_parquet, save_parquet
 
 BASE_DIR = Path(__file__).resolve().parents[3]
 PARQUET_DIR = BASE_DIR / "data" / "parquet"
-CORE_STEMS = ["ghostbuster_orig", "manugram_gb", "manugram_sci", "manugram_den"]
+CORE_STEMS = ["ghostbuster_orig", "manugram_gb", "manugram_sci", "manugram_den", "ai_scientist_hc"]
 
 IN_PREFIX = "llm_judge_logprobs_"
 MODE_SUFFIX = {"_v3_words": "words", "_v3_scale": "scale"}
