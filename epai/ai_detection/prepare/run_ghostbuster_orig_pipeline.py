@@ -162,7 +162,7 @@ def build_stages(args: argparse.Namespace) -> list[Stage]:
         w = g4s_w if j in g4s else api_w
         stages.append(Stage(
             f"judge-{j}", f"{SCORE_DIR}/add_llm_judge_scores.py",
-            [out, "--model", j, "--prompt", PROMPT_VERSION, *w, *cpu, *yes],
+            [out, "--model", j, "--prompt", PROMPT_VERSION, *w, *gpu, *cpu, *yes],
             produces=[f"llm_judge_score_{_stem(j)}_{PROMPT_VERSION}"],
         ))
 
@@ -172,7 +172,7 @@ def build_stages(args: argparse.Namespace) -> list[Stage]:
             "cue-reasons", f"{SCORE_DIR}/add_llm_judge_reasons.py",
             [out, "--model", CUE_JUDGE, "--prompt", PROMPT_VERSION,
              "--select", "all", "--per-band", str(per_band),
-             *(g4s_w if CUE_JUDGE in g4s else api_w), *cpu, *yes],
+             *(g4s_w if CUE_JUDGE in g4s else api_w), *gpu, *cpu, *yes],
             produces=[f"llm_judge_reason_{cue_stem}"],
         ),
         Stage(
