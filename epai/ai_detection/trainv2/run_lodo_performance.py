@@ -66,19 +66,29 @@ Run:
 from __future__ import annotations
 
 import argparse
+import multiprocessing
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import torch
 from tqdm import tqdm
 
 from epai.ai_detection.trainv2._trained import (
     AUX_COL,
     EMB_COL,
+    MULTI_EMB_COLS,
+    MULTI_EMB_SPECS,
     TRAINED_SPECS,
     _stack,
     eval_on_fprs,
     fit,
+    load_multi_features,
+    load_multi_ood,
+    with_emb_dims,
 )
 from epai.ai_detection.trainv2._zeroshot import (
     agg_cell,
@@ -159,7 +169,7 @@ def _fold(spec, X, y, Z, groups, tr, te, seeds, fprs, ood_sets) -> dict:
     ood: dict[str, dict[float, list]] = {n: {f: [] for f in fprs} for n in ood_sets}
     for seed in seeds:
         clf = fit(spec, X, y, Z, groups, tr, seed)
-        au, per = eval_on_fprs(clf, spec, X[te], y[te], Z[te], fprs)
+        au, per = eval_on_fprs(clf, spec, X[te], y[te], Z[te] if Z is not None else None, fprs)
         a.append(au)
         for f in fprs:
             t[f].append(per[f][0])
@@ -272,6 +282,188 @@ def compute_trained(splits, ood_splits, seeds, fprs, human_label,
                 split_rows.append(sr)
 
             for name, (_, _, _, n_h) in ood_sets.items():
+                reads = ood_reads[spec_key][name][fpr]
+                oa, ot = [r[0] for r in reads], [r[1] for r in reads]
+                ote = [r[2] for r in reads]
+                og = [goodness(a, te, combine) for a, te in zip(oa, ote)]
+                sr = {
+                    "level": "split", "kind": "trained", "detector": detector,
+                    "split": name, "held_out_domain": "", "fpr": fpr, "n_test": "",
+                    "n_folds": len(reads), "n_seeds": len(seeds),
+                    "reachable": bool(n_h >= 1 / fpr),
+                    "auroc": float(np.mean(oa)), "auroc_std": _std(oa),
+                    "tpr_at_fpr": float(np.mean(ot)), "tpr_at_fpr_std": _std(ot),
+                    "tpr_eff": float(np.mean(ote)), "tpr_eff_std": _std(ote),
+                    "eff_fpr": eff_fpr_level(n_h, fpr),
+                    "goodness": float(np.mean(og)), "goodness_std": _std(og),
+                }
+                rows.append(sr)
+                split_rows.append(sr)
+
+            tpr_ok = [r for r in split_rows if r.get("reachable")]
+            rows.append({
+                "level": "overall", "kind": "trained", "detector": detector,
+                "split": "mean", "held_out_domain": "", "fpr": fpr, "n_test": "",
+                "n_folds": sum(len(all_folds[s][spec_key]) for s in all_folds),
+                "n_seeds": len(seeds),
+                "auroc": float(np.mean([r["auroc"] for r in split_rows])),
+                "auroc_std": float(np.mean([r["auroc_std"] for r in split_rows])),
+                "tpr_at_fpr": float(np.mean([r["tpr_at_fpr"] for r in tpr_ok])) if tpr_ok else float("nan"),
+                "tpr_at_fpr_std": float(np.mean([r["tpr_at_fpr_std"] for r in tpr_ok])) if tpr_ok else float("nan"),
+                "tpr_eff": float(np.mean([r["tpr_eff"] for r in split_rows])),
+                "tpr_eff_std": float(np.mean([r["tpr_eff_std"] for r in split_rows])),
+                "eff_fpr": fpr,
+                "goodness": float(np.mean([r["goodness"] for r in split_rows])),
+                "goodness_std": float(np.mean([r["goodness_std"] for r in split_rows])),
+            })
+    return rows
+
+
+def _multi_emb_lodo_task(split_key, path, spec_key, spec, embeddings, ood_splits,
+                         seeds, fprs, human_label, min_domain_rows, cpu_threads):
+    """One (split, architecture) unit of work for :func:`compute_multi_emb`,
+    self-contained -- see :func:`run_in_domain_performance._multi_emb_task`
+    for why (process-global RNG state under ``fit``, and avoiding pickling a
+    multi-embedding matrix across the process boundary once per task).
+
+    Returns ``(spec_key, split_key, fold_dicts, ood_reads, ood_n_human)`` --
+    ``fold_dicts`` (each already stripped of ``_fold``'s ``'ood'`` key) and
+    ``ood_reads`` (``{name: {fpr: [(auroc, tpr, tpr_eff), ...]}}``, one triple
+    per fold, matching every other spec's shape) are empty when the split has
+    fewer than 2 usable domains.
+    """
+    if cpu_threads:
+        torch.set_num_threads(cpu_threads)
+    X, y, groups, dom, dims = load_multi_features(
+        path, GROUP_COL, human_label, embeddings, domain_col=DOMAIN_COL)
+    run_spec = with_emb_dims(spec, dims, embeddings)
+    counts = {d: int((dom == d).sum()) for d in np.unique(dom)}
+    domains = sorted(d for d, n in counts.items()
+                     if n >= min_domain_rows and np.unique(y[dom == d]).size == 2)
+    if len(domains) < 2:
+        return spec_key, split_key, [], {}, {}
+
+    ood_sets = {}
+    for name, opath in ood_splits:
+        oX, oy, on_h, _odims = load_multi_ood(opath, human_label, embeddings)
+        ood_sets[name] = (oX, oy, None, on_h)
+
+    folds = []
+    ood_reads: dict[str, dict[float, list]] = {n: {f: [] for f in fprs} for n in ood_sets}
+    for d in domains:
+        tr, te = dom != d, dom == d
+        assert d not in set(dom[tr]) and set(dom[te]) == {d}
+        assert tr.sum() + te.sum() == len(dom) and not (tr & te).any()
+        assert set(groups[tr]).isdisjoint(groups[te]), "a group straddled the fold"
+        fd = _fold(run_spec, X, y, None, groups, tr, te, seeds, fprs, ood_sets)
+        fd["held_out_domain"] = d
+        for name, by_fpr in fd.pop("ood").items():
+            for f in fprs:
+                ood_reads[name][f].extend(by_fpr[f])
+        folds.append(fd)
+    ood_n_h = {name: n_h for name, (_, _, _, n_h) in ood_sets.items()}
+    return spec_key, split_key, folds, ood_reads, ood_n_h
+
+
+def compute_multi_emb(splits, ood_splits, seeds, fprs, human_label,
+                      min_domain_rows, combine, embeddings=MULTI_EMB_COLS,
+                      jobs=1, cpu_threads=None) -> list[dict]:
+    """LODO for the multi-embedding architectures (``MULTI_EMB_SPECS``), on the
+    concatenation of ``embeddings``. Identical fold procedure to
+    :func:`compute_trained` (reuses :func:`_fold` unchanged) -- kept as a
+    separate function rather than folded into ``compute_trained`` because
+    ``compute_trained`` is imported directly by ``run_cascade_performance.py``
+    / ``run_dr_transfer.py`` / ``run_robust_performance.py`` for their own,
+    unrelated comparisons -- see ``_trained.py``'s module docstring.
+
+    ``jobs > 1`` fits every (split, architecture) pair -- all of that split's
+    domain folds -- in its own OS process (``ProcessPoolExecutor``, ``spawn``
+    context; see :func:`_multi_emb_lodo_task` for why not a thread pool).
+    ``jobs <= 1`` runs the exact same task calls in a plain loop in this
+    process, so the two modes compute identical numbers and only differ in
+    wall-clock time.
+    """
+    tasks = [(split_key, path, spec_key, spec)
+             for split_key, path in splits
+             for spec_key, spec in MULTI_EMB_SPECS.items()]
+
+    results = []
+    if jobs > 1:
+        ctx = multiprocessing.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=jobs, mp_context=ctx) as ex:
+            futs = [
+                ex.submit(_multi_emb_lodo_task, split_key, path, spec_key, spec,
+                         embeddings, ood_splits, seeds, fprs, human_label,
+                         min_domain_rows, cpu_threads)
+                for split_key, path, spec_key, spec in tasks
+            ]
+            for fut in tqdm(as_completed(futs), total=len(futs),
+                            desc="LODO multi-emb (parallel)", unit="task"):
+                results.append(fut.result())
+    else:
+        for split_key, path, spec_key, spec in tqdm(tasks, desc="LODO multi-emb", unit="task"):
+            results.append(_multi_emb_lodo_task(split_key, path, spec_key, spec, embeddings,
+                                                ood_splits, seeds, fprs, human_label,
+                                                min_domain_rows, cpu_threads))
+
+    all_folds: dict[str, dict[str, list[dict]]] = {}
+    ood_reads: dict[str, dict[str, dict[float, list]]] = {
+        k: {name: {f: [] for f in fprs} for name, _ in ood_splits} for k in MULTI_EMB_SPECS
+    }
+    ood_n_h: dict[str, int] = {}
+    for spec_key, split_key, folds, task_ood_reads, task_ood_n_h in results:
+        if not folds:
+            continue
+        all_folds.setdefault(split_key, {k: [] for k in MULTI_EMB_SPECS})[spec_key] = folds
+        for name, by_fpr in task_ood_reads.items():
+            for f in fprs:
+                ood_reads[spec_key][name][f].extend(by_fpr[f])
+        ood_n_h.update(task_ood_n_h)
+
+    if not all_folds:
+        return []
+
+    rows: list[dict] = []
+    for spec_key, spec in MULTI_EMB_SPECS.items():
+        detector = f"trained/{spec['label']}"
+        for fpr in fprs:
+            split_rows: list[dict] = []
+            for split_key, spec_folds in all_folds.items():
+                folds = spec_folds[spec_key]
+                gf = [goodness(fd["auroc"], fd["by_fpr"][fpr]["tpr_eff"], combine)
+                      for fd in folds]
+                for fd, gfi in zip(folds, gf):
+                    bf = fd["by_fpr"][fpr]
+                    rows.append({
+                        "level": "fold", "kind": "trained", "detector": detector,
+                        "split": split_key, "held_out_domain": fd["held_out_domain"],
+                        "fpr": fpr, "n_test": fd["n_test"], "n_folds": "",
+                        "n_seeds": len(seeds),
+                        "auroc": fd["auroc"], "auroc_std": "",
+                        "tpr_at_fpr": bf["tpr_at_fpr"], "tpr_at_fpr_std": "",
+                        "tpr_eff": bf["tpr_eff"], "tpr_eff_std": "",
+                        "eff_fpr": bf["eff_fpr"], "goodness": gfi, "goodness_std": "",
+                    })
+                ok = [fd for fd in folds if fd["n_test_human"] >= 1 / fpr]
+                use = ok or folds
+                sr = {
+                    "level": "split", "kind": "trained", "detector": detector,
+                    "split": split_key, "held_out_domain": "", "fpr": fpr,
+                    "n_test": "", "n_folds": len(folds), "n_seeds": len(seeds),
+                    "reachable": bool(ok),
+                    "auroc": float(np.mean([fd["auroc"] for fd in folds])),
+                    "auroc_std": _std([fd["auroc"] for fd in folds]),
+                    "tpr_at_fpr": float(np.mean([fd["by_fpr"][fpr]["tpr_at_fpr"] for fd in use])),
+                    "tpr_at_fpr_std": _std([fd["by_fpr"][fpr]["tpr_at_fpr"] for fd in use]),
+                    "tpr_eff": float(np.mean([fd["by_fpr"][fpr]["tpr_eff"] for fd in folds])),
+                    "tpr_eff_std": _std([fd["by_fpr"][fpr]["tpr_eff"] for fd in folds]),
+                    "eff_fpr": float(np.mean([fd["by_fpr"][fpr]["eff_fpr"] for fd in folds])),
+                    "goodness": float(np.mean(gf)), "goodness_std": _std(gf),
+                }
+                rows.append(sr)
+                split_rows.append(sr)
+
+            for name, n_h in ood_n_h.items():
                 reads = ood_reads[spec_key][name][fpr]
                 oa, ot = [r[0] for r in reads], [r[1] for r in reads]
                 ote = [r[2] for r in reads]
@@ -488,10 +680,53 @@ def main() -> None:
     ap.add_argument("--human-label", default="human")
     ap.add_argument("--zeroshot-config", type=Path, default=DEFAULT_CONFIG)
     ap.add_argument("--no-zeroshot", action="store_true")
-    ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
+    ap.add_argument("--multi-embeddings", nargs="+", default=None, metavar="EMB_COL",
+                    help=f"embeddings the 4 multi-embedding architectures "
+                         f"concatenate (default: {list(MULTI_EMB_COLS)})")
+    ap.add_argument("--no-multi-emb", action="store_true",
+                    help="skip the 4 multi-embedding architectures (emb_stacking, "
+                         "emb_early_fusion, emb_gated_n, emb_attn_fusion)")
+    ap.add_argument("--jobs", type=int, default=1, metavar="N",
+                    help="fit N (split, multi-embedding architecture) pairs at once "
+                         "-- each running all of that split's domain folds -- each "
+                         "in its own process (default: 1, i.e. serial). Does not "
+                         "affect the roberta_logistic baseline, which stays serial "
+                         "-- see compute_multi_emb's docstring for why a process "
+                         "pool, not a thread pool")
+    ap.add_argument("--gpu", default=None, metavar="IDS",
+                    help="value for CUDA_VISIBLE_DEVICES (e.g. '0' or '0,1'). "
+                         "Default: leave unset so all visible GPUs are used. Applied "
+                         "before any model is fit; every --jobs worker inherits it")
+    ap.add_argument("--cpu-threads", type=int, default=None, metavar="N",
+                    help="cap CPU threads used per fit (sets OMP_NUM_THREADS / "
+                         "MKL_NUM_THREADS and torch's intra-op pool -- in every "
+                         "--jobs worker too). Default: leave unset. With --jobs > 1, "
+                         "consider capping this so N workers don't each grab every "
+                         "core")
+    ap.add_argument("--out-dir", type=Path, default=None,
+                    help=f"default: a fresh {DEFAULT_OUT_DIR.name}_<YYYYMMDD_HHMM> "
+                         f"directory under {DEFAULT_OUT_DIR.parent}/, so past runs "
+                         f"are never overwritten")
     ap.add_argument("--no-plots", action="store_true")
     ap.add_argument("--replot", type=Path, default=None, metavar="PERFORMANCE_CSV")
     args = ap.parse_args()
+    out_dir = args.out_dir or (
+        DEFAULT_OUT_DIR.parent / f"{DEFAULT_OUT_DIR.name}_{datetime.now():%Y%m%d_%H%M}"
+    )
+
+    # Applied before any `fit()` call (the only place a torch algorithm ever
+    # touches CUDA -- see epai/algs/*.py): CUDA device enumeration and the
+    # BLAS/OpenMP thread pools are triggered lazily, on first use, not merely
+    # by `import torch` above, so setting these here -- rather than needing
+    # add_embeddings.py's "parse argv before importing torch" trick -- is
+    # still early enough. A --jobs worker is a freshly spawned process that
+    # inherits this environment from scratch, so it applies there too.
+    if args.gpu is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
+    if args.cpu_threads is not None:
+        os.environ["OMP_NUM_THREADS"] = str(args.cpu_threads)
+        os.environ["MKL_NUM_THREADS"] = str(args.cpu_threads)
+        torch.set_num_threads(args.cpu_threads)
 
     splits = resolve_splits(args.splits or DEFAULT_SPLITS, PARQUET_DIR)
     ood_splits = resolve_splits(args.ood_splits or DEFAULT_OOD, PARQUET_DIR)
@@ -517,6 +752,14 @@ def main() -> None:
     if not any(r["level"] == "overall" for r in rows):
         raise SystemExit("no split had >= 2 usable domains")
 
+    if not args.no_multi_emb:
+        multi_emb = tuple(args.multi_embeddings) if args.multi_embeddings else MULTI_EMB_COLS
+        print(f"\nmulti-embedding architectures: {list(MULTI_EMB_SPECS)} on {multi_emb}"
+              f", leave-one-domain-out  (--jobs {args.jobs})")
+        rows += compute_multi_emb(splits, ood_splits, args.seeds, args.fpr,
+                                  args.human_label, args.min_domain_rows,
+                                  args.combine, multi_emb, args.jobs, args.cpu_threads)
+
     if not args.no_zeroshot:
         print(f"zero-shot: {args.zeroshot_config} "
               f"(scored on the held-out domain folds)")
@@ -524,14 +767,14 @@ def main() -> None:
                                  args.seeds, args.fpr, args.human_label,
                                  args.min_domain_rows, args.combine)
 
-    args.out_dir.mkdir(parents=True, exist_ok=True)
-    csv_path = args.out_dir / "performance.csv"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = out_dir / "performance.csv"
     pd.DataFrame(rows, columns=CSV_FIELDS).to_csv(csv_path, index=False)
     _print_table(rows, args.fpr)
     print(f"\nwrote {csv_path}")
 
     if not args.no_plots:
-        plots_from_csv(csv_path, meta, args.out_dir)
+        plots_from_csv(csv_path, meta, out_dir)
 
 
 if __name__ == "__main__":

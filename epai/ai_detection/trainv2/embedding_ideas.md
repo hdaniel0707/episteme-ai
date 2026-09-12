@@ -1,8 +1,23 @@
 # Multi-embedding fusion / ensembling — ideas to come back to
 
-Working notes from a discussion on 2026-09-11, kept for later. **Nothing here
-is implemented yet** — this is a plan to pick back up, not a running
-experiment. The motivating idea: instead of one embedding (`emb_roberta`),
+Working notes from a discussion on 2026-09-11, kept for later.
+
+**Status (2026-09-12): Stage 1 implemented, Stage 0 still open.** All four
+architectures on the menu below (score-level ensemble, early fusion, N-branch
+gate, attention fusion) are implemented as `epai/algs/emb_stacking.py` /
+`emb_early_fusion.py` / `emb_gated_n.py` / `emb_attention_fusion.py`, wired
+into `run_in_domain_performance.py` and `run_lodo_performance.py` via
+`_trained.py`'s `MULTI_EMB_SPECS` (default embeddings: `emb_roberta` +
+`emb_styledistance` + `emb_specter2` — see `_trained.py` for the reasoning,
+overridable with `--multi-embeddings`). `roberta_fusion_cuevec` /
+`roberta_gated_cuevec` were removed from `TRAINED_SPECS` in the same change
+(see the README's trained-detector table). Stage 0's pairwise embedding-score
+correlation diagnostic was NOT done first -- the diversity-family reasoning
+below was used as the prior instead -- so it remains a good follow-up for
+interpreting *why* a given architecture won or lost, not a blocker on what
+already ran.
+
+The motivating idea: instead of one embedding (`emb_roberta`),
 give the detector several different "views" of the same text — concatenated
 (early fusion) or combined as an ensemble (late fusion) — to see whether that
 buys back some of the LODO / MG-AI-Sci robustness the single-embedding probes

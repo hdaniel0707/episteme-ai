@@ -59,17 +59,27 @@ Run:
 from __future__ import annotations
 
 import argparse
+import multiprocessing
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import torch
 from tqdm import tqdm
 
 from epai.ai_detection.trainv2._trained import (
+    MULTI_EMB_COLS,
+    MULTI_EMB_SPECS,
     TRAINED_SPECS,
     eval_on_fprs,
     fit,
     load_features,
+    load_multi_features,
+    load_multi_ood,
+    with_emb_dims,
 )
 from epai.ai_detection.trainv2._zeroshot import (
     agg_cell,
@@ -202,6 +212,156 @@ def compute_trained(train_splits, ood_splits, seeds, test_size, fprs,
             for c in spec_cells:
                 rows.append(_row(detector, c["split"], "in_domain", c))
             for name, (_, _, _, n_h) in ood_sets.items():
+                reads = ood_reads[spec_key][name][f]
+                oa = [r[0] for r in reads]
+                ot = [r[1] for r in reads]
+                ote = [r[2] for r in reads]
+                og = [goodness(ai, ei, combine) for ai, ei in zip(oa, ote)]
+                c = {"split": name, "fpr": f, "n_test": "", "n_test_human": n_h,
+                     "n_seeds": len(seeds),
+                     "auroc": float(np.mean(oa)), "auroc_std": _std(oa),
+                     "tpr_at_fpr": float(np.mean(ot)), "tpr_at_fpr_std": _std(ot),
+                     "tpr_eff": float(np.mean(ote)), "tpr_eff_std": _std(ote),
+                     "goodness": float(np.mean(og)), "goodness_std": _std(og),
+                     "eff_fpr": eff_fpr_level(n_h, f)}
+                spec_cells.append(c)
+                rows.append(_row(detector, name, "ood", c))
+            rows.append(_row(detector, "mean", "overall",
+                             _overall_cell(spec_cells, len(seeds), f)))
+    return rows
+
+
+def _multi_emb_task(split_key, path, spec_key, spec, embeddings, ood_splits,
+                    seeds, test_size, fprs, group_col, human_label, combine,
+                    cpu_threads):
+    """One (split, architecture) unit of work for :func:`compute_multi_emb`,
+    self-contained: loads its own ``X``/``y``/``groups`` and its own OOD sets
+    from disk rather than receiving them as arguments, and returns only small,
+    already-aggregated dicts. Two reasons, not one:
+
+    * It must be safe to run in its own process (see ``--jobs``'s help text):
+      an algorithm's ``fit`` calls ``torch.manual_seed`` / ``np.random.seed``,
+      both PROCESS-GLOBAL, so two specs fitting inside the same process at the
+      same time (e.g. under a thread pool) would stomp on each other's random
+      state. A separate OS process each with its own interpreter and its own
+      global RNG state is what makes ``--jobs > 1`` reproduce the same numbers
+      as ``--jobs 1``, not merely what makes it fast.
+    * Passing the loaded arrays themselves to a worker would pickle a
+      multi-embedding matrix (tens to hundreds of MB with ``--multi-embeddings``
+      set to all 12) across the process boundary once per task. Reloading a
+      Parquet is a fraction of a second; that is cheaper and simpler than
+      shipping the array.
+
+    Returns ``(spec_key, cells_by_fpr, ood_reads_by_name_by_fpr, ood_n_human)``.
+    """
+    if cpu_threads:
+        torch.set_num_threads(cpu_threads)
+    X, y, groups, dims = load_multi_features(path, group_col, human_label, embeddings)
+    run_spec = with_emb_dims(spec, dims, embeddings)
+
+    ood_sets: dict[str, tuple] = {}
+    for name, opath in ood_splits:
+        oX, oy, on_h, _odims = load_multi_ood(opath, human_label, embeddings)
+        ood_sets[name] = (oX, oy, on_h)
+
+    a: list[float] = []
+    t = {f: [] for f in fprs}
+    te_ = {f: [] for f in fprs}
+    ood_reads: dict[str, dict[float, list]] = {n: {f: [] for f in fprs} for n in ood_sets}
+    n_tr = n_te = n_te_h = 0
+    for seed in seeds:
+        tr, te = grouped_split(y, groups, test_size, seed)
+        clf = fit(run_spec, X, y, None, groups, tr, seed)
+        au, per = eval_on_fprs(clf, run_spec, X[te], y[te], None, fprs)
+        a.append(au)
+        for f in fprs:
+            t[f].append(per[f][0])
+            te_[f].append(per[f][1])
+        n_tr, n_te, n_te_h = len(tr), len(te), int((y[te] == 0).sum())
+        for name, (oX, oy, _) in ood_sets.items():
+            oau, oper = eval_on_fprs(clf, run_spec, oX, oy, None, fprs)
+            for f in fprs:
+                ood_reads[name][f].append((oau, oper[f][0], oper[f][1]))
+
+    cells: dict[float, dict] = {}
+    for f in fprs:
+        g = [goodness(ai, ei, combine) for ai, ei in zip(a, te_[f])]
+        cells[f] = {
+            "split": split_key, "fpr": f, "n_train": n_tr, "n_test": n_te,
+            "n_test_human": n_te_h, "n_seeds": len(seeds),
+            "auroc": float(np.mean(a)), "auroc_std": _std(a),
+            "tpr_at_fpr": float(np.mean(t[f])), "tpr_at_fpr_std": _std(t[f]),
+            "tpr_eff": float(np.mean(te_[f])), "tpr_eff_std": _std(te_[f]),
+            "goodness": float(np.mean(g)), "goodness_std": _std(g),
+            "eff_fpr": eff_fpr_level(n_te_h, f),
+        }
+    ood_n_h = {name: n_h for name, (_, _, n_h) in ood_sets.items()}
+    return spec_key, cells, ood_reads, ood_n_h
+
+
+def compute_multi_emb(train_splits, ood_splits, seeds, test_size, fprs,
+                      group_col, human_label, combine,
+                      embeddings=MULTI_EMB_COLS, jobs=1, cpu_threads=None) -> list[dict]:
+    """The multi-embedding architectures (``MULTI_EMB_SPECS``), trained on the
+    concatenation of ``embeddings``. Identical procedure to
+    :func:`compute_trained` -- same grouped 70/30 split per seed, same OOD
+    scoring, same cell/goodness shape, so a row here lands in the same
+    ``performance.csv`` / figures as a ``compute_trained`` row and is directly
+    comparable to it. Kept as a separate function (rather than folded into
+    ``compute_trained``) because ``compute_trained`` is imported directly by
+    ``run_dr_transfer.py`` / ``run_robust_performance.py`` for their own,
+    unrelated comparisons -- see ``_trained.py``'s module docstring.
+
+    ``jobs > 1`` fits every (split, architecture) pair in its own OS process
+    (``ProcessPoolExecutor``, ``spawn`` context -- see :func:`_multi_emb_task`
+    for why not a thread pool). ``jobs <= 1`` runs the exact same
+    :func:`_multi_emb_task` calls in a plain loop in this process, so the two
+    modes compute identical numbers and only differ in wall-clock time.
+    """
+    tasks = [(split_key, path, spec_key, spec)
+             for split_key, path in train_splits
+             for spec_key, spec in MULTI_EMB_SPECS.items()]
+
+    results = []
+    if jobs > 1:
+        ctx = multiprocessing.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=jobs, mp_context=ctx) as ex:
+            futs = [
+                ex.submit(_multi_emb_task, split_key, path, spec_key, spec,
+                         embeddings, ood_splits, seeds, test_size, fprs,
+                         group_col, human_label, combine, cpu_threads)
+                for split_key, path, spec_key, spec in tasks
+            ]
+            for fut in tqdm(as_completed(futs), total=len(futs),
+                            desc="multi-emb (parallel)", unit="task"):
+                results.append(fut.result())
+    else:
+        for split_key, path, spec_key, spec in tqdm(tasks, desc="multi-emb", unit="task"):
+            results.append(_multi_emb_task(split_key, path, spec_key, spec, embeddings,
+                                           ood_splits, seeds, test_size, fprs,
+                                           group_col, human_label, combine, cpu_threads))
+
+    cells: dict[str, dict[float, list[dict]]] = {
+        k: {f: [] for f in fprs} for k in MULTI_EMB_SPECS}
+    ood_reads: dict[str, dict[str, dict[float, list]]] = {
+        k: {name: {f: [] for f in fprs} for name, _ in ood_splits} for k in MULTI_EMB_SPECS}
+    ood_n_h: dict[str, int] = {}
+    for spec_key, task_cells, task_ood_reads, task_ood_n_h in results:
+        for f in fprs:
+            cells[spec_key][f].append(task_cells[f])
+        for name, by_fpr in task_ood_reads.items():
+            for f in fprs:
+                ood_reads[spec_key][name][f].extend(by_fpr[f])
+        ood_n_h.update(task_ood_n_h)
+
+    rows: list[dict] = []
+    for spec_key, spec in MULTI_EMB_SPECS.items():
+        detector = f"trained/{spec['label']}"
+        for f in fprs:
+            spec_cells = list(cells[spec_key][f])
+            for c in spec_cells:
+                rows.append(_row(detector, c["split"], "in_domain", c))
+            for name, n_h in ood_n_h.items():
                 reads = ood_reads[spec_key][name][f]
                 oa = [r[0] for r in reads]
                 ot = [r[1] for r in reads]
@@ -365,10 +525,52 @@ def main() -> None:
     ap.add_argument("--human-label", default="human")
     ap.add_argument("--zeroshot-config", type=Path, default=DEFAULT_CONFIG)
     ap.add_argument("--no-zeroshot", action="store_true")
-    ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
+    ap.add_argument("--multi-embeddings", nargs="+", default=None, metavar="EMB_COL",
+                    help=f"embeddings the 4 multi-embedding architectures "
+                         f"concatenate (default: {list(MULTI_EMB_COLS)})")
+    ap.add_argument("--no-multi-emb", action="store_true",
+                    help="skip the 4 multi-embedding architectures (emb_stacking, "
+                         "emb_early_fusion, emb_gated_n, emb_attn_fusion)")
+    ap.add_argument("--jobs", type=int, default=1, metavar="N",
+                    help="fit N (split, multi-embedding architecture) pairs at once, "
+                         "each in its own process (default: 1, i.e. serial). Does "
+                         "not affect the roberta_logistic baseline, which stays "
+                         "serial -- see compute_multi_emb's docstring for why a "
+                         "process pool, not a thread pool")
+    ap.add_argument("--gpu", default=None, metavar="IDS",
+                    help="value for CUDA_VISIBLE_DEVICES (e.g. '0' or '0,1'). "
+                         "Default: leave unset so all visible GPUs are used. Applied "
+                         "before any model is fit; every --jobs worker inherits it")
+    ap.add_argument("--cpu-threads", type=int, default=None, metavar="N",
+                    help="cap CPU threads used per fit (sets OMP_NUM_THREADS / "
+                         "MKL_NUM_THREADS and torch's intra-op pool -- in every "
+                         "--jobs worker too). Default: leave unset. With --jobs > 1, "
+                         "consider capping this so N workers don't each grab every "
+                         "core")
+    ap.add_argument("--out-dir", type=Path, default=None,
+                    help=f"default: a fresh {DEFAULT_OUT_DIR.name}_<YYYYMMDD_HHMM> "
+                         f"directory under {DEFAULT_OUT_DIR.parent}/, so past runs "
+                         f"are never overwritten")
     ap.add_argument("--no-plots", action="store_true")
     ap.add_argument("--replot", type=Path, default=None, metavar="PERFORMANCE_CSV")
     args = ap.parse_args()
+    out_dir = args.out_dir or (
+        DEFAULT_OUT_DIR.parent / f"{DEFAULT_OUT_DIR.name}_{datetime.now():%Y%m%d_%H%M}"
+    )
+
+    # Applied before any `fit()` call (the only place a torch algorithm ever
+    # touches CUDA -- see epai/algs/*.py): CUDA device enumeration and the
+    # BLAS/OpenMP thread pools are triggered lazily, on first use, not merely
+    # by `import torch` above, so setting these here -- rather than needing
+    # add_embeddings.py's "parse argv before importing torch" trick -- is
+    # still early enough. A --jobs worker is a freshly spawned process that
+    # inherits this environment from scratch, so it applies there too.
+    if args.gpu is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
+    if args.cpu_threads is not None:
+        os.environ["OMP_NUM_THREADS"] = str(args.cpu_threads)
+        os.environ["MKL_NUM_THREADS"] = str(args.cpu_threads)
+        torch.set_num_threads(args.cpu_threads)
 
     train_splits = resolve_splits(args.splits or DEFAULT_SPLITS, PARQUET_DIR)
     ood_splits = resolve_splits(args.ood_splits or DEFAULT_OOD, PARQUET_DIR)
@@ -392,6 +594,13 @@ def main() -> None:
 
     rows = compute_trained(train_splits, ood_splits, args.seeds, args.test_size,
                            args.fpr, args.group_col, args.human_label, args.combine)
+    if not args.no_multi_emb:
+        multi_emb = tuple(args.multi_embeddings) if args.multi_embeddings else MULTI_EMB_COLS
+        print(f"\nmulti-embedding architectures: {list(MULTI_EMB_SPECS)} on {multi_emb}"
+              f"  (--jobs {args.jobs})")
+        rows += compute_multi_emb(train_splits, ood_splits, args.seeds, args.test_size,
+                                  args.fpr, args.group_col, args.human_label,
+                                  args.combine, multi_emb, args.jobs, args.cpu_threads)
     if not args.no_zeroshot:
         print(f"\nzero-shot: {args.zeroshot_config} "
               f"(scored on the trained models' own eval rows)")
@@ -399,14 +608,14 @@ def main() -> None:
                                  args.seeds, args.test_size, args.fpr,
                                  args.group_col, args.human_label, args.combine)
 
-    args.out_dir.mkdir(parents=True, exist_ok=True)
-    csv_path = args.out_dir / "performance.csv"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = out_dir / "performance.csv"
     pd.DataFrame(rows, columns=CSV_FIELDS).to_csv(csv_path, index=False)
     _print_table(rows, args.fpr)
     print(f"\nwrote {csv_path}")
 
     if not args.no_plots:
-        plots_from_csv(csv_path, meta, args.out_dir)
+        plots_from_csv(csv_path, meta, out_dir)
 
 
 if __name__ == "__main__":

@@ -55,13 +55,27 @@ Not run directly — `__init__.py` (rationale), `splits.py` (the registry),
 (`TRAINED_SPECS`), `_reph_trained.py` (the rephrase feature loader), `plots.py`
 (every figure function).
 
-The three trained detectors in `_trained.py`:
+The one baseline detector in `_trained.py`'s `TRAINED_SPECS` (the two RoBERTa +
+judge-cue hybrids that used to live here, `fusion_mlp` and `gated_mlp`, were
+removed in favor of the multi-embedding architectures below):
 
-| key                     | plot label       | algorithm    | aux input |
-|-------------------------|------------------|--------------|-----------|
-| `roberta_logistic`      | `roberta·logistic` | `logistic` on `emb_roberta` | — |
-| `roberta_fusion_cuevec` | `roberta⊕cuevec` | `fusion_mlp` (concatenation fusion) | `llm_judge_cuevec_gpt56luna_v3` (11-dim) |
-| `roberta_gated_cuevec`  | `roberta+gated`  | `gated_mlp` (learned gate on the embedding branch) | `llm_judge_cuevec_gpt56luna_v3` |
+| key                | plot label         | algorithm                   | aux input |
+|--------------------|---------------------|------------------------------|-----------|
+| `roberta_logistic` | `roberta·logistic` | `logistic` on `emb_roberta` | — |
+
+`_trained.py`'s `MULTI_EMB_SPECS` — imported only by `run_in_domain_performance.py`
+/ `run_lodo_performance.py`, not by `run_dr_transfer.py` / `run_robust_performance.py`
+/ `run_cascade_performance.py` (see `embedding_ideas.md`): four architectures, all
+reading the concatenation of `MULTI_EMB_COLS` (default `emb_roberta` +
+`emb_styledistance` + `emb_specter2`, overridable with `--multi-embeddings`):
+
+| key                   | plot label                        | algorithm (`epai/algs/`) |
+|-----------------------|------------------------------------|--------------------------|
+| `emb_stack_avg`       | `roberta+style+sci·stack(avg)`     | `emb_stacking.py`, `meta: average` |
+| `emb_stack_logistic`  | `roberta+style+sci·stack(LR)`      | `emb_stacking.py`, `meta: logistic` (GroupKFold OOF meta-LR) |
+| `emb_early_fusion`    | `roberta+style+sci·fusion(PCA)`    | `emb_early_fusion.py` (per-block PCA + embedding dropout) |
+| `emb_gated_n`         | `roberta+style+sci·gated(N)`       | `emb_gated_n.py` (N-branch generalization of `gated_mlp`) |
+| `emb_attn_fusion`     | `roberta+style+sci·attention`      | `emb_attention_fusion.py` (embeddings-as-tokens self-attention) |
 
 ---
 
