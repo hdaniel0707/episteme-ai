@@ -67,15 +67,24 @@ removed in favor of the multi-embedding architectures below):
 / `run_lodo_performance.py`, not by `run_dr_transfer.py` / `run_robust_performance.py`
 / `run_cascade_performance.py` (see `embedding_ideas.md`): four architectures, all
 reading the concatenation of `MULTI_EMB_COLS` (default `emb_roberta` +
-`emb_styledistance` + `emb_specter2`, overridable with `--multi-embeddings`):
+`emb_styledistance` + `emb_specter2`, overridable with `--multi-embeddings`).
+`spec['label']` in the table below is the ARCHITECTURE name only; the detector
+name actually shown on a plot / in `performance.csv` is
+`spec_label(spec, embeddings)` = `<emb_tag(embeddings)>·<label>`, e.g.
+`roberta+luar_crud+llm_judge_cuevec_gpt56luna_v3·gated(N)` for a
+`--multi-embeddings emb_roberta emb_luar_crud llm_judge_cuevec_gpt56luna_v3`
+run -- so two runs with different `--multi-embeddings` are distinguishable in
+their own CSV, unlike before `spec_label` existed (every run used to show the
+literal string `roberta+style+sci·...` regardless of what was actually
+concatenated):
 
-| key                   | plot label                        | algorithm (`epai/algs/`) |
-|-----------------------|------------------------------------|--------------------------|
-| `emb_stack_avg`       | `roberta+style+sci·stack(avg)`     | `emb_stacking.py`, `meta: average` |
-| `emb_stack_logistic`  | `roberta+style+sci·stack(LR)`      | `emb_stacking.py`, `meta: logistic` (GroupKFold OOF meta-LR) |
-| `emb_early_fusion`    | `roberta+style+sci·fusion(PCA)`    | `emb_early_fusion.py` (per-block PCA + embedding dropout) |
-| `emb_gated_n`         | `roberta+style+sci·gated(N)`       | `emb_gated_n.py` (N-branch generalization of `gated_mlp`) |
-| `emb_attn_fusion`     | `roberta+style+sci·attention`      | `emb_attention_fusion.py` (embeddings-as-tokens self-attention) |
+| key                   | `spec['label']` (architecture) | algorithm (`epai/algs/`) |
+|-----------------------|---------------------------------|--------------------------|
+| `emb_stack_avg`       | `stack(avg)`     | `emb_stacking.py`, `meta: average` |
+| `emb_stack_logistic`  | `stack(LR)`      | `emb_stacking.py`, `meta: logistic` (GroupKFold OOF meta-LR) |
+| `emb_early_fusion`    | `fusion(PCA)`    | `emb_early_fusion.py` (per-block PCA + embedding dropout) |
+| `emb_gated_n`         | `gated(N)`       | `emb_gated_n.py` (N-branch generalization of `gated_mlp`) |
+| `emb_attn_fusion`     | `attention`      | `emb_attention_fusion.py` (embeddings-as-tokens self-attention) |
 
 ---
 

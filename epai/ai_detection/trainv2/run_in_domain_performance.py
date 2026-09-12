@@ -79,6 +79,8 @@ from epai.ai_detection.trainv2._trained import (
     load_features,
     load_multi_features,
     load_multi_ood,
+    save_fitted,
+    spec_label,
     with_emb_dims,
 )
 from epai.ai_detection.trainv2._zeroshot import (
@@ -233,7 +235,7 @@ def compute_trained(train_splits, ood_splits, seeds, test_size, fprs,
 
 def _multi_emb_task(split_key, path, spec_key, spec, embeddings, ood_splits,
                     seeds, test_size, fprs, group_col, human_label, combine,
-                    cpu_threads):
+                    cpu_threads, out_dir=None, save_models=False):
     """One (split, architecture) unit of work for :func:`compute_multi_emb`,
     self-contained: loads its own ``X``/``y``/``groups`` and its own OOD sets
     from disk rather than receiving them as arguments, and returns only small,
@@ -251,6 +253,15 @@ def _multi_emb_task(split_key, path, spec_key, spec, embeddings, ood_splits,
       set to all 12) across the process boundary once per task. Reloading a
       Parquet is a fraction of a second; that is cheaper and simpler than
       shipping the array.
+
+    With ``save_models``, the FIRST seed's fitted classifier is persisted --
+    see :func:`epai.ai_detection.trainv2._trained.save_fitted` -- to
+    ``out_dir/models/<split>/<spec>/seed_<seed>.joblib`` plus a JSON sidecar
+    naming the exact train/test group ids, so a later inference run knows
+    precisely what that one saved model has and hasn't seen. Only the first
+    seed: the other ``--seeds`` exist to steady the reported metric, not to
+    each be a candidate deployment artifact, and saving all of them would
+    multiply disk use by ``len(seeds)`` for no one's benefit.
 
     Returns ``(spec_key, cells_by_fpr, ood_reads_by_name_by_fpr, ood_n_human)``.
     """
@@ -282,6 +293,19 @@ def _multi_emb_task(split_key, path, spec_key, spec, embeddings, ood_splits,
             oau, oper = eval_on_fprs(clf, run_spec, oX, oy, None, fprs)
             for f in fprs:
                 ood_reads[name][f].append((oau, oper[f][0], oper[f][1]))
+        if save_models and seed == seeds[0]:
+            meta = {
+                "created": datetime.now().isoformat(timespec="seconds"),
+                "alg": run_spec["alg"], "label": spec_label(spec, embeddings),
+                "embeddings": list(embeddings), "resolved_params": clf.resolved_params(),
+                "split": split_key, "seed": seed, "test_size": test_size,
+                "group_col": group_col, "human_label": human_label,
+                "n_train": n_tr, "n_test": n_te,
+                "train_group_ids": sorted(set(map(str, groups[tr]))),
+                "test_group_ids": sorted(set(map(str, groups[te]))),
+            }
+            save_fitted(clf, out_dir / "models" / split_key / spec_key,
+                       f"seed_{seed}", meta)
 
     cells: dict[float, dict] = {}
     for f in fprs:
@@ -301,7 +325,8 @@ def _multi_emb_task(split_key, path, spec_key, spec, embeddings, ood_splits,
 
 def compute_multi_emb(train_splits, ood_splits, seeds, test_size, fprs,
                       group_col, human_label, combine,
-                      embeddings=MULTI_EMB_COLS, jobs=1, cpu_threads=None) -> list[dict]:
+                      embeddings=MULTI_EMB_COLS, jobs=1, cpu_threads=None,
+                      out_dir=None, save_models=False) -> list[dict]:
     """The multi-embedding architectures (``MULTI_EMB_SPECS``), trained on the
     concatenation of ``embeddings``. Identical procedure to
     :func:`compute_trained` -- same grouped 70/30 split per seed, same OOD
@@ -317,6 +342,11 @@ def compute_multi_emb(train_splits, ood_splits, seeds, test_size, fprs,
     for why not a thread pool). ``jobs <= 1`` runs the exact same
     :func:`_multi_emb_task` calls in a plain loop in this process, so the two
     modes compute identical numbers and only differ in wall-clock time.
+
+    ``save_models`` persists the first seed's fitted classifier for every
+    (split, architecture) pair under ``out_dir/models/`` -- see
+    :func:`_multi_emb_task`. Does not touch the ``roberta_logistic`` baseline
+    (``compute_trained``, untouched -- see above).
     """
     tasks = [(split_key, path, spec_key, spec)
              for split_key, path in train_splits
@@ -329,7 +359,8 @@ def compute_multi_emb(train_splits, ood_splits, seeds, test_size, fprs,
             futs = [
                 ex.submit(_multi_emb_task, split_key, path, spec_key, spec,
                          embeddings, ood_splits, seeds, test_size, fprs,
-                         group_col, human_label, combine, cpu_threads)
+                         group_col, human_label, combine, cpu_threads,
+                         out_dir, save_models)
                 for split_key, path, spec_key, spec in tasks
             ]
             for fut in tqdm(as_completed(futs), total=len(futs),
@@ -339,7 +370,8 @@ def compute_multi_emb(train_splits, ood_splits, seeds, test_size, fprs,
         for split_key, path, spec_key, spec in tqdm(tasks, desc="multi-emb", unit="task"):
             results.append(_multi_emb_task(split_key, path, spec_key, spec, embeddings,
                                            ood_splits, seeds, test_size, fprs,
-                                           group_col, human_label, combine, cpu_threads))
+                                           group_col, human_label, combine, cpu_threads,
+                                           out_dir, save_models))
 
     cells: dict[str, dict[float, list[dict]]] = {
         k: {f: [] for f in fprs} for k in MULTI_EMB_SPECS}
@@ -356,7 +388,7 @@ def compute_multi_emb(train_splits, ood_splits, seeds, test_size, fprs,
 
     rows: list[dict] = []
     for spec_key, spec in MULTI_EMB_SPECS.items():
-        detector = f"trained/{spec['label']}"
+        detector = f"trained/{spec_label(spec, embeddings)}"
         for f in fprs:
             spec_cells = list(cells[spec_key][f])
             for c in spec_cells:
@@ -547,6 +579,13 @@ def main() -> None:
                          "--jobs worker too). Default: leave unset. With --jobs > 1, "
                          "consider capping this so N workers don't each grab every "
                          "core")
+    ap.add_argument("--save-models", action="store_true",
+                    help="persist the first seed's fitted classifier for every "
+                         "multi-embedding (split, architecture) pair to "
+                         "<out-dir>/models/<split>/<spec>/seed_<seed>.joblib, plus "
+                         "a JSON sidecar naming the resolved hyperparameters and "
+                         "the exact train/test group ids. Does not save the "
+                         "roberta_logistic baseline. Off by default")
     ap.add_argument("--out-dir", type=Path, default=None,
                     help=f"default: a fresh {DEFAULT_OUT_DIR.name}_<YYYYMMDD_HHMM> "
                          f"directory under {DEFAULT_OUT_DIR.parent}/, so past runs "
@@ -597,10 +636,12 @@ def main() -> None:
     if not args.no_multi_emb:
         multi_emb = tuple(args.multi_embeddings) if args.multi_embeddings else MULTI_EMB_COLS
         print(f"\nmulti-embedding architectures: {list(MULTI_EMB_SPECS)} on {multi_emb}"
-              f"  (--jobs {args.jobs})")
+              f"  (--jobs {args.jobs}"
+              + (f", saving models to {out_dir / 'models'})" if args.save_models else ")"))
         rows += compute_multi_emb(train_splits, ood_splits, args.seeds, args.test_size,
                                   args.fpr, args.group_col, args.human_label,
-                                  args.combine, multi_emb, args.jobs, args.cpu_threads)
+                                  args.combine, multi_emb, args.jobs, args.cpu_threads,
+                                  out_dir, args.save_models)
     if not args.no_zeroshot:
         print(f"\nzero-shot: {args.zeroshot_config} "
               f"(scored on the trained models' own eval rows)")

@@ -88,6 +88,8 @@ from epai.ai_detection.trainv2._trained import (
     fit,
     load_multi_features,
     load_multi_ood,
+    save_fitted,
+    spec_label,
     with_emb_dims,
 )
 from epai.ai_detection.trainv2._zeroshot import (
@@ -320,11 +322,19 @@ def compute_trained(splits, ood_splits, seeds, fprs, human_label,
 
 
 def _multi_emb_lodo_task(split_key, path, spec_key, spec, embeddings, ood_splits,
-                         seeds, fprs, human_label, min_domain_rows, cpu_threads):
+                         seeds, fprs, human_label, min_domain_rows, cpu_threads,
+                         out_dir=None, save_models=False):
     """One (split, architecture) unit of work for :func:`compute_multi_emb`,
     self-contained -- see :func:`run_in_domain_performance._multi_emb_task`
     for why (process-global RNG state under ``fit``, and avoiding pickling a
     multi-embedding matrix across the process boundary once per task).
+
+    With ``save_models``, one classifier per domain fold is persisted -- see
+    :func:`epai.ai_detection.trainv2._trained.save_fitted`. ``_fold`` averages
+    over ``seeds`` internally and never exposes the individual fitted
+    classifiers, so the model actually saved is a SEPARATE fit on the first
+    seed, done once more here purely for persistence -- one extra fit per
+    domain fold, only when ``save_models`` is set, i.e. free otherwise.
 
     Returns ``(spec_key, split_key, fold_dicts, ood_reads, ood_n_human)`` --
     ``fold_dicts`` (each already stripped of ``_fold``'s ``'ood'`` key) and
@@ -361,13 +371,30 @@ def _multi_emb_lodo_task(split_key, path, spec_key, spec, embeddings, ood_splits
             for f in fprs:
                 ood_reads[name][f].extend(by_fpr[f])
         folds.append(fd)
+        if save_models:
+            save_seed = seeds[0]
+            save_clf = fit(run_spec, X, y, None, groups, tr, save_seed)
+            meta = {
+                "created": datetime.now().isoformat(timespec="seconds"),
+                "alg": run_spec["alg"], "label": spec_label(spec, embeddings),
+                "embeddings": list(embeddings),
+                "resolved_params": save_clf.resolved_params(),
+                "split": split_key, "held_out_domain": d, "seed": save_seed,
+                "group_col": GROUP_COL, "human_label": human_label,
+                "n_train": int(tr.sum()), "n_test": int(te.sum()),
+                "train_group_ids": sorted(set(map(str, groups[tr]))),
+                "test_group_ids": sorted(set(map(str, groups[te]))),
+            }
+            save_fitted(save_clf, out_dir / "models" / split_key / spec_key,
+                       f"domain_{d}_seed_{save_seed}", meta)
     ood_n_h = {name: n_h for name, (_, _, _, n_h) in ood_sets.items()}
     return spec_key, split_key, folds, ood_reads, ood_n_h
 
 
 def compute_multi_emb(splits, ood_splits, seeds, fprs, human_label,
                       min_domain_rows, combine, embeddings=MULTI_EMB_COLS,
-                      jobs=1, cpu_threads=None) -> list[dict]:
+                      jobs=1, cpu_threads=None, out_dir=None,
+                      save_models=False) -> list[dict]:
     """LODO for the multi-embedding architectures (``MULTI_EMB_SPECS``), on the
     concatenation of ``embeddings``. Identical fold procedure to
     :func:`compute_trained` (reuses :func:`_fold` unchanged) -- kept as a
@@ -382,6 +409,11 @@ def compute_multi_emb(splits, ood_splits, seeds, fprs, human_label,
     ``jobs <= 1`` runs the exact same task calls in a plain loop in this
     process, so the two modes compute identical numbers and only differ in
     wall-clock time.
+
+    ``save_models`` persists one classifier per domain fold for every (split,
+    architecture) pair under ``out_dir/models/`` -- see
+    :func:`_multi_emb_lodo_task`. Does not touch the ``roberta_logistic``
+    baseline (``compute_trained``, untouched -- see above).
     """
     tasks = [(split_key, path, spec_key, spec)
              for split_key, path in splits
@@ -394,7 +426,7 @@ def compute_multi_emb(splits, ood_splits, seeds, fprs, human_label,
             futs = [
                 ex.submit(_multi_emb_lodo_task, split_key, path, spec_key, spec,
                          embeddings, ood_splits, seeds, fprs, human_label,
-                         min_domain_rows, cpu_threads)
+                         min_domain_rows, cpu_threads, out_dir, save_models)
                 for split_key, path, spec_key, spec in tasks
             ]
             for fut in tqdm(as_completed(futs), total=len(futs),
@@ -404,7 +436,8 @@ def compute_multi_emb(splits, ood_splits, seeds, fprs, human_label,
         for split_key, path, spec_key, spec in tqdm(tasks, desc="LODO multi-emb", unit="task"):
             results.append(_multi_emb_lodo_task(split_key, path, spec_key, spec, embeddings,
                                                 ood_splits, seeds, fprs, human_label,
-                                                min_domain_rows, cpu_threads))
+                                                min_domain_rows, cpu_threads,
+                                                out_dir, save_models))
 
     all_folds: dict[str, dict[str, list[dict]]] = {}
     ood_reads: dict[str, dict[str, dict[float, list]]] = {
@@ -425,7 +458,7 @@ def compute_multi_emb(splits, ood_splits, seeds, fprs, human_label,
 
     rows: list[dict] = []
     for spec_key, spec in MULTI_EMB_SPECS.items():
-        detector = f"trained/{spec['label']}"
+        detector = f"trained/{spec_label(spec, embeddings)}"
         for fpr in fprs:
             split_rows: list[dict] = []
             for split_key, spec_folds in all_folds.items():
@@ -703,6 +736,14 @@ def main() -> None:
                          "--jobs worker too). Default: leave unset. With --jobs > 1, "
                          "consider capping this so N workers don't each grab every "
                          "core")
+    ap.add_argument("--save-models", action="store_true",
+                    help="persist one classifier per domain fold for every "
+                         "multi-embedding (split, architecture) pair to "
+                         "<out-dir>/models/<split>/<spec>/domain_<domain>_seed_"
+                         "<seed>.joblib, plus a JSON sidecar naming the resolved "
+                         "hyperparameters and the exact train/test group ids. "
+                         "Does not save the roberta_logistic baseline. Off by "
+                         "default")
     ap.add_argument("--out-dir", type=Path, default=None,
                     help=f"default: a fresh {DEFAULT_OUT_DIR.name}_<YYYYMMDD_HHMM> "
                          f"directory under {DEFAULT_OUT_DIR.parent}/, so past runs "
@@ -755,10 +796,12 @@ def main() -> None:
     if not args.no_multi_emb:
         multi_emb = tuple(args.multi_embeddings) if args.multi_embeddings else MULTI_EMB_COLS
         print(f"\nmulti-embedding architectures: {list(MULTI_EMB_SPECS)} on {multi_emb}"
-              f", leave-one-domain-out  (--jobs {args.jobs})")
+              f", leave-one-domain-out  (--jobs {args.jobs}"
+              + (f", saving models to {out_dir / 'models'})" if args.save_models else ")"))
         rows += compute_multi_emb(splits, ood_splits, args.seeds, args.fpr,
                                   args.human_label, args.min_domain_rows,
-                                  args.combine, multi_emb, args.jobs, args.cpu_threads)
+                                  args.combine, multi_emb, args.jobs, args.cpu_threads,
+                                  out_dir, args.save_models)
 
     if not args.no_zeroshot:
         print(f"zero-shot: {args.zeroshot_config} "
