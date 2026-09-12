@@ -239,8 +239,12 @@ def zeroshot_scatter(
     rows: list[dict], meta: dict, path: Path, *, key: str = "version", title: str = "",
     variant_suffix: str = "_wlp",
 ) -> None:
+    from .splits import PLOT_EXCLUDE
     from .splits import display as _sd
     from .splits import marker as _split_marker
+
+    excluded = PLOT_EXCLUDE.get("scatter", frozenset())
+    rows = [r for r in rows if r["split"] == "mean" or r["split"] not in excluded]
 
     names = sorted({r[key] for r in rows})
     splits = [s for s in meta["splits"] if s in {r["split"] for r in rows}]
@@ -477,10 +481,13 @@ def goodness_bars(
     rows: list[dict], meta: dict, path: Path, *, key: str = "version",
     title: str = "", combine: str = "hmean", variant_suffix: str = "_wlp",
 ) -> None:
+    from .splits import PLOT_EXCLUDE
     from .splits import display as _sd
 
+    excluded = PLOT_EXCLUDE.get("goodness", frozenset())
     rows = [r for r in rows if r.get("kind") != "trained"
             or r.get("split") is not None] if rows else []
+    rows = [r for r in rows if r.get("split") == "mean" or r.get("split") not in excluded]
     # dataset groups: the per-split rows in the run's order, then the pooled
     # 'mean' (shown last).
     present = {r["split"] for r in rows}

@@ -66,6 +66,7 @@ from epai.utils.cd_core import (
 )
 
 from epai.ai_detection.trainv2.core import eff_fpr_level, fpr_tag, rows_at_fpr
+from epai.ai_detection.trainv2.splits import POOL_SPLITS
 from epai.ai_detection.trainv2.splits import resolve as resolve_splits
 
 DEFAULT_FPRS = [0.01, 0.05]
@@ -185,12 +186,15 @@ def compute(
     for r in rows:
         grouped[(r["family"], r["version"], r["column"], r["fpr"])].append(r)
     for (fam, ver, col, fpr), cells in grouped.items():
-        tprs = [c["tpr_at_fpr"] for c in cells if c["reachable"]]
-        effs = [c["tpr_eff"] for c in cells]
+        # "mean" is the MG-All aggregate (goodness_bars relabels it as such) --
+        # pool over the MANUGRAM splits only, same exclusion as splits.POOL_SPLITS.
+        pool_cells = [c for c in cells if c["split"] in POOL_SPLITS]
+        tprs = [c["tpr_at_fpr"] for c in pool_cells if c["reachable"]]
+        effs = [c["tpr_eff"] for c in pool_cells]
         rows.append({
             "family": fam, "version": ver, "column": col, "split": "mean", "fpr": fpr,
             "n": "", "n_human": "", "n_machine": "",
-            "auroc": float(np.mean([c["auroc"] for c in cells])),
+            "auroc": float(np.mean([c["auroc"] for c in pool_cells])) if pool_cells else float("nan"),
             "tpr_at_fpr": float(np.mean(tprs)) if tprs else float("nan"),
             "fpr_at_fpr": "", "reachable": "",
             "tpr_eff": float(np.mean(effs)) if effs else float("nan"), "eff_fpr": fpr,

@@ -32,6 +32,7 @@ self-contained.
 | script | what it does | § |
 |--------|--------------|---|
 | `rebuild_all.py` | orchestrate the whole rebuild — dependency order + bounded parallelism | [Full rebuild](#full-rebuild) |
+| `run_train_pipeline.py` | run A → D → F sequentially, every artifact archived under one `train_pipeline_<timestamp>` folder | [Full rebuild](#full-rebuild) |
 | `calibrate_judge_baseline.py`<br>`calibrate_binox_baseline.py`<br>`calibrate_fastdetect_baseline.py`<br>`calibrate_detector_baseline.py` | one fixed **1%-FPR + Youden** threshold per score column → a calibrated baseline YAML | A |
 | `run_judge_youden_calibration.py`<br>`run_binox_youden_calibration.py`<br>`run_fastdetect_youden_calibration.py` | per-domain + pooled **Youden** operating points → CSV for downstream reads | B |
 | `run_embedding_effectiveness.py` | which `emb_*` column separates human from AI best, per split + mean | C |
@@ -75,15 +76,32 @@ lands in a CSV's `split` column; the display name is for figure labels.
 
 | key       | parquet (`data/parquet/`)   | display  | generators (non-human)                              | rows   | domains                              | role |
 |-----------|-----------------------------|----------|----------------------------------------------------|--------|--------------------------------------|------|
-| `gb_orig` | `ghostbuster_orig.parquet`  | GB-orig  | `gpt35t`, `gpt35ts` (GPT-3.5, legacy)               | ~9.0k  | wp, reuter, essay                    | multi-generator |
+| `gb_orig` | `ghostbuster_orig.parquet`  | GB-orig  | `gpt35t` (GPT-3.5, legacy, raw text)                | ~6.0k  | wp, reuter, essay                    | single-generator |
 | `mg_gb`   | `manugram_gb.parquet`       | MG-GB    | `gpt56luna`, `gptoss120b`, `gemma431b`, `llama3370b`| ~15.0k | wp, reuter, essay                    | multi-generator |
 | `mg_sci`  | `manugram_sci.parquet`      | MG-Sci   | `gpt56luna`, `gptoss120b`, `gemma431b`, `llama3370b`| ~15.0k | computer_science, mathematics, sociology | multi-generator |
 | `mg_aisci`  | `manugram_aiscientist.parquet`      | MG-AI-Sci   | `denario`, `sakana`, `sakanav2`, `cycleresearcher`, `zochi` | 200 (100 human) | 9 scientific domains + computer_science, ~1–80 rows each | multi-generator, 1:1-matched, **eval-only OOD** |
+
+`splits.POOL_SPLITS` is what feeds the pooled `all` column (MG-All) — currently
+all four core splits, a plain arithmetic mean / full pool over GB-orig, MG-GB,
+MG-Sci, MG-AI-Sci. It's kept as its own constant (rather than reusing `DEFAULT`
+directly) so a split could be carved out of the pool again later by editing
+that one line in `splits.py`, without touching any script.
+
+`splits.PLOT_EXCLUDE` is the master switch for what a split's own *figures*
+show, independent of what gets scored: a split named under a figure kind there
+(`"scatter"` for `plots.zeroshot_scatter`, `"goodness"` for
+`plots.goodness_bars` — the shared functions behind every AUROC-vs-TPR scatter
+and goodness-bar figure in trainv2, incl. the MG-Reph rephrase scripts) would
+still be computed and still land in the CSV, just not drawn on that kind of
+figure. Currently empty for both kinds — every core split shows on every
+figure. Edit that one dict to hide a split from one kind of figure everywhere,
+without touching a script or `plots.py`.
 
 **Opt-in splits** — registered, but never in a default sweep; pass by name only:
 
 | key           | parquet                        | display     | contents |
 |---------------|--------------------------------|-------------|----------|
+| `gb_orig_stand` | `ghostbuster_orig_stand.parquet` | GB-orig-stand | GB-orig with **standardized** features/text (same rows, same `gpt35t:0000A` label). Kept for the ad-hoc `compare_gb_orig_stand.py` check — standardizing turned out not to change results, so it's not in a default sweep. |
 | `mg_reph`     | `manugram_reph.parquet`        | MG-Reph     | **Manugram Rephrase** — the human rows of MG-GB + MG-Sci, each paired with one moderate `gpt56luna:0908R` rephrase. ~12.0k rows, 6 domains, `source_family ∈ {ghostbuster, science}` |
 | `mg_reph_sci` | `manugram_reph_sci.parquet`    | MG-Reph-Sci | the `source_family == science` half — CS / math / sociology, ~6.0k rows (3.0k pairs) |
 | `mg_reph_gb`  | `manugram_reph_gb.parquet`     | MG-Reph-GB  | the `source_family == ghostbuster` half — essay / reuter / wp, ~6.0k rows (~3.0k pairs) |
@@ -92,7 +110,8 @@ lands in a CSV's `split` column; the display name is for figure labels.
 ([MG-Reph experiments](#mg-reph-experiments-opt-in)).
 
 Fixed left-to-right order everywhere: `gb_orig → mg_gb → mg_sci → mg_reph →
-mg_reph_sci → mg_reph_gb → mg_aisci`, then the pooled column (`all` / `mean`) last.
+mg_reph_sci → mg_reph_gb → mg_aisci`, then the pooled column (`all` / `mean`)
+last.
 
 **Single-generator caveat.** The `MG-Reph` family has one non-human label
 each, so the multi-generator scripts skip it: `run_judge_by_generator.py`
@@ -607,3 +626,22 @@ four D/F performance runners take a **list**, default `0.01 0.05`, and emit a
 `_1pct` / `_5pct` figure set per level), `--seeds`, `--test-size` (default
 `0.30`), `--human-label` (default `human`),
 `--group-col` (default `id`), `--no-plots` / `--no-plot`, `--replot <csv>`.
+
+**`run_train_pipeline.py` runs just the A → D → F subset above, in that exact
+order, one step at a time** (not `rebuild_all.py`'s parallel dependency graph
+-- no C/E/B), and archives every artifact under its own folder instead of the
+scripts' normal locations:
+
+```bash
+uv run python epai/ai_detection/trainv2/run_train_pipeline.py             # A -> D -> F, serial
+uv run python epai/ai_detection/trainv2/run_train_pipeline.py --no-training  # A -> D only, drop the slow F steps
+uv run python epai/ai_detection/trainv2/run_train_pipeline.py --dry-run   # print the commands, run nothing
+uv run python epai/ai_detection/trainv2/run_train_pipeline.py --keep-going  # don't stop at the first failure
+```
+
+Each step's own output flags (`-o` / `--csv` / `--fig-dir` for the calibration
+scripts, `--out-dir` for the rest) are pointed at
+`results/trainv2/train_pipeline_<YYYYMMDD_HHMM>/<step>/` -- including the
+calibration YAMLs, so a pipeline run does **not** refresh the live
+`cfg/ai_detection/trainv2/*_baseline_calibrated.yaml` (copy the ones you want
+to keep out of the run folder by hand).

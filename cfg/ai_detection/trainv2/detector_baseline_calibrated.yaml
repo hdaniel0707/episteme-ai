@@ -5,6 +5,6 @@
 detector_baseline:
   columns:
   - column: detector_score_radar
-    threshold: 0.923052
-    threshold_youden: 0.201495
+    threshold: 0.922936
+    threshold_youden: 0.195023
     label: radar

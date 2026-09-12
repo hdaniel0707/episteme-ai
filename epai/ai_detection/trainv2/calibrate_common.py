@@ -32,9 +32,11 @@ Two modes, both through :func:`run`:
 
 ``--corpora all`` (and a bare run) uses the four core splits, in the fixed
 left-to-right order used everywhere: ``gb_orig`` (GB-orig), ``mg_gb`` (MG-GB),
-``mg_sci`` (MG-Sci), ``mg_aisci`` (MG-AI-Sci); pooled is ``all`` (MG-All), always
-last. The MG-Reph family (``mg_reph`` / ``mg_reph_sci`` / ``mg_reph_gb``) is
-registered but opt-in only -- pass it by name (``--corpora mg_reph_sci`` …).
+``mg_sci`` (MG-Sci), ``mg_aisci`` (MG-AI-Sci); pooled is ``all`` (MG-All), built
+from ``splits.POOL_SPLITS`` (currently all four -- see ``splits.py``), always
+last. The MG-Reph family (``mg_reph`` / ``mg_reph_sci`` / ``mg_reph_gb``) and
+GB-orig-stand are registered but opt-in only -- pass either by name
+(``--corpora mg_reph_sci`` / ``gb_orig_stand`` …).
 
 ``--generators MODEL ...`` restricts the machine class to rows whose
 ``generated_by`` model (the part before ``:``) is named -- e.g.
@@ -63,7 +65,7 @@ from epai.utils.cd_core import (
     youden_threshold,
 )
 
-from .splits import DEFAULT, POOLED, SPLITS
+from .splits import POOL_SPLITS, POOLED, SPLITS
 from .splits import display as _display
 from .splits import resolve as _resolve_splits
 
@@ -412,7 +414,9 @@ def _multi(
     column drawn from the CSV, YAML from the pooled 'all' row."""
     frames = {name: _load(path, prefix, cols_arg, exclude, human_label, generators)
               for name, path in corpora}
-    pooled = pd.concat(frames.values(), ignore_index=True)
+    pool_names = [n for n in POOL_SPLITS if n in frames]
+    pooled = (pd.concat([frames[n] for n in pool_names], ignore_index=True)
+              if pool_names else next(iter(frames.values())).iloc[0:0])
 
     if cols_arg:
         cols = cols_arg
@@ -426,7 +430,8 @@ def _multi(
     if generators:
         print(f"machine   : restricted to {', '.join(generators)}")
     print(f"corpora   : {', '.join(f'{n} ({len(df)})' for n, df in frames.items())}")
-    print(f"pooled    : {POOLED} ({len(pooled)} rows)")
+    print(f"pooled    : {POOLED} <- {'+'.join(pool_names) or '(none)'} "
+          f"({len(pooled)} rows)")
     print(f"columns   : {cols}")
     print(f"target FPR: {fpr_target:g}   orientation: {orient}\n")
 
@@ -481,9 +486,9 @@ def _multi(
         print(f"not written ({fpr_target:g}-FPR unreachable on pooled 'all'): {dropped}")
     if not entries:
         raise SystemExit("nothing to write -- no finite pooled threshold")
-    src = "+".join(n for n, _ in corpora)
-    desc = "MG-All" if [n for n, _ in corpora] == list(DEFAULT) else src
-    src_desc = f"{desc} ({src}), pooled ('all')"
+    pool_src = "+".join(pool_names)
+    desc = "MG-All" if pool_names == list(POOL_SPLITS) else pool_src
+    src_desc = f"{desc} ({pool_src}), pooled ('all')"
     if generators:
         src_desc += f" [machine: {'+'.join(generators)}]"
     _write_yaml(entries, block_key, out, script, src_desc, fpr_target)

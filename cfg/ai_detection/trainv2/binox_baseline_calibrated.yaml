@@ -5,22 +5,22 @@
 binoculars_baseline:
   columns:
   - column: binoculars_score
-    threshold: 0.882261
-    threshold_youden: 0.92511
+    threshold: 0.882643
+    threshold_youden: 0.924694
     label: falcon-7b
   - column: binoculars_score_falcon3_7b
-    threshold: 0.894531
-    threshold_youden: 0.965394
+    threshold: 0.895694
+    threshold_youden: 0.966871
     label: falcon3-7b
   - column: binoculars_score_llama31_8b
     threshold: 0.859611
-    threshold_youden: 0.924987
+    threshold_youden: 0.922074
     label: llama31-8b
   - column: binoculars_score_mistral_v03
     threshold: 0.881162
-    threshold_youden: 0.947288
+    threshold_youden: 0.947419
     label: mistral-v03
   - column: binoculars_score_qwen25_7b
     threshold: 0.868848
-    threshold_youden: 0.968196
+    threshold_youden: 0.969003
     label: qwen25-7b
