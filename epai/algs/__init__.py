@@ -17,6 +17,7 @@ from .emb_stacking import EmbStackingAlg
 from .fusion_mlp import FusionMLPAlg
 from .gated_mlp import GatedMLPAlg
 from .gradient_boosting import GradientBoostingAlg
+from .judge_distill import JudgeDistillHybridAlg, JudgeDistillRegressAlg
 from .logistic import LogisticAlg
 from .robust_mlp import RobustMLPAlg
 from .svm import SVMAlg
@@ -35,6 +36,8 @@ ALGORITHMS: dict[str, type[ClfAlgorithm]] = {
     EmbEarlyFusionAlg.name: EmbEarlyFusionAlg,
     EmbGatedNAlg.name: EmbGatedNAlg,
     EmbAttentionFusionAlg.name: EmbAttentionFusionAlg,
+    JudgeDistillRegressAlg.name: JudgeDistillRegressAlg,
+    JudgeDistillHybridAlg.name: JudgeDistillHybridAlg,
 }
 
 
@@ -60,6 +63,8 @@ __all__ = [
     "FusionMLPAlg",
     "GatedMLPAlg",
     "GradientBoostingAlg",
+    "JudgeDistillHybridAlg",
+    "JudgeDistillRegressAlg",
     "LogisticAlg",
     "RobustMLPAlg",
     "SVMAlg",

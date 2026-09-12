@@ -248,23 +248,27 @@ def _stack(s: pd.Series) -> np.ndarray:
 
 
 def load_features(path: Path, group_col: str, human_label: str,
-                  *, score_cols: tuple[str, ...] = ()):
-    """``(X_emb, y, Z_cue, groups)``. A group is dropped whole if ANY of its
+                  *, score_cols: tuple[str, ...] = (), aux_col: str = AUX_COL):
+    """``(X_emb, y, Z_aux, groups)``. A group is dropped whole if ANY of its
     rows is missing EITHER feature, so every spec (aux or not) trains and
     scores on the identical rows.
+
+    ``aux_col`` defaults to the judge cue vector (``AUX_COL``); pass another
+    column (e.g. a continuous judge score) to load a different aux target for
+    an ``aux: True`` spec -- see ``run_judge_distillation_performance.py``.
 
     With ``score_cols`` (raw zero-shot columns, all assumed present in the
     parquet), a 5th element is returned: ``{col: float_array}`` aligned to the
     same surviving rows -- so a zero-shot pick can be scored on the trained
     models' exact eval partition. NaNs are left in place."""
-    cols = list(dict.fromkeys([group_col, GEN_COL, EMB_COL, AUX_COL, *score_cols]))
+    cols = list(dict.fromkeys([group_col, GEN_COL, EMB_COL, aux_col, *score_cols]))
     df = pd.read_parquet(path, columns=cols)
-    bad = df[EMB_COL].map(_is_missing) | df[AUX_COL].map(_is_missing)
+    bad = df[EMB_COL].map(_is_missing) | df[aux_col].map(_is_missing)
     if bad.any():
         df = df[~df[group_col].isin(df.loc[bad, group_col].unique())]
     df = df.reset_index(drop=True)
     y = (df[GEN_COL].to_numpy() != human_label).astype(int)
-    feats = (_stack(df[EMB_COL]), y, _stack(df[AUX_COL]), df[group_col].to_numpy())
+    feats = (_stack(df[EMB_COL]), y, _stack(df[aux_col]), df[group_col].to_numpy())
     if score_cols:
         return (*feats, {c: df[c].to_numpy(dtype=float) for c in score_cols})
     return feats

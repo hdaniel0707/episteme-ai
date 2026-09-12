@@ -116,6 +116,13 @@ class TrainHParams:
     # --- preprocessing ---
     normalize: str = "standard"
 
+    # --- class imbalance ---
+    # "balanced": inverse-frequency weights (sklearn's convention --
+    # n_samples / (n_classes * class_count)), computed from the TRAINING split
+    # only, applied to the cross-entropy loss (and to the per-row loss V-REx
+    # reads). Default "none" reproduces every existing config unchanged.
+    class_weight: str = "none"
+
     # --- tail-aware loss / domain-invariance (epai/algs/robust_mlp.py) ---
     # See epai/ai_detection/trainv2/improving_sota_ideas.md for the method and
     # citations. Every default here reproduces plain cross-entropy training
@@ -170,6 +177,10 @@ class TrainHParams:
                 "'toppush' or domain_penalty != 'none'"
             )
 
+        if self.class_weight not in ("none", "balanced"):
+            raise ValueError(
+                f"class_weight must be 'none' or 'balanced', got {self.class_weight!r}"
+            )
         if self.val_metric not in VAL_METRICS:
             raise ValueError(
                 f"val_metric must be one of {sorted(VAL_METRICS)}, "
@@ -507,7 +518,7 @@ class TrainHistory:
 
 def split_train_val(
     n: int,
-    hp: TrainHParams,
+    val_frac: float,
     seed: int,
     groups: np.ndarray | None = None,
     y: np.ndarray | None = None,
@@ -519,15 +530,19 @@ def split_train_val(
     rewrite of the same source text on both sides and the validation score --
     and therefore the epoch early stopping picks -- would be optimistic.
 
+    Takes ``val_frac`` directly (not a ``TrainHParams``) so a caller outside
+    this package's shared trainer -- :class:`epai.algs.judge_distill.JudgeDistillHybridAlg`,
+    which has its own training loop -- can reuse it too.
+
     Returns ``(train_idx, val_idx, fallback_reason)``. The reason is non-empty
     when a validation split was asked for but could not be used, in which case
     ``val_idx`` is empty and the caller falls back to the training loss.
     """
-    if hp.val_frac <= 0:
+    if val_frac <= 0:
         return np.arange(n), np.empty(0, dtype=int), ""
 
     splitter_cls = GroupShuffleSplit if groups is not None else ShuffleSplit
-    splitter = splitter_cls(n_splits=1, test_size=hp.val_frac, random_state=seed)
+    splitter = splitter_cls(n_splits=1, test_size=val_frac, random_state=seed)
     try:
         train_idx, val_idx = next(splitter.split(np.zeros((n, 1)), groups=groups))
     except ValueError as exc:  # too few rows / groups to split at this fraction
@@ -658,7 +673,7 @@ def train_torch_model(
     ``domain_penalty``.
     """
     n = len(y)
-    train_idx, val_idx, fallback = split_train_val(n, hp, seed, groups, y)
+    train_idx, val_idx, fallback = split_train_val(n, hp.val_frac, seed, groups, y)
     use_val = len(val_idx) > 0
 
     y_arr = np.asarray(y, dtype=np.int64)
@@ -679,7 +694,13 @@ def train_torch_model(
         y_val = y_t[va]
 
     opt = torch.optim.AdamW(model.parameters(), lr=hp.lr, weight_decay=hp.weight_decay)
-    loss_fn = nn.CrossEntropyLoss(label_smoothing=hp.label_smoothing)
+    class_weight = None
+    if hp.class_weight == "balanced":
+        # sklearn's "balanced" convention, computed from the TRAINING rows
+        # only (never the validation split): n_samples / (n_classes * count).
+        counts = torch.bincount(y_train, minlength=2).float().clamp(min=1.0)
+        class_weight = (y_train.numel() / (2.0 * counts)).to(device)
+    loss_fn = nn.CrossEntropyLoss(label_smoothing=hp.label_smoothing, weight=class_weight)
     use_push = hp.loss_kind == "toppush"
     dataset_tensors = [*train_tensors, y_train] + ([dom_train] if has_dom else [])
     loader = DataLoader(
@@ -723,7 +744,8 @@ def train_torch_model(
                     # V-REx reads the per-domain mean of the SAME per-row CE
                     # this batch's base loss uses, so compute it un-reduced.
                     per_row = F.cross_entropy(out, yb, reduction="none",
-                                              label_smoothing=hp.label_smoothing)
+                                              label_smoothing=hp.label_smoothing,
+                                              weight=class_weight)
                     loss = per_row.mean()
                 else:
                     loss = loss_fn(out, yb)

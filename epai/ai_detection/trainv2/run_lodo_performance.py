@@ -120,17 +120,22 @@ CSV_FIELDS = ["level", "kind", "detector", "split", "held_out_domain", "fpr",
               "goodness", "goodness_std"]
 
 
-def _load(path: Path, human_label: str, *, score_cols: tuple[str, ...] = ()):
-    """``(X_emb, y, Z_cue, dom, ids)``. Group dropped whole on ANY missing
+def _load(path: Path, human_label: str, *, score_cols: tuple[str, ...] = (),
+         aux_col: str = AUX_COL):
+    """``(X_emb, y, Z_aux, dom, ids)``. Group dropped whole on ANY missing
     feature; a group must sit in one domain (checked).
+
+    ``aux_col`` defaults to the judge cue vector (``AUX_COL``); pass another
+    column (e.g. a continuous judge score) to load a different aux target --
+    see ``run_judge_distillation_performance.py``.
 
     With ``score_cols`` (raw zero-shot columns, all present in the parquet), a
     6th element ``{col: float_array}`` aligned to the surviving rows is
     returned -- for scoring a zero-shot pick on each held-out domain fold."""
-    cols = list(dict.fromkeys([GROUP_COL, DOMAIN_COL, GEN_COL, EMB_COL, AUX_COL,
+    cols = list(dict.fromkeys([GROUP_COL, DOMAIN_COL, GEN_COL, EMB_COL, aux_col,
                                *score_cols]))
     df = pd.read_parquet(path, columns=cols)
-    bad = df[EMB_COL].map(_is_missing) | df[AUX_COL].map(_is_missing)
+    bad = df[EMB_COL].map(_is_missing) | df[aux_col].map(_is_missing)
     if bad.any():
         df = df[~df[GROUP_COL].isin(df.loc[bad, GROUP_COL].unique())]
     df = df.reset_index(drop=True)
@@ -140,23 +145,25 @@ def _load(path: Path, human_label: str, *, score_cols: tuple[str, ...] = ()):
                          f"more than one domain — LODO would split them")
     out = (_stack(df[EMB_COL]),
            (df[GEN_COL].to_numpy() != human_label).astype(int),
-           _stack(df[AUX_COL]), df[DOMAIN_COL].astype(str).to_numpy(),
+           _stack(df[aux_col]), df[DOMAIN_COL].astype(str).to_numpy(),
            df[GROUP_COL].to_numpy())
     if score_cols:
         return (*out, {c: df[c].to_numpy(dtype=float) for c in score_cols})
     return out
 
 
-def _load_ood(path: Path, human_label: str, *, score_cols: tuple[str, ...] = ()):
+def _load_ood(path: Path, human_label: str, *, score_cols: tuple[str, ...] = (),
+             aux_col: str = AUX_COL):
     """Full-corpus eval set (never trained on): (X, y, Z, n_human). With
     ``score_cols``, a 5th element ``{col: float_array}`` aligned to the same
-    rows (feature-missing rows dropped) is returned."""
-    cols = list(dict.fromkeys([GEN_COL, EMB_COL, AUX_COL, *score_cols]))
+    rows (feature-missing rows dropped) is returned. ``aux_col`` -- see
+    :func:`_load`."""
+    cols = list(dict.fromkeys([GEN_COL, EMB_COL, aux_col, *score_cols]))
     df = pd.read_parquet(path, columns=cols)
-    bad = df[EMB_COL].map(_is_missing) | df[AUX_COL].map(_is_missing)
+    bad = df[EMB_COL].map(_is_missing) | df[aux_col].map(_is_missing)
     df = df[~bad].reset_index(drop=True)
     y = (df[GEN_COL].to_numpy() != human_label).astype(int)
-    out = _stack(df[EMB_COL]), y, _stack(df[AUX_COL]), int((y == 0).sum())
+    out = _stack(df[EMB_COL]), y, _stack(df[aux_col]), int((y == 0).sum())
     if score_cols:
         return (*out, {c: df[c].to_numpy(dtype=float) for c in score_cols})
     return out

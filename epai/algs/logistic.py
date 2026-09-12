@@ -21,14 +21,19 @@ class LogisticAlg(ClfAlgorithm):
       * ``max_iter`` -- solver iterations (default 1000);
       * ``l1_ratio`` -- elastic-net mix, 0 = pure L2, 1 = pure L1 (needs a
         compatible ``solver``, e.g. 'saga'), forwarded only when given;
-      * ``solver`` -- forwarded only when given.
+      * ``solver`` -- forwarded only when given;
+      * ``class_weight`` -- ``None`` (default, every row weighted equally) or
+        ``"balanced"`` (sklearn's inverse-frequency weighting -- reweights the
+        log-loss so a 4:1 machine:human split, e.g. MG-GB/MG-Sci, does not
+        just get more say because it has more rows).
     """
 
     name = "logistic"
-    PARAMS = ("C", "max_iter", "l1_ratio", "solver")
+    PARAMS = ("C", "max_iter", "l1_ratio", "solver", "class_weight")
 
     def resolved_params(self) -> dict:
-        out = {"C": self.params.get("C", 1.0), "max_iter": self.params.get("max_iter", 1000)}
+        out = {"C": self.params.get("C", 1.0), "max_iter": self.params.get("max_iter", 1000),
+              "class_weight": self.params.get("class_weight", None)}
         # Only reported when set, mirroring fit: sklearn's own defaults apply
         # otherwise and naming them here would misreport what ran.
         out.update({k: self.params[k] for k in ("l1_ratio", "solver") if k in self.params})
@@ -38,6 +43,7 @@ class LogisticAlg(ClfAlgorithm):
         kwargs = dict(
             C=self.params.get("C", 1.0),
             max_iter=self.params.get("max_iter", 1000),
+            class_weight=self.params.get("class_weight", None),
             random_state=self.seed,
         )
         # Forward only when set: the defaults already give L2, and naming

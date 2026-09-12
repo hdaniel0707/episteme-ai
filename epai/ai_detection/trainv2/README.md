@@ -423,6 +423,103 @@ alongside the existing trained detectors and zero-shot picks. See
 Outputs (`results/trainv2/cascade_performance/`): `lodo_performance.csv`,
 `lodo_{1pct,5pct}.png` (+ `_goodness_`, `_denario_`).
 
+### J. Class-weighting pilot (opt-in)
+
+**`run_class_weight_performance.py`** — an opt-in add-on, never in
+`rebuild_all.py`. In-domain 70/30 only (no LODO sibling yet). MG-GB/MG-Sci
+are 4:1 machine:human (4 generators pooled per human doc), and neither
+sklearn's `LogisticRegression` (`class_weight=None` by default) nor the
+shared torch trainer's `CrossEntropyLoss` (no `weight=` tensor) corrected for
+it. Both gained an opt-in `class_weight: "balanced"` hyperparameter
+(sklearn's inverse-frequency convention, computed from the training rows
+only) — `epai/algs/logistic.py`, `epai/algs/_torch_common.py`'s
+`TrainHParams` (so every torch algorithm that shares it —
+`simple_mlp`/`binox_mlp`/`fusion_mlp`/`gated_mlp`/`robust_mlp` — can opt in
+too, one `params: {class_weight: balanced}` on its spec). Default `"none"`
+everywhere, so every existing config/result is unaffected unless it sets
+this explicitly.
+
+One new arm, `roberta_logistic_balanced` (`ALL_SPECS`/`BALANCED_SPECS` in
+this module — imported by `run_judge_distillation_performance.py` too, so the
+spec is defined once): `trained/roberta·logistic`'s own architecture with
+`class_weight: "balanced"` turned on, nothing else different. Reported
+alongside the unweighted baseline and the `best_zeroshot.yaml` picks — the
+comparison is exactly best zero-shot vs. `roberta·logistic` vs.
+`roberta·logistic(balanced)`.
+
+Same `--jobs`/`--gpu`/`--cpu-threads` parallelism as `run_in_domain_performance.py`'s
+multi-embedding architectures: `--jobs > 1` fits every (split, detector) pair
+in its own OS process (`ProcessPoolExecutor`, `spawn` context — a task
+reloads its own data rather than receiving it, both because reloading a
+Parquet is cheap and because an algorithm's `fit` calls
+`torch.manual_seed`/`np.random.seed`, both PROCESS-GLOBAL, so two specs
+fitting inside one process at once would stomp on each other's random
+state); `--jobs <= 1` runs the same calls in a plain loop, so the two modes
+compute identical numbers and only differ in wall-clock time.
+
+```bash
+.venv/bin/python epai/ai_detection/trainv2/run_class_weight_performance.py
+.venv/bin/python epai/ai_detection/trainv2/run_class_weight_performance.py --seeds 0 1
+# on a GPU box: 2 detectors x 3 splits = 6 tasks, cap threads so --jobs workers share the machine
+.venv/bin/python epai/ai_detection/trainv2/run_class_weight_performance.py --jobs 6 --gpu 0 --cpu-threads 4
+.venv/bin/python epai/ai_detection/trainv2/run_class_weight_performance.py \
+    --replot results/trainv2/class_weight_performance/performance.csv
+```
+Outputs (`results/trainv2/class_weight_performance/`): `performance.csv`,
+`in_domain_{1pct,5pct}.png` (+ `_goodness_`, `_denario_`).
+
+### K. Judge distillation pilot (opt-in)
+
+**`run_judge_distillation_performance.py`** — an opt-in add-on, never in
+`rebuild_all.py`. Now BOTH regimes (in-domain 70/30 and leave-one-domain-out,
+`--regimes`), same combination `run_robust_performance.py` uses for its own
+arms. Core: two new arms (`epai/algs/judge_distill.py`) alongside
+`trained/roberta·logistic` — instead of training `emb_roberta` on the GT
+label, regress it onto the judge's own continuous score
+(`llm_judge_score_gpt56luna_v3_wlp`, the strongest zero-shot detector on
+MG-AI-Sci): `judge_distill_regress` ignores GT entirely (pure distillation,
+Ridge), `judge_distill_hybrid` combines CE(GT) with a weighted MSE toward
+the judge score (now early-stopped on validation AUROC — `val_frac` /
+`patience`, reusing `_torch_common.split_train_val`, which gained a plain
+`val_frac: float` parameter instead of a `TrainHParams` so a caller outside
+the shared trainer can reuse it). Tests whether the judge's soft target
+generalizes to MG-AI-Sci better than the binary GT label does, or whether
+the gap is a representation problem no training target fixes. `_trained.py`'s
+`load_features` and `run_lodo_performance`'s `_load`/`_load_ood` all gained
+an `aux_col` parameter (default unchanged) so this script can load the judge
+score as the auxiliary column instead of the usual judge cue vector. Also
+reports §J's `roberta_logistic_balanced` arm (imported, not redefined) on
+the same figure, for the full picture.
+
+**First result (2026-09-13, in-domain 70/30): `judge_distill_hybrid` is the
+best of the new arms** — still short of the zero-shot judge on MG-AI-Sci,
+but ahead of the GT baseline and the other new arms. `HYBRID_SWEEP_SPECS`
+follows up with 5 named arms sweeping the hybrid's own hyperparameters
+(`--no-sweep` drops them for a cheaper run): `judge_distill_hybrid_lam{0.1,
+0.25,1,2}` (away from the default `lambda_distill: 0.5`) and
+`judge_distill_hybrid_balanced` (default lambda + `class_weight: balanced`
+together).
+
+Same `--jobs`/`--gpu`/`--cpu-threads` parallelism as §J (see there for how
+it works) — applies to BOTH regimes: in-domain, one task per (split,
+detector); LODO, one task per (split, detector) covering that detector's
+*entire* set of domain folds on that split (so `--jobs` parallelises across
+detectors and splits, not across individual folds).
+
+```bash
+.venv/bin/python epai/ai_detection/trainv2/run_judge_distillation_performance.py
+.venv/bin/python epai/ai_detection/trainv2/run_judge_distillation_performance.py --regimes lodo --seeds 0 1
+.venv/bin/python epai/ai_detection/trainv2/run_judge_distillation_performance.py --no-sweep
+# on a GPU box: 9 detectors x 3 splits = 27 in-domain tasks (fewer for LODO/--no-sweep)
+.venv/bin/python epai/ai_detection/trainv2/run_judge_distillation_performance.py --jobs 9 --gpu 0 --cpu-threads 2
+.venv/bin/python epai/ai_detection/trainv2/run_judge_distillation_performance.py \
+    --replot results/trainv2/judge_distillation_performance
+```
+Outputs (`results/trainv2/judge_distillation_performance/`):
+`in_domain_performance.csv` + `in_domain_{1pct,5pct}.png` (+ `_goodness_`,
+`_denario_`), `lodo_performance.csv` + `lodo_{1pct,5pct}.png` (+ `_goodness_`,
+`_denario_`).
+
 ---
 
 ## MG-Reph experiments (opt-in)
