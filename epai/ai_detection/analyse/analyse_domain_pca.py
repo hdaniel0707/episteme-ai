@@ -1001,46 +1001,22 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
-    report = Report()
+def analyse_corpus(
+    df: pd.DataFrame, X: np.ndarray, feature_label: str, parquet_path: Path,
+    out_dir: Path, report: Report, args: argparse.Namespace,
+) -> dict:
+    """Statistics + PCA + geometry + figures for one already-built embedding
+    matrix ``X`` (one row per row of ``df``). Everything from here on reads
+    ``X``'s actual width off the array and never revisits how it was built, so
+    this is shared verbatim by this script's own single-embedding ``main``
+    (``feature_label`` = one column name) and ``analyse_multi_emb_pca.py``'s
+    concatenated one (``feature_label`` = a "col1+col2+..." display tag).
 
-    parquet_path = (args.parquet if args.parquet.is_absolute()
-                    else BASE_DIR / args.parquet)
-    out_dir = args.out_dir or RESULTS_DIR / f"{parquet_path.stem}_{args.feature}"
-    if not out_dir.is_absolute():
-        out_dir = BASE_DIR / out_dir
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    report.rule(f"analyse_domain_pca.py — {datetime.now():%Y-%m-%d %H:%M:%S}")
-    report(f"  Parquet : {parquet_path}")
-    report(f"  Feature : {args.feature}")
-    report(f"  Output  : {out_dir}")
-
-    df = load_parquet(parquet_path)
-    for col in (DOMAIN_COL, CLF_TARGET_COL):
-        if col not in df.columns:
-            raise SystemExit(
-                f"{parquet_path.name}: no {col!r} column. This script expects the "
-                "output of prepare/combine_domains.py."
-            )
-    if args.feature not in df.columns:
-        available = sorted(c for c in df.columns if c.startswith("emb_"))
-        raise SystemExit(f"{parquet_path.name}: no column {args.feature!r}. "
-                         f"Embeddings present: {available}")
-
-    df = drop_missing_rows(df, [args.feature, CLF_TARGET_COL])
-    if args.drop_classes:
-        df = df[~df[CLF_TARGET_COL].isin(args.drop_classes)].reset_index(drop=True)
-        report(f"  Dropped classes: {args.drop_classes}")
-    if args.sample and args.sample < len(df):
-        df = df.sample(args.sample, random_state=args.seed).reset_index(drop=True)
-        report(f"  Subsampled to {len(df)} rows (seed {args.seed})")
-    df = df.reset_index(drop=True)
-
-    X = np.asarray(np.vstack(df[args.feature].to_numpy()), dtype=np.float64)
-    report(f"  Rows    : {len(df)}   embedding dim: {X.shape[1]}")
-
+    ``args`` supplies the options both scripts define identically:
+    ``normalize``, ``by_generator``, ``binary``, ``jitter``, ``jitter_scale``,
+    ``seed``, ``no_plots``, ``no_html``, ``plotly_cdn``. Returns the summary
+    dict (also written to ``out_dir/summary.json``).
+    """
     # --- corpus ------------------------------------------------------------
     report.rule("CORPUS")
     counts = counts_table(df)
@@ -1066,7 +1042,7 @@ def main() -> None:
                f"{int((pairs > 1).sum())} carrying more than one class")
 
     # --- embedding ---------------------------------------------------------
-    report.rule(f"EMBEDDING — {args.feature}")
+    report.rule(f"EMBEDDING — {feature_label}")
     X = normalize(X, args.normalize, report)
 
     n_generators = int(df.loc[df[CLF_TARGET_COL] != HUMAN_LABEL,
@@ -1152,7 +1128,7 @@ def main() -> None:
         report(f"  {out_dir / name}")
 
     summary.update({
-        "parquet": str(parquet_path), "feature": args.feature,
+        "parquet": str(parquet_path), "feature": feature_label,
         "normalize": args.normalize, "rows": int(len(df)),
         "dim": int(X.shape[1]), "by_generator": by_generator,
         "explained_variance_3": float(pca.explained_variance_ratio_[:3].sum()),
@@ -1164,7 +1140,7 @@ def main() -> None:
     # --- figures -----------------------------------------------------------
     if not args.no_plots:
         links = domain_links(groups)
-        title = (f"{parquet_path.stem} — {args.feature}"
+        title = (f"{parquet_path.stem} — {feature_label}"
                  + (f" ({args.normalize})" if args.normalize != "none" else ""))
         hovers = None
         for three_d in (False, True):
@@ -1193,6 +1169,50 @@ def main() -> None:
     stats_path = out_dir / "stats.txt"
     report(f"  {stats_path}")
     report.save(stats_path)
+    return summary
+
+
+def main() -> None:
+    args = parse_args()
+    report = Report()
+
+    parquet_path = (args.parquet if args.parquet.is_absolute()
+                    else BASE_DIR / args.parquet)
+    out_dir = args.out_dir or RESULTS_DIR / f"{parquet_path.stem}_{args.feature}"
+    if not out_dir.is_absolute():
+        out_dir = BASE_DIR / out_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    report.rule(f"analyse_domain_pca.py — {datetime.now():%Y-%m-%d %H:%M:%S}")
+    report(f"  Parquet : {parquet_path}")
+    report(f"  Feature : {args.feature}")
+    report(f"  Output  : {out_dir}")
+
+    df = load_parquet(parquet_path)
+    for col in (DOMAIN_COL, CLF_TARGET_COL):
+        if col not in df.columns:
+            raise SystemExit(
+                f"{parquet_path.name}: no {col!r} column. This script expects the "
+                "output of prepare/combine_domains.py."
+            )
+    if args.feature not in df.columns:
+        available = sorted(c for c in df.columns if c.startswith("emb_"))
+        raise SystemExit(f"{parquet_path.name}: no column {args.feature!r}. "
+                         f"Embeddings present: {available}")
+
+    df = drop_missing_rows(df, [args.feature, CLF_TARGET_COL])
+    if args.drop_classes:
+        df = df[~df[CLF_TARGET_COL].isin(args.drop_classes)].reset_index(drop=True)
+        report(f"  Dropped classes: {args.drop_classes}")
+    if args.sample and args.sample < len(df):
+        df = df.sample(args.sample, random_state=args.seed).reset_index(drop=True)
+        report(f"  Subsampled to {len(df)} rows (seed {args.seed})")
+    df = df.reset_index(drop=True)
+
+    X = np.asarray(np.vstack(df[args.feature].to_numpy()), dtype=np.float64)
+    report(f"  Rows    : {len(df)}   embedding dim: {X.shape[1]}")
+
+    analyse_corpus(df, X, args.feature, parquet_path, out_dir, report, args)
 
 
 if __name__ == "__main__":
