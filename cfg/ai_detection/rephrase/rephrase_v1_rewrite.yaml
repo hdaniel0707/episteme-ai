@@ -1,0 +1,89 @@
+# Prompt config 0916R — rephrase of the gpt56luna REWRITE (not the human text).
+#
+# rephrase_v1.yaml's "0908R" rephrases the HUMAN original. This config applies
+# the exact same system prompt and domain hints (copied verbatim below) to the
+# gpt-5.6-luna FULL-TEXT REWRITE of that same document instead — the row
+# labelled "gpt56luna:0701A" (ghostbuster) / "gpt56luna:0811A" (science) in
+# manugram_gb.parquet / manugram_sci.parquet, added into MG-Reph by
+# reph_add_rewrite.py. Its id is stamped into the resulting row's
+# `generated_by` as "gpt56luna:0916R" — a DIFFERENT id from "0908R" is
+# required even though the prompt text is identical, because the two runs
+# rephrase different source populations (human vs. gpt56luna-rewrite); reusing
+# "0908R" would silently merge two different classes under one label.
+#
+# THEREFORE: never edit this file in place once a corpus has been generated
+# from it. Copy it to a new id and point reph_rephrase_rewrite.py at that.
+#
+# Ids are <MMDD><letter>: the date the config was written, plus a letter.
+#
+# ===========================================================================
+# WHAT THIS ARM IS
+# ===========================================================================
+# Together with rephrase_v1.yaml's "0908R" rows, this completes MG-Reph's 2x2
+# at fixed model identity (gpt-5.6-luna):
+#
+#     human                <-> gpt56luna REWRITE   (full generation, Ghostbuster
+#                                                    protocol — never sees the
+#                                                    human text)
+#     gpt56luna REPHRASE   <-> gpt56luna REPHRASE   (this config — a
+#     of the human text        of the REWRITE        content-preserving edit
+#                                                    of the rewrite, not the
+#                                                    human original)
+#
+# "Moderate" is still the design point: aggressive enough that surface form
+# clearly changes, restrained enough that no new content is introduced and the
+# text is not effectively regenerated.
+
+id: "0916R"
+description: >
+  One moderate, domain-aware rephrase of each gpt-5.6-luna REWRITE text (the
+  Ghostbuster-protocol full generation, not the human original), by
+  gpt-5.6-luna. Same prompt as rephrase_v1.yaml's 0908R, applied to a
+  different source population, paired via the shared `id`.
+
+# Sent as the system message. The user message is the gpt56luna rewrite text
+# verbatim (not the human text).
+system_prompt: |
+  You are rephrasing an existing piece of writing. Rewrite it so that the
+  wording and sentence structure differ substantially from the original, while
+  preserving its meaning exactly.
+
+  Rules:
+  - Preserve every fact, claim, figure, name, date, citation and quotation, and
+    keep them in the same logical order.
+  - Do not add anything: no new information, examples, framing, or opinions.
+  - Do not remove anything: every point in the original must still be present.
+  - Do not change the genre, register, or point of view.
+  - Rephrase at the sentence and phrase level — replace vocabulary, recast
+    clauses, split or join sentences — but do not reorganise the piece or
+    substitute your own argument.
+  - Keep the length within about 15% of the original.
+  - Output only the rewritten text. No preamble, no notes, no markdown, no
+    headings, no labels.
+
+# Appended to the system prompt, chosen by the row's `domain`. Every domain
+# that appears in the corpus must have an entry here or the build stops.
+domain_hints:
+  essay: >
+    The text is a student's argumentative or analytical essay. Keep the thesis,
+    the sequence of arguments, and every supporting example exactly as they are.
+  reuter: >
+    The text is a news-wire article. Keep every reported fact, all attributions
+    and quotations, named sources, figures, and the dateline/lede style of a
+    news report.
+  wp: >
+    The text is a piece of short creative fiction written to a prompt. Keep the
+    plot, the characters, the sequence of events, the point of view and the
+    tone. Vary the prose, not the story.
+  computer_science: >
+    The text is the abstract of a computer-science paper. Keep the problem, the
+    method, the system or algorithm described, every quantitative result and
+    metric, and the stated contributions.
+  mathematics: >
+    The text is the abstract of a mathematics paper. Keep every definition,
+    theorem, hypothesis and result, and the precise logical statements. Do not
+    alter notation or the exact form of any claim.
+  sociology: >
+    The text is the abstract of a sociology paper. Keep the research question,
+    the data and method, every finding, the theoretical framing and all cited
+    concepts.
