@@ -122,11 +122,14 @@ def add_rewrite(fam: str, *, force: bool, dry_run: bool) -> int:
         print(f"{RED}nothing matched.{RESET}")
         return 1
 
+    # Match the target's existing field types exactly (e.g. large_string, not
+    # string) -- unify_schemas is strict about the Arrow string-width variant.
     matched = matched.append_column(
-        "source_family", pa.array([source_family] * n, pa.string())
+        "source_family",
+        pa.array([source_family] * n, tgt.schema.field("source_family").type),
     )
     for c in QC_COLS:
-        matched = matched.append_column(c, pa.nulls(n, pa.float64()))
+        matched = matched.append_column(c, pa.nulls(n, tgt.schema.field(c).type))
 
     unified = pa.unify_schemas([tgt.schema, matched.schema])
     combined = pa.concat_tables([_conform(tgt, unified), _conform(matched, unified)])
