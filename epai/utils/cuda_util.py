@@ -20,3 +20,7 @@ def check_cuda() -> bool:
     else:
         print("❌ CUDA is NOT available!")
         return False
+
+
+if __name__ == "__main__":
+    check_cuda()
