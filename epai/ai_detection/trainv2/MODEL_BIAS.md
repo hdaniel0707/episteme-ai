@@ -178,3 +178,99 @@ well-defined generator, `mg_den` may be a blend across families with no
 fixed recipe — a harder, more diffuse target than a single-generator
 fingerprint, and consistent with (though not proof of) the per-generator
 collapse pattern found in §2.
+
+---
+
+## 6. `mg_aisci` (MG-AI-Sci) OOD gap — dataset checked out clean; the gap is a
+real generalization failure of supervised probes, not a data problem
+
+Investigated 2026-09-12 after every trained detector variant plateaued at
+the same OOD ceiling on `mg_aisci` no matter what was tried. Two questions:
+is the split itself sound, and why is it so much harder than `gb_orig` /
+`mg_gb` / `mg_sci` for trained models specifically.
+
+**Dataset integrity — no problem found.**
+- `check_ai_scientist_overlap.py`'s guard already enforces zero shared
+  OpenAlex id / title / abstract between the Denario 80+80 and the 20
+  ai_scientist-added pairs, either direction, either class — re-verified,
+  still clean.
+- Domain is not confounded with label: every one of the 10 domains has equal
+  human/AI counts (e.g. `cosmology_astrophysics`: 17/17, `neuroscience`:
+  15/15). The `computer_science` domain (40 rows) is exactly the
+  ai_scientist addition (20 human OpenAlex CS abstracts + 20 AI: 6
+  cycleresearcher, 10 sakana, 3 sakanav2, 1 zochi); Denario's 9 domains never
+  include CS, so the two sources don't overlap there either.
+- No duplicate `uid`, no bad nulls.
+- The one real caveat: N=200 total, and the AI class is lopsided (80
+  denario, 10 sakana, 6 cycleresearcher, 3 sakanav2, 1 zochi) — fine for a
+  pooled 100-vs-100 AUROC, too thin to claim much per-minor-generator.
+
+**Is the human/AI signal even there?** Yes, strongly. 5-fold in-corpus CV
+logistic regression on the *same* embeddings already in the parquet, trained
+and evaluated only within `mg_aisci` (no cross-domain transfer at all):
+
+| embedding | in-corpus CV AUROC |
+|---|---|
+| emb_specter2 | 0.994 |
+| emb_roberta | 0.990 |
+| emb_luar_crud | 0.987 |
+| emb_styledistance | 0.964 |
+
+So the discriminative content is sitting right there in the same feature
+spaces the trained pipeline already uses — this is not a hard-to-detect or
+mislabeled corpus.
+
+**So why does every trained variant fail?** Because what's trained is a
+decision boundary fit to `mg_gb`+`mg_sci`'s *specific* four generators
+(gemma431b/gpt56luna/gptoss120b/llama3370b) writing in three genres
+(essay/wp/reuter prose, or CS/math/sociology short-answer style). `mg_aisci`
+swaps both axes at once: genre (abstracts from agentic pipelines that ran a
+real analysis — Denario, Sakana AI-Scientist, CycleResearcher, Zochi — over
+domains like cosmology, neuroscience, planetary science, medicine that never
+appear in training) and generator identity (Denario's underlying model is
+itself undisclosed/mixed per §5; the other three are never-seen-in-training
+systems). Every trained architecture tried lands in the same narrow band —
+this is a ceiling, not a tuning problem:
+
+| detector | OOD AUROC | OOD TPR@1%FPR |
+|---|---|---|
+| roberta·logistic | 0.903 | 0.315 |
+| roberta+style+sci·stack(avg) | 0.907 | 0.311 |
+| roberta+style+sci·stack(LR) | 0.917 | 0.316 |
+| roberta+style+sci·fusion(PCA) | 0.892 | 0.313 |
+| roberta+style+sci·gated(N) | 0.925 | 0.397 |
+| roberta+style+sci·attention | 0.882 | 0.250 |
+
+(vs. 0.9997–0.9999 AUROC and ~0.999 TPR@1%FPR in-domain for every one of
+these — the collapse is concentrated in the low-FPR tail even more than in
+AUROC, the same AUROC/TPR-at-low-FPR divergence shape documented for RADAR
+in §4: ranking degrades some, but the extreme-confidence tail — where
+1%-FPR lives — degrades much more.)
+
+**The zero-shot LLM judge does not show this collapse.** `judge/gpt56luna`
+and `judge/gpt56luna_wlp` (logprob-weighted) hold up close to their in-domain
+numbers OOD:
+
+| detector | gb_orig | mg_gb | mg_sci | mg_aisci (OOD) |
+|---|---|---|---|---|
+| judge/gpt56luna | 0.990 | 0.975 | 0.992 | 0.940 |
+| judge/gpt56luna_wlp | 0.989 | 0.968 | 0.984 | **0.958** |
+
+And it doesn't secretly collapse on the 80% of the AI class with an
+undisclosed generator either — AUROC is 0.961 on human-vs-Denario alone and
+0.949 on human-vs-{sakana,sakanav2,cycleresearcher,zochi} alone, essentially
+the same. It generalizes because it's reasoning about content/genre-
+appropriate cues rather than fitting a boundary specific to four training
+generators.
+
+**Takeaway for the article:** `mg_aisci` is a legitimate, clean OOD holdout
+— the gap is a real finding, not an artifact to explain away. The honest
+story is: supervised probes overfit to generator/genre-specific surface
+correlates and their decision boundary does not transfer to a genuinely new
+genre + new generator family, even though the same embeddings retain the
+human/AI signal in-domain-for-that-new-corpus (0.96–0.99 in-corpus CV). The
+zero-shot logprob-weighted judge (`gpt56luna_wlp`) is the one detector type
+that transfers, which is the actual result to report, not a fallback taken
+for lack of time. Further architecture/feature tuning of the supervised
+probes on the same four training generators is not expected to close this
+gap — it is a distribution-shift ceiling, not an undertrained model.
