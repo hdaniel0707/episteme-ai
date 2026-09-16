@@ -61,8 +61,8 @@ uv run python epai/ai_detection/score/capture_judge_logprobs.py --model gemma4-3
 uv run python epai/ai_detection/score/capture_judge_logprobs.py --model gemma4-31b --limit 40 --yes
 uv run python epai/ai_detection/score/capture_judge_logprobs.py --model gpt56luna  --limit 40 --yes
 
-# or one whole small file -- MG-Den is 160 rows, trivial cost:
-uv run python epai/ai_detection/score/capture_judge_logprobs.py --model gpt56luna --only manugram_den --yes
+# or one whole small file -- MG-AI-Sci is 200 rows, trivial cost:
+uv run python epai/ai_detection/score/capture_judge_logprobs.py --model gpt56luna --only manugram_aiscientist --yes
 ```
 
 Each run prints a per-(file, mode) summary: rows captured, **mean window size**
@@ -79,7 +79,7 @@ To inspect a smoke sidecar directly:
 
 ```bash
 uv run python epai/ai_detection/score/merge_captured_logprobs.py \
-    --only manugram_den --dry-run          # coverage + column report, writes nothing
+    --only manugram_aiscientist --dry-run  # coverage + column report, writes nothing
 ```
 
 ## 2. Full run

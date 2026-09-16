@@ -9,13 +9,55 @@ plain **P(human)** score columns:
 | `llm_judge_logprobs_<model>_v3_words` | `llm_judge_score_<model>_v3_wlp` | words, **contrast** |
 | `llm_judge_logprobs_<model>_v3_scale` | `llm_judge_score_<model>_v3_slp` | scale, **expected value** |
 | `llm_judge_logprobs_<model>_v3_scale` | `llm_judge_score_<model>_v3_sbc` | scale, **contrast** |
+| `llm_judge_logprobs_<model>_v3_words` | `llm_judge_score_<model>_v3_logjudge_t0000` | words, **contrast** (= `wlp`) |
+| `llm_judge_logprobs_<model>_v3_scale` | `llm_judge_score_<model>_v3_logjudge_t0001` | scale, **contrast**, full ladder |
 
-`<model>` ∈ `gemma4_31b`, `gpt56luna` → **6 columns per parquet**, across the 4
+`<model>` ∈ `gemma4_31b`, `gpt56luna` → **10 columns per parquet**, across the 4
 core splits. All are P(human): **1.0 = human, 0.0 = machine**,
 `machine_is_high=False`, same `llm_judge_score_` prefix as every other judge, so
 `run_zeroshot_performance.py`, `calibrate_judge_baseline.py`,
 `run_judge_youden_calibration.py`, `run_judge_by_generator.py` pick them up on
 re-run with no config change (labels `gemma4_31b_wlp`, `gpt56luna_sbc`, …).
+
+## `logjudge_<paramid>` -- the naming convention for LogJudge columns
+
+Every column that instantiates the paper's general LogJudge formula (not
+`wlp`/`slp`/`sbc`, which predate this and are kept unchanged) gets the suffix
+`_v3_logjudge_<paramid>`, `<paramid>` a sequential id (`t0000`, `t0001`, ...)
+assigned once, permanently, the moment a (prompt, lambda, v) configuration
+becomes a real column -- ids are never reused or renumbered, and exploring a
+config in `search_logjudge_params.py`'s random search does not by itself
+spend one; only promoting a trial to a permanent column does. The `logjudge_`
+tag also disambiguates these from the *other*, differently-computed
+`llm_judge_score_*` columns on the same parquets (`sonnet5`, `gptoss_120b`,
+`llama33_70b`, `qwen3_14b`, the `_base` columns, …), which are not LogJudge at
+all.
+
+**`epai/ai_detection/score/logjudge_params.csv` is the registry** -- the only
+place a paramid's exact configuration is decoded from: `prompt`,
+`lambda_family`, `eps` (if the threshold readout), and `v_1..v_5` (positional
+values for the labels in scheme order, so both the 2-label and 5-label schemes
+fit one schema), plus a free-text `note`.
+
+The paper's two reported variants are the first two entries:
+
+- **`t0000`** (paper's `ord2`) -- `L = {human, machine}`, `v = (1, 0)`. This is
+  `wlp` under the new convention; same formula, same input, added as its own
+  column so the paper's variant resolves directly to a parquet column instead
+  of requiring a `t0000 == wlp` footnote everywhere downstream.
+- **`t0001`** (paper's `ord5`) -- `L = {A,B,C,D,E}`, `v = (1,.75,.5,.25,0)`.
+  This is a *new* formula, distinct from both existing scale-prompt scores:
+  unlike `slp` it never renormalises by `P(x)` (so no clumping at exact letter
+  values), and unlike `sbc` it keeps all five letters and their ordinal
+  weights instead of collapsing to a binary `{A,B}` vs `{D,E}` split. It is
+  exactly `wlp`'s formula applied to the five-letter ladder instead of the
+  two-word one.
+
+`t0000` vs `t0001` is therefore the paper's controlled comparison: same
+readout, only the scheme's resolution changes. `wlp` / `slp` / `sbc` are left
+in place unchanged -- `slp` and `sbc` are the earlier (readout, prompt)
+exploration this ablation grew out of (see "Why `sbc` exists" below), not
+superseded data.
 
 ## The window
 
@@ -147,7 +189,7 @@ tie-free check — that is for the parsed `llm_judge_score_<model>_v3_lp` column
 .venv/bin/python epai/ai_detection/score/score_logprob_windows.py
 
 # one file / a scratch copy / recompute
-.venv/bin/python epai/ai_detection/score/score_logprob_windows.py --only manugram_den
+.venv/bin/python epai/ai_detection/score/score_logprob_windows.py --only manugram_aiscientist
 .venv/bin/python epai/ai_detection/score/score_logprob_windows.py --out-dir data/parquet/tmp/scored
 .venv/bin/python epai/ai_detection/score/score_logprob_windows.py --overwrite
 ```

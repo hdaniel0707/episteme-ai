@@ -14,7 +14,7 @@ refuses if a sidecar ``uid`` is missing from the real file, refuses below
     uv run python epai/ai_detection/score/merge_captured_judge_scores.py --dry-run
     uv run python epai/ai_detection/score/merge_captured_judge_scores.py
     uv run python epai/ai_detection/score/merge_captured_judge_scores.py \
-        --workspaces data/parquet/tmp/judge_scores/gpt56luna --only manugram_den
+        --workspaces data/parquet/tmp/judge_scores/gpt56luna --only manugram_aiscientist
     uv run python epai/ai_detection/score/merge_captured_judge_scores.py --out-dir data/parquet/tmp/merged
 """
 
@@ -31,7 +31,7 @@ from epai.utils.parquet_utils import load_parquet, save_parquet
 BASE_DIR = Path(__file__).resolve().parents[3]
 PARQUET_DIR = BASE_DIR / "data" / "parquet"
 CAPTURE_DIR = PARQUET_DIR / "tmp" / "judge_scores"
-CORE_STEMS = ["ghostbuster_orig", "manugram_gb", "manugram_sci", "manugram_den", "ai_scientist_hc"]
+CORE_STEMS = ["ghostbuster_orig", "manugram_gb", "manugram_sci", "manugram_aiscientist"]
 KEY_COL = "uid"
 PREFIX = "llm_judge_score_"
 

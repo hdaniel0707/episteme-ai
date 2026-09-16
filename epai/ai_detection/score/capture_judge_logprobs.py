@@ -35,7 +35,7 @@ gpt56luna -> OpenAI Responses API ``reasoning={"effort":"none"}`` +
 
     uv run python epai/ai_detection/score/capture_judge_logprobs.py --model gemma4-31b --dry-run
     uv run python epai/ai_detection/score/capture_judge_logprobs.py --model gemma4-31b --yes
-    uv run python epai/ai_detection/score/capture_judge_logprobs.py --model gpt56luna --only manugram_den --limit 60 --yes
+    uv run python epai/ai_detection/score/capture_judge_logprobs.py --model gpt56luna --only manugram_aiscientist --limit 60 --yes
     # then, once both models are done:
     uv run python epai/ai_detection/score/merge_captured_logprobs.py
 """
@@ -72,7 +72,7 @@ BASE_DIR = Path(__file__).resolve().parents[3]
 PARQUET_DIR = BASE_DIR / "data" / "parquet"
 CAPTURE_DIR = PARQUET_DIR / "tmp"  # sidecars live here; data/ is gitignored
 
-CORE_STEMS = ["ghostbuster_orig", "manugram_gb", "manugram_sci", "manugram_den", "ai_scientist_hc"]
+CORE_STEMS = ["ghostbuster_orig", "manugram_gb", "manugram_sci", "manugram_aiscientist"]
 MODES = ("words", "scale")
 PROMPT_ID = "v3"
 TOP_N = 20

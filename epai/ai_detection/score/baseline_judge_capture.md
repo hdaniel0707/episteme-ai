@@ -60,8 +60,8 @@ uv run python epai/ai_detection/score/capture_baseline_judge.py --model gemma4-3
 uv run python epai/ai_detection/score/capture_baseline_judge.py --model gemma4-31b --limit 40 --yes
 uv run python epai/ai_detection/score/capture_baseline_judge.py --model gpt56luna  --limit 40 --yes
 
-# or one whole small file — MG-Den is 160 rows, trivial cost:
-uv run python epai/ai_detection/score/capture_baseline_judge.py --model gpt56luna --only manugram_den --yes
+# or one whole small file — MG-AI-Sci is 200 rows, trivial cost:
+uv run python epai/ai_detection/score/capture_baseline_judge.py --model gpt56luna --only manugram_aiscientist --yes
 ```
 
 Each file prints a summary: rows scored, mean / median, **distinct values and

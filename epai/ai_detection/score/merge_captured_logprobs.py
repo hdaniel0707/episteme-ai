@@ -13,7 +13,7 @@ coverage is suspiciously low (``--min-coverage``).
     uv run python epai/ai_detection/score/merge_captured_logprobs.py --dry-run
     uv run python epai/ai_detection/score/merge_captured_logprobs.py
     uv run python epai/ai_detection/score/merge_captured_logprobs.py \
-        --workspaces data/parquet/tmp/gpt56luna --only manugram_den
+        --workspaces data/parquet/tmp/gpt56luna --only manugram_aiscientist
     uv run python epai/ai_detection/score/merge_captured_logprobs.py --out-dir data/parquet/tmp/merged
 """
 
@@ -30,7 +30,7 @@ from epai.utils.parquet_utils import load_parquet, save_parquet
 BASE_DIR = Path(__file__).resolve().parents[3]
 PARQUET_DIR = BASE_DIR / "data" / "parquet"
 CAPTURE_DIR = PARQUET_DIR / "tmp"
-CORE_STEMS = ["ghostbuster_orig", "manugram_gb", "manugram_sci", "manugram_den", "ai_scientist_hc"]
+CORE_STEMS = ["ghostbuster_orig", "manugram_gb", "manugram_sci", "manugram_aiscientist"]
 KEY_COL = "uid"
 PREFIX = "llm_judge_logprobs_"
 

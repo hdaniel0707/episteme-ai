@@ -11,11 +11,30 @@ This reads a detection score off each window and writes it as a plain scalar
 column, so the trainv2 judge comparison picks it up by the ``llm_judge_score_``
 prefix like every other judge::
 
-    llm_judge_score_<model>_v3_wlp    from _words   words, contrast readout
-    llm_judge_score_<model>_v3_slp    from _scale   scale, expected-value readout
-    llm_judge_score_<model>_v3_sbc    from _scale   scale, contrast readout
+    llm_judge_score_<model>_v3_wlp             from _words   words, contrast
+    llm_judge_score_<model>_v3_slp             from _scale   scale, expected value
+    llm_judge_score_<model>_v3_sbc             from _scale   scale, contrast
+    llm_judge_score_<model>_v3_logjudge_t0000  from _words   paper's ord2
+    llm_judge_score_<model>_v3_logjudge_t0001  from _scale   paper's ord5
 
 All scores are **P(human)**: 1.0 human, 0.0 machine, ``machine_is_high=False``.
+
+The ``logjudge_<paramid>`` suffix is the naming convention for every column
+that instantiates the paper's general LogJudge formula (Section
+``method_logjudge`` / Appendix ``logjudge_general``): a sequential id
+(``t0000``, ``t0001``, ...) assigned once, permanently, the moment a
+particular (prompt, lambda, v) configuration becomes a real column -- never
+reused, never renumbered. ``epai/ai_detection/score/logjudge_params.csv`` is
+the registry: one row per paramid, decoding it back to its exact prompt,
+lambda family, floor (if any), and value function. ``t0000``/``t0001`` are the
+paper's two reported variants, ``ord2`` and ``ord5`` (see the registry's
+``note`` column) -- both instances of the general contrast readout
+s(x) = sum_l p_l(x)*v(l) + (1-P(x))*0.5, with lambda(x)=P(x), differing only
+in the answer scheme's label set L. A search over further (lambda, v)
+choices (``search_logjudge_params.py``) only assigns a paramid -- and only
+writes a real column -- for a trial someone decides to promote; exploring a
+trial does not by itself spend an id. ``wlp`` / ``slp`` / ``sbc`` predate this
+convention and are kept unchanged for continuity with earlier results.
 
 Formulation -- see ``score_logprob_windows.md`` for the derivation:
 
@@ -41,6 +60,23 @@ Formulation -- see ``score_logprob_windows.md`` for the derivation:
         functional form as ``wlp``, so ``sbc`` vs ``wlp`` isolates the prompt
         (5-level rating vs binary) from the scoring.
 
+  t0000 (ord2)  identical to ``wlp`` -- the paper's binary instance
+        (L={human, machine}, v=(1,0)) of the same general contrast formula.
+        A separate column only so the paper's variant names resolve
+        directly to a parquet column.
+
+  t0001 (ord5)  the paper's ordinal instance (L={A,B,C,D,E},
+        v=(1,.75,.5,.25,0)) of the *same* contrast formula as
+        ``wlp``/``t0000``, applied to all five letters without
+        renormalising or collapsing any of them:
+            s = p_A*1 + p_B*.75 + p_C*.5 + p_D*.25 + p_E*0 + (1 - P)*0.5,
+            P = p_A + p_B + p_C + p_D + p_E
+        Unlike ``slp`` this never divides by P (no renormalisation, no
+        clumping at exact letter values); unlike ``sbc`` it keeps all five
+        letters and their ordinal weights instead of collapsing to a binary
+        split. Together, ``t0000`` vs ``t0001`` isolates the answer scheme's
+        resolution while holding the readout fixed -- see the paper.
+
 Edge cases, both modes:
 
   * empty window (capture failed)                         -> Null  (not 0.5)
@@ -50,7 +86,7 @@ Edge cases, both modes:
 
     .venv/bin/python epai/ai_detection/score/score_logprob_windows.py --dry-run
     .venv/bin/python epai/ai_detection/score/score_logprob_windows.py
-    .venv/bin/python epai/ai_detection/score/score_logprob_windows.py --only manugram_den
+    .venv/bin/python epai/ai_detection/score/score_logprob_windows.py --only manugram_aiscientist
     .venv/bin/python epai/ai_detection/score/score_logprob_windows.py --out-dir data/parquet/tmp/scored
 
 Deterministic, no API, one read + write per file (``--out-dir`` to divert).
@@ -70,7 +106,7 @@ from epai.utils.parquet_utils import load_parquet, save_parquet
 
 BASE_DIR = Path(__file__).resolve().parents[3]
 PARQUET_DIR = BASE_DIR / "data" / "parquet"
-CORE_STEMS = ["ghostbuster_orig", "manugram_gb", "manugram_sci", "manugram_den", "ai_scientist_hc"]
+CORE_STEMS = ["ghostbuster_orig", "manugram_gb", "manugram_sci", "manugram_aiscientist"]
 
 IN_PREFIX = "llm_judge_logprobs_"
 MODE_SUFFIX = {"_v3_words": "words", "_v3_scale": "scale"}
@@ -149,12 +185,35 @@ def score_scale_contrast(window) -> float | None:
     return _contrast(p["A"] + p["B"], p["D"] + p["E"])
 
 
-#: (input mode, output column suffix, scorer). A ``_scale`` window feeds two
-#: output columns.
+def score_scale_contrast_full(window) -> float | None:
+    """``t0001`` (paper's ``ord5``): the general contrast readout
+    (Eq. logjudge_contrast, lambda(x)=P(x)) applied to the full A..E ladder --
+    the un-renormalised weighted sum of all five letters' raw mass plus a
+    residual*0.5 term, same functional form as ``wlp``/``t0000`` and ``sbc``,
+    just without collapsing the ladder to a binary split first. Paired with
+    ``t0000`` (=``wlp``) under the same readout, it isolates the answer
+    scheme's resolution alone. See ``logjudge_params.csv`` for the registry
+    entry."""
+    p = _answer_probs(window, "scale")
+    if p is None:
+        return None
+    total = sum(p.values())
+    if total < MIN_ANSWER_MASS:
+        return 0.5
+    s = sum(p[k] * SCALE_VALUES[k] for k in _LETTERS) + (1.0 - total) * 0.5
+    return float(np.clip(s, 0.0, 1.0))
+
+
+#: (input mode, output column suffix, scorer). A ``_scale`` window feeds three
+#: output columns; a ``_words`` window feeds two. ``_v3_logjudge_<paramid>``
+#: suffixes are registered in ``logjudge_params.csv`` -- add a row there
+#: before adding a new one here.
 SCORERS: tuple[tuple[str, str, "callable"], ...] = (
     ("words", "_v3_wlp", score_words),
+    ("words", "_v3_logjudge_t0000", score_words),
     ("scale", "_v3_slp", score_scale_ev),
     ("scale", "_v3_sbc", score_scale_contrast),
+    ("scale", "_v3_logjudge_t0001", score_scale_contrast_full),
 )
 
 
@@ -240,7 +299,8 @@ def main() -> None:
     ap.add_argument("--out-dir", type=Path, default=None,
                     help="write scored <stem>.parquet here instead of in place")
     ap.add_argument("--overwrite", action="store_true",
-                    help="replace an llm_judge_score_*_{wlp,slp,sbc} column that exists")
+                    help="replace an llm_judge_score_*_{wlp,slp,sbc,"
+                         "logjudge_t0000,logjudge_t0001} column that exists")
     ap.add_argument("--dry-run", action="store_true",
                     help="compute and print the score distributions, write nothing")
     args = ap.parse_args()
