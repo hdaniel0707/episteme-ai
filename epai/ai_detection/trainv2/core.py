@@ -140,16 +140,22 @@ def rows_at_fpr(rows: list[dict], fpr: float) -> list[dict]:
     return [r for r in rows if float(r["fpr"]) == fpr]
 
 
-def goodness(auroc_val: float, tpr: float, how: str = "hmean") -> float:
-    """Fold ranking + operating point into ``[0, 1]``. ``G = 2*AUROC - 1``
-    (Gini, clipped at 0), ``T = TPR`` (clipped at 0), combined by ``how``
-    (``hmean`` weakest-link default, ``gmean``, or ``amean``).
+def goodness(auroc_val: float, tpr: float, how: str = "hmean", alpha: float = 0.01) -> float:
+    """AT-HM: fold ranking + operating point into ``[0, 1]``.
+
+    ``G = max(0, 2*AUROC - 1)`` (Gini) and ``T = max(0, (TPR - alpha) / (1 -
+    alpha))`` are both rescaled so a chance detector scores 0 on each axis (its
+    ROC is the diagonal TPR = FPR, so it attains TPR = alpha at the alpha-FPR
+    operating point) and a perfect detector scores 1. Combined by ``how``
+    (``hmean`` weakest-link default, ``gmean``, or ``amean``). ``alpha`` is the
+    FPR level ``tpr`` was measured at -- 0.01 for the paper's headline AT-HM;
+    pass the sweep's own level for a goodness reading at another FPR grid point.
 
     Shared by the goodness-bar figure (:func:`epai.ai_detection.trainv2.plots.
     goodness_bars`) and the trained runners, which compute it per seed / fold so
     the bar can carry a real SD."""
     g = max(0.0, 2.0 * float(auroc_val) - 1.0)
-    t = max(0.0, float(tpr))
+    t = max(0.0, (float(tpr) - alpha) / (1.0 - alpha))
     if how == "amean":
         return (g + t) / 2.0
     if how == "gmean":

@@ -90,7 +90,7 @@ DISPLAY: dict[str, str] = {
     "mg_reph_gb": "MG-Reph-GB",
     "mg_aisci": "MG-AI-Sci",
     "all": "MG-All",
-    "mean": "mean",
+    "mean": "Mean",
 }
 
 #: short key -> matplotlib marker, for any figure that encodes the split as a

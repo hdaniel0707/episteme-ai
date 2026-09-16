@@ -181,9 +181,11 @@ def emb_by_split(summary_rows: list[dict], meta: dict, path: Path) -> None:
 # Zero-shot detector performance (run_zeroshot_performance.py /
 # run_best_zeroshot_performance.py). AUROC vs. oracle-TPR@1%FPR scatter:
 # colour = detector (keyed by ``key`` -- 'version' within a family, 'detector'
-# across families), marker shape = MANUGRAM split (splits.MARKER), a bold filled
-# circle = that detector's mean across splits. ``rows`` is the pre-filtered
-# subset to draw; it includes the split=="mean" rows.
+# across families), marker shape = MANUGRAM split (splits.MARKER), a bold
+# marker = that detector's mean across splits (filled = a ``_wlp``-style
+# variant, hollow/same hue = its base). A grey Greys contourf/contour field
+# behind everything shows the AT-HM region each point falls in. ``rows`` is
+# the pre-filtered subset to draw; it includes the split=="mean" rows.
 # ---------------------------------------------------------------------------
 
 
@@ -213,12 +215,29 @@ def _f(v):
     return v if np.isfinite(v) else None
 
 
+def _goodness_field(auroc, tpr, alpha: float = 0.01, how: str = "hmean"):
+    """Vectorised twin of ``core.goodness`` for a background grid (arrays, not
+    a single point) -- same G/T rescaling, same combine rule."""
+    g = np.clip(2.0 * auroc - 1.0, 0.0, None)
+    t = np.clip((tpr - alpha) / (1.0 - alpha), 0.0, None)
+    if how == "amean":
+        return (g + t) / 2.0
+    if how == "gmean":
+        return np.sqrt(g * t)
+    denom = g + t
+    with np.errstate(invalid="ignore", divide="ignore"):
+        hm = 2.0 * g * t / denom
+    return np.where(denom > 0, hm, 0.0)
+
+
 def _variant_palette(names, suffix: str = "_wlp"):
-    """Colour rule shared by the AUROC-vs-TPR scatters: a detector ``<x><suffix>``
-    is a readout variant of ``<x>`` -- the pair shares a hue, and the *base*
-    draws one shade darker so the variant reads as the lighter twin. Returns
-    ``(base_of, dcol)`` where ``base_of[variant] = base`` and ``dcol(name)`` is
-    that name's display colour."""
+    """Colour rule shared by :func:`denario_scatter` and :func:`goodness_bars`:
+    a detector ``<x><suffix>`` is a readout variant of ``<x>`` -- the pair
+    shares a hue, and the *base* draws one shade darker so the variant reads
+    as the lighter twin. Returns ``(base_of, dcol)`` where ``base_of[variant]
+    = base`` and ``dcol(name)`` is that name's display colour. (The main
+    AUROC-vs-TPR scatter, :func:`zeroshot_scatter`, uses the hollow-base
+    scheme below instead.)"""
     base_of = {n: n[: -len(suffix)] for n in names
                if n.endswith(suffix) and n[: -len(suffix)] in names}
     paired_base = set(base_of.values())
@@ -235,9 +254,28 @@ def _variant_palette(names, suffix: str = "_wlp"):
     return base_of, dcol
 
 
+def _variant_palette_hollow(names, suffix: str = "_wlp"):
+    """Colour rule for :func:`zeroshot_scatter`: like :func:`_variant_palette`,
+    a detector ``<x><suffix>`` shares a hue with its base ``<x>``, but the
+    base keeps that *same* hue instead of a darker shade and is drawn hollow
+    (unfilled) instead -- "same colour, filled vs. outline" reads more
+    clearly than "two adjacent but different colours" once there are several
+    such pairs on one plot. Returns ``(base_of, paired_base, hue)``."""
+    base_of = {n: n[: -len(suffix)] for n in names
+               if n.endswith(suffix) and n[: -len(suffix)] in names}
+    paired_base = set(base_of.values())
+    hue: dict[str, str] = {}
+    for v in names:
+        if v not in base_of:
+            hue[v] = _PALETTE[len(hue) % len(_PALETTE)]
+    for v, b in base_of.items():
+        hue[v] = hue[b]
+    return base_of, paired_base, hue
+
+
 def zeroshot_scatter(
     rows: list[dict], meta: dict, path: Path, *, key: str = "version", title: str = "",
-    variant_suffix: str = "_wlp",
+    variant_suffix: str = "_wlp", figsize: tuple[float, float] = (9.6, 4.6),
 ) -> None:
     from .splits import PLOT_EXCLUDE
     from .splits import display as _sd
@@ -251,16 +289,15 @@ def zeroshot_scatter(
 
     # A ``variant_suffix`` detector is a readout variant of its base (default
     # ``_wlp``, a judge's logprob-window score; ``run_dr_transfer.py`` passes
-    # ``_dr`` for its domain-randomized twin): shared hue, base a shade darker,
-    # the two means joined by a connector. Every detector draws as a filled
-    # circle -- trained and zero-shot alike -- distinguished only by colour +
-    # the seed-SD error bar (trained rows carry one).
-    base_of, _dcol = _variant_palette(names, suffix=variant_suffix)
+    # ``_dr`` for its domain-randomized twin): shared hue, the two means
+    # joined by a connector. The variant draws as a filled circle; its base
+    # draws hollow in the same hue (see :func:`_variant_palette_hollow`).
+    base_of, paired_base, hue = _variant_palette_hollow(names, suffix=variant_suffix)
 
     marker = {s: _split_marker(s) for s in splits}
     fpr = meta["fpr"]
 
-    fig, ax = plt.subplots(figsize=(7.8, 5.8))
+    fig, ax = plt.subplots(figsize=figsize)
     ax.set_facecolor(_SURFACE)
     for spine in ("top", "right"):
         ax.spines[spine].set_visible(False)
@@ -283,14 +320,18 @@ def zeroshot_scatter(
         return (xe if np.isfinite(xe) else None, ye if np.isfinite(ye) else None)
 
     # Light per-split points: bare markers, no error bars, no labels -- the
-    # legend carries every name.
+    # legend carries every name. A paired base draws hollow, same hue as its
+    # variant, at the same size/edge-weight as a filled point.
     for r in rows:
         if r["split"] == "mean" or not np.isfinite(r["tpr_at_fpr"]):
             continue
+        hollow = r[key] in paired_base
+        col = hue[r[key]]
         ax.scatter([r["auroc"]], [r["tpr_at_fpr"]], s=34,
                    marker=marker.get(r["split"], "P"),
-                   color=_tint(_dcol(r[key])), edgecolors="#6a6a6a", lw=0.6,
-                   zorder=3)
+                   facecolors="none" if hollow else _tint(col),
+                   edgecolors=_tint(col, 0.55) if hollow else "#6a6a6a",
+                   linewidths=0.6, zorder=3)
 
     means = [(v, next((r for r in rows if r[key] == v and r["split"] == "mean"), None))
              for v in names]
@@ -301,43 +342,79 @@ def zeroshot_scatter(
     for v, b in base_of.items():
         if v in mean_xy and b in mean_xy:
             (xv, yv), (xb, yb) = mean_xy[v], mean_xy[b]
-            ax.plot([xb, xv], [yb, yv], color=_dcol(b), lw=1.1, alpha=0.6,
+            ax.plot([xb, xv], [yb, yv], color=hue[b], lw=1.1, alpha=0.6,
                     zorder=4)
 
     for v, m in means:
         xe, ye = _err(m)
+        hollow = v in paired_base
         ax.errorbar([m["auroc"]], [m["tpr_at_fpr"]], xerr=xe, yerr=ye,
-                    fmt="o", ms=7, mfc=_dcol(v), mec="#222222", mew=1.0,
+                    fmt="o", ms=7, mfc="none" if hollow else hue[v],
+                    mec=hue[v] if hollow else "#222222", mew=1.0,
                     ecolor="#222222", elinewidth=1.0, capsize=2.0, zorder=5)
 
     aurocs = [r["auroc"] for r in rows if np.isfinite(r["auroc"])]
     x_lo = min(0.45, (min(aurocs) - 0.03) if aurocs else 0.45)
-    ax.set_xlabel("AUROC (machine = positive)", fontsize=9, color=_INK)
-    ax.set_ylabel(f"oracle TPR @ {fpr * 100:g}% FPR", fontsize=9, color=_INK)
+    ax.set_xlabel("AUROC", fontsize=9, color=_INK)
+    ax.set_ylabel(f"TPR@{fpr * 100:g}%FPR", fontsize=9, color=_INK)
     ax.set_xlim(x_lo, 1.02)
     ax.set_ylim(-0.04, 1.04)
+
+    # AT-HM background field: shows which region of (AUROC, TPR) space each
+    # point's combined score falls in, so the trade-off reads directly off the
+    # plot rather than only through the separate goodness bar chart. Drawn
+    # deep behind everything else (points, chance cross, grid).
+    # Capped at 1.0, not the axis's padded 1.02/1.04 -- AUROC and TPR can't
+    # exceed 1, so the field simply doesn't exist past that edge (the sliver
+    # between 1.0 and the axis edge stays blank rather than showing a flat,
+    # clipped plateau).
+    gx = np.linspace(x_lo, 1.0, 200)
+    gy = np.linspace(-0.04, 1.0, 200)
+    GX, GY = np.meshgrid(gx, gy)
+    GZ = _goodness_field(GX, GY)
+    ax.contourf(GX, GY, GZ, levels=np.linspace(0, 1, 11), cmap="Greys",
+                alpha=0.30, zorder=-5)
+    cs = ax.contour(GX, GY, GZ, levels=[0.2, 0.4, 0.6, 0.8], colors="#8a8a8a",
+                     linewidths=0.6, alpha=0.8, zorder=-4)
+    ax.clabel(cs, fmt=lambda v: f"{v:.1f}", fontsize=6.5, colors="#6a6a6a",
+              inline=True)
+
     ax.grid(True, lw=0.4, alpha=0.4)
     ax.tick_params(labelsize=8, colors=_MUTED)
 
-    # Colour key: one entry per detector, in name order so a base and its _wlp
-    # variant land next to each other (base darker, variant plain hue).
-    handles = [plt.Line2D([], [], marker="o", ls="", ms=7, color=_dcol(v),
-                          label=v) for v in names]
+    # Colour key: sorted by mean AT-HM (descending) with the value printed, so
+    # the legend order matches the goodness bar chart's ranking; a base and
+    # its _wlp variant no longer sit next to each other, but the combined
+    # score is now the thing being read off, not the pairing.
+    def _at_hm(v: str) -> float | None:
+        xy = mean_xy.get(v)
+        return _goodness(*xy, "hmean") if xy is not None else None
+
+    ranked = sorted(names, key=lambda v: (_at_hm(v) is None, -(_at_hm(v) or 0.0)))
+    handles = []
+    for v in ranked:
+        hollow = v in paired_base
+        s = _at_hm(v)
+        label = f"{v} — AT-HM {s:.2f}" if s is not None else v
+        handles.append(plt.Line2D(
+            [], [], marker="o", ls="", ms=7,
+            mfc="none" if hollow else hue[v],
+            mec=hue[v] if hollow else "#222222", mew=1.0, label=label))
     handles.append(plt.Line2D([], [], ls="", label=""))
     handles += [plt.Line2D([], [], marker=marker[s], ls="", ms=7,
                            color="#8a8a8a", label=_sd(s)) for s in splits]
     handles.append(plt.Line2D([], [], marker="x", ls="", color="#b5495b",
                               label=f"chance (0.5, {fpr * 100:g}%)"))
-    ax.legend(handles=handles, fontsize=8, loc="upper left",
-              bbox_to_anchor=(1.01, 1.0), framealpha=0.9, borderaxespad=0.0,
-              title="● = mean across splits\nshape = split")
+    legend = ax.legend(
+        handles=handles, fontsize=8, loc="upper left",
+        bbox_to_anchor=(1.01, 1.0), framealpha=0.9, borderaxespad=0.0,
+    )
 
-    ax.set_title(title or "zero-shot AUROC vs. oracle TPR@"
-                 f"{fpr * 100:g}%FPR across the MANUGRAM splits",
-                 fontsize=10.5, color=_INK)
-    fig.tight_layout()
+    if title:
+        ax.set_title(title, fontsize=10.5, color=_INK)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=150, facecolor="white", bbox_inches="tight")
+    fig.savefig(path, dpi=150, facecolor="white", bbox_inches="tight",
+                bbox_extra_artists=(legend,))
     plt.close(fig)
     print(f"wrote {path}")
 
@@ -570,7 +647,7 @@ def goodness_bars(
     ax.set_xticks(range(len(groups)))
     xlabels = []
     for g in groups:
-        lab = "MG-All" if g == "mean" else _sd(g)
+        lab = _sd(g)
         if g in loosened:
             lab += f"\n@ {loosened[g] * 100:.2f}% FPR"
         xlabels.append(lab)
@@ -588,7 +665,7 @@ def goodness_bars(
                for d in dets]
     ax.legend(handles=handles, fontsize=8, loc="upper left",
               bbox_to_anchor=(1.01, 1.0), framealpha=0.9, borderaxespad=0.0,
-              title=f"bars ranked by MG-All\n{_COMBINE_LABEL[combine]}")
+              title=f"bars ranked by {_sd('mean')}\n{_COMBINE_LABEL[combine]}")
 
     ax.set_title(title or f"detector goodness across the MANUGRAM splits "
                  f"({_COMBINE_LABEL[combine]} of Gini and oracle "

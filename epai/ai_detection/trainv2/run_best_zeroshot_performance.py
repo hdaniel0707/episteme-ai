@@ -93,8 +93,6 @@ def plots_from_csv(csv_path: Path, meta: dict, out_dir: Path) -> None:
         frows = rows_at_fpr(rows, fpr)
         zeroshot_scatter(
             frows, fmeta, out_dir / f"best_zeroshot_{tag}.png", key="detector",
-            title=f"Best zero-shot detector per family — AUROC vs. oracle "
-                  f"TPR@{fpr * 100:g}%FPR across the MANUGRAM splits",
         )
         goodness_bars(
             frows, fmeta, out_dir / f"best_zeroshot_goodness_{tag}.png",
