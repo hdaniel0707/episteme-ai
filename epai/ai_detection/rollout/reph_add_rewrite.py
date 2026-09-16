@@ -70,6 +70,42 @@ def _rewrite_label(gen_values: list[str]) -> str:
     return labels[0]
 
 
+def _merge_type(a: pa.DataType, b: pa.DataType) -> pa.DataType:
+    """Resolve two Arrow types for the same field name into one shared type.
+
+    ``pa.unify_schemas`` refuses these outright even though the value-level
+    cast is safe and lossless: string vs large_string (a metadata column built
+    by two different pipelines), and int vs float (an integer metadata column
+    -- author_count, citation_count, year -- that null-heavy rows promoted to
+    double in one file but not the other). Always widens, never narrows.
+    """
+    if a == b:
+        return a
+    if pa.types.is_string(a) or pa.types.is_large_string(a) or \
+       pa.types.is_string(b) or pa.types.is_large_string(b):
+        return pa.large_string()
+    if pa.types.is_integer(a) and pa.types.is_floating(b):
+        return b
+    if pa.types.is_floating(a) and pa.types.is_integer(b):
+        return a
+    if pa.types.is_integer(a) and pa.types.is_integer(b):
+        return a if a.bit_width >= b.bit_width else b
+    if pa.types.is_floating(a) and pa.types.is_floating(b):
+        return a if a.bit_width >= b.bit_width else b
+    raise SystemExit(f"don't know how to merge field types {a} and {b}")
+
+
+def _unify_schemas(a: pa.Schema, b: pa.Schema) -> pa.Schema:
+    """Like ``pa.unify_schemas`` but resolves the mismatches this merge hits
+    (see ``_merge_type``) instead of raising on them."""
+    types = {f.name: f.type for f in a}
+    for f in b:
+        types[f.name] = _merge_type(types[f.name], f.type) if f.name in types else f.type
+    seen = {f.name for f in a}
+    names = [f.name for f in a] + [f.name for f in b if f.name not in seen]
+    return pa.schema([pa.field(n, types[n]) for n in names])
+
+
 def _conform(t: pa.Table, schema: pa.Schema) -> pa.Table:
     """Cast/pad ``t`` onto ``schema``, filling any column it lacks with nulls."""
     cols = [
@@ -131,7 +167,7 @@ def add_rewrite(fam: str, *, force: bool, dry_run: bool) -> int:
     for c in QC_COLS:
         matched = matched.append_column(c, pa.nulls(n, tgt.schema.field(c).type))
 
-    unified = pa.unify_schemas([tgt.schema, matched.schema])
+    unified = _unify_schemas(tgt.schema, matched.schema)
     combined = pa.concat_tables([_conform(tgt, unified), _conform(matched, unified)])
     order = pc.sort_indices(
         combined, sort_keys=[("id", "ascending"), ("generated_by", "ascending")]
