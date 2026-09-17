@@ -16,14 +16,23 @@ What's searched, per the paper's own axes (not a free-form sweep):
   prompt    ``words`` (|L|=2) or ``scale`` (|L|=5) -- the two prompts already
             captured; not interpolated, not sub-set. Looped over, not sampled.
 
-  lambda    ``contrast`` (lambda(x)=P(x), the paper's adopted readout --
-            no renormalisation, no floor:
+  lambda    one of three families, sampled uniformly per trial:
+            ``contrast`` (lambda(x)=P(x), the paper's adopted readout -- no
+            renormalisation, no floor:
                 s = sum_l p_l(x)*v(l) + (1 - P(x))*0.5
-            or ``threshold`` (lambda(x)=1[P(x)>=eps], the paper's named
+            ``threshold`` (lambda(x)=1[P(x)>=eps], the paper's named
             generalisation-axis alternative -- renormalises over the labels
-            present, discards the residual:
+            present, discards the residual below a floor:
                 s = sum_l [p_l(x)/P(x)]*v(l)   if P(x) >= eps,  else 0.5
-            ``eps`` sampled log-uniform in ``[EPS_LO, EPS_HI]`` per trial.
+            ``eps`` sampled log-uniform in ``[EPS_LO, EPS_HI]`` per trial; or
+            ``naive`` (lambda(x)=1 always -- the degenerate "just pick
+            whichever label has more probability" baseline, no shrinkage at
+            all, not even a floor -- only guarded against the P(x)=0
+            divide-by-zero):
+                s = sum_l [p_l(x)/P(x)]*v(l)   if P(x) > 0,  else 0.5
+            ``naive`` is ``threshold`` with eps -> 0, kept as its own family
+            (not folded into the eps sweep) so it always gets sampled rather
+            than only approximated when a small eps happens to be drawn.
 
   v         only free under the ``scale`` prompt. The endpoints are fixed by
             the paper's own definition (v(A)=1 "certainly human", v(E)=0
@@ -151,10 +160,19 @@ def build_stratum(path: Path, split_key: str, model: str, prompt: str,
     if win_col not in names or GEN_COL not in names:
         return None
 
-    df = pd.read_parquet(path, columns=[win_col, GEN_COL])
+    # Read the window column via pyarrow's own to_pylist(), not
+    # pd.read_parquet -- pandas materialises a list<struct> column as numpy
+    # arrays per cell, and `if not window` in _answer_probs() is ambiguous on
+    # an array. to_pylist() gives genuine Python lists of dicts, matching
+    # what score_logprob_windows.py's own process_stem() already relies on.
+    table = pq.read_table(path, columns=[win_col, GEN_COL])
+    windows = table.column(win_col).to_pylist()
+    generated_by = table.column(GEN_COL).to_pylist()
+
     keys = LABELS[prompt]
-    probs = {k: np.full(len(df), np.nan) for k in keys}
-    for i, window in enumerate(df[win_col]):
+    n = len(windows)
+    probs = {k: np.full(n, np.nan) for k in keys}
+    for i, window in enumerate(windows):
         p = _answer_probs(window, prompt)
         if p is None:
             continue  # empty window -- Null, stays NaN
@@ -163,14 +181,14 @@ def build_stratum(path: Path, split_key: str, model: str, prompt: str,
 
     p_total = np.sum([probs[k] for k in keys], axis=0)
     valid = np.isfinite(p_total)
-    y = (df[GEN_COL].astype(str) != human_label).to_numpy().astype(int)
+    y = np.array([str(g) != human_label for g in generated_by], dtype=int)
     return Stratum(split=split_key, y=y, valid=valid, p_total=p_total, probs=probs)
 
 
 def sample_trial(rng: np.random.Generator, prompt: str) -> dict:
     """One trial's params: always a lambda choice; a monotonic v ladder only
     under ``scale`` (fixed v=(1,0) under ``words``, so nothing to sample)."""
-    lam_family = "contrast" if rng.random() < 0.5 else "threshold"
+    lam_family = rng.choice(["contrast", "threshold", "naive"])
     eps = float(10 ** rng.uniform(np.log10(EPS_LO), np.log10(EPS_HI))) \
         if lam_family == "threshold" else None
     if prompt == "words":
@@ -191,10 +209,17 @@ def score_array(stratum: Stratum, v_map: dict[str, float], lam_family: str,
         weighted = weighted + arr * v_map[k]
     if lam_family == "contrast":
         s = weighted + (1.0 - p_total) * 0.5
-    else:
+    elif lam_family == "threshold":
         with np.errstate(divide="ignore", invalid="ignore"):
             base = weighted / p_total
         s = np.where(p_total >= eps, base, 0.5)
+    else:  # naive: lambda(x) = 1 always -- renormalise unconditionally, no
+        # shrinkage toward 0.5 at all; the only guard is the P(x) = 0
+        # divide-by-zero (a measurement failure, not something to shrink
+        # toward). This is "just pick whichever label has more probability."
+        with np.errstate(divide="ignore", invalid="ignore"):
+            base = weighted / p_total
+        s = np.where(p_total > 0.0, base, 0.5)
     return np.clip(s, 0.0, 1.0)
 
 
