@@ -37,11 +37,21 @@ CANDIDATES_DIR = BASE_DIR / "cfg" / "ai_detection" / "judge_prompts" / "candidat
 ANCHOR_PROMPT_ID = "v3"
 
 
-def _candidate_ids() -> list[str]:
-    ids = []
-    for path in sorted(CANDIDATES_DIR.glob("*.yaml")):
-        ids.append(yaml.safe_load(path.read_text())["id"])
-    return ids
+def _load_candidates(dir_path: Path) -> dict[str, str]:
+    """id -> text, read straight from the YAMLs in ``dir_path``.
+
+    Deliberately bypasses ``add_llm_judge_scores.PROMPTS``: that registry is
+    global and collision-checked, which is right for prompts meant to be
+    scored by ``--prompt <id>`` elsewhere, but wrong for a candidate pool that
+    only needs to be compared against the ``v3`` anchor here. Reading the
+    YAMLs directly lets ``--candidates-dir`` point at any pool (e.g. a v2
+    re-run in its own directory) without id collisions against another pool.
+    """
+    out: dict[str, str] = {}
+    for path in sorted(dir_path.glob("*.yaml")):
+        spec = yaml.safe_load(path.read_text())
+        out[spec["id"]] = spec["text"].rstrip()
+    return out
 
 
 def _embed(texts: list[str]) -> np.ndarray:
@@ -74,15 +84,18 @@ def main() -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     ap.add_argument("--metric", choices=["cosine", "euclidean"], default="cosine")
+    ap.add_argument("--candidates-dir", type=Path, default=CANDIDATES_DIR,
+                     help="Directory of candidate YAMLs, e.g. a v2 re-run's "
+                     "own directory. Default: the original pilot's candidates/.")
     args = ap.parse_args()
 
-    cand_ids = _candidate_ids()
-    if len(cand_ids) < 2:
-        raise SystemExit(f"need at least 2 candidate files in {CANDIDATES_DIR}, "
-                          f"found {len(cand_ids)}")
+    candidates = _load_candidates(args.candidates_dir)
+    if len(candidates) < 2:
+        raise SystemExit(f"need at least 2 candidate files in {args.candidates_dir}, "
+                          f"found {len(candidates)}")
 
-    ids = [ANCHOR_PROMPT_ID, *cand_ids]
-    texts = [PROMPTS[pid] for pid in ids]
+    ids = [ANCHOR_PROMPT_ID, *candidates]
+    texts = [PROMPTS[ANCHOR_PROMPT_ID], *candidates.values()]
     print(f"embedding {len(texts)} prompts with roberta-base ({args.metric} distance)...")
     vecs = _embed(texts)
 
