@@ -760,6 +760,38 @@ CALIBRATION
 
 Reply with the probability only."""
 
+# Candidate evidence prompts for the prompt-diversity LogJudge pilot (see
+# select_diverse_judge_prompts.py): each cfg/ai_detection/judge_prompts/
+# candidates/*.yaml file is one candidate, same shape as v1/v2/v3/base (a
+# CALIBRATION heading, so evidence_head() and --mode logprob work on it
+# unchanged). Registering them into PROMPTS here is what lets --prompt on this
+# script, capture_judge_logprobs.py and score_logprob_windows.py resolve a
+# candidate id exactly like v1/v2/v3 -- no separate code path for "real" vs
+# "candidate" prompts.
+_CANDIDATE_PROMPTS_DIR = (
+    Path(__file__).resolve().parents[3]
+    / "cfg" / "ai_detection" / "judge_prompts" / "candidates"
+)
+
+
+def _load_candidate_prompts(dir_path: Path) -> None:
+    if not dir_path.is_dir():
+        return
+    import yaml
+
+    for path in sorted(dir_path.glob("*.yaml")):
+        spec = yaml.safe_load(path.read_text())
+        prompt_id = spec["id"]
+        if prompt_id in PROMPTS:
+            raise ValueError(
+                f"{path}: prompt id {prompt_id!r} collides with an existing "
+                "PROMPTS entry"
+            )
+        PROMPTS[prompt_id] = spec["text"].rstrip()
+
+
+_load_candidate_prompts(_CANDIDATE_PROMPTS_DIR)
+
 DEFAULT_PROMPT = "v3"
 
 # Everything above the calibration heading is the judge's evidence: what counts

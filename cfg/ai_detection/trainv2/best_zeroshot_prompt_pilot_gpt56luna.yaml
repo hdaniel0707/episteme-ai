@@ -1,0 +1,10 @@
+# Focused prompt-pilot summary: gpt56luna only (parsed + wlp, baseline vs.
+# 3-way mean) against the two non-judge zero-shot baselines. MG-AI-Sci only.
+# Read by run_best_zeroshot_performance.py --config this file --splits mg_aisci.
+columns:
+  - binoculars_score_llama31_8b
+  - fastdetect_crit_llama31_8b
+  - llm_judge_score_gpt56luna_v3                              # old default, parsed
+  - llm_judge_score_gpt56luna_v3_wlp                          # old default, wlp
+  - llm_judge_score_gpt56luna_v3_c03_c10_parsed_promptmean    # 3-way mean, parsed
+  - llm_judge_score_gpt56luna_3p_promptmean                   # 3-way mean, wlp

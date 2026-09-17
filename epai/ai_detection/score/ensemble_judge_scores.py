@@ -1,4 +1,6 @@
-r"""Soft-min ensemble of judge P(human) score columns.
+r"""Soft-min or mean ensemble of judge P(human) score columns.
+
+``--combine softmin`` (default) -- combining across judge *models*:
 
     s = −T · log( (1/M) Σ_m exp( −s_m / T ) )
 
@@ -8,17 +10,27 @@ rarely the minimum, so it self-neutralises -- like a chance model in a
 product-of-experts). T → 0 recovers the hard min; T → ∞ the mean; T ≈ 0.1 is
 the knee. See ``score_logprob_windows.md`` § "Ensembling across models".
 
+``--combine mean`` -- combining across judge *prompts*, same model: a plain
+per-row arithmetic mean over the members. Intended for the prompt-diversity
+LogJudge pilot -- averaging a model's ord2 (``_wlp``) score under several
+prompts (e.g. ``v3`` + 2 diverse candidates from
+``select_diverse_judge_prompts.py``) into one column, rather than averaging
+across models the way ``softmin`` does. No shrinkage, no temperature: unlike
+``softmin`` this has no reason to favour the lowest (most machine-leaning)
+member, since the members here disagree about the same document under
+different framings rather than being judges of differing reliability.
+
 Inputs and output are all **P(human)** (1.0 human, 0.0 machine,
 ``machine_is_high=False``), so trainv2's ``llm_judge_score_`` prefix picks the
 new column(s) up with no config change (``run_zeroshot_performance.py``,
 ``calibrate_judge_baseline.py``, …).
 
-Output column:  ``llm_judge_score_<name>_v3_smin_<tau>``
-  ``<name>``  ``--name`` (default ``ens``)
-  ``<tau>``   the T value with ``.`` → ``p``:  T=0.1 → ``smin_0p1``,
-             T=0.15 → ``smin_0p15``
+Output column:
+  ``softmin``  ``llm_judge_score_<name>_v3_smin_<tau>``, one per ``--tau``
+               value (``.`` → ``p``: T=0.1 → ``smin_0p1``)
+  ``mean``     ``llm_judge_score_<name>_promptmean``, ``--tau`` ignored
 
-One ``--tau`` value → one output column; pass several to sweep in one run.
+``<name>``  ``--name`` (default ``ens``)
 
     .venv/bin/python epai/ai_detection/score/ensemble_judge_scores.py --dry-run
     .venv/bin/python epai/ai_detection/score/ensemble_judge_scores.py --tau 0.1
@@ -26,6 +38,10 @@ One ``--tau`` value → one output column; pass several to sweep in one run.
     .venv/bin/python epai/ai_detection/score/ensemble_judge_scores.py \
         --members llm_judge_score_gemma4_31b_v3_wlp llm_judge_score_gpt56luna_v3_wlp \
                   llm_judge_score_gpt56luna_v3 --name g3 --tau 0.1
+    .venv/bin/python epai/ai_detection/score/ensemble_judge_scores.py --combine mean \
+        --members llm_judge_score_gpt56luna_v3_wlp llm_judge_score_gpt56luna_cand03_wlp \
+                  llm_judge_score_gpt56luna_cand07_wlp \
+        --name gpt56luna_3prompt --only manugram_aiscientist
 
 Deterministic, no API, one read + write per file (``--out-dir`` to divert).
 Refuses to replace an existing column without ``--overwrite``.
@@ -59,6 +75,14 @@ def soft_min(scores: np.ndarray, tau: float) -> np.ndarray:
         warnings.simplefilter("ignore", RuntimeWarning)  # all-NaN row -> NaN
         mean_e = np.nanmean(np.exp(-scores / tau), axis=0)
     return np.clip(-tau * np.log(mean_e), 0.0, 1.0)
+
+
+def mean_combine(scores: np.ndarray) -> np.ndarray:
+    """``scores``: ``(M, N)``, NaN for a missing member. Row-wise arithmetic
+    mean over the members present. An all-NaN row stays NaN."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)  # all-NaN row -> NaN
+        return np.clip(np.nanmean(scores, axis=0), 0.0, 1.0)
 
 
 def _tau_tag(tau: float) -> str:
@@ -96,15 +120,25 @@ def process_stem(stem: str, args: argparse.Namespace) -> None:
     print(f"  members ({len(args.members)}): {args.members}")
 
     computed: dict[str, np.ndarray] = {}
-    for tau in args.tau:
-        col = f"llm_judge_score_{args.name}_v3_smin_{_tau_tag(tau)}"
+    if args.combine == "mean":
+        col = f"llm_judge_score_{args.name}_promptmean"
         if col in names and not args.overwrite:
             print(f"  {col} already present -- pass --overwrite; skipped")
-            continue
-        s = soft_min(M, tau)
-        computed[col] = s
-        print(f"  T={tau:g}  ->  {col}")
-        print(_dist(s))
+        else:
+            s = mean_combine(M)
+            computed[col] = s
+            print(f"  mean  ->  {col}")
+            print(_dist(s))
+    else:
+        for tau in args.tau:
+            col = f"llm_judge_score_{args.name}_v3_smin_{_tau_tag(tau)}"
+            if col in names and not args.overwrite:
+                print(f"  {col} already present -- pass --overwrite; skipped")
+                continue
+            s = soft_min(M, tau)
+            computed[col] = s
+            print(f"  T={tau:g}  ->  {col}")
+            print(_dist(s))
 
     if args.dry_run:
         print("  [dry run] -- nothing written")
@@ -124,9 +158,14 @@ def main() -> None:
     ap.add_argument("--members", nargs="+", default=DEFAULT_MEMBERS,
                     help="judge P(human) score columns to combine "
                          f"(default: {DEFAULT_MEMBERS})")
+    ap.add_argument("--combine", choices=["softmin", "mean"], default="softmin",
+                    help="'softmin' (default): shrinkage combiner across judge "
+                         "models, one column per --tau. 'mean': plain average "
+                         "across judge prompts (same model), --tau ignored, "
+                         "one column.")
     ap.add_argument("--tau", nargs="+", type=float, default=[0.1],
                     help="soft-min temperature(s); one output column per value "
-                         "(default: 0.1)")
+                         "(default: 0.1). Ignored for --combine mean.")
     ap.add_argument("--name", default="ens",
                     help="stem in the output column name (default: 'ens')")
     ap.add_argument("--only", nargs="+", choices=CORE_STEMS, metavar="STEM")
@@ -138,7 +177,7 @@ def main() -> None:
                     help="compute and print the distributions, write nothing")
     args = ap.parse_args()
 
-    if any(t <= 0 for t in args.tau):
+    if args.combine == "softmin" and any(t <= 0 for t in args.tau):
         ap.error("--tau values must be positive")
     if args.out_dir:
         args.out_dir.mkdir(parents=True, exist_ok=True)

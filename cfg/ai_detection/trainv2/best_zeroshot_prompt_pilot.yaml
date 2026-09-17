@@ -1,0 +1,27 @@
+# The prompt-diversity LogJudge pilot vs. the paper's main zero-shot picks
+# (best_zeroshot.yaml), MG-AI-Sci only. Read by run_best_zeroshot_performance.py
+# --config this file --splits mg_aisci.
+columns:
+  # -- previous main zero-shot versions (== best_zeroshot.yaml) --
+  - binoculars_score_llama31_8b
+  - fastdetect_crit_llama31_8b
+  - detector_score_radar
+  - llm_judge_score_gpt56luna_v3
+  - llm_judge_score_gemma4_31b_v3
+  - llm_judge_score_gpt56luna_v3_wlp
+  - llm_judge_score_gemma4_31b_v3_wlp
+  # -- prompt-diversity pilot: cand03, cand10, and their mean-of-3 with v3 --
+  - llm_judge_score_gpt56luna_cand03_wlp
+  - llm_judge_score_gpt56luna_cand10_wlp
+  - llm_judge_score_gpt56luna_3p_promptmean            # wlp mean, v3+cand03+cand10
+  - llm_judge_score_gemma4_31b_cand03_wlp
+  - llm_judge_score_gemma4_31b_cand10_wlp
+  - llm_judge_score_gemma4_31b_3p_promptmean           # wlp mean, v3+cand03+cand10
+  # -- parsed-mode (prompt-based) counterpart of the wlp means above --
+  - llm_judge_score_gpt56luna_v3_c03_c10_parsed_promptmean  # parsed mean, v3+cand03+cand10
+  - llm_judge_score_gemma4_31b_v3_c03_c10_parsed_promptmean # parsed mean, v3+cand03+cand10
+  # -- 2-way means (v3+cand03 only, cand10 dropped), parsed and wlp --
+  - llm_judge_score_gpt56luna_v3_c03_parsed_promptmean
+  - llm_judge_score_gemma4_31b_v3_c03_parsed_promptmean
+  - llm_judge_score_gpt56luna_v3_c03_wlp_promptmean
+  - llm_judge_score_gemma4_31b_v3_c03_wlp_promptmean

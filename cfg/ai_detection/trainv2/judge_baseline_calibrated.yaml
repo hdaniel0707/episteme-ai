@@ -24,10 +24,26 @@ llm_judge_baseline:
     threshold: 0.12
     threshold_youden: 0.44
     label: gemma4_31b_base
+  - column: llm_judge_score_gemma4_31b_cand03
+    threshold: 0.08
+    threshold_youden: 0.38
+    label: gemma4_31b_cand03
+  - column: llm_judge_score_gemma4_31b_cand10
+    threshold: 0.07
+    threshold_youden: 0.18
+    label: gemma4_31b_cand10
   - column: llm_judge_score_gemma4_31b_v3
     threshold: 0.12
     threshold_youden: 0.43
     label: gemma4_31b
+  - column: llm_judge_score_gemma4_31b_v3_logjudge_t0000
+    threshold: 2.1e-05
+    threshold_youden: 0.999981
+    label: gemma4_31b_logjudge_t0000
+  - column: llm_judge_score_gemma4_31b_v3_logjudge_t0001
+    threshold: 0.002543
+    threshold_youden: 0.718428
+    label: gemma4_31b_logjudge_t0001
   - column: llm_judge_score_gemma4_31b_v3_lp
     threshold: 1.6e-05
     threshold_youden: 0.999965
@@ -48,10 +64,26 @@ llm_judge_baseline:
     threshold: 0.07
     threshold_youden: 0.28
     label: gpt56luna_base
+  - column: llm_judge_score_gpt56luna_cand03
+    threshold: 0.11
+    threshold_youden: 0.38
+    label: gpt56luna_cand03
+  - column: llm_judge_score_gpt56luna_cand10
+    threshold: 0.17
+    threshold_youden: 0.28
+    label: gpt56luna_cand10
   - column: llm_judge_score_gpt56luna_v3
     threshold: 0.07
     threshold_youden: 0.24
     label: gpt56luna
+  - column: llm_judge_score_gpt56luna_v3_logjudge_t0000
+    threshold: 7.4e-05
+    threshold_youden: 0.003567
+    label: gpt56luna_logjudge_t0000
+  - column: llm_judge_score_gpt56luna_v3_logjudge_t0001
+    threshold: 0.005025
+    threshold_youden: 0.245364
+    label: gpt56luna_logjudge_t0001
   - column: llm_judge_score_gpt56luna_v3_sbc
     threshold: 7.0e-06
     threshold_youden: 0.010497

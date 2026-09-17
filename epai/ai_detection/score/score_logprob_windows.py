@@ -4,8 +4,14 @@ r"""Turn the captured LLM-judge logprob windows into P(human) score columns.
 ``list<struct{token, logprob}>`` columns on each core parquet -- the ranked
 answer-position window, ``window[0]`` the sampled token, ``[]`` a failed row::
 
-    llm_judge_logprobs_<model>_v3_words     answer: human / machine
-    llm_judge_logprobs_<model>_v3_scale     answer: A (human) .. E (machine)
+    llm_judge_logprobs_<model>_<prompt>_words     answer: human / machine
+    llm_judge_logprobs_<model>_<prompt>_scale     answer: A (human) .. E (machine)
+
+``<prompt>`` is whichever id ``capture_judge_logprobs.py --prompt`` was run
+with (``v3`` for every existing capture; a candidate id such as ``cand03`` for
+the prompt-diversity pilot -- see ``select_diverse_judge_prompts.py``). This
+script reads it straight off the column name, so it needs no ``--prompt`` of
+its own: whatever windows are on disk get scored, for any prompt id.
 
 This reads a detection score off each window and writes it as a plain scalar
 column, so the trainv2 judge comparison picks it up by the ``llm_judge_score_``
@@ -102,6 +108,7 @@ from pathlib import Path
 import numpy as np
 import pyarrow.parquet as pq
 
+from epai.ai_detection.score.add_llm_judge_scores import MODELS
 from epai.utils.parquet_utils import load_parquet, save_parquet
 
 BASE_DIR = Path(__file__).resolve().parents[3]
@@ -109,7 +116,11 @@ PARQUET_DIR = BASE_DIR / "data" / "parquet"
 CORE_STEMS = ["ghostbuster_orig", "manugram_gb", "manugram_sci", "manugram_aiscientist"]
 
 IN_PREFIX = "llm_judge_logprobs_"
-MODE_SUFFIX = {"_v3_words": "words", "_v3_scale": "scale"}
+_MODE_SUFFIX = {"words": "_words", "scale": "_scale"}
+# Longest first: a column is ``<prefix><model_column>_<prompt_id><mode_suffix>``,
+# so the model column has to be matched greedily to keep e.g. "qwen3_8b" from
+# ever being mistaken for a prefix of a different, longer model column.
+_MODEL_COLUMNS = sorted({m.column for m in MODELS.values()}, key=len, reverse=True)
 
 # A = human end, E = machine end -- P(human) direction, so A scores 1.0.
 SCALE_VALUES = {"A": 1.0, "B": 0.75, "C": 0.5, "D": 0.25, "E": 0.0}
@@ -205,26 +216,39 @@ def score_scale_contrast_full(window) -> float | None:
 
 
 #: (input mode, output column suffix, scorer). A ``_scale`` window feeds three
-#: output columns; a ``_words`` window feeds two. ``_v3_logjudge_<paramid>``
+#: output columns; a ``_words`` window feeds two. ``logjudge_<paramid>``
 #: suffixes are registered in ``logjudge_params.csv`` -- add a row there
-#: before adding a new one here.
+#: before adding a new one here. The prompt id is spliced in at use (see
+#: ``process_stem``), so one entry here covers every prompt, not just v3.
 SCORERS: tuple[tuple[str, str, "callable"], ...] = (
-    ("words", "_v3_wlp", score_words),
-    ("words", "_v3_logjudge_t0000", score_words),
-    ("scale", "_v3_slp", score_scale_ev),
-    ("scale", "_v3_sbc", score_scale_contrast),
-    ("scale", "_v3_logjudge_t0001", score_scale_contrast_full),
+    ("words", "wlp", score_words),
+    ("words", "logjudge_t0000", score_words),
+    ("scale", "slp", score_scale_ev),
+    ("scale", "sbc", score_scale_contrast),
+    ("scale", "logjudge_t0001", score_scale_contrast_full),
 )
 
 
-def _parse_column(name: str) -> tuple[str, str] | None:
-    """``llm_judge_logprobs_gemma4_31b_v3_words`` -> ``('gemma4_31b', 'words')``."""
+def _parse_column(name: str) -> tuple[str, str, str] | None:
+    """``llm_judge_logprobs_gemma4_31b_v3_words`` -> ``('gemma4_31b', 'v3', 'words')``.
+
+    The model column is matched against the known aliases in
+    ``add_llm_judge_scores.MODELS`` (rather than split on position) because the
+    prompt id in between -- ``v3``, or a candidate id such as ``cand03`` -- is
+    open-ended and cannot otherwise be told apart from a model column that also
+    contains underscores.
+    """
     if not name.startswith(IN_PREFIX):
         return None
     rest = name[len(IN_PREFIX):]
-    for suf, mode in MODE_SUFFIX.items():
-        if rest.endswith(suf):
-            return rest[: -len(suf)], mode
+    for mode, suf in _MODE_SUFFIX.items():
+        if not rest.endswith(suf):
+            continue
+        body = rest[: -len(suf)]
+        for model_col in _MODEL_COLUMNS:
+            prefix = model_col + "_"
+            if body.startswith(prefix) and len(body) > len(prefix):
+                return model_col, body[len(prefix):], mode
     return None
 
 
@@ -257,11 +281,11 @@ def process_stem(stem: str, args: argparse.Namespace) -> None:
         parsed = _parse_column(name)
         if parsed is None:
             continue
-        model, mode = parsed
-        for smode, suffix, fn in SCORERS:
+        model, prompt_id, mode = parsed
+        for smode, tail, fn in SCORERS:
             if smode != mode:
                 continue
-            out_col = f"llm_judge_score_{model}{suffix}"
+            out_col = f"llm_judge_score_{model}_{prompt_id}_{tail}"
             if out_col in schema.names and not args.overwrite:
                 print(f"  {out_col} already present -- pass --overwrite; skipped")
                 continue

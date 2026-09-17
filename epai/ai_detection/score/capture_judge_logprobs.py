@@ -27,7 +27,16 @@ Sidecar: ``<workspace>/<stem>.parquet`` = ``uid`` + one column per (mode):
 
 Default workspace ``data/parquet/tmp/<model>/`` (created if missing;
 ``data/`` is gitignored) -- deterministic, so re-running the same command
-resumes. Pass ``--workspace`` for an isolated run.
+resumes. Pass ``--workspace`` for an isolated run. **Running more than one
+``--prompt`` into the same workspace overwrites the sidecar's other prompt's
+columns** (the sidecar write keeps only the current run's columns) -- give
+each prompt its own ``--workspace`` when capturing more than one.
+
+``--prompt`` picks the evidence prompt from ``add_llm_judge_scores.PROMPTS``
+(default ``v3``) -- any registered id, including a candidate loaded from
+``cfg/ai_detection/judge_prompts/candidates/`` (see
+``select_diverse_judge_prompts.py``). The prompt id is part of the column
+name, so two prompts captured for the same model never collide once merged.
 
 Paths: gemma4-31b -> GenAI4Science chat completions ``logprobs=True``;
 gpt56luna -> OpenAI Responses API ``reasoning={"effort":"none"}`` +
@@ -36,6 +45,8 @@ gpt56luna -> OpenAI Responses API ``reasoning={"effort":"none"}`` +
     uv run python epai/ai_detection/score/capture_judge_logprobs.py --model gemma4-31b --dry-run
     uv run python epai/ai_detection/score/capture_judge_logprobs.py --model gemma4-31b --yes
     uv run python epai/ai_detection/score/capture_judge_logprobs.py --model gpt56luna --only manugram_aiscientist --limit 60 --yes
+    uv run python epai/ai_detection/score/capture_judge_logprobs.py --model gpt56luna --prompt cand03 \
+        --workspace data/parquet/tmp/gpt56luna-cand03 --only manugram_aiscientist --yes
     # then, once both models are done:
     uv run python epai/ai_detection/score/merge_captured_logprobs.py
 """
@@ -62,6 +73,7 @@ from epai.ai_detection.score.add_llm_judge_scores import (
     BACKOFF_BASE,
     LOGPROB_ANSWER_BLOCK,
     MODELS,
+    PROMPTS,
     RETRIES,
     USER_TEMPLATE,
     apply_limit,
@@ -74,7 +86,7 @@ CAPTURE_DIR = PARQUET_DIR / "tmp"  # sidecars live here; data/ is gitignored
 
 CORE_STEMS = ["ghostbuster_orig", "manugram_gb", "manugram_sci", "manugram_aiscientist"]
 MODES = ("words", "scale")
-PROMPT_ID = "v3"
+DEFAULT_PROMPT = "v3"
 TOP_N = 20
 TEXT_COL = "text"
 KEY_COL = "uid"
@@ -93,12 +105,12 @@ _ANSWER_BLOCK = {"words": LOGPROB_ANSWER_BLOCK, "scale": SCALE_ANSWER_BLOCK}
 _VALID = {"words": {"human", "machine"}, "scale": set("ABCDE")}
 
 
-def column(model_key: str, mode: str) -> str:
-    return f"llm_judge_logprobs_{MODELS[model_key].column}_{PROMPT_ID}_{mode}"
+def column(model_key: str, mode: str, prompt_id: str) -> str:
+    return f"llm_judge_logprobs_{MODELS[model_key].column}_{prompt_id}_{mode}"
 
 
-def _system_prompt(mode: str) -> str:
-    return evidence_head(PROMPT_ID) + "\n\n" + _ANSWER_BLOCK[mode]
+def _system_prompt(mode: str, prompt_id: str) -> str:
+    return evidence_head(prompt_id) + "\n\n" + _ANSWER_BLOCK[mode]
 
 
 def _norm(token: str, mode: str) -> str:
@@ -220,7 +232,7 @@ def _run_mode(light: pd.DataFrame, col: str, mode: str, eligible: np.ndarray,
         return
 
     client = _build_client(spec.provider, spec.model)
-    system = _system_prompt(mode)
+    system = _system_prompt(mode, args.prompt)
     call = _window_openai if spec.provider == "openai" else _window_genai4science
     text = light[TEXT_COL].astype(str)
     texts = {int(p): (text.iloc[int(p)][: args.max_chars] if args.max_chars
@@ -276,7 +288,7 @@ def capture_stem(stem: str, model_key: str, modes: list[str], args) -> None:
     spec = MODELS[model_key]
     src = PARQUET_DIR / f"{stem}.parquet"
     sidecar = args.workspace / f"{stem}.parquet"
-    cols = [column(model_key, md) for md in modes]
+    cols = [column(model_key, md, args.prompt) for md in modes]
     print(f"\n{'-' * 74}\n{stem}   ->  {sidecar}")
     if not src.is_file():
         print("  source parquet not on disk -- skipped")
@@ -299,7 +311,7 @@ def capture_stem(stem: str, model_key: str, modes: list[str], args) -> None:
 
     eligible = (light[TEXT_COL].astype(str).str.strip().str.len() > 0).to_numpy()
     for mode in modes:
-        _run_mode(light, column(model_key, mode), mode, eligible, spec,
+        _run_mode(light, column(model_key, mode, args.prompt), mode, eligible, spec,
                   sidecar, cols, args)
     if not args.dry_run:
         _write_sidecar(light, sidecar, cols)  # consolidating flush
@@ -311,6 +323,10 @@ def main() -> None:
     )
     ap.add_argument("--model", required=True, choices=list(MODELS),
                     help="one judge alias from add_llm_judge_scores.MODELS")
+    ap.add_argument("--prompt", default=DEFAULT_PROMPT, choices=sorted(PROMPTS),
+                    help=f"evidence prompt id from add_llm_judge_scores.PROMPTS "
+                         f"(default: {DEFAULT_PROMPT}); includes any candidate "
+                         "loaded from cfg/ai_detection/judge_prompts/candidates/")
     ap.add_argument("--modes", nargs="+", choices=MODES, default=list(MODES))
     ap.add_argument("--only", nargs="+", choices=CORE_STEMS, metavar="STEM")
     ap.add_argument("--workspace", type=Path, default=None,
@@ -335,9 +351,10 @@ def main() -> None:
     stems = args.only or CORE_STEMS
     spec = MODELS[args.model]
 
-    print(f"model {args.model} ({spec.provider} -> {spec.model})   modes {args.modes}")
+    print(f"model {args.model} ({spec.provider} -> {spec.model})   "
+          f"prompt {args.prompt}   modes {args.modes}")
     print(f"workspace {args.workspace}")
-    print("columns:  " + "  ".join(column(args.model, md) for md in args.modes))
+    print("columns:  " + "  ".join(column(args.model, md, args.prompt) for md in args.modes))
 
     if spec.provider == "openai" and not args.dry_run and not args.yes:
         print("\nNOTE  billed API call -- one short completion per row. "
