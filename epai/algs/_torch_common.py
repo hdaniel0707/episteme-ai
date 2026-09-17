@@ -100,6 +100,7 @@ class TrainHParams:
     lr: float = 1e-3
     weight_decay: float = 1e-4
     grad_clip: float = 0.0  # 0 disables
+    scheduler: str = "none"  # none | cosine (CosineAnnealingLR over `epochs`)
 
     # --- early stopping ---
     patience: int = 10  # 0 disables; always runs `epochs`
@@ -110,6 +111,7 @@ class TrainHParams:
     dropout: float = 0.1  # between hidden layers
     input_dropout: float = 0.0  # on the raw feature vector
     norm_layer: str = "none"  # none | layernorm
+    activation: str = "relu"  # relu | gelu
     label_smoothing: float = 0.0
     mixup_alpha: float = 0.0  # 0 disables
 
@@ -189,6 +191,14 @@ class TrainHParams:
         if self.norm_layer not in {"none", "layernorm"}:
             raise ValueError(
                 f"norm_layer must be 'none' or 'layernorm', got {self.norm_layer!r}"
+            )
+        if self.activation not in {"relu", "gelu"}:
+            raise ValueError(
+                f"activation must be 'relu' or 'gelu', got {self.activation!r}"
+            )
+        if self.scheduler not in {"none", "cosine"}:
+            raise ValueError(
+                f"scheduler must be 'none' or 'cosine', got {self.scheduler!r}"
             )
         if not 0.0 <= self.val_frac < 1.0:
             raise ValueError(f"val_frac must be in [0, 1), got {self.val_frac}")
@@ -432,8 +442,16 @@ def clean_aux(Z, fill: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
-def hidden_block(in_dim: int, out_dim: int, dropout: float, norm_layer: str) -> list:
-    """One ``Linear -> [LayerNorm] -> ReLU -> Dropout`` stack.
+#: ``activation`` -> module class, for :func:`hidden_block`. ``gelu`` exists for
+#: :mod:`simple_mlp` specs that replicate a GELU-MLP head (e.g. RoBERTa-Sentinel,
+#: Chen et al. 2023); every other algorithm in this package defaults to ``relu``
+#: unchanged.
+_ACTIVATIONS: dict[str, type[nn.Module]] = {"relu": nn.ReLU, "gelu": nn.GELU}
+
+
+def hidden_block(in_dim: int, out_dim: int, dropout: float, norm_layer: str,
+                 activation: str = "relu") -> list:
+    """One ``Linear -> [LayerNorm] -> Activation -> Dropout`` stack.
 
     LayerNorm rather than BatchNorm on purpose: BatchNorm's running statistics
     are the *source* corpus's, so a BatchNorm model carries the training corpus's
@@ -444,7 +462,7 @@ def hidden_block(in_dim: int, out_dim: int, dropout: float, norm_layer: str) -> 
     layers: list[nn.Module] = [nn.Linear(in_dim, out_dim)]
     if norm_layer == "layernorm":
         layers.append(nn.LayerNorm(out_dim))
-    layers += [nn.ReLU(), nn.Dropout(dropout)]
+    layers += [_ACTIVATIONS[activation](), nn.Dropout(dropout)]
     return layers
 
 
@@ -462,7 +480,7 @@ def mlp_layers(in_dim: int, hidden_dims: list[int], hp: TrainHParams) -> tuple[l
         layers.append(nn.Dropout(hp.input_dropout))
     prev = in_dim
     for h in hidden_dims:
-        layers += hidden_block(prev, h, hp.dropout, hp.norm_layer)
+        layers += hidden_block(prev, h, hp.dropout, hp.norm_layer, hp.activation)
         prev = h
     return layers, prev
 
@@ -694,6 +712,8 @@ def train_torch_model(
         y_val = y_t[va]
 
     opt = torch.optim.AdamW(model.parameters(), lr=hp.lr, weight_decay=hp.weight_decay)
+    sched = (torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=hp.epochs)
+             if hp.scheduler == "cosine" else None)
     class_weight = None
     if hp.class_weight == "balanced":
         # sklearn's "balanced" convention, computed from the TRAINING rows
@@ -764,6 +784,8 @@ def train_torch_model(
         epoch_loss /= max(len(loader), 1)
         hist.train_loss.append(epoch_loss)
         hist.epochs_run = epoch + 1
+        if sched is not None:
+            sched.step()
 
         if use_val:
             score = _val_score(model, val_tensors, y_val, hp, loss_fn)

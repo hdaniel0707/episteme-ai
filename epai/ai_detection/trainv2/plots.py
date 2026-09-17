@@ -17,6 +17,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from .core import goodness as _goodness
+from .detector_names import display_detector as _display_detector
+from .detector_names import is_judge_family
 
 _PALETTE = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#4a3aa7",
             "#008300", "#e34948"]
@@ -184,7 +186,9 @@ def emb_by_split(summary_rows: list[dict], meta: dict, path: Path) -> None:
 # across families), marker shape = MANUGRAM split (splits.MARKER), a bold
 # marker = that detector's mean across splits (filled = a ``_wlp``-style
 # variant, hollow/same hue = its base). A grey Greys contourf/contour field
-# behind everything shows the AT-HM region each point falls in. ``rows`` is
+# behind everything shows the AT-HM region each point falls in. Both axes use
+# an anchored power-law warp (:func:`_distort`) that compresses the mostly-
+# empty low end and stretches out the crowded near-1.0 cluster. ``rows`` is
 # the pre-filtered subset to draw; it includes the split=="mean" rows.
 # ---------------------------------------------------------------------------
 
@@ -273,10 +277,28 @@ def _variant_palette_hollow(names, suffix: str = "_wlp"):
     return base_of, paired_base, hue
 
 
+def _distort(v, lo: float, hi: float, k: float):
+    """Anchored power-law warp on ``[lo, hi]``: endpoints stay fixed, ``k >
+    1`` compresses values near ``lo`` and stretches values near ``hi`` (the
+    derivative shrinks to 0 near ``lo`` and grows to ``k`` near ``hi``).
+    Works on a scalar or an array (used for both point coordinates and the
+    AT-HM background grid)."""
+    u = np.clip((np.asarray(v, dtype=float) - lo) / (hi - lo), 0.0, None)
+    return lo + u ** k * (hi - lo)
+
+
 def zeroshot_scatter(
     rows: list[dict], meta: dict, path: Path, *, key: str = "version", title: str = "",
     variant_suffix: str = "_wlp", figsize: tuple[float, float] = (9.6, 4.6),
+    kx: float = 1.7, ky: float = 1.7,
 ) -> None:
+    """Both axes use a nonlinear "expand near 1" warp (:func:`_distort`,
+    anchored power law) instead of a linear scale: it compresses the mostly-
+    empty region near the low end and stretches out the crowded top-right
+    cluster. The AT-HM background field is warped the same way so its
+    contours still line up with the (distorted) points. Tick positions are
+    chosen by hand and placed at their warped location, since evenly-spaced
+    real values no longer land evenly spaced on the page."""
     from .splits import PLOT_EXCLUDE
     from .splits import display as _sd
     from .splits import marker as _split_marker
@@ -297,6 +319,20 @@ def zeroshot_scatter(
     marker = {s: _split_marker(s) for s in splits}
     fpr = meta["fpr"]
 
+    # A bigger low-end pad than a linear scale would need -- the warp is
+    # anchored at (x_lo, y_lo) and compresses hardest right there, so a small
+    # pad gets squeezed down to almost nothing, leaving no room for a
+    # marker's own radius and clipping it against the axis edge.
+    aurocs = [r["auroc"] for r in rows if np.isfinite(r["auroc"])]
+    x_lo = min(0.45, (min(aurocs) - 0.12) if aurocs else 0.45)
+    x_hi, y_lo, y_hi = 1.02, -0.25, 1.04
+
+    def wx(v):
+        return _distort(v, x_lo, x_hi, kx)
+
+    def wy(v):
+        return _distort(v, y_lo, y_hi, ky)
+
     fig, ax = plt.subplots(figsize=figsize)
     ax.set_facecolor(_SURFACE)
     for spine in ("top", "right"):
@@ -304,9 +340,9 @@ def zeroshot_scatter(
 
     # Chance: an uninformative score is AUROC 0.5, and its oracle TPR at a
     # target FPR is that FPR -- a single point, not a diagonal (x is AUROC).
-    ax.axvline(0.5, color="#b5495b", lw=1.0, ls=":", alpha=0.6, zorder=0)
-    ax.axhline(fpr, color="#b5495b", lw=1.0, ls=":", alpha=0.6, zorder=0)
-    ax.scatter([0.5], [fpr], s=120, color="#b5495b", marker="x", lw=1.8,
+    ax.axvline(wx(0.5), color="#b5495b", lw=1.0, ls=":", alpha=0.6, zorder=0)
+    ax.axhline(wy(fpr), color="#b5495b", lw=1.0, ls=":", alpha=0.6, zorder=0)
+    ax.scatter([wx(0.5)], [wy(fpr)], s=120, color="#b5495b", marker="x", lw=1.8,
                alpha=0.6, zorder=0)
 
     def _err(r: dict) -> tuple[float | None, float | None]:
@@ -327,7 +363,7 @@ def zeroshot_scatter(
             continue
         hollow = r[key] in paired_base
         col = hue[r[key]]
-        ax.scatter([r["auroc"]], [r["tpr_at_fpr"]], s=34,
+        ax.scatter([wx(r["auroc"])], [wy(r["tpr_at_fpr"])], s=34,
                    marker=marker.get(r["split"], "P"),
                    facecolors="none" if hollow else _tint(col),
                    edgecolors=_tint(col, 0.55) if hollow else "#6a6a6a",
@@ -342,45 +378,58 @@ def zeroshot_scatter(
     for v, b in base_of.items():
         if v in mean_xy and b in mean_xy:
             (xv, yv), (xb, yb) = mean_xy[v], mean_xy[b]
-            ax.plot([xb, xv], [yb, yv], color=hue[b], lw=1.1, alpha=0.6,
-                    zorder=4)
+            ax.plot([wx(xb), wx(xv)], [wy(yb), wy(yv)], color=hue[b], lw=1.1,
+                    alpha=0.6, zorder=4)
 
     for v, m in means:
         xe, ye = _err(m)
         hollow = v in paired_base
-        ax.errorbar([m["auroc"]], [m["tpr_at_fpr"]], xerr=xe, yerr=ye,
+        x0, y0 = m["auroc"], m["tpr_at_fpr"]
+        # Asymmetric error bars: (mean - err) and (mean + err) each warp by a
+        # different amount since the transform isn't linear.
+        xerr = [[wx(x0) - wx(x0 - xe)], [wx(x0 + xe) - wx(x0)]] if xe is not None else None
+        yerr = [[wy(y0) - wy(y0 - ye)], [wy(y0 + ye) - wy(y0)]] if ye is not None else None
+        ax.errorbar([wx(x0)], [wy(y0)], xerr=xerr, yerr=yerr,
                     fmt="o", ms=7, mfc="none" if hollow else hue[v],
                     mec=hue[v] if hollow else "#222222", mew=1.0,
                     ecolor="#222222", elinewidth=1.0, capsize=2.0, zorder=5)
 
-    aurocs = [r["auroc"] for r in rows if np.isfinite(r["auroc"])]
-    x_lo = min(0.45, (min(aurocs) - 0.03) if aurocs else 0.45)
-    ax.set_xlabel("AUROC", fontsize=9, color=_INK)
-    ax.set_ylabel(f"TPR@{fpr * 100:g}%FPR", fontsize=9, color=_INK)
-    ax.set_xlim(x_lo, 1.02)
-    ax.set_ylim(-0.04, 1.04)
+    ax.set_xlabel(f"AUROC\n(power warp, k={kx:g})", fontsize=9, color=_INK)
+    ax.set_ylabel(f"TPR@{fpr * 100:g}%FPR\n(power warp, k={ky:g})", fontsize=9,
+                  color=_INK)
+    ax.set_xlim(wx(x_lo), wx(x_hi))
+    ax.set_ylim(wy(y_lo), wy(y_hi))
 
     # AT-HM background field: shows which region of (AUROC, TPR) space each
     # point's combined score falls in, so the trade-off reads directly off the
     # plot rather than only through the separate goodness bar chart. Drawn
-    # deep behind everything else (points, chance cross, grid).
-    # Capped at 1.0, not the axis's padded 1.02/1.04 -- AUROC and TPR can't
-    # exceed 1, so the field simply doesn't exist past that edge (the sliver
-    # between 1.0 and the axis edge stays blank rather than showing a flat,
-    # clipped plateau).
+    # deep behind everything else (points, chance cross, grid). Computed on a
+    # real-value grid capped at 1.0 (not the axis's padded x_hi/y_hi -- AUROC
+    # and TPR can't exceed 1), then warped to display coordinates so the
+    # shading lines up with the (distorted) points.
     gx = np.linspace(x_lo, 1.0, 200)
     gy = np.linspace(-0.04, 1.0, 200)
     GX, GY = np.meshgrid(gx, gy)
     GZ = _goodness_field(GX, GY)
-    ax.contourf(GX, GY, GZ, levels=np.linspace(0, 1, 11), cmap="Greys",
+    ax.contourf(wx(GX), wy(GY), GZ, levels=np.linspace(0, 1, 11), cmap="Greys",
                 alpha=0.30, zorder=-5)
-    cs = ax.contour(GX, GY, GZ, levels=[0.2, 0.4, 0.6, 0.8], colors="#8a8a8a",
-                     linewidths=0.6, alpha=0.8, zorder=-4)
+    cs = ax.contour(wx(GX), wy(GY), GZ, levels=[0.2, 0.4, 0.6, 0.8],
+                     colors="#8a8a8a", linewidths=0.6, alpha=0.8, zorder=-4)
     ax.clabel(cs, fmt=lambda v: f"{v:.1f}", fontsize=6.5, colors="#6a6a6a",
               inline=True)
 
     ax.grid(True, lw=0.4, alpha=0.4)
     ax.tick_params(labelsize=8, colors=_MUTED)
+
+    # Hand-picked tick values, placed at their warped position -- evenly
+    # spaced real values no longer land evenly spaced once warped, and the
+    # extra room near 1.0 is exactly where finer ticks earn their keep.
+    x_ticks = [t for t in (0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.98, 1.0) if t >= x_lo]
+    ax.set_xticks([wx(t) for t in x_ticks])
+    ax.set_xticklabels([f"{t:g}" for t in x_ticks])
+    y_ticks = (0.0, 0.2, 0.4, 0.6, 0.8, 0.9, 0.95, 1.0)
+    ax.set_yticks([wy(t) for t in y_ticks])
+    ax.set_yticklabels([f"{t:g}" for t in y_ticks])
 
     # Colour key: sorted by mean AT-HM (descending) with the value printed, so
     # the legend order matches the goodness bar chart's ranking; a base and
@@ -395,7 +444,8 @@ def zeroshot_scatter(
     for v in ranked:
         hollow = v in paired_base
         s = _at_hm(v)
-        label = f"{v} — AT-HM {s:.2f}" if s is not None else v
+        dv = _display_detector(v)
+        label = f"{dv} — AT-HM {s:.2f}" if s is not None else dv
         handles.append(plt.Line2D(
             [], [], marker="o", ls="", ms=7,
             mfc="none" if hollow else hue[v],
@@ -407,8 +457,14 @@ def zeroshot_scatter(
                               label=f"chance (0.5, {fpr * 100:g}%)"))
     legend = ax.legend(
         handles=handles, fontsize=8, loc="upper left",
-        bbox_to_anchor=(1.01, 1.0), framealpha=0.9, borderaxespad=0.0,
+        bbox_to_anchor=(1.01, 0.95), framealpha=0.9, borderaxespad=0.0,
     )
+    # LLM-judge family (LogJudge readout + parsed-answer baseline) in bold,
+    # same rule as build_general_results_table.py's tables -- zip stops at
+    # len(ranked), so this never touches the split-shape/chance entries below.
+    for v, txt in zip(ranked, legend.get_texts()):
+        if is_judge_family(v):
+            txt.set_fontweight("bold")
 
     if title:
         ax.set_title(title, fontsize=10.5, color=_INK)

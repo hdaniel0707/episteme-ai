@@ -9,28 +9,29 @@ For every score column of every detector family --
     judge        llm_judge_score_gpt56luna_v3                    (low  = machine)
 
 -- one figure ``<column>.png`` with three panels: **MG-GB**, **MG-Sci**,
-**MG-All** (pooled). Each panel is an overlaid density histogram of three
+**MG-All** (pooled). Each panel is an overlaid density histogram of four
 classes:
 
-    human       generated_by == 'human'             blue
-    rephrase    generated_by == 'gpt56luna:0908R'    orange   (from the *_reph_* parquet)
-    rewritten   the full gpt56luna generation        red      (':0701A' in GB, ':0811A' in Sci)
+    human           generated_by == 'human'             blue
+    human_rephrased generated_by == 'gpt56luna:0908R'    dark blue  (from the *_reph_* parquet; rephrase of the human text)
+    ai              the full gpt56luna generation        red        (':0701A' in GB, ':0811A' in Sci)
+    ai_rephrased    generated_by == 'gpt56luna:0916R'    dark red   (from the *_reph_* parquet; rephrase of the ai text)
 
 The ``*_reph_*`` human rows are the same documents (same ``id``, suite scores
-copied whole), so humans come from the full corpus. Each panel marks two
-Youden's-J cuts fit on just the two classes involved: human|rephrase (dotted)
-and human|rewritten (dashed). ``--no-thresholds`` drops them. Not a calibration
--- writes no config.
+copied whole), so humans come from the full corpus. No per-figure title and no
+threshold lines are drawn on the panels; the class legend sits below the row
+of panels. Youden's-J cuts (human|human_rephrased, human|ai,
+human|ai_rephrased) and their AUROCs are still fit and written to
+``summary.csv``, just not plotted. Not a calibration -- writes no config.
 
 Output (under ``--out-dir``, default ``results/trainv2/rephrase_score_histograms/``):
     <column>.png   per score column, 3 panels (MG-GB / MG-Sci / MG-All)
     summary.csv    one row per (corpus, column, class): n, mean, p1/p50/p99,
-                   the two cuts, the two human-vs-other AUROCs
+                   the three cuts, the three human-vs-other AUROCs
 
 Run:
     uv run python epai/ai_detection/trainv2/plot_score_histograms.py
     uv run python epai/ai_detection/trainv2/plot_score_histograms.py --families binoculars fastdetect
-    uv run python epai/ai_detection/trainv2/plot_score_histograms.py --no-thresholds
 """
 
 from __future__ import annotations
@@ -50,6 +51,7 @@ DEFAULT_OUT_DIR = BASE / "results" / "trainv2" / "rephrase_score_histograms"
 GEN_COL = "generated_by"
 HUMAN = "human"
 REPHRASE_GEN = "gpt56luna:0908R"
+AI_REPHRASE_GEN = "gpt56luna:0916R"
 POOLED = "all"
 
 #: per-corpus source: the full-suite parquet (+ its gpt56luna full-generation
@@ -65,7 +67,8 @@ DISPLAY = {**{k: v["display"] for k, v in CORPUS_SOURCES.items()}, POOLED: "MG-A
 
 #: class -> colour. Order is legend / draw order.
 CLASSES: dict[str, str] = {
-    "human": "#1c6fb3", "rephrase": "#e8890c", "rewritten": "#d92d20",
+    "human": "#1c6fb3", "human_rephrased": "#0a2f5c",
+    "ai": "#d92d20", "ai_rephrased": "#7a1710",
 }
 
 #: family -> spec. ``prefix`` = every matching column; ``cols`` = exactly these.
@@ -82,8 +85,8 @@ FAMILIES: dict[str, dict] = {
 
 CSV_FIELDS = [
     "corpus", "family", "column", "class", "n", "mean", "p1", "p50", "p99",
-    "machine_is_high", "cut_human_rephrase", "cut_human_rewritten",
-    "auroc_human_rephrase", "auroc_human_rewritten",
+    "machine_is_high", "cut_human_rephrased", "cut_ai", "cut_ai_rephrased",
+    "auroc_human_rephrased", "auroc_ai", "auroc_ai_rephrased",
 ]
 
 
@@ -96,8 +99,9 @@ def family_columns(spec: dict, names: set[str]) -> list[str]:
 def build(columns: list[str]) -> pd.DataFrame:
     """Rows for every panel: columns ``[corpus, cls, *columns]``.
 
-    Per corpus, ``human`` / ``rewritten`` come from the full parquet and
-    ``rephrase`` from the rephrase half; ``all`` is the two corpora pooled.
+    Per corpus, ``human`` / ``ai`` come from the full parquet and
+    ``human_rephrased`` / ``ai_rephrased`` from the rephrase half; ``all`` is
+    the two corpora pooled.
     """
     parts = []
     for key, c in CORPUS_SOURCES.items():
@@ -105,8 +109,9 @@ def build(columns: list[str]) -> pd.DataFrame:
         reph = pd.read_parquet(PARQUET_DIR / c["reph"], columns=[GEN_COL, *columns])
         picks = {
             "human": full[full[GEN_COL] == HUMAN],
-            "rephrase": reph[reph[GEN_COL] == REPHRASE_GEN],
-            "rewritten": full[full[GEN_COL] == c["rewrite_gen"]],
+            "human_rephrased": reph[reph[GEN_COL] == REPHRASE_GEN],
+            "ai": full[full[GEN_COL] == c["rewrite_gen"]],
+            "ai_rephrased": reph[reph[GEN_COL] == AI_REPHRASE_GEN],
         }
         for cls, rows in picks.items():
             if rows.empty:
@@ -118,7 +123,7 @@ def build(columns: list[str]) -> pd.DataFrame:
 
 
 def panel_stats(sub: pd.DataFrame, column: str, machine_is_high: bool) -> dict:
-    """Per-class percentiles + the two human-vs-other Youden cuts and AUROCs,
+    """Per-class percentiles + the human-vs-other Youden cuts and AUROCs,
     for one (corpus, column) slice."""
     vals = {cls: sub.loc[sub.cls == cls, column].to_numpy(dtype=float) for cls in CLASSES}
     vals = {cls: v[np.isfinite(v)] for cls, v in vals.items()}
@@ -134,7 +139,7 @@ def panel_stats(sub: pd.DataFrame, column: str, machine_is_high: bool) -> dict:
     }
     cuts, aurocs = {}, {}
     h = vals["human"]
-    for other in ("rephrase", "rewritten"):
+    for other in (c for c in CLASSES if c != "human"):
         o = vals[other]
         if h.size < 10 or o.size < 10:
             cuts[other] = aurocs[other] = float("nan")
@@ -150,7 +155,7 @@ def panel_stats(sub: pd.DataFrame, column: str, machine_is_high: bool) -> dict:
 
 def plot_column(
     df: pd.DataFrame, column: str, family: str, spec: dict,
-    stats: dict[str, dict], draw_thresholds: bool, path: Path, bins: int,
+    stats: dict[str, dict], path: Path, bins: int,
 ) -> None:
     import matplotlib
 
@@ -164,10 +169,6 @@ def plot_column(
     raw_all = df[column].to_numpy(dtype=float)
     raw_all = raw_all[np.isfinite(raw_all)]
     lo, hi = np.percentile(raw_all, [0.5, 99.5])
-    if draw_thresholds:
-        ts = [t for s in stats.values() for t in s["cuts"].values() if np.isfinite(t)]
-        if ts:
-            lo, hi = min(lo, *ts), max(hi, *ts)
     pad = 0.03 * (hi - lo) or 0.01
     lo, hi = lo - pad, hi + pad
     edges = np.linspace(lo, hi, bins + 1)
@@ -183,32 +184,22 @@ def plot_column(
             ax.step(mids, dens, where="mid", color=colour, lw=1.6, label=cls)
             ax.fill_between(mids, dens, step="mid", color=colour, alpha=0.13)
 
-        if draw_thresholds:
-            for other, ls in (("rephrase", ":"), ("rewritten", "--")):
-                t = s["cuts"][other]
-                if not np.isfinite(t):
-                    continue
-                ax.axvline(t, color=CLASSES[other], lw=1.5, ls=ls)
-                ax.text(t, ax.get_ylim()[1] * 0.97, f" {t:.3g}",
-                        color=CLASSES[other], fontsize=8, va="top",
-                        ha="left" if t < lo + 0.8 * (hi - lo) else "right")
-
-        a_r, a_w = s["aurocs"]["rephrase"], s["aurocs"]["rewritten"]
+        a_hr, a_ai, a_air = (s["aurocs"]["human_rephrased"], s["aurocs"]["ai"],
+                            s["aurocs"]["ai_rephrased"])
         title = f"{DISPLAY[corpus]}  (n={len(sub)})"
-        if np.isfinite(a_r) and np.isfinite(a_w):
-            title += f"\nAUROC  h|reph {a_r:.3f}   h|rew {a_w:.3f}"
+        if np.isfinite(a_hr) and np.isfinite(a_ai) and np.isfinite(a_air):
+            title += (f"\nAUROC  h|hr {a_hr:.3f}   h|ai {a_ai:.3f}"
+                      f"   h|air {a_air:.3f}")
         ax.set_title(title, fontsize=9)
         ax.set_xlabel(spec["xlabel"])
         ax.set_xlim(lo, hi)
         ax.grid(True, lw=0.4, alpha=0.4)
 
     axes[0].set_ylabel("density")
-    axes[0].legend(fontsize=8, loc="upper left")
-    suptitle = f"{column}  ({family}) — human vs. rephrase vs. rewritten"
-    if draw_thresholds:
-        suptitle += "   (dotted = h|rephrase Youden cut, dashed = h|rewritten)"
-    fig.suptitle(suptitle, fontsize=11)
-    fig.tight_layout(rect=(0, 0, 1, 0.92))
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, fontsize=9, loc="lower center",
+               ncol=len(CLASSES), bbox_to_anchor=(0.5, 0.0))
+    fig.tight_layout(rect=(0, 0.08, 1, 1))
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=150)
     plt.close(fig)
@@ -221,8 +212,6 @@ def main() -> int:
     )
     ap.add_argument("--families", nargs="+", choices=list(FAMILIES),
                     default=list(FAMILIES))
-    ap.add_argument("--no-thresholds", action="store_true",
-                    help="just the histograms, no Youden cut lines")
     ap.add_argument("--bins", type=int, default=45)
     ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     args = ap.parse_args()
@@ -257,7 +246,7 @@ def main() -> int:
                                     spec["machine_is_high"])
                 for corpus in PANEL_ORDER
             }
-            plot_column(df, column, family, spec, stats, not args.no_thresholds,
+            plot_column(df, column, family, spec, stats,
                         args.out_dir / f"{column}.png", args.bins)
             for corpus, s in stats.items():
                 for cls, pc in s["per_class"].items():
@@ -265,10 +254,12 @@ def main() -> int:
                         "corpus": corpus, "family": family, "column": column,
                         "class": cls, **pc,
                         "machine_is_high": spec["machine_is_high"],
-                        "cut_human_rephrase": s["cuts"]["rephrase"],
-                        "cut_human_rewritten": s["cuts"]["rewritten"],
-                        "auroc_human_rephrase": s["aurocs"]["rephrase"],
-                        "auroc_human_rewritten": s["aurocs"]["rewritten"],
+                        "cut_human_rephrased": s["cuts"]["human_rephrased"],
+                        "cut_ai": s["cuts"]["ai"],
+                        "cut_ai_rephrased": s["cuts"]["ai_rephrased"],
+                        "auroc_human_rephrased": s["aurocs"]["human_rephrased"],
+                        "auroc_ai": s["aurocs"]["ai"],
+                        "auroc_ai_rephrased": s["aurocs"]["ai_rephrased"],
                     })
 
     args.out_dir.mkdir(parents=True, exist_ok=True)

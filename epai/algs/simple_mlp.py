@@ -63,6 +63,12 @@ class SimpleMLPAlg(ClfAlgorithm):
       * ``dropout`` / ``input_dropout`` -- between hidden layers / on the raw
         feature vector (defaults 0.1 / 0.0);
       * ``norm_layer`` -- ``none`` or ``layernorm`` (default ``none``);
+      * ``activation`` -- ``relu`` or ``gelu`` (default ``relu``), between hidden
+        layers -- ``gelu`` reproduces a GELU-MLP head from the literature (e.g.
+        RoBERTa-Sentinel, Chen et al. 2023) on top of this package's shared
+        trainer;
+      * ``scheduler`` -- ``none`` or ``cosine`` (default ``none``), a
+        ``CosineAnnealingLR`` over the full ``epochs`` count;
       * ``label_smoothing``, ``mixup_alpha``, ``grad_clip`` -- default 0, off;
       * ``epochs``, ``batch_size``, ``lr``, ``weight_decay``, ``patience`` --
         defaults 100, 64, 1e-3, 1e-4, 10.
