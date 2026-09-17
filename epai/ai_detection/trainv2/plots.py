@@ -288,8 +288,8 @@ def _distort(v, lo: float, hi: float, k: float):
 
 
 def zeroshot_scatter(
-    rows: list[dict], meta: dict, path: Path, *, key: str = "version", title: str = "",
-    variant_suffix: str = "_wlp", figsize: tuple[float, float] = (9.6, 4.6),
+    rows: list[dict], meta: dict, path: Path | list[Path], *, key: str = "version",
+    title: str = "", variant_suffix: str = "_wlp", figsize: tuple[float, float] = (9.6, 4.6),
     kx: float = 1.7, ky: float = 1.7,
 ) -> None:
     """Both axes use a nonlinear "expand near 1" warp (:func:`_distort`,
@@ -468,11 +468,12 @@ def zeroshot_scatter(
 
     if title:
         ax.set_title(title, fontsize=10.5, color=_INK)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=150, facecolor="white", bbox_inches="tight",
-                bbox_extra_artists=(legend,))
+    for p in [path] if isinstance(path, Path) else path:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(p, dpi=150, facecolor="white", bbox_inches="tight",
+                    bbox_extra_artists=(legend,))
+        print(f"wrote {p}")
     plt.close(fig)
-    print(f"wrote {path}")
 
 
 # ---------------------------------------------------------------------------

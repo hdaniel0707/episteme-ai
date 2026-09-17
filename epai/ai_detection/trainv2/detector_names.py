@@ -34,6 +34,12 @@ DETECTOR_DISPLAY: dict[str, str] = {
 
 
 def display_detector(name: str) -> str:
+    """``<x>_reph`` (``rephrase_best_zeroshot_performance.py``'s baseline-vs-
+    rephrase shift figure) displays as its base's name with a suffix -- the
+    hollow/filled marker already carries the baseline/rephrase distinction,
+    this just keeps the legend text unambiguous out of sorted order."""
+    if name.endswith("_reph"):
+        return f"{display_detector(name[: -len('_reph')])} (rephrase)"
     return DETECTOR_DISPLAY.get(name, name)
 
 

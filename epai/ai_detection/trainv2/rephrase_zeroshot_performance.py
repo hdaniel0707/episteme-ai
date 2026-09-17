@@ -1,11 +1,10 @@
-r"""Zero-shot detector performance on the rephrase task, with rephrased text
-counted as HUMAN ground truth.
+r"""Zero-shot detector performance on the rephrase task: AI (original +
+rephrased) vs. human (original + rephrased).
 
-The detection target is the FULL gpt-5.6-luna generation only:
-
-    y = 1   rewritten    the full gpt56luna generation ('...:0701A' GB, '...:0811A' Sci)
-    y = 0   human        generated_by == 'human'
-    y = 0   rephrase     generated_by == 'gpt56luna:0908R'   <-- counted as human
+    y = 1   ai             the full gpt56luna generation ('...:0701A' GB, '...:0811A' Sci)
+    y = 1   ai_rephrased   that generation, rephrased again by gpt56luna ('...:0916R')
+    y = 0   human          generated_by == 'human'
+    y = 0   human_rephrased generated_by == 'gpt56luna:0908R'
 
 For every Binoculars column and, separately, every Fast-DetectGPT column, on
 MG-GB / MG-Sci (and MG-All pooled, kept in the CSV): oriented AUROC
@@ -83,13 +82,13 @@ def _cols(spec: dict, names: set[str]) -> list[str]:
 
 def _cell(sub: pd.DataFrame, column: str, machine_is_high: bool,
           fprs: list[float]) -> list[dict]:
-    """One (corpus, column) reading at each FPR level: rephrase + human vs. the
-    full rewrite. ``[]`` on a degenerate slice."""
+    """One (corpus, column) reading at each FPR level: {ai, ai_rephrased} vs.
+    {human, human_rephrased}. ``[]`` on a degenerate slice."""
     v = sub[column].to_numpy(dtype=float)
     cls = sub["cls"].to_numpy()
     ok = np.isfinite(v)
     v, cls = v[ok], cls[ok]
-    y = (cls == "rewritten").astype(int)  # human and rephrase -> 0
+    y = np.isin(cls, ["ai", "ai_rephrased"]).astype(int)  # human(_rephrased) -> 0
     if np.unique(y).size < 2 or len(y) < 10:
         return []
     oriented = oriented_scores(v, machine_is_high)
@@ -162,8 +161,8 @@ def plots_from_csv(csv_path: Path, meta: dict, out_dir: Path) -> None:
         frows = rows_at_fpr(rows, fpr)
         for family in sorted({r["family"] for r in frows}):
             fam_rows = [r for r in frows if r["family"] == family]
-            title = (f"{_TITLE.get(family, family)} — rephrase counted as human — "
-                     f"zero-shot AUROC vs. oracle TPR@{fpr * 100:g}%FPR")
+            title = (f"{_TITLE.get(family, family)} — AI+rephrase vs. "
+                     f"human+rephrase — zero-shot AUROC vs. oracle TPR@{fpr * 100:g}%FPR")
             zeroshot_scatter(fam_rows, fmeta, out_dir / f"{family}_{tag}.png",
                              key="version", title=title)
 
@@ -203,7 +202,7 @@ def main() -> int:
     if not columns:
         raise SystemExit("no binoculars_score* / fastdetect_crit_* columns present")
     print(f"columns : {columns}")
-    print(f"target  : y=1 the full gpt56luna generation; human AND rephrase -> y=0")
+    print("target  : y=1 ai + ai_rephrased; y=0 human + human_rephrased")
     print(f"metric  : AUROC (oriented), oracle TPR@"
           f"{[f'{f * 100:g}%' for f in args.fpr]}FPR\n")
 

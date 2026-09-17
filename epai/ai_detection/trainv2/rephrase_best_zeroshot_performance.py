@@ -1,31 +1,44 @@
-r"""The hand-picked best zero-shot detector per family on ONE figure -- rephrase
-task, rephrased text counted as HUMAN ground truth.
+r"""The hand-picked best zero-shot detector per family -- rephrase task, AI
+(original + rephrased) vs. human (original + rephrased) -- on ONE figure that
+shows the SHIFT from each detector's pre-rephrase reading.
 
-The rephrase-GT sibling of ``run_best_zeroshot_performance.py``: reads the same
-flat column list from ``--config`` (``cfg/ai_detection/trainv2/best_zeroshot.yaml``)
+``performance.csv`` (all 5 hand-picked detectors, incl. RADAR) and its
+results table are computed exactly as before: reads the same flat column
+list from ``--config`` (``cfg/ai_detection/trainv2/best_zeroshot.yaml``)
 **minus any gemma judge** (null on the rephrase rows), and scores each on
 MG-GB / MG-Sci -- plus MG-All pooled, kept in the CSV only -- with
 
-    y = 1   the full gpt56luna generation ('...:0701A' GB, '...:0811A' Sci)
-    y = 0   human AND rephrase (gpt56luna:0908R)
+    y = 1   ai + ai_rephrased (gpt56luna full generation, and that generation
+            rephrased again by gpt56luna: '...:0701A'/'...:0811A' + '...:0916R')
+    y = 0   human + human_rephrased (gpt56luna:0908R)
 
-reporting oriented AUROC and the ORACLE TPR@1%FPR, all on one
-AUROC-vs-TPR@1%FPR scatter:
-
-    colour = detector (``<family>/<version>``)
-    marker shape = corpus (MG-GB / MG-Sci)
-    bold filled circle = that detector's mean across MG-GB and MG-Sci
+The FIGURE is different: only the four detectors with a real zero-shot
+signal here (Binoculars, Fast-DetectGPT, the parsed-answer judge, LogJudge --
+RADAR dropped) are plotted, each paired with its own PRE-rephrase reading
+(``compute_baseline()``: the same detectors on MG-GB / MG-Sci, human vs. the
+full unrephrased generation only -- i.e. ``run_best_zeroshot_performance.py``'s
+own scoring, restricted to those two splits). Both readings share the
+detector's colour; the rephrase-task point is filled, the pre-rephrase point
+is hollow, and the two means are joined by a line -- reusing
+``plots.zeroshot_scatter``'s existing hollow-base/filled-variant machinery
+(normally LogJudge vs. its parsed-answer base) with ``variant_suffix="_reph"``
+instead, so here each detector pairs with ITSELF on the other task rather
+than with a different detector. The result reads as a before/after shift per
+detector rather than five independent points. No title on the figure -- the
+caption carries it, matching the article's other figures.
 
 compute -> CSV -> plot from the CSV:
 
     results/trainv2/rephrase_best_zeroshot_performance/
-        performance.csv     one row per (detector, split) AND (detector, 'mean')
-        best_zeroshot.png
+        performance.csv                    all 5 detectors; feeds the results table only
+        shift_performance.csv              4 detectors x {baseline, rephrase}; feeds the figure
+        rephrase_best_zeroshot_1pct.png     also written as .pdf
+        rephrase_best_zeroshot_1pct.pdf
 
 Run:
     uv run python epai/ai_detection/trainv2/rephrase_best_zeroshot_performance.py
     uv run python epai/ai_detection/trainv2/rephrase_best_zeroshot_performance.py \
-        --replot results/trainv2/rephrase_best_zeroshot_performance/performance.csv
+        --replot results/trainv2/rephrase_best_zeroshot_performance/shift_performance.csv
 """
 
 from __future__ import annotations
@@ -51,6 +64,8 @@ from epai.ai_detection.trainv2.run_best_zeroshot_performance import (
 )
 from epai.ai_detection.trainv2.run_zeroshot_performance import DEFAULT_FPRS
 from epai.ai_detection.trainv2.run_zeroshot_performance import FAMILIES as ZS_FAMILIES
+from epai.ai_detection.trainv2.run_zeroshot_performance import compute as zs_compute
+from epai.ai_detection.trainv2.splits import resolve as resolve_splits
 
 BASE = Path(__file__).resolve().parents[3]
 DEFAULT_OUT_DIR = BASE / "results" / "trainv2" / "rephrase_best_zeroshot_performance"
@@ -119,20 +134,51 @@ def compute(df: pd.DataFrame, columns: list[str], fprs: list[float]) -> list[dic
     return rows
 
 
+#: the figure drops RADAR -- the request was the four detectors with a
+#: meaningful zero-shot AUROC on this task (binox, fastdetect, judge, LogJudge).
+#: performance.csv / the results table (rephrase_general_results_table.py)
+#: are untouched and still carry all five.
+FIG_OUT_FIELDS = ["kind", "detector", "family", "version", "column", "split", "fpr",
+                   "n", "n_human", "n_machine", "auroc", "tpr_at_fpr", "fpr_at_fpr",
+                   "reachable"]
+
+
+def fig_columns(columns: list[str]) -> list[str]:
+    return [c for c in columns if not c.startswith("detector_score_")]
+
+
+def compute_baseline(columns: list[str], fprs: list[float]) -> list[dict]:
+    """The same detectors' PRE-rephrase reading: MG-GB / MG-Sci, human vs. the
+    full (unrephrased) generation only -- what each rephrase-task point in
+    Figure~\\ref{fig:rephrasing-scatter} is measured against."""
+    splits = resolve_splits(["mg_gb", "mg_sci"], PARQUET_DIR)
+    rows = zs_compute(splits, ZS_FAMILIES, columns, fprs, "human")
+    for r in rows:
+        r["detector"] = _detector(r["family"], r["version"])
+    return rows
+
+
 def plots_from_csv(csv_path: Path, meta: dict, out_dir: Path) -> None:
+    """Reads the ``shift_performance.csv`` (``kind`` in {baseline, rephrase}):
+    a rephrase-task row plots filled, keyed ``<detector>_reph``; its baseline
+    counterpart plots hollow, keyed ``<detector>`` -- ``zeroshot_scatter``'s
+    existing ``_reph``-suffix variant machinery then draws same-colour
+    hollow/filled pairs connected at their mean, exactly like the LogJudge/
+    parsed-judge pairing on the main figure, but pairing each detector with
+    its own pre-rephrase reading instead of a different detector."""
     from epai.ai_detection.trainv2.plots import zeroshot_scatter
 
-    rows = [r for r in pd.read_csv(csv_path).to_dict("records")
-            if r["split"] in (*meta["splits"], "mean")]
+    df = pd.read_csv(csv_path)
+    df = df[df["split"].isin((*meta["splits"], "mean"))].copy()
+    df["plot_key"] = df["detector"] + np.where(df["kind"] == "rephrase", "_reph", "")
+    rows = df.to_dict("records")
     out_dir.mkdir(parents=True, exist_ok=True)
     for fpr in meta["fprs"]:
         frows = rows_at_fpr(rows, fpr)
-        zeroshot_scatter(
-            frows, {**meta, "fpr": fpr},
-            out_dir / f"best_zeroshot_{fpr_tag(fpr)}.png", key="detector",
-            title=f"Best zero-shot detector per family — rephrase counted as human "
-                  f"— AUROC vs. oracle TPR@{fpr * 100:g}%FPR",
-        )
+        name = f"rephrase_best_zeroshot_{fpr_tag(fpr)}"
+        paths = [out_dir / f"{name}.png", out_dir / f"{name}.pdf"]
+        zeroshot_scatter(frows, {**meta, "fpr": fpr}, paths, key="plot_key",
+                          variant_suffix="_reph")
 
 
 def main() -> int:
@@ -146,7 +192,7 @@ def main() -> int:
                          f"(default: {DEFAULT_FPRS})")
     ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     ap.add_argument("--no-plots", action="store_true")
-    ap.add_argument("--replot", type=Path, default=None, metavar="PERFORMANCE_CSV")
+    ap.add_argument("--replot", type=Path, default=None, metavar="SHIFT_PERFORMANCE_CSV")
     args = ap.parse_args()
 
     meta = {"fprs": args.fpr, "splits": SPLITS}
@@ -166,7 +212,7 @@ def main() -> int:
 
     print(f"config  : {args.config}")
     print(f"columns : {columns}")
-    print("target  : y=1 the full gpt56luna generation; human AND rephrase -> y=0")
+    print("target  : y=1 ai + ai_rephrased; y=0 human + human_rephrased")
     print(f"metric  : AUROC (oriented), oracle TPR@"
           f"{[f'{f * 100:g}%' for f in args.fpr]}FPR\n")
 
@@ -182,8 +228,16 @@ def main() -> int:
                                       "tpr_at_fpr", "reachable"]).to_string(index=False))
     print(f"\nwrote {csv_path}")
 
+    fcols = fig_columns(columns)
+    baseline_rows = compute_baseline(fcols, args.fpr)
+    shift_rows = ([{**r, "kind": "baseline"} for r in baseline_rows]
+                  + [{**r, "kind": "rephrase"} for r in rows if r["column"] in fcols])
+    shift_csv = args.out_dir / "shift_performance.csv"
+    pd.DataFrame(shift_rows, columns=FIG_OUT_FIELDS).to_csv(shift_csv, index=False)
+    print(f"wrote {shift_csv}")
+
     if not args.no_plots:
-        plots_from_csv(csv_path, meta, args.out_dir)
+        plots_from_csv(shift_csv, meta, args.out_dir)
     return 0
 
 
