@@ -1,0 +1,142 @@
+# Canonical column layout for the 4 core AI-detection parquets
+# (ghostbuster_orig, manugram_gb, manugram_sci, manugram_aiscientist).
+#
+# The model: `canonical_columns` (meta_common + the detector-suite block +
+# judge_columns_canonical) is the EXACT, ordered list of column names every
+# one of the 4 parquets must carry, identically spelled, identically ordered.
+# Nothing here is inferred from shape or pattern-matched -- if a name isn't
+# listed, it isn't canonical, full stop. That's on purpose: a shape/pattern
+# rule (e.g. "any <model> in judge_model_order times any <prompt> in
+# judge_prompt_order") silently accepted combinations that were never
+# actually scored everywhere (gemma4_31b_cand03/cand10 only exist on
+# manugram_aiscientist) and let real drift (differently-abbreviated ad hoc
+# names across files) through uncaught.
+#
+# A column legitimately specific to one corpus (OpenAlex metadata on
+# manugram_sci, `ai_author` on manugram_aiscientist, a one-off judge rerun)
+# goes in `per_stem_extra` instead -- allowed there, not required anywhere
+# else, never flagged. Position among per_stem_extra columns (and any other
+# unrecognized column) isn't enforced, only membership -- ordering is only
+# strict within `canonical_columns`.
+#
+# Read by epai/ai_detection/score/core_columns.py. Checked by
+# epai/ai_detection/score/check_core_columns.py.
+
+# --- the 4 core parquets, by stem name --------------------------------------
+stems: [ghostbuster_orig, manugram_gb, manugram_sci, manugram_aiscientist]
+
+# --- meta (required everywhere) ---------------------------------------------
+meta_common: [uid, id, domain, text, text_raw, generated_by]
+
+# --- per-stem extra (allowed only there, never required, never flagged) ----
+per_stem_extra:
+  manugram_sci:
+    - doi
+    - title
+    - author_ids
+    - author_count
+    - year
+    - venue
+    - citation_count
+    - fwci
+    - language
+    - fields_of_study
+    - query
+    - also_matched_domains
+    - prompt
+  manugram_aiscientist:
+    - text_preclean
+    - title
+    - year
+    - oa_id
+    - ai_author
+
+# --- detector-suite column order --------------------------------------------
+# Capability-ladder order, copied from cfg/detector_suite.md's figure axis
+# (Falcon-7B (2023) -> Falcon3-7B -> Qwen2.5-7B -> Mistral-7B v0.3 -> Llama-3.1-8B).
+# WHICH models/pairs exist still comes from cfg/detector_suite.yaml (the
+# single source of truth for membership) -- these lists set the column
+# ORDER instead of that file's own list order, because detector_suite.yaml
+# says plainly its embedders order "is not load-bearing"; it was never meant
+# to pin a column position. Every combination here is legitimately exact --
+# unlike judges, there's no partial-coverage concept for a Binoculars/
+# Fast-DetectGPT pair or an embedder, so generating from these (rather than
+# hand-enumerating 34 names) doesn't reintroduce the shape-matching problem.
+embedders_order:
+  - specter2
+  - scincl
+  - scibert
+  - mpnet
+  - minilm
+  - e5
+  - bge
+  - roberta
+  - styledistance
+  - style_wegmann
+  - luar
+  - luar_crud
+
+# Shared by binoculars_pairs and fastdetect_pairs -- detector_suite.md keeps
+# the two pair lists identical on purpose (same 5 model pairs, one statistic
+# swapped), so one order list covers both. Underscored to match column names
+# directly (cfg/detector_suite.yaml's keys use hyphens).
+model_pair_order:
+  - falcon_7b
+  - falcon3_7b
+  - qwen25_7b
+  - mistral_v03
+  - llama31_8b
+
+detectors_order:
+  - radar
+
+# Stat sub-order within one fastdetect_pairs entry: fastdetect_<stat>_<key>.
+fastdetect_stat_order: [crit, prob, ntok]
+
+# Stat sub-order within one detectors entry: detector_<stat>_<name>.
+detector_stat_order: [score, ntok]
+
+# --- llm_judge_* columns (required everywhere) ------------------------------
+# The EXACT, ordered list of every llm_judge* column every parquet must
+# carry -- not generated from a model x prompt cross product (see the header
+# comment for why). A judge column that's only real on some corpora belongs
+# in per_stem_extra above, not here.
+judge_columns_canonical:
+
+  # Judge Baseline
+  - llm_judge_score_gpt56luna_base
+  - llm_judge_score_gemma4_31b_base
+
+  # Judge Scores (gpt56Luna 3x)
+  - llm_judge_score_gpt56luna_v3
+  - llm_judge_score_gpt56luna_cand03
+  - llm_judge_score_gpt56luna_cand10
+
+  # Judge Scores (open-weight models)
+  - llm_judge_score_qwen3_14b_v3
+  - llm_judge_score_gptoss_120b_v3
+  - llm_judge_score_llama33_70b_v3
+  - llm_judge_score_gemma4_31b_v3
+
+  # LogJudge Ord2 Raw (gpt56Luna 3x)
+  - llm_judge_logprobs_gpt56luna_v3_words
+  - llm_judge_logprobs_gpt56luna_cand03_words
+  - llm_judge_logprobs_gpt56luna_cand10_words
+
+  # LogJudge Ord2 Raw (gemma)
+  - llm_judge_logprobs_gemma4_31b_v3_words
+
+  # LogJudge Ord5 Raw 
+  - llm_judge_logprobs_gpt56luna_v3_scale
+  - llm_judge_logprobs_gemma4_31b_v3_scale
+
+  # Judge Reasoning
+  - llm_judge_cues_human_gpt56luna_v3
+  - llm_judge_cues_machine_gpt56luna_v3
+  - llm_judge_cuevec_gpt56luna_v3
+  - llm_judge_reason_gpt56luna_v3
+  - llm_judge_other_gpt56luna_v3
+
+
+# Primary key column: must be unique within each parquet.
+primary_key: uid
