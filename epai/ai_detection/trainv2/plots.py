@@ -291,6 +291,12 @@ def zeroshot_scatter(
     rows: list[dict], meta: dict, path: Path | list[Path], *, key: str = "version",
     title: str = "", variant_suffix: str = "_wlp", figsize: tuple[float, float] = (9.6, 4.6),
     kx: float = 1.7, ky: float = 1.7,
+    color_override: dict[str, str] | None = None,
+    light_border: frozenset[str] = frozenset(),
+    emphasize: frozenset[str] = frozenset(),
+    chance_color: str = "#b5495b",
+    label_override: dict[str, str] | None = None,
+    show_scores: bool = True,
 ) -> None:
     """Both axes use a nonlinear "expand near 1" warp (:func:`_distort`,
     anchored power law) instead of a linear scale: it compresses the mostly-
@@ -298,7 +304,30 @@ def zeroshot_scatter(
     cluster. The AT-HM background field is warped the same way so its
     contours still line up with the (distorted) points. Tick positions are
     chosen by hand and placed at their warped location, since evenly-spaced
-    real values no longer land evenly spaced on the page."""
+    real values no longer land evenly spaced on the page.
+
+    ``color_override`` replaces the auto-assigned hue for the given raw
+    ``key`` values (any name absent from it keeps its automatic palette
+    slot) -- for a figure that needs specific series to carry a fixed,
+    semantic colour rather than whatever slot they land on. Every marker is
+    the same size and gets SOME border; ``light_border`` only thins that
+    (non-hollow) name's edge instead of the default bold one -- both stay
+    black, so a de-emphasised series still reads as "the same kind of mark,
+    less shouty" rather than a different, flatter kind of mark. ``emphasize``
+    draws those names' markers one zorder step above everything else, so
+    they sit visibly on top of any overlap at the same point. The intended
+    combination is baselines with a thin black border in their own
+    full-saturation hues (``light_border``, left out of ``emphasize``)
+    against a bold-bordered, accent-coloured "ours" drawn on top
+    (``emphasize``, left out of ``light_border``). ``chance_color`` recolours
+    the chance cross/dotted reference lines. ``label_override`` replaces a
+    name's whole legend string outright (e.g. dropping the backbone suffix
+    down to a short official name, or adding a "(ours)" tag); ``show_scores``
+    (default on) toggles the auto "— AT-HM x.xx" suffix for every name NOT
+    in ``label_override``. All six default to the original look (bold
+    border, no z-order boost, maroon chance marker, full ``family/backbone``
+    names with their AT-HM score), so every other caller of this function is
+    unaffected."""
     from .splits import PLOT_EXCLUDE
     from .splits import display as _sd
     from .splits import marker as _split_marker
@@ -315,6 +344,8 @@ def zeroshot_scatter(
     # joined by a connector. The variant draws as a filled circle; its base
     # draws hollow in the same hue (see :func:`_variant_palette_hollow`).
     base_of, paired_base, hue = _variant_palette_hollow(names, suffix=variant_suffix)
+    if color_override:
+        hue.update({k: v for k, v in color_override.items() if k in hue})
 
     marker = {s: _split_marker(s) for s in splits}
     fpr = meta["fpr"]
@@ -340,9 +371,9 @@ def zeroshot_scatter(
 
     # Chance: an uninformative score is AUROC 0.5, and its oracle TPR at a
     # target FPR is that FPR -- a single point, not a diagonal (x is AUROC).
-    ax.axvline(wx(0.5), color="#b5495b", lw=1.0, ls=":", alpha=0.6, zorder=0)
-    ax.axhline(wy(fpr), color="#b5495b", lw=1.0, ls=":", alpha=0.6, zorder=0)
-    ax.scatter([wx(0.5)], [wy(fpr)], s=120, color="#b5495b", marker="x", lw=1.8,
+    ax.axvline(wx(0.5), color=chance_color, lw=1.0, ls=":", alpha=0.6, zorder=0)
+    ax.axhline(wy(fpr), color=chance_color, lw=1.0, ls=":", alpha=0.6, zorder=0)
+    ax.scatter([wx(0.5)], [wy(fpr)], s=120, color=chance_color, marker="x", lw=1.8,
                alpha=0.6, zorder=0)
 
     def _err(r: dict) -> tuple[float | None, float | None]:
@@ -362,12 +393,19 @@ def zeroshot_scatter(
         if r["split"] == "mean" or not np.isfinite(r["tpr_at_fpr"]):
             continue
         hollow = r[key] in paired_base
+        light = r[key] in light_border and not hollow
+        big = r[key] in emphasize
         col = hue[r[key]]
-        ax.scatter([wx(r["auroc"])], [wy(r["tpr_at_fpr"])], s=34,
+        if hollow:
+            edge, lw = _tint(col, 0.55), 0.6
+        elif light:
+            edge, lw = _INK, 0.5
+        else:
+            edge, lw = _INK, 1.0
+        ax.scatter([wx(r["auroc"])], [wy(r["tpr_at_fpr"])], s=48,
                    marker=marker.get(r["split"], "P"),
                    facecolors="none" if hollow else _tint(col),
-                   edgecolors=_tint(col, 0.55) if hollow else "#6a6a6a",
-                   linewidths=0.6, zorder=3)
+                   edgecolors=edge, linewidths=lw, zorder=3.5 if big else 3)
 
     means = [(v, next((r for r in rows if r[key] == v and r["split"] == "mean"), None))
              for v in names]
@@ -384,15 +422,23 @@ def zeroshot_scatter(
     for v, m in means:
         xe, ye = _err(m)
         hollow = v in paired_base
+        light = v in light_border and not hollow
+        big = v in emphasize
         x0, y0 = m["auroc"], m["tpr_at_fpr"]
+        if hollow:
+            mec, mew = hue[v], 1.2
+        elif light:
+            mec, mew = _INK, 0.7
+        else:
+            mec, mew = _INK, 1.3
         # Asymmetric error bars: (mean - err) and (mean + err) each warp by a
         # different amount since the transform isn't linear.
         xerr = [[wx(x0) - wx(x0 - xe)], [wx(x0 + xe) - wx(x0)]] if xe is not None else None
         yerr = [[wy(y0) - wy(y0 - ye)], [wy(y0 + ye) - wy(y0)]] if ye is not None else None
         ax.errorbar([wx(x0)], [wy(y0)], xerr=xerr, yerr=yerr,
-                    fmt="o", ms=7, mfc="none" if hollow else hue[v],
-                    mec=hue[v] if hollow else "#222222", mew=1.0,
-                    ecolor="#222222", elinewidth=1.0, capsize=2.0, zorder=5)
+                    fmt="o", ms=9, mfc="none" if hollow else hue[v], mec=mec, mew=mew,
+                    ecolor="#222222", elinewidth=1.0, capsize=2.0,
+                    zorder=5.5 if big else 5)
 
     ax.set_xlabel(f"AUROC\n(power warp, k={kx:g})", fontsize=9, color=_INK)
     ax.set_ylabel(f"TPR@{fpr * 100:g}%FPR\n(power warp, k={ky:g})", fontsize=9,
@@ -443,9 +489,12 @@ def zeroshot_scatter(
     handles = []
     for v in ranked:
         hollow = v in paired_base
-        s = _at_hm(v)
-        dv = _display_detector(v)
-        label = f"{dv} — AT-HM {s:.2f}" if s is not None else dv
+        if label_override and v in label_override:
+            label = label_override[v]
+        else:
+            s = _at_hm(v)
+            dv = _display_detector(v)
+            label = f"{dv} — AT-HM {s:.2f}" if (show_scores and s is not None) else dv
         handles.append(plt.Line2D(
             [], [], marker="o", ls="", ms=7,
             mfc="none" if hollow else hue[v],
@@ -453,15 +502,15 @@ def zeroshot_scatter(
     handles.append(plt.Line2D([], [], ls="", label=""))
     handles += [plt.Line2D([], [], marker=marker[s], ls="", ms=7,
                            color="#8a8a8a", label=_sd(s)) for s in splits]
-    handles.append(plt.Line2D([], [], marker="x", ls="", color="#b5495b",
+    handles.append(plt.Line2D([], [], marker="x", ls="", color=chance_color,
                               label=f"chance (0.5, {fpr * 100:g}%)"))
     legend = ax.legend(
         handles=handles, fontsize=8, loc="upper left",
         bbox_to_anchor=(1.01, 0.95), framealpha=0.9, borderaxespad=0.0,
     )
-    # LLM-judge family (LogJudge readout + parsed-answer baseline) in bold,
-    # same rule as build_general_results_table.py's tables -- zip stops at
-    # len(ranked), so this never touches the split-shape/chance entries below.
+    # Our two contributions (LogJudge, FusionJudge) in bold, same rule as
+    # build_general_results_table.py's tables -- zip stops at len(ranked), so
+    # this never touches the split-shape/chance entries below.
     for v, txt in zip(ranked, legend.get_texts()):
         if is_judge_family(v):
             txt.set_fontweight("bold")

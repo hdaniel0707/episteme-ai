@@ -5,8 +5,9 @@ The rephrase-task sibling of ``build_general_results_table.py``: same
 detectors (``run_best_zeroshot_performance.py``'s hand-picked list, minus the
 gemma judge -- null on the rephrase rows, see
 ``rephrase_best_zeroshot_performance.py``), same ranking rule (pooled-mean
-AT-HM) and cell format, same bold rules (best value per column, LLM-judge
-family row labels bolded) -- just over MG-GB / MG-Sci (rephrase counted as
+AT-HM) and cell format, same bold rules (best value per column, our own
+contributions' -- LogJudge, FusionJudge -- row labels bolded) -- just over
+MG-GB / MG-Sci (rephrase counted as
 human) instead of the four Manugram core splits, reusing
 ``build_general_results_table.py``'s ``_plain_tabular`` renderer directly
 rather than re-implementing it.

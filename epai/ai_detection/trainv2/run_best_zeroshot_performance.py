@@ -65,6 +65,57 @@ _FAMILY_ABBR = {"binoculars": "binox", "fastdetect": "fastdetect", "judge": "jud
                  "detector": "detector"}
 OUT_FIELDS = ["detector", *CSV_FIELDS]
 
+# Style for this one figure only (zeroshot_scatter's color_override/
+# light_border/emphasize/chance_color default to a no-op everywhere else):
+# baselines keep normal, fully-saturated colours from the paper's existing
+# validated 8-hue palette -- they're real published methods, not props, so
+# they don't get greyed out, and every marker (baseline or ours) is the same
+# size with a black border. "Ours" (LLM-judge family = blue, FusionJudge =
+# purple) pops instead through a bolder/thicker border plus drawing on top
+# (emphasize), against baselines' thinner black one (light_border) -- weight
+# and layering, not size, colour, or desaturation. Blue is vivified from the
+# palette's default slot (#2a78d6 -> #1d6fe0, OKLCH chroma 0.16 -> 0.19)
+# since it still clears the CVD pair check against purple (ΔE 12.3 deutan /
+# 15.0 normal-vision) at that chroma; purple is left at its existing slot
+# (#4a3aa7) because pushing it more vivid too is what collapses the
+# blue/purple separation (tested: drops below the ΔE 15 normal-vision
+# floor). Baselines pull three more slots from the same documented palette
+# (green/gold/red); the full 5-hue set clears CVD/lightness, with a
+# WCAG-contrast and a CVD WARN on the baseline pair that the legend text +
+# per-split marker shapes + emphasize treatment already cover as secondary
+# encoding (see the dataviz skill's validator -- run via conversation, not
+# committed here). The chance cross/dotted lines are recoloured to a neutral
+# grey so they read as a reference mark, not a seventh series.
+_ACCENT_BLUE = "#1d6fe0"
+_ACCENT_PURPLE = "#4a3aa7"
+_CHANCE_GRAY = "#8a8a86"
+_BASELINE_STYLE = {
+    "binox/llama31-8b": "#1baf7a",
+    "fastdetect/llama31-8b": "#eda100",
+    "detector/radar": "#e34948",
+}
+_COLOR_OVERRIDE = {
+    **_BASELINE_STYLE,
+    "judge/gpt56luna": _ACCENT_BLUE,
+    "judge/gpt56luna_ord2": _ACCENT_BLUE,
+    "fusionjudge/gpt56luna_v3": _ACCENT_PURPLE,
+}
+_LIGHT_BORDER = frozenset(_BASELINE_STYLE)
+_EMPHASIZE = frozenset({"judge/gpt56luna", "judge/gpt56luna_ord2", "fusionjudge/gpt56luna_v3"})
+
+# Legend text for this figure only: short official names, no backbone/version
+# suffix and no AT-HM score (show_scores=False handles the rest) -- the
+# per-point detail lives in the table, not the legend. The two contributions
+# also get an explicit "(ours)" tag alongside their existing bold weight.
+_LEGEND_LABEL = {
+    "fusionjudge/gpt56luna_v3": "FusionJudge (ours)",
+    "judge/gpt56luna_ord2": "LogJudge (ours)",
+    "judge/gpt56luna": "Judge",
+    "fastdetect/llama31-8b": "Fast-DetectGPT",
+    "binox/llama31-8b": "Binoculars",
+    "detector/radar": "RADAR",
+}
+
 
 def _detector(family: str, version: str) -> str:
     return f"{_FAMILY_ABBR.get(family, family)}/{version}"
@@ -92,8 +143,12 @@ def plots_from_csv(csv_path: Path, meta: dict, out_dir: Path) -> None:
         tag = fpr_tag(fpr)
         frows = rows_at_fpr(rows, fpr)
         zeroshot_scatter(
-            frows, fmeta, out_dir / f"best_zeroshot_{tag}.png", key="detector",
-            variant_suffix="_ord2",
+            frows, fmeta,
+            [out_dir / f"best_zeroshot_{tag}.png", out_dir / f"best_zeroshot_{tag}.pdf"],
+            key="detector", variant_suffix="_ord2",
+            color_override=_COLOR_OVERRIDE, light_border=_LIGHT_BORDER,
+            emphasize=_EMPHASIZE, chance_color=_CHANCE_GRAY,
+            label_override=_LEGEND_LABEL, show_scores=False,
         )
         goodness_bars(
             frows, fmeta, out_dir / f"best_zeroshot_goodness_{tag}.png",

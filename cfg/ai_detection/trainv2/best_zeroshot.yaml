@@ -19,8 +19,10 @@ columns:
   - binoculars_score_llama31_8b            # Binoculars      -> llama31-8b
   - fastdetect_crit_llama31_8b             # Fast-DetectGPT  -> llama31-8b
   - llm_judge_score_gpt56luna_v3           # LLM judge       -> gpt56luna (parsed)
-  - llm_judge_score_gemma4_31b_v3          # LLM judge       -> gemma4_31b (parsed)
   - logjudge_ord2_gpt56luna_v3             # LLM judge       -> gpt56luna (ord2, paper Eq. logjudge_simple)
-  - logjudge_ord2_gemma4_31b_v3            # LLM judge       -> gemma4_31b (ord2, paper Eq. logjudge_simple)
-  - ensemble_score                         # Ensemble        -> gpt56luna v3 (mean of parsed + ord2, same-scale cross-readout ensemble)
+  - fusionjudge_score                      # FusionJudge     -> gpt56luna v3 (mean of parsed + ord2, same-scale cross-readout fusion)
   - detector_score_radar                   # Pretrained det. -> RADAR
+  # gemma-4-31b judge/logjudge dropped from this figure/table on purpose --
+  # keeping only 2 of our own contributions (LogJudge, FusionJudge) on the
+  # headline comparison; gemma stays available as raw columns
+  # (core_parquet_columns.yaml) and in the backbone-selection appendix.

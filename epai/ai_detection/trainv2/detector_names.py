@@ -14,10 +14,10 @@ it has no backbone LLM to name, so it's just ``radar``.
 ``judge/<x>_ord2`` -> ``logjudge/<x>``: the ``ord2`` readout
 (``score_logjudge_ord2.py``, the paper's Eq. logjudge_simple, exactly) is
 the paper's LogJudge contribution, so it gets that family name instead of
-the generic ``judge/`` one; the parsed-answer base (``judge/<x>``, no
-suffix) is unaffected, and both are still "the LLM-judge family" for the
-bold rule (:func:`is_judge_family`). ``ensemble/<x>`` (``score_ensemble_
-gpt56luna_v3.py``, the mean of the two) gets the same bold treatment.
+the generic ``judge/`` one. ``fusionjudge/<x>`` (``score_fusionjudge_
+gpt56luna_v3.py``, the mean of LogJudge and the parsed-answer judge) is our
+other contribution. Both get the bold treatment (:func:`is_judge_family`);
+the plain parsed-answer judge baseline (``judge/<x>``, no suffix) does not.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ DETECTOR_DISPLAY: dict[str, str] = {
     "judge/gpt56luna": "judge/gpt-5.6-luna",
     "judge/gemma4_31b_ord2": "logjudge/gemma-4-31b",
     "judge/gemma4_31b": "judge/gemma-4-31b",
-    "ensemble/gpt56luna_v3": "ensemble/gpt-5.6-luna (judge+logjudge)",
+    "fusionjudge/gpt56luna_v3": "fusionjudge/gpt-5.6-luna",
     "binox/llama31-8b": "binoculars/llama-3.1-8b",
     "fastdetect/llama31-8b": "fastdetect/llama-3.1-8b",
     "detector/radar": "radar",
@@ -47,8 +47,9 @@ def display_detector(name: str) -> str:
 
 
 def is_judge_family(name: str) -> bool:
-    """True for the LLM-judge family (LogJudge readout, parsed-answer
-    baseline, and the judge+logjudge ensemble built from both) -- the
-    bold-in-figure-and-table rule. Keyed on the RAW id (before
-    :func:`display_detector`)."""
-    return name.startswith("judge/") or name.startswith("ensemble/")
+    """True only for our two zero-shot contributions -- LogJudge (the
+    ``_ord2`` logprob readout) and FusionJudge (the mean of LogJudge and the
+    parsed-answer judge) -- the bold-in-figure-and-table rule. The plain
+    parsed-answer judge baseline is deliberately NOT bolded. Keyed on the RAW
+    id (before :func:`display_detector`)."""
+    return name.endswith("_ord2") or name.startswith("fusionjudge/")

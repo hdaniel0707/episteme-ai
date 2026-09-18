@@ -102,9 +102,9 @@ def _detector_label(c: str) -> str:
     return c.removeprefix("detector_score_").replace("_", "-")
 
 
-def _ensemble_label(c: str) -> str:
-    """``ensemble_score`` -> ``gpt56luna_v3`` -- the one member pair
-    (score_ensemble_gpt56luna_v3.py) this family currently has."""
+def _fusionjudge_label(c: str) -> str:
+    """``fusionjudge_score`` -> ``gpt56luna_v3`` -- the one member pair
+    (score_fusionjudge_gpt56luna_v3.py) this family currently has."""
     return "gpt56luna_v3"
 
 
@@ -135,13 +135,13 @@ FAMILIES: dict[str, dict] = {
                   })),
     "detector": dict(prefix="detector_score_", machine_is_high=True,
                      label=_detector_label, exclude=frozenset()),
-    # score_ensemble_gpt56luna_v3.py: mean(llm_judge_score_gpt56luna_v3,
+    # score_fusionjudge_gpt56luna_v3.py: mean(llm_judge_score_gpt56luna_v3,
     # logjudge_ord2_gpt56luna_v3) -- both already P(human) on the same
     # scale/orientation, so a plain mean is meaningful (unlike a
-    # binoculars/fastdetect/judge ensemble, whose raw ranges and directions
+    # binoculars/fastdetect/judge fusion, whose raw ranges and directions
     # don't agree -- see the conversation that led here).
-    "ensemble": dict(prefix="ensemble_score", machine_is_high=False,
-                     label=_ensemble_label, exclude=frozenset()),
+    "fusionjudge": dict(prefix="fusionjudge_score", machine_is_high=False,
+                     label=_fusionjudge_label, exclude=frozenset()),
 }
 
 CSV_FIELDS = [

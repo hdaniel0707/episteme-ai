@@ -139,10 +139,10 @@ judge_columns_canonical:
   # LogJudge Ord2 Scores (gemma)
   - logjudge_ord2_gemma4_31b_v3
 
-  # Ensemble -- score_ensemble_gpt56luna_v3.py, mean(llm_judge_score_gpt56luna_v3,
+  # FusionJudge -- score_fusionjudge_gpt56luna_v3.py, mean(llm_judge_score_gpt56luna_v3,
   # logjudge_ord2_gpt56luna_v3); NOT a naming-convention match for either
   # prefix on purpose, it's a cross-readout combination of both
-  - ensemble_score
+  - fusionjudge_score
 
   # Judge Reasoning
   - llm_judge_cues_human_gpt56luna_v3

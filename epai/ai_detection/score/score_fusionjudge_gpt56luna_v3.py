@@ -2,28 +2,30 @@ r"""Arithmetic mean of gpt-5.6-luna's two v3-prompt P(human) readouts --
 the directly-parsed judge score and the logprob-derived ord2 score -- into
 one column:
 
-    ensemble_score
+    fusionjudge_score
 
-    ensemble_score = mean(llm_judge_score_gpt56luna_v3, logjudge_ord2_gpt56luna_v3)
+    fusionjudge_score = mean(llm_judge_score_gpt56luna_v3, logjudge_ord2_gpt56luna_v3)
 
 Both members are already P(human) in [0, 1] on the same orientation
 (high = human), so this is a plain, unweighted average -- no sign-flip or
 rescaling needed, unlike combining across score families with genuinely
 different scales/directions (e.g. binoculars_score / fastdetect_crit, whose
-ranges and orientation don't match either of these).
+ranges and orientation don't match either of these). This is the paper's
+FusionJudge: an unweighted mean (sum-rule score fusion) of LogJudge with its
+own parsed-answer readout, both already produced by the same judge call.
 
 Row-wise arithmetic mean over whichever member is non-null for that row
 (``np.nanmean`` -- same policy as every other ``*mean`` script in this
 directory); a row null in both members stays null.
 
 Run:
-    uv run python epai/ai_detection/score/score_ensemble_gpt56luna_v3.py --dry-run
-    uv run python epai/ai_detection/score/score_ensemble_gpt56luna_v3.py
-    uv run python epai/ai_detection/score/score_ensemble_gpt56luna_v3.py --only manugram_gb
-    uv run python epai/ai_detection/score/score_ensemble_gpt56luna_v3.py --only manugram_reph_gb manugram_reph_sci
+    uv run python epai/ai_detection/score/score_fusionjudge_gpt56luna_v3.py --dry-run
+    uv run python epai/ai_detection/score/score_fusionjudge_gpt56luna_v3.py
+    uv run python epai/ai_detection/score/score_fusionjudge_gpt56luna_v3.py --only manugram_gb
+    uv run python epai/ai_detection/score/score_fusionjudge_gpt56luna_v3.py --only manugram_reph_gb manugram_reph_sci
 
 Deterministic, no API, one read + write per file (``--out-dir`` to divert).
-Refuses to replace an existing ``ensemble_score`` column without
+Refuses to replace an existing ``fusionjudge_score`` column without
 ``--overwrite``.
 """
 
@@ -47,7 +49,7 @@ REPHRASE_STEMS = ["manugram_reph_gb", "manugram_reph_sci"]
 ALL_STEMS = CORE_STEMS + REPHRASE_STEMS
 
 MEMBERS = ["llm_judge_score_gpt56luna_v3", "logjudge_ord2_gpt56luna_v3"]
-OUT_COL = "ensemble_score"
+OUT_COL = "fusionjudge_score"
 
 
 def mean_combine(scores: np.ndarray) -> np.ndarray:
@@ -110,7 +112,7 @@ def main() -> None:
     ap.add_argument("--out-dir", type=Path, default=None,
                     help="write scored <stem>.parquet here instead of in place")
     ap.add_argument("--overwrite", action="store_true",
-                    help="replace an ensemble_score column that already exists")
+                    help="replace a fusionjudge_score column that already exists")
     ap.add_argument("--dry-run", action="store_true",
                     help="compute and print the score distribution, write nothing")
     args = ap.parse_args()

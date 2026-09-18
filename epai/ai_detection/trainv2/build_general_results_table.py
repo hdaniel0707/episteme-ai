@@ -9,8 +9,8 @@ run's scatter legend. Columns = each MANUGRAM core split + (unless
 since the CSV doesn't store a goodness column for zero-shot rows, same as
 plots.py's goodness_bars()). Every metric header carries an ``\\uparrow``
 (higher is better everywhere here); the best value in each column is
-bolded; our own contribution (the ``_wlp`` LogJudge readout) gets its row
-label bolded too.
+bolded; our own contributions (LogJudge, FusionJudge) get their row label
+bolded too.
 
 Every AT-HM cell -- including the Mean column's -- is ``goodness(auroc, tpr)``
 computed from that same column's own (pooled, for Mean) AUROC/TPR pair, never
@@ -68,24 +68,65 @@ DEFAULT_DOMAIN_CSV = (BASE_DIR / "results" / "trainv2" / "best_zeroshot_performa
 DEFAULT_OUT = (BASE_DIR / "results" / "trainv2" / "best_zeroshot_performance"
                / "general_results_table.txt")
 
-METRICS = ("auroc", "tpr", "hm")
+METRICS = ("hm", "auroc", "tpr")
 METRIC_LABEL = {"auroc": "AUROC", "tpr": "TPR@1\\%FPR", "hm": "AT-HM"}
 #: a heavier separator between dataset groups (vs. a single \midrule between
 #: rows within the same dataset, e.g. a split's domains).
 DOUBLE_RULE = "\\midrule\n\\midrule"
+
+#: Row/column labels for this table family (General Results + its --appendix
+#: and --domains variants, and rephrase_general_results_table.py's table,
+#: which calls into _plain_tabular directly) -- matches the main figure's
+#: legend (run_best_zeroshot_performance.py's _LEGEND_LABEL): short official
+#: names, no backbone/version suffix, "(ours)" alongside the existing bold
+#: weight on our two contributions, and a \citep for each baseline (same
+#: citation keys as the paper's own "As baselines we used ..." sentence).
+#: Plain prose, not \texttt -- these are proper names now, not raw column
+#: identifiers. A detector id absent from this map (e.g. a future addition)
+#: falls back to the old \texttt{display_detector(...)} rendering.
+TABLE_LABEL: dict[str, str] = {
+    "fusionjudge/gpt56luna_v3": "FusionJudge (ours)",
+    "judge/gpt56luna_ord2": "LogJudge (ours)",
+    "judge/gpt56luna": "Judge",
+    "fastdetect/llama31-8b": r"Fast-DetectGPT~\citep{bao2024fastdetectgpt}",
+    "binox/llama31-8b": r"Binoculars~\citep{hans_spotting_2024}",
+    "detector/radar": r"RADAR~\citep{hu_radar_2023}",
+}
 
 
 def _tex_escape(name: str) -> str:
     return name.replace("_", r"\_")
 
 
+def _table_label(det: str) -> str:
+    if det in TABLE_LABEL:
+        return TABLE_LABEL[det]
+    return f"\\texttt{{{_tex_escape(_display_detector(det))}}}"
+
+
+def _group_label(key: str) -> str:
+    """Column-group header -- same as :func:`splits.display` except the
+    pooled-mean group reads "All Benchmark Mean" and GB-orig reads
+    "Ghostbuster (Original)" with its citation, in this table only
+    (``splits.DISPLAY``'s "Mean"/"GB-orig" stay the shared default
+    everywhere else, e.g. the scatter legend and the --appendix/--domains
+    table variants)."""
+    if key == "mean":
+        return "All Benchmark Mean"
+    if key == "gb_orig":
+        return r"Ghostbuster (Original)~\citep{verma_ghostbuster_2024}"
+    return _sd(key)
+
+
 
 
 def build(csv_path: Path, fpr: float, skip_mean: bool, only_mean: bool,
-          appendix: bool) -> str:
+          appendix: bool, columns_override: list[str] | None = None) -> str:
     df = pd.read_csv(csv_path)
     df = df[df["fpr"] == fpr]
-    if only_mean:
+    if columns_override:
+        columns = columns_override
+    elif only_mean:
         columns = ["mean"]
     elif skip_mean:
         columns = list(CORE_SPLITS)
@@ -116,15 +157,11 @@ def build(csv_path: Path, fpr: float, skip_mean: bool, only_mean: bool,
     else:
         tabular, resize, bold_note = _plain_tabular(detectors, columns, values, best)
 
+    groups = " and ".join(_group_label(c) for c in columns)
     caption = (
-        f"General Results: zero-shot and LogJudge detectors on the Manugram "
-        f"core splits, oriented AUROC and oracle TPR@{fpr * 100:g}\\%FPR, and "
-        f"their AT-HM (Section~\\ref{{sec:method_metric}}); higher is better "
-        f"throughout. Every AT-HM value, including the Mean column's, is "
-        f"computed from that column's own (pooled, for Mean) AUROC and TPR -- "
-        f"not the mean of the four per-split AT-HM scores -- matching "
-        f"Figure~\\ref{{fig:general-results-scatter}}. Ranked by pooled-mean "
-        f"AT-HM; \\textbf{{bold}} {bold_note}."
+        f"General Results: zero-shot detectors on {groups}, oriented AUROC, "
+        f"oracle TPR@{fpr * 100:g}\\%FPR, and AT-HM "
+        f"(Section~\\ref{{sec:method_metric}}); higher is better. {bold_note}."
     )
     lines = [
         r"\begin{table}[t]",
@@ -145,7 +182,7 @@ def _plain_tabular(detectors, columns, values, best) -> tuple[list[str], bool, s
     columns wide and reads better transposed (see :func:`_transposed_tabular`,
     ``--appendix``)."""
     header1 = " & " + " & ".join(
-        f"\\multicolumn{{3}}{{c}}{{{_sd(c)}}}" for c in columns) + r" \\"
+        f"\\multicolumn{{3}}{{c}}{{{_group_label(c)}}}" for c in columns) + r" \\"
     n_cols = len(columns)
     cmidrules = " ".join(
         f"\\cmidrule(lr){{{2 + 3 * i}-{4 + 3 * i}}}" for i in range(n_cols))
@@ -165,7 +202,7 @@ def _plain_tabular(detectors, columns, values, best) -> tuple[list[str], bool, s
                 if best[(split, m)] is not None and s == f"{best[(split, m)]:.3f}":
                     s = f"\\textbf{{{s}}}"
                 cells.append(s)
-        label = f"\\texttt{{{_tex_escape(_display_detector(det))}}}"
+        label = _table_label(det)
         if is_judge_family(det):
             label = f"\\textbf{{{label}}}"
         rows.append(f"{label} & " + " & ".join(cells) + r" \\")
@@ -183,9 +220,9 @@ def _plain_tabular(detectors, columns, values, best) -> tuple[list[str], bool, s
         r"\bottomrule",
         r"\end{tabular}%" if resize else r"\end{tabular}",
     ]
-    bold_note = ("row labels are the LLM-judge family (LogJudge readout and "
-                 "parsed-answer baseline), \\textbf{bold} values are the "
-                 "best in their column")
+    bold_note = (r"\textbf{Bold} row labels are our contributions "
+                 r"(LogJudge, FusionJudge); \textbf{bold} values are the "
+                 r"best per column")
     return tabular, resize, bold_note
 
 
@@ -195,7 +232,7 @@ def _rotated_header(detectors) -> str:
     metric) table."""
     return " & & " + " & ".join(
         (r"\textbf{" if is_judge_family(det) else "")
-        + f"\\rotatebox{{90}}{{\\texttt{{{_tex_escape(_display_detector(det))}}}}}"
+        + f"\\rotatebox{{90}}{{{_table_label(det)}}}"
         + ("}" if is_judge_family(det) else "")
         for det in detectors) + r" \\"
 
@@ -244,9 +281,9 @@ def _transposed_tabular(detectors, columns, values, best) -> tuple[list[str], bo
         r"\bottomrule",
         r"\end{tabular}%",
     ]
-    bold_note = ("column headers are the LLM-judge family (LogJudge readout "
-                 "and parsed-answer baseline), \\textbf{bold} values are the "
-                 "best detector for that row")
+    bold_note = (r"\textbf{Bold} column headers are our contributions "
+                 r"(LogJudge, FusionJudge); \textbf{bold} values are the "
+                 r"best detector per row")
     return tabular, True, bold_note
 
 
@@ -369,6 +406,12 @@ def main() -> None:
                         help="keep ONLY the pooled-mean column group -- a "
                              "compact 1-group table (still ranked/computed "
                              "the same way)")
+    group.add_argument("--columns", nargs="+", metavar="SPLIT",
+                        choices=[*CORE_SPLITS, "mean"],
+                        help="exact column-group list and order (e.g. "
+                             "--columns gb_orig mean), overriding --skip-"
+                             "mean/--only-mean; the pooled-mean group prints "
+                             "as \"All Benchmark Mean\" here")
     ap.add_argument("--appendix", action="store_true",
                      help="transpose the table (rows = split x metric, "
                           "columns = detector) instead of squeezing 16 "
@@ -386,7 +429,8 @@ def main() -> None:
     if args.domains:
         tex = build_domains_table(args.csv, args.domain_csv, args.fpr)
     else:
-        tex = build(args.csv, args.fpr, args.skip_mean, args.only_mean, args.appendix)
+        tex = build(args.csv, args.fpr, args.skip_mean, args.only_mean, args.appendix,
+                    columns_override=args.columns)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(tex)
     print(f"wrote {args.out}")
