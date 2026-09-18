@@ -138,5 +138,25 @@ judge_columns_canonical:
   - llm_judge_other_gpt56luna_v3
 
 
+# --- columns allowed to be entirely null/empty ------------------------------
+# A canonical column that's null on every row is normally an ERROR (check 6),
+# but these are null ON PURPOSE, not a capture bug:
+#
+# fastdetect_prob_* has real values only for the falcon-7b pair.
+# Fast-DetectGPT's criterion-to-probability mapping ships published
+# calibration constants for a handful of pairs only, and
+# run_fastdetect_pairs.py deliberately writes Null for the rest rather than
+# borrow another pair's constants (see that script's "THE PROBABILITY
+# COLUMNS ARE MOSTLY NULL, ON PURPOSE" docstring section).
+# `fastdetect_crit_*` -- not this -- is the real detector score: it's what
+# every calibration/scoring script (calibrate_fastdetect_baseline.py,
+# run_fastdetect_youden_calibration.py, run_zeroshot_performance.py) reads,
+# and it has no nulls. Nothing reads fastdetect_prob_*.
+allow_null:
+  - fastdetect_prob_falcon3_7b
+  - fastdetect_prob_qwen25_7b
+  - fastdetect_prob_mistral_v03
+  - fastdetect_prob_llama31_8b
+
 # Primary key column: must be unique within each parquet.
 primary_key: uid

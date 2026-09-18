@@ -26,6 +26,12 @@ DETECTOR_SUITE = yaml.safe_load(DETECTOR_SUITE_PATH.read_text())
 CORE_STEMS: list[str] = CORE_CFG["stems"]
 PRIMARY_KEY: str = CORE_CFG["primary_key"]
 
+#: Columns that are null/empty on every row on purpose (not a capture bug --
+#: see core_parquet_columns.yaml's "allow_null" comment for why each one is
+#: there). check_core_columns.py downgrades an otherwise-ERROR "entirely
+#: null" finding to INFO for these.
+ALLOW_NULL: set[str] = set(CORE_CFG.get("allow_null", []))
+
 
 def _key(pair: dict) -> str:
     return pair["key"].replace("-", "_")

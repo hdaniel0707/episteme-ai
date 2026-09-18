@@ -32,9 +32,13 @@ where a real answer needs one:
      (embeddings, judge logprob windows, cue vectors) and string columns
      are read directly, since "list is null" vs "list is empty" and empty
      string can't be told apart from footer stats alone. A column that is
-     entirely null/empty is an ERROR; a partially-null column is reported
-     for the count only (not necessarily a bug -- some metadata is
-     legitimately optional).
+     entirely null/empty is an ERROR, UNLESS it's in core_parquet_columns.yaml's
+     ``allow_null`` list (null on every row *on purpose* -- e.g.
+     ``fastdetect_prob_*``, which only has real values for one pair; the
+     actual detector score everything reads is ``fastdetect_crit_*``, which
+     has none), in which case it's INFO instead. A partially-null column is
+     always just reported for the count (not necessarily a bug -- some
+     metadata is legitimately optional).
 
 Plus two checks that aren't per-parquet:
 
@@ -70,6 +74,7 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from epai.ai_detection.score.core_columns import (
+    ALLOW_NULL,
     CORE_STEMS,
     PRIMARY_KEY,
     allowed_extra,
@@ -212,11 +217,14 @@ def _check_nulls(src: Path, names: list[str], issues: list[tuple[str, str]]) -> 
         field = schema.field(name)
         is_listy = pa.types.is_list(field.type) or pa.types.is_large_list(field.type)
         is_stringy = pa.types.is_string(field.type) or pa.types.is_large_string(field.type)
+        allowed = name in ALLOW_NULL
+        entirely_level = "INFO" if allowed else "ERROR"
+        entirely_suffix = " (expected -- see core_parquet_columns.yaml allow_null)" if allowed else ""
 
         if not is_listy and not is_stringy:
             null_count = _footer_null_count(pf, name)
             if null_count == n_rows:
-                _issue(issues, "ERROR", f"{name}: entirely null ({n_rows} row(s))")
+                _issue(issues, entirely_level, f"{name}: entirely null ({n_rows} row(s)){entirely_suffix}")
             elif null_count > 0:
                 _issue(issues, "INFO", f"{name}: {null_count}/{n_rows} null")
             continue
@@ -232,11 +240,12 @@ def _check_nulls(src: Path, names: list[str], issues: list[tuple[str, str]]) -> 
 
         empty_kind = "empty-list" if is_listy else "empty-string"
         if null_count == n_rows:
-            _issue(issues, "ERROR", f"{name}: entirely null ({n_rows} row(s))")
+            _issue(issues, entirely_level, f"{name}: entirely null ({n_rows} row(s)){entirely_suffix}")
         elif null_count + empty_count == n_rows and empty_count > 0:
-            _issue(issues, "ERROR",
+            _issue(issues, entirely_level,
                    f"{name}: entirely null-or-{empty_kind} "
-                   f"({null_count} null, {empty_count} {empty_kind}, {n_rows} row(s))")
+                   f"({null_count} null, {empty_count} {empty_kind}, {n_rows} row(s))"
+                   f"{entirely_suffix}")
         else:
             if null_count > 0:
                 _issue(issues, "INFO", f"{name}: {null_count}/{n_rows} null")
