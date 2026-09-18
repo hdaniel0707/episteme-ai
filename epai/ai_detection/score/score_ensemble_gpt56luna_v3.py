@@ -20,6 +20,7 @@ Run:
     uv run python epai/ai_detection/score/score_ensemble_gpt56luna_v3.py --dry-run
     uv run python epai/ai_detection/score/score_ensemble_gpt56luna_v3.py
     uv run python epai/ai_detection/score/score_ensemble_gpt56luna_v3.py --only manugram_gb
+    uv run python epai/ai_detection/score/score_ensemble_gpt56luna_v3.py --only manugram_reph_gb manugram_reph_sci
 
 Deterministic, no API, one read + write per file (``--out-dir`` to divert).
 Refuses to replace an existing ``ensemble_score`` column without
@@ -40,6 +41,10 @@ from epai.utils.parquet_utils import load_parquet, save_parquet
 BASE_DIR = Path(__file__).resolve().parents[3]
 PARQUET_DIR = BASE_DIR / "data" / "parquet"
 CORE_STEMS = ["ghostbuster_orig", "manugram_gb", "manugram_sci", "manugram_aiscientist"]
+#: opt-in only -- pass via --only, never swept by a bare (no --only) run, so
+#: the rephrase task's scores get computed on request, not by default.
+REPHRASE_STEMS = ["manugram_reph_gb", "manugram_reph_sci"]
+ALL_STEMS = CORE_STEMS + REPHRASE_STEMS
 
 MEMBERS = ["llm_judge_score_gpt56luna_v3", "logjudge_ord2_gpt56luna_v3"]
 OUT_COL = "ensemble_score"
@@ -101,7 +106,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("--only", nargs="+", choices=CORE_STEMS, metavar="STEM")
+    ap.add_argument("--only", nargs="+", choices=ALL_STEMS, metavar="STEM")
     ap.add_argument("--out-dir", type=Path, default=None,
                     help="write scored <stem>.parquet here instead of in place")
     ap.add_argument("--overwrite", action="store_true",
