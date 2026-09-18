@@ -88,11 +88,24 @@ def _fastdetect_label(c: str) -> str:
 
 
 def _judge_label(c: str) -> str:
+    """``llm_judge_score_gpt56luna_v3`` -> ``gpt56luna`` (the parsed-answer
+    baseline, unchanged); ``logjudge_ord2_gpt56luna_v3`` -> ``gpt56luna_ord2``
+    (the paper's ord2 readout) -- an explicit ``_ord2`` suffix so
+    :func:`plots.zeroshot_scatter`'s hollow-base pairing (``variant_suffix``)
+    still connects it to its parsed base, the same way ``_wlp`` used to."""
+    if c.startswith("logjudge_ord2_"):
+        return c.removeprefix("logjudge_ord2_").replace("_v3", "") + "_ord2"
     return c.removeprefix("llm_judge_score_").replace("_v3", "")
 
 
 def _detector_label(c: str) -> str:
     return c.removeprefix("detector_score_").replace("_", "-")
+
+
+def _ensemble_label(c: str) -> str:
+    """``ensemble_score`` -> ``gpt56luna_v3`` -- the one member pair
+    (score_ensemble_gpt56luna_v3.py) this family currently has."""
+    return "gpt56luna_v3"
 
 
 #: prefix / orientation / label / default-excluded columns per family.
@@ -101,7 +114,7 @@ FAMILIES: dict[str, dict] = {
                        label=_binox_label, exclude=frozenset()),
     "fastdetect": dict(prefix="fastdetect_crit_", machine_is_high=True,
                        label=_fastdetect_label, exclude=frozenset()),
-    "judge": dict(prefix="llm_judge_score_", machine_is_high=False,
+    "judge": dict(prefix=("llm_judge_score_", "logjudge_ord2_"), machine_is_high=False,
                   label=_judge_label,
                   exclude=frozenset({
                       "llm_judge_score_sonnet5_v3",
@@ -122,6 +135,13 @@ FAMILIES: dict[str, dict] = {
                   })),
     "detector": dict(prefix="detector_score_", machine_is_high=True,
                      label=_detector_label, exclude=frozenset()),
+    # score_ensemble_gpt56luna_v3.py: mean(llm_judge_score_gpt56luna_v3,
+    # logjudge_ord2_gpt56luna_v3) -- both already P(human) on the same
+    # scale/orientation, so a plain mean is meaningful (unlike a
+    # binoculars/fastdetect/judge ensemble, whose raw ranges and directions
+    # don't agree -- see the conversation that led here).
+    "ensemble": dict(prefix="ensemble_score", machine_is_high=False,
+                     label=_ensemble_label, exclude=frozenset()),
 }
 
 CSV_FIELDS = [

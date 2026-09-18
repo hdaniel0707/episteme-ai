@@ -11,11 +11,13 @@ cleaned up by hand below rather than by a generic regex, since the three
 don't sanitize the same way. RADAR is the one exception to the pattern --
 it has no backbone LLM to name, so it's just ``radar``.
 
-``judge/<x>_wlp`` -> ``logjudge/<x>``: the ``_wlp`` logprob-window readout is
+``judge/<x>_ord2`` -> ``logjudge/<x>``: the ``ord2`` readout
+(``score_logjudge_ord2.py``, the paper's Eq. logjudge_simple, exactly) is
 the paper's LogJudge contribution, so it gets that family name instead of
 the generic ``judge/`` one; the parsed-answer base (``judge/<x>``, no
 suffix) is unaffected, and both are still "the LLM-judge family" for the
-bold rule (:func:`is_judge_family`).
+bold rule (:func:`is_judge_family`). ``ensemble/<x>`` (``score_ensemble_
+gpt56luna_v3.py``, the mean of the two) gets the same bold treatment.
 """
 
 from __future__ import annotations
@@ -23,10 +25,11 @@ from __future__ import annotations
 #: raw ``detector`` id (run_best_zeroshot_performance.py's ``_detector()``,
 #: "<family-abbr>/<version>") -> display name.
 DETECTOR_DISPLAY: dict[str, str] = {
-    "judge/gpt56luna_wlp": "logjudge/gpt-5.6-luna",
+    "judge/gpt56luna_ord2": "logjudge/gpt-5.6-luna",
     "judge/gpt56luna": "judge/gpt-5.6-luna",
-    "judge/gemma4_31b_wlp": "logjudge/gemma-4-31b",
+    "judge/gemma4_31b_ord2": "logjudge/gemma-4-31b",
     "judge/gemma4_31b": "judge/gemma-4-31b",
+    "ensemble/gpt56luna_v3": "ensemble/gpt-5.6-luna (judge+logjudge)",
     "binox/llama31-8b": "binoculars/llama-3.1-8b",
     "fastdetect/llama31-8b": "fastdetect/llama-3.1-8b",
     "detector/radar": "radar",
@@ -44,8 +47,8 @@ def display_detector(name: str) -> str:
 
 
 def is_judge_family(name: str) -> bool:
-    """True for the LLM-judge family (LogJudge readout + parsed-answer
-    baseline) -- the bold-in-figure-and-table rule. Keyed on the RAW id
-    (before :func:`display_detector`), which always starts with ``judge/``
-    for both the base and its ``_wlp`` variant."""
-    return name.startswith("judge/")
+    """True for the LLM-judge family (LogJudge readout, parsed-answer
+    baseline, and the judge+logjudge ensemble built from both) -- the
+    bold-in-figure-and-table rule. Keyed on the RAW id (before
+    :func:`display_detector`)."""
+    return name.startswith("judge/") or name.startswith("ensemble/")

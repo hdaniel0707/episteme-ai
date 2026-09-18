@@ -5,11 +5,22 @@
 # plots them all on ONE AUROC-vs-TPR@1%FPR figure.
 #
 # A flat list of score columns; each is routed to its family by prefix.
+#
+# The LLM-judge rows use logjudge_ord2_* -- score_logjudge_ord2.py's literal
+# implementation of the paper's ord2 mechanism (Eq. logjudge_simple:
+# L={human,machine}, v(human)=1, v(machine)=0, lambda(x)=P(x)) -- in place of
+# the old llm_judge_score_*_wlp columns, which added an extra MIN_ANSWER_MASS
+# floor the paper's formula doesn't have. Same swap for the 3-prompt means:
+# *_aritmean (score_logjudge_ord2_mean.py / score_llm_judge_mean.py) replaces
+# the old ad hoc *_3p / *_3p_wlp alias columns (alias_promptmean_columns.py),
+# which existed only to paper over inconsistent literal promptmean names
+# across splits -- see judge_columns.md's history, since removed.
 columns:
-  - binoculars_score_llama31_8b      # Binoculars      -> llama31-8b
-  - fastdetect_crit_llama31_8b       # Fast-DetectGPT  -> llama31-8b
-  - llm_judge_score_gpt56luna_v3      # LLM judge       -> gpt56luna (parsed)
-  - llm_judge_score_gemma4_31b_v3     # LLM judge       -> gemma4_31b (parsed)
-  - llm_judge_score_gpt56luna_v3_wlp  # LLM judge       -> gpt56luna (words logprob)
-  - llm_judge_score_gemma4_31b_v3_wlp # LLM judge       -> gemma4_31b (words logprob)
-  - detector_score_radar              # Pretrained det. -> RADAR
+  - binoculars_score_llama31_8b            # Binoculars      -> llama31-8b
+  - fastdetect_crit_llama31_8b             # Fast-DetectGPT  -> llama31-8b
+  - llm_judge_score_gpt56luna_v3           # LLM judge       -> gpt56luna (parsed)
+  - llm_judge_score_gemma4_31b_v3          # LLM judge       -> gemma4_31b (parsed)
+  - logjudge_ord2_gpt56luna_v3             # LLM judge       -> gpt56luna (ord2, paper Eq. logjudge_simple)
+  - logjudge_ord2_gemma4_31b_v3            # LLM judge       -> gemma4_31b (ord2, paper Eq. logjudge_simple)
+  - ensemble_score                         # Ensemble        -> gpt56luna v3 (mean of parsed + ord2, same-scale cross-readout ensemble)
+  - detector_score_radar                   # Pretrained det. -> RADAR

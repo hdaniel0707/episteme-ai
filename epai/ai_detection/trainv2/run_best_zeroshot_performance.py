@@ -93,10 +93,12 @@ def plots_from_csv(csv_path: Path, meta: dict, out_dir: Path) -> None:
         frows = rows_at_fpr(rows, fpr)
         zeroshot_scatter(
             frows, fmeta, out_dir / f"best_zeroshot_{tag}.png", key="detector",
+            variant_suffix="_ord2",
         )
         goodness_bars(
             frows, fmeta, out_dir / f"best_zeroshot_goodness_{tag}.png",
             key="detector", combine=meta.get("combine", "hmean"),
+            variant_suffix="_ord2",
             title=f"Best zero-shot detector per family — goodness "
                   f"(TPR@{fpr * 100:g}%FPR) across the MANUGRAM splits",
         )
