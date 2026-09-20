@@ -47,6 +47,10 @@ gpt56luna -> OpenAI Responses API ``reasoning={"effort":"none"}`` +
     uv run python epai/ai_detection/score/capture_judge_logprobs.py --model gpt56luna --only manugram_aiscientist --limit 60 --yes
     uv run python epai/ai_detection/score/capture_judge_logprobs.py --model gpt56luna --prompt cand03 \
         --workspace data/parquet/tmp/gpt56luna-cand03 --only manugram_aiscientist --yes
+    # rephrase corpora (opt-in, REPHRASE_STEMS) -- words mode only, score_logjudge_ord2.py
+    # doesn't use scale:
+    uv run python epai/ai_detection/score/capture_judge_logprobs.py --model gpt56luna \
+        --only manugram_reph_gb manugram_reph_sci --modes words --dry-run
     # then, once both models are done:
     uv run python epai/ai_detection/score/merge_captured_logprobs.py
 """
@@ -85,6 +89,22 @@ PARQUET_DIR = BASE_DIR / "data" / "parquet"
 CAPTURE_DIR = PARQUET_DIR / "tmp"  # sidecars live here; data/ is gitignored
 
 CORE_STEMS = ["ghostbuster_orig", "manugram_gb", "manugram_sci", "manugram_aiscientist"]
+#: opt-in only -- pass via --only, never swept by a bare (no --only) run, same
+#: convention as score_logjudge_ord2.py's REPHRASE_STEMS. Only the two
+#: genuinely-new rephrase classes need a window (human/full-ai in these files
+#: are unused duplicates of the core-split rows -- see REPH_GEN_FILTER).
+REPHRASE_STEMS = ["manugram_reph_gb", "manugram_reph_sci"]
+ALL_STEMS = CORE_STEMS + REPHRASE_STEMS
+#: stem -> the only generated_by values worth capturing there. manugram_reph_*
+#: also carries a duplicate 'human' row and a duplicate full-ai
+#: ('...:0701A'/'...:0811A') row per document -- both already scored via the
+#: core-split parquet (plot_score_histograms.build() sources human/ai from
+#: there, never from the reph file), so capturing them here would just be a
+#: billed no-op.
+REPH_GEN_FILTER: dict[str, set[str]] = {
+    "manugram_reph_gb": {"gpt56luna:0908R", "gpt56luna:0916R"},
+    "manugram_reph_sci": {"gpt56luna:0908R", "gpt56luna:0916R"},
+}
 MODES = ("words", "scale")
 DEFAULT_PROMPT = "v3"
 TOP_N = 20
@@ -310,6 +330,8 @@ def capture_stem(stem: str, model_key: str, modes: list[str], args) -> None:
             light[c] = None
 
     eligible = (light[TEXT_COL].astype(str).str.strip().str.len() > 0).to_numpy()
+    if stem in REPH_GEN_FILTER:
+        eligible = eligible & light["generated_by"].isin(REPH_GEN_FILTER[stem]).to_numpy()
     for mode in modes:
         _run_mode(light, column(model_key, mode, args.prompt), mode, eligible, spec,
                   sidecar, cols, args)
@@ -328,7 +350,7 @@ def main() -> None:
                          f"(default: {DEFAULT_PROMPT}); includes any candidate "
                          "loaded from cfg/ai_detection/judge_prompts/candidates/")
     ap.add_argument("--modes", nargs="+", choices=MODES, default=list(MODES))
-    ap.add_argument("--only", nargs="+", choices=CORE_STEMS, metavar="STEM")
+    ap.add_argument("--only", nargs="+", choices=ALL_STEMS, metavar="STEM")
     ap.add_argument("--workspace", type=Path, default=None,
                     help="sidecar dir (default data/parquet/tmp/<model>/, created if missing)")
     ap.add_argument("--limit", type=int, default=None,

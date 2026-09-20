@@ -25,6 +25,15 @@
 # --- the 4 core parquets, by stem name --------------------------------------
 stems: [ghostbuster_orig, manugram_gb, manugram_sci, manugram_aiscientist]
 
+# --- MG-Reph, opt-in only (check_core_columns.py --only; never swept by a
+# bare run, same convention as score_logjudge_ord2.py's REPHRASE_STEMS).
+# Both halves are built from a merged/unioned schema (source_family splits
+# them, split_manugram_reph.py/rollout variant) -- manugram_reph_sci carries
+# manugram_sci's own per_stem_extra fields for real, manugram_reph_gb carries
+# the same columns but always null (unioned in from the sci half, never
+# populated for Ghostbuster-family rows) -- see per_stem_extra below for both.
+rephrase_stems: [manugram_reph_gb, manugram_reph_sci]
+
 # --- meta (required everywhere) ---------------------------------------------
 meta_common: [uid, id, domain, text, text_raw, generated_by]
 
@@ -50,6 +59,30 @@ per_stem_extra:
     - year
     - oa_id
     - ai_author
+  manugram_reph_gb: &rephrase_extra
+    - source_family
+    - rephrase_len_ratio
+    - rephrase_surface_jaccard
+    - rephrase_seqmatch_ratio
+    - doi
+    - title
+    - author_ids
+    - author_count
+    - year
+    - venue
+    - citation_count
+    - fwci
+    - language
+    - fields_of_study
+    - query
+    - also_matched_domains
+    - prompt
+    # NOT listed here on purpose: the 12 live experiment/variant judge
+    # columns (_wlp/_slp/_sbc/_lp, ens_v3_smin_*, sonnet5_v3) that
+    # run_zeroshot_performance.py etc. read on the 4 CORE parquets --
+    # deliberately dropped from manugram_reph_gb/_sci instead (never scored
+    # as a real analysis target there; check_core_columns.py --drop-extra).
+  manugram_reph_sci: *rephrase_extra
 
 # --- detector-suite column order --------------------------------------------
 # Capability-ladder order, copied from cfg/detector_suite.md's figure axis
@@ -102,10 +135,6 @@ detector_stat_order: [score, ntok]
 # comment for why). A judge column that's only real on some corpora belongs
 # in per_stem_extra above, not here.
 judge_columns_canonical:
-
-  # Judge Baseline
-  - llm_judge_score_gpt56luna_base
-  - llm_judge_score_gemma4_31b_base
 
   # Judge Scores (gpt56Luna 3x)
   - llm_judge_score_gpt56luna_v3

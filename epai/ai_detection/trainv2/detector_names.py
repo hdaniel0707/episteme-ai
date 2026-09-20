@@ -17,7 +17,8 @@ the paper's LogJudge contribution, so it gets that family name instead of
 the generic ``judge/`` one. ``fusionjudge/<x>`` (``score_fusionjudge_
 gpt56luna_v3.py``, the mean of LogJudge and the parsed-answer judge) is our
 other contribution. Both get the bold treatment (:func:`is_judge_family`);
-the plain parsed-answer judge baseline (``judge/<x>``, no suffix) does not.
+the plain parsed-answer judge baseline (``judge/<x>``, no suffix) displays as
+``basejudge/<x>`` and does not.
 """
 
 from __future__ import annotations
@@ -26,9 +27,9 @@ from __future__ import annotations
 #: "<family-abbr>/<version>") -> display name.
 DETECTOR_DISPLAY: dict[str, str] = {
     "judge/gpt56luna_ord2": "logjudge/gpt-5.6-luna",
-    "judge/gpt56luna": "judge/gpt-5.6-luna",
+    "judge/gpt56luna": "basejudge/gpt-5.6-luna",
     "judge/gemma4_31b_ord2": "logjudge/gemma-4-31b",
-    "judge/gemma4_31b": "judge/gemma-4-31b",
+    "judge/gemma4_31b": "basejudge/gemma-4-31b",
     "fusionjudge/gpt56luna_v3": "fusionjudge/gpt-5.6-luna",
     "fusionjudge/gpt56luna_v3_logodds": "fusionjudge (log-odds)/gpt-5.6-luna",
     "fusionjudge/gpt56luna_v3_bayes": "fusionjudge (bayes)/gpt-5.6-luna",
@@ -39,12 +40,6 @@ DETECTOR_DISPLAY: dict[str, str] = {
 
 
 def display_detector(name: str) -> str:
-    """``<x>_reph`` (``rephrase_best_zeroshot_performance.py``'s baseline-vs-
-    rephrase shift figure) displays as its base's name with a suffix -- the
-    hollow/filled marker already carries the baseline/rephrase distinction,
-    this just keeps the legend text unambiguous out of sorted order."""
-    if name.endswith("_reph"):
-        return f"{display_detector(name[: -len('_reph')])} (rephrase)"
     return DETECTOR_DISPLAY.get(name, name)
 
 

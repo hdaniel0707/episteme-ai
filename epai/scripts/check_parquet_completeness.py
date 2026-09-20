@@ -37,13 +37,6 @@ fetch/filter stages reject on) — and for text that is **not English** (a
 wrong-language abstract, or a generator that answered in a non-English title's
 language, leaving an English human row paired with a non-English machine one).
 
-A **baseline-judge column** (``llm_judge_score_<model>_base`` — the ``base``
-control prompt, genre only, no cue guidance, from ``capture_baseline_judge.py``
-+ ``merge_captured_judge_scores.py``) is checked like any other bounded score
-column (nulls, [0, 1] range, degeneracy). ``--only-baseline`` restricts the scan
-to just those columns and prints a per-class coverage line for each — the fast
-re-check after a merge, without materialising the ``emb_*`` columns.
-
 When both ``domain`` and ``generated_by`` are present it also prints the
 domain × generated_by count matrix and the rows-per-``id`` count, and warns if a
 training corpus (more than one ``generated_by`` class) is uneven across those —
@@ -62,10 +55,6 @@ a time (~0.8 GB, ~20 s on a 320 MB / 6000-row corpus).
     .venv/bin/python epai/scripts/check_parquet_completeness.py data/parquet/science_v3f_multi_0811A.parquet
 
     .venv/bin/python epai/scripts/check_parquet_completeness.py data/parquet/ghostbuster_multi.parquet
-
-    # fast re-check of only the baseline-judge columns after a merge
-    .venv/bin/python epai/scripts/check_parquet_completeness.py data/parquet/ghostbuster_orig.parquet \
-        --only-baseline
 
     # or an arbitrary column subset
     .venv/bin/python epai/scripts/check_parquet_completeness.py data/parquet/ghostbuster_orig.parquet \
@@ -158,12 +147,6 @@ SUSPICIOUS_FRAC = 0.80
 # fire on an ``_lp`` column that is merely re-clumped at the extremes.
 LOGPROB_SCORE_SUFFIX = "_lp"
 LOGPROB_MIN_DISTINCT_FRAC = 0.50   # below → WARN (not behaving tie-free)
-
-# Baseline-judge columns — llm_judge_score_<model>_base, the 'base' control
-# prompt (genre only, no cue guidance) written by capture_baseline_judge.py +
-# merge_captured_judge_scores.py. Checked like any bounded score column;
-# --only-baseline restricts the scan to just these.
-BASELINE_JUDGE_GLOB = "llm_judge_score_*_base"
 LOGPROB_MAX_TIE_FRAC = 0.25        # one identical value on ≥ this share → WARN
 LOGPROB_DEAD_DISTINCT = 5          # ≤ this many distinct values → ERROR
 
@@ -260,10 +243,6 @@ def _is_vector(name: str) -> bool:
 
 def _is_logprob_window(name: str) -> bool:
     return name.startswith(LOGPROB_WINDOW_PREFIX)
-
-
-def _is_baseline_judge(name: str) -> bool:
-    return fnmatch.fnmatch(name, BASELINE_JUDGE_GLOB)
 
 
 def _norm_answer(token: str | None, mode: str) -> str:
@@ -974,39 +953,6 @@ def check_logprob_window(name: str, arr: pa.ChunkedArray, n: int,
     return info
 
 
-def _baseline_judge_summary(path: Path, schema, col_info: dict, rep: Report,
-                            n: int) -> None:
-    """Per-class coverage for each ``llm_judge_score_<model>_base`` column.
-
-    The pass/fail verdict (null share, [0, 1] range, degeneracy) is
-    ``check_scalar``'s; this block adds the readout ``check_scalar`` cannot give
-    — which CLASS a partial merge left short, the tell of a
-    ``merge_captured_judge_scores.py`` run that only reached one arm.
-    """
-    base_cols = sorted(f.name for f in schema if _is_baseline_judge(f.name))
-    if not base_cols:
-        return
-    print(f"\n  {BOLD}baseline judge{RESET}{DIM}  base prompt — "
-          f"llm_judge_score_*_base{RESET}")
-    gen = np.array([str(x) for x in rep.gen]) if rep.gen else None
-    classes = sorted(set(gen.tolist())) if gen is not None else []
-    for name in base_cols:
-        valid = pq.read_table(path, columns=[name]).column(0) \
-            .is_valid().to_numpy(zero_copy_only=False)
-        filled = int(valid.sum())
-        parts = [f"{name}: {filled}/{n} ({100 * filled / n:.1f}%)"]
-        if gen is not None and len(classes) > 1:
-            parts.append("  ".join(
-                f"{c} {int(valid[gen == c].sum())}/{int((gen == c).sum())}"
-                for c in classes
-            ))
-        info = col_info.get(name) or {}
-        if info.get("mean") is not None:
-            parts.append(f"mean {_fmt(info['mean'])}  "
-                         f"{info.get('distinct', '?')} distinct")
-        print(f"    {'   '.join(parts)}")
-
-
 def check_class_balance(path: Path, schema, rep: Report) -> dict:
     """The domain × generated_by count matrix, printed, plus a balance check.
 
@@ -1168,15 +1114,9 @@ def check_file(path: Path, reference_cols: set[str] | None,
                 field.name, arr, n, rep, args.max_essay_human_blanks
             )
     if patterns and matched == 0:
-        rep.error(
-            f"no column matches --only {' '.join(patterns)}"
-            + (" — merge_captured_judge_scores.py has not run on this file"
-               if args.only_baseline else "")
-        )
+        rep.error(f"no column matches --only {' '.join(patterns)}")
     elif patterns:
         rep.detail(f"scanned {matched}/{len(schema)} column(s)")
-
-    _baseline_judge_summary(path, schema, col_info, rep, n)
 
     balance = check_class_balance(path, schema, rep)
     if balance:
@@ -1216,11 +1156,6 @@ def parse_args() -> argparse.Namespace:
                          "class-balance matrix still prints. Speeds up a "
                          "re-check of one merge on a big parquet — the heavy "
                          "emb_* columns are never read.")
-    ap.add_argument("--only-baseline", action="store_true",
-                    help=f"shorthand for --only '{BASELINE_JUDGE_GLOB}' — verify "
-                         f"just the baseline-judge columns after "
-                         f"merge_captured_judge_scores.py, with a per-class "
-                         f"coverage line for each")
     ap.add_argument("--fail-on", choices=("error", "warn", "never"), default="error",
                     help="which findings set exit code 1 (default: error)")
     ap.add_argument("--strict", action="store_true", help="alias for --fail-on warn")
@@ -1263,8 +1198,6 @@ def main() -> None:
     args = parse_args()
     if args.strict:
         args.fail_on = "warn"
-    if args.only_baseline:
-        args.only = (args.only or []) + [BASELINE_JUDGE_GLOB]
 
     reference_cols = None
     if args.reference:

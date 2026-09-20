@@ -91,7 +91,6 @@ WS_ROOT = BASE_DIR / "data" / "parquet" / "tmp" / "gb_orig_pipe"
 
 CUE_JUDGE = "gpt56luna"          # rationales -> cue vector; column carries it
 LOGPROB_MODELS = ("gpt56luna", "gemma4-31b")
-BASELINE_MODELS = ("gpt56luna", "gemma4-31b")
 ENSEMBLE_TAUS = ("0.05", "0.1", "0.15", "0.2")
 
 
@@ -110,7 +109,6 @@ def build_stages(args: argparse.Namespace) -> list[Stage]:
 
     per_band = max(args.per_band, _row_count(out))
     lp_ws = {m: WS_ROOT / "logprob" / m for m in LOGPROB_MODELS}
-    base_ws = {m: WS_ROOT / "baseline" / m for m in BASELINE_MODELS}
 
     stages: list[Stage] = []
 
@@ -205,23 +203,6 @@ def build_stages(args: argparse.Namespace) -> list[Stage]:
         ["--only", STEM, "--overwrite"],
         produces=[f"llm_judge_score_{_stem(m)}_v3_{suf}"
                   for m in LOGPROB_MODELS for suf in ("wlp", "slp", "sbc")],
-        reads_text=False,
-    ))
-
-    # baseline ('base' control prompt) — same capture -> merge shape.
-    for m in BASELINE_MODELS:
-        w = g4s_w if m in g4s else api_w
-        stages.append(Stage(
-            f"baseline-capture-{m}", f"{SCORE_DIR}/capture_baseline_judge.py",
-            ["--model", m, "--prompt", "base", "--only", STEM,
-             "--workspace", str(base_ws[m]), *w, *yes],
-            produces=[], reads_text=False,
-        ))
-    stages.append(Stage(
-        "baseline-merge", f"{SCORE_DIR}/merge_captured_judge_scores.py",
-        ["--only", STEM, "--overwrite",
-         "--workspaces", *[str(base_ws[m]) for m in BASELINE_MODELS]],
-        produces=[f"llm_judge_score_{_stem(m)}_base" for m in BASELINE_MODELS],
         reads_text=False,
     ))
 

@@ -15,6 +15,11 @@ coverage is suspiciously low (``--min-coverage``).
     uv run python epai/ai_detection/score/merge_captured_logprobs.py \
         --workspaces data/parquet/tmp/gpt56luna --only manugram_aiscientist
     uv run python epai/ai_detection/score/merge_captured_logprobs.py --out-dir data/parquet/tmp/merged
+    # rephrase corpora: --allow-low expected -- only ~half the file (the two
+    # rephrase classes; REPHRASE_STEMS) ever gets a window, never the
+    # duplicate human/full-ai rows, so coverage is well under --min-coverage:
+    uv run python epai/ai_detection/score/merge_captured_logprobs.py \
+        --only manugram_reph_gb manugram_reph_sci --allow-low --dry-run
 """
 
 from __future__ import annotations
@@ -31,6 +36,10 @@ BASE_DIR = Path(__file__).resolve().parents[3]
 PARQUET_DIR = BASE_DIR / "data" / "parquet"
 CAPTURE_DIR = PARQUET_DIR / "tmp"
 CORE_STEMS = ["ghostbuster_orig", "manugram_gb", "manugram_sci", "manugram_aiscientist"]
+#: opt-in only -- pass via --only, never swept by a bare (no --only) run, same
+#: convention as capture_judge_logprobs.py / score_logjudge_ord2.py.
+REPHRASE_STEMS = ["manugram_reph_gb", "manugram_reph_sci"]
+ALL_STEMS = CORE_STEMS + REPHRASE_STEMS
 KEY_COL = "uid"
 PREFIX = "llm_judge_logprobs_"
 
@@ -117,7 +126,7 @@ def main() -> None:
     )
     ap.add_argument("--workspaces", nargs="+", type=Path, default=None,
                     help="capture dirs (default: every dir under data/parquet/tmp/)")
-    ap.add_argument("--only", nargs="+", choices=CORE_STEMS, metavar="STEM")
+    ap.add_argument("--only", nargs="+", choices=ALL_STEMS, metavar="STEM")
     ap.add_argument("--out-dir", type=Path, default=None,
                     help="write merged <stem>.parquet here instead of in place")
     ap.add_argument("--overwrite", action="store_true",

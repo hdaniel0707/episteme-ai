@@ -24,6 +24,13 @@ CORE_CFG = yaml.safe_load(CORE_CFG_PATH.read_text())
 DETECTOR_SUITE = yaml.safe_load(DETECTOR_SUITE_PATH.read_text())
 
 CORE_STEMS: list[str] = CORE_CFG["stems"]
+#: opt-in only -- pass via check_core_columns.py --only, never swept by a
+#: bare (no --only) run, same convention as score_logjudge_ord2.py's
+#: REPHRASE_STEMS. Checked against the SAME canonical_columns() as the 4
+#: core stems (MG-Reph inherits the full core schema plus its own extras,
+#: per_stem_extra below).
+REPHRASE_STEMS: list[str] = CORE_CFG.get("rephrase_stems", [])
+ALL_STEMS: list[str] = CORE_STEMS + REPHRASE_STEMS
 PRIMARY_KEY: str = CORE_CFG["primary_key"]
 
 #: Columns that are null/empty on every row on purpose (not a capture bug --

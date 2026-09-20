@@ -525,6 +525,141 @@ def zeroshot_scatter(
     plt.close(fig)
 
 
+def athm_bars(
+    rows: list[dict], meta: dict, path: Path | list[Path], *, key: str = "version",
+    color_override: dict[str, str] | None = None,
+    emphasize: frozenset[str] = frozenset(),
+    label_override: dict[str, str] | None = None,
+    combine: str = "hmean",
+    title: str = "",
+) -> None:
+    """Bar version of the AT-HM leaderboard behind :func:`zeroshot_scatter`:
+    each ``key`` gets three flush bars -- AUROC and TPR@<fpr>%FPR as narrow,
+    faded context, AT-HM (:func:`core.goodness`, this run's headline
+    composite) full-strength and black-outlined -- ranked by mean AT-HM
+    across splits (descending, left to right). Per-split AT-HM values overlay
+    the AT-HM bar only, as small markers shaped by split
+    (:func:`splits.marker`) and tinted a pale version of that bar's own hue
+    (:func:`_tint`) so a marker reads as belonging to its bar rather than a
+    foreign sticker; every split keeps a fixed left-to-right slot inside the
+    bar so the same split always lands in the same spot across detectors.
+    ``color_override``/``emphasize``/``label_override`` mirror
+    :func:`zeroshot_scatter`'s -- there is no hollow-pair scheme here, every
+    name gets its own group of bars."""
+    from .splits import display as _sd
+    from .splits import marker as _split_marker
+
+    names = sorted({r[key] for r in rows})
+    splits = [s for s in meta["splits"] if s in {r["split"] for r in rows}]
+    fpr = meta["fpr"]
+
+    hue = {n: _PALETTE[i % len(_PALETTE)] for i, n in enumerate(names)}
+    if color_override:
+        hue.update({k: v for k, v in color_override.items() if k in hue})
+
+    def _label(n: str) -> str:
+        # x-tick labels are narrow columns -- break " (ours)" onto its own
+        # line so it doesn't run into the neighbouring tick's label.
+        return (label_override or {}).get(n, _display_detector(n)).replace(" (ours)", "\n(ours)")
+
+    def _row(n: str, split: str) -> dict | None:
+        return next((r for r in rows if r[key] == n and r["split"] == split), None)
+
+    def _athm(r: dict | None) -> float | None:
+        if r is None:
+            return None
+        a, t = _f(r.get("auroc")), _f(r.get("tpr_at_fpr"))
+        return None if a is None or t is None else _goodness(a, t, combine, fpr)
+
+    entries = []
+    for n in names:
+        mean_r = _row(n, "mean")
+        mean_athm = _athm(mean_r)
+        if mean_athm is None:
+            continue
+        per_split = {s: v for s in splits if (v := _athm(_row(n, s))) is not None}
+        entries.append({"name": n, "mean_row": mean_r, "mean_athm": mean_athm,
+                         "per_split": per_split})
+    entries.sort(key=lambda e: e["mean_athm"], reverse=True)
+    if not entries:
+        print("athm_bars: no rows -- skipped")
+        return
+
+    metrics = [("auroc", "AUROC"), ("tpr_at_fpr", f"TPR@{fpr * 100:g}%FPR"), ("athm", "AT-HM")]
+    # AT-HM is the headline bar -- full-strength colour, own outline; AUROC/
+    # TPR are narrower, faded context. Flush (no gap): auroc [-0.26,-0.10],
+    # tpr [-0.10,0.06], athm [0.06,0.26].
+    width = {"auroc": 0.16, "tpr_at_fpr": 0.16, "athm": 0.20}
+    offset = {"auroc": -0.18, "tpr_at_fpr": -0.02, "athm": 0.16}
+    alpha = {"auroc": 0.40, "tpr_at_fpr": 0.40, "athm": 0.95}
+    hatch = {"auroc": None, "tpr_at_fpr": "//", "athm": None}
+
+    n_splits = max(len(splits), 1)
+    jitter = {s: (i - (n_splits - 1) / 2) * (width["athm"] * 0.7 / max(n_splits - 1, 1))
+              for i, s in enumerate(splits)}
+
+    fig, ax = plt.subplots(figsize=(max(7.0, 1.55 * len(entries) + 2.6), 4.8))
+    ax.set_facecolor(_SURFACE)
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+
+    for gi, e in enumerate(entries):
+        n = e["name"]
+        col = hue[n]
+        big = n in emphasize
+        vals = {"auroc": e["mean_row"]["auroc"], "tpr_at_fpr": e["mean_row"]["tpr_at_fpr"],
+                "athm": e["mean_athm"]}
+        for mkey, _mlabel in metrics:
+            xb = gi + offset[mkey]
+            is_main = mkey == "athm"
+            ax.bar(xb, vals[mkey], width=width[mkey], color=col, hatch=hatch[mkey],
+                   edgecolor=_INK, linewidth=(1.8 if big else 1.0) if is_main else 0.5,
+                   alpha=alpha[mkey], zorder=3 if is_main else 2)
+            if not is_main:
+                continue
+            for s, v in e["per_split"].items():
+                ax.scatter([xb + jitter.get(s, 0.0)], [v], marker=_split_marker(s),
+                           facecolors=_tint(col), edgecolors=_INK, linewidths=0.6,
+                           s=59, zorder=4)
+
+    ax.set_xticks(list(range(len(entries))))
+    ax.set_xticklabels([_label(e["name"]) for e in entries], fontsize=12, color=_INK)
+    for tick, e in zip(ax.get_xticklabels(), entries):
+        if e["name"] in emphasize:
+            tick.set_fontweight("bold")
+            tick.set_color(hue[e["name"]])
+    ax.set_xlim(-0.6, len(entries) - 0.4)
+    ax.set_ylim(0, 1.05)
+    ax.set_ylabel("Score", fontsize=13, color=_INK)
+    ax.tick_params(axis="y", labelsize=11, colors=_MUTED)
+    ax.grid(axis="y", color="#e5e5e2", lw=0.8, zorder=0)
+
+    metric_handles = [plt.Rectangle((0, 0), 1, 1, facecolor=_MUTED, edgecolor=_INK,
+                                     alpha=alpha[mkey], hatch=hatch[mkey],
+                                     linewidth=1.8 if mkey == "athm" else 0.5)
+                       for mkey, _mlabel in metrics]
+    leg1 = ax.legend(metric_handles, [lbl for _, lbl in metrics], title="Metrics",
+                      loc="upper left", bbox_to_anchor=(1.01, 1.0),
+                      fontsize=11, title_fontsize=11, framealpha=0.9, borderaxespad=0.0)
+    ax.add_artist(leg1)
+    split_handles = [plt.Line2D([0], [0], marker=_split_marker(s), color="none",
+                                 markerfacecolor=_tint(_MUTED), markeredgecolor=_INK,
+                                 markeredgewidth=0.6, markersize=10.5)
+                      for s in splits]
+    legend2 = ax.legend(split_handles, [_sd(s) for s in splits], title="Benchmarks",
+                         loc="upper left", bbox_to_anchor=(1.01, 0.60),
+                         fontsize=11, title_fontsize=11, framealpha=0.9, borderaxespad=0.0)
+
+    if title:
+        ax.set_title(title, fontsize=13, color=_INK)
+    for p in [path] if isinstance(path, Path) else path:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(p, dpi=150, facecolor="white", bbox_inches="tight",
+                    bbox_extra_artists=(leg1, legend2))
+        print(f"wrote {p}")
+    plt.close(fig)
+
+
 # ---------------------------------------------------------------------------
 # The eval-only OOD corpus on its own (run_in_domain_performance.py /
 # run_lodo_performance.py, alongside their main scatter). A dedicated zoom on

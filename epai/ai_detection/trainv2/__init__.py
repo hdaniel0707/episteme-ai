@@ -31,15 +31,10 @@ The scripts:
   * ``run_judge_by_generator.py`` — judge x generator matrix, per split.
   * ``run_{binox,fastdetect,judge}_youden_calibration.py`` — per-domain +
     pooled Youden operating points, one CSV per detector family.
-  * ``split_manugram_reph.py`` / ``plot_score_histograms.py`` /
-    ``rephrase_zeroshot_performance.py`` /
-    ``rephrase_best_zeroshot_performance.py`` /
-    ``rephrase_{in_domain,lodo}_performance.py`` (+ ``_reph_trained.py``) --
-    the MG-Reph helpers, all with rephrase counted as human and only gpt56luna:
-    split the corpus; 3-class score distributions; zero-shot and best-of-family;
-    in-domain and LODO trained detection.
-  * ``rebuild_all.py`` / ``rebuild_rephrase.py`` — run the core-split resp.
-    MG-Reph experiments above concurrently.
+  * ``split_manugram_reph.py`` -- splits the MG-Reph corpus into its two
+    halves (ghostbuster / science); the MG-Reph analysis scripts that
+    consumed it were removed for a clean rewrite.
+  * ``rebuild_all.py`` — run the core-split experiments above concurrently.
 
 Reused from the old code: only ``epai/algs`` (the pluggable classifier
 registry). Everything else here is self-contained.

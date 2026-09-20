@@ -4,8 +4,8 @@ The ai_scientist sibling of ``run_ghostbuster_orig_pipeline.py`` -- same reason
 to exist: ``run_holdout_pipeline.py``'s own stage list (embed -> binox ->
 fastdetect -> detector -> judges -> cue-reasons/features) is what
 ``denario_detect.parquet`` / ``denario_hc.parquet`` actually have today, but it
-lacks everything added since (the logprob-window judge readouts, the 'base'
-control-prompt baseline, the soft-min ensemble). This builds the FULLER set --
+lacks everything added since (the logprob-window judge readouts, the
+soft-min ensemble). This builds the FULLER set --
 the same one ``ghostbuster_orig.parquet`` has -- so a later merge with Denario
 does not have to explain away a thinner column set on the new side too.
 
@@ -28,8 +28,8 @@ that script). NOT standardised, NOT scored. This pipeline:
     3..N  the full detector suite, same shape as ghostbuster_orig's pipeline:
           embed -> binox(+extended) -> fastdetect -> radar -> the 5 suite
           judges (v3) -> cue-reasons/features -> logprob capture
-          (gpt56luna, gemma4-31b) / merge / windows -> 'base' baseline capture
-          / merge -> soft-min ensemble -> verify.
+          (gpt56luna, gemma4-31b) / merge / windows -> soft-min ensemble ->
+          verify.
 
 CAUTION -- TWO THINGS THAT BIT THE ghostbuster_orig RUN, HANDLED HERE
 ----------------------------------------------------------------------
@@ -40,9 +40,9 @@ CAUTION -- TWO THINGS THAT BIT THE ghostbuster_orig RUN, HANDLED HERE
   "all visible GPUs" instead of the one asked for. Every stage below that
   wraps a script accepting ``--gpu`` gets it -- checked against each script's
   own argparse, not assumed by analogy. ocr-clean, standardize, cue-features,
-  the logprob/baseline capture-and-merge scripts, and ensemble take no
-  ``--gpu`` at all (verified: none of their argparsers define it) and do not
-  get the flag -- passing it would be an unrecognised argument, not a no-op.
+  the logprob capture-and-merge scripts, and ensemble take no ``--gpu`` at
+  all (verified: none of their argparsers define it) and do not get the
+  flag -- passing it would be an unrecognised argument, not a no-op.
 
 * MAX TOKENS ON THE REAL OPENAI API: ``add_llm_judge_scores.py``'s
   ``_score_openai`` (used for the ``gpt56luna`` judge) and
@@ -132,7 +132,6 @@ WS_ROOT = BASE_DIR / "data" / "parquet" / "tmp" / "ai_scientist_hc_pipe"
 
 CUE_JUDGE = "gpt56luna"
 LOGPROB_MODELS = ("gpt56luna", "gemma4-31b")
-BASELINE_MODELS = ("gpt56luna", "gemma4-31b")
 ENSEMBLE_TAUS = ("0.05", "0.1", "0.15", "0.2")
 
 
@@ -159,7 +158,6 @@ def build_stages(args: argparse.Namespace) -> list[Stage]:
 
     per_band = max(args.per_band, _row_count(OUT if OUT.is_file() else RAW_IN))
     lp_ws = {m: WS_ROOT / "logprob" / m for m in LOGPROB_MODELS}
-    base_ws = {m: WS_ROOT / "baseline" / m for m in BASELINE_MODELS}
 
     stages: list[Stage] = []
 
@@ -263,23 +261,6 @@ def build_stages(args: argparse.Namespace) -> list[Stage]:
         ["--only", STEM, "--overwrite"],
         produces=[f"llm_judge_score_{_stem(m)}_v3_{suf}"
                   for m in LOGPROB_MODELS for suf in ("wlp", "slp", "sbc")],
-        reads_text=False,
-    ))
-
-    # baseline ('base' control judge prompt) -- same capture -> merge shape.
-    for m in BASELINE_MODELS:
-        w = g4s_w if m in g4s else api_w
-        stages.append(Stage(
-            f"baseline-capture-{m}", f"{SCORE_DIR}/capture_baseline_judge.py",
-            ["--model", m, "--prompt", "base", "--only", STEM,
-             "--workspace", str(base_ws[m]), *w, *yes],
-            produces=[], reads_text=False,
-        ))
-    stages.append(Stage(
-        "baseline-merge", f"{SCORE_DIR}/merge_captured_judge_scores.py",
-        ["--only", STEM, "--overwrite",
-         "--workspaces", *[str(base_ws[m]) for m in BASELINE_MODELS]],
-        produces=[f"llm_judge_score_{_stem(m)}_base" for m in BASELINE_MODELS],
         reads_text=False,
     ))
 

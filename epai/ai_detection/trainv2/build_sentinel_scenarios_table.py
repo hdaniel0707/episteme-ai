@@ -1,14 +1,16 @@
 r"""Fill the Training-based comparison LaTeX table from ``run_sentinel_
 comparison.py``'s ``performance.csv`` -- the companion table to
 ``plot_sentinel_scenarios.py``'s figure (Section~\ref{sec:results_training_
-comparison} "Training-based comparison", ``latex/ICLR_AIDetect/
+comparison} "Training-based comparison", ``latex/_ICLR_2027__AI_Detect/
 iclr2027_conference.tex``, Fig.~\ref{fig:sentinel_scenarios}).
 
-Rows = the same four :data:`plot_sentinel_scenarios.ALGORITHMS` the figure
-plots (two trained detectors, two zero-shot picks), in that fixed order.
-Columns = the same four :data:`plot_sentinel_scenarios.SCENARIOS`, in the
-figure's degradation-path order (In-Domain -> Near-OOD -> Far-OOD Sci ->
-Far-OOD GB), each split into AUROC / TPR@<fpr>%FPR / AT-HM. Reuses that
+Rows = the same five :data:`plot_sentinel_scenarios.ALGORITHMS` the figure
+plots (two trained detectors, three zero-shot picks), in that fixed order.
+Columns = the same three :data:`plot_sentinel_scenarios.SCENARIOS`, in the
+figure's degradation-path order (In-Domain -> Near-OOD -> Far-OOD), each
+split into AUROC / TPR@<fpr>%FPR / AT-HM. A zero-shot detector's three
+column values are identical -- see ``run_sentinel_comparison.py``'s module
+docstring's "Design" section for why that's correct, not a bug. Reuses that
 module's own ``ALGORITHMS`` / ``SCENARIOS`` / ``SCENARIO_LABEL`` /
 ``_points`` so every cell is the exact same (algorithm, scenario) mean the
 figure plots that point at -- the table and the figure can never disagree.
@@ -36,7 +38,7 @@ from pathlib import Path
 import pandas as pd
 
 from epai.ai_detection.trainv2.core import goodness
-from epai.ai_detection.trainv2.detector_names import display_detector
+from epai.ai_detection.trainv2.detector_names import display_detector, is_judge_family
 from epai.ai_detection.trainv2.plot_sentinel_scenarios import (
     ALGORITHMS,
     SCENARIO_LABEL,
@@ -95,17 +97,20 @@ def build(csv_path: Path, fpr: float) -> str:
                     s = f"\\textbf{{{s}}}"
                 cells.append(s)
         label = f"\\texttt{{{_tex_escape(display_detector(algo))}}}"
+        if is_judge_family(algo):
+            label = f"\\textbf{{{label}}}"
         rows.append(f"{label} & " + " & ".join(cells) + r" \\")
 
     col_spec = "l" + " ccc" * n_cols
     caption = (
-        f"Training-based comparison: the four detectors and four scenarios of "
+        f"Training-based comparison: the five detectors and three scenarios of "
         f"Figure~\\ref{{fig:sentinel_scenarios}}, oriented AUROC and oracle "
         f"TPR@{fpr * 100:g}\\%FPR, and their AT-HM (Section~\\ref{{sec:method_metric}}); "
         f"higher is better throughout. Every AT-HM value is computed from that "
         f"cell's own (already-averaged) AUROC and TPR, matching the point "
         f"Figure~\\ref{{fig:sentinel_scenarios}} plots for that (detector, scenario) "
-        f"pair. \\textbf{{Bold}} marks the best value in each column."
+        f"pair. \\textbf{{Bold}} row labels are our contributions (LogJudge, "
+        f"FusionJudge); \\textbf{{bold}} values are the best per column."
     )
     lines = [
         r"\begin{table}[t]",

@@ -43,8 +43,7 @@ Ghostbuster human originals + the raw `gpt35t` machine rows, scored on the same
 
 ## Prerequisites
 
-* The fresh `ghostbuster_orig.parquet` from the server — **after the baseline
-  judge run finishes** (adds `llm_judge_score_<model>_base`). 3 classes, ~2994
+* The fresh `ghostbuster_orig.parquet` from the server. 3 classes, ~2994
   rows each.
 * A GPU box for the re-score: embeddings (12 models), Binoculars / Fast-DetectGPT
   (5 pairs), radar, the local `qwen3-14b` judge.
@@ -85,15 +84,10 @@ surprising gap, this is the first thing to rule out.
 ```bash
 # bring data/parquet/ghostbuster_orig.parquet from the server, then:
 uv run python epai/scripts/check_parquet_completeness.py data/parquet/ghostbuster_orig.parquet
-
-# fast confirmation that the baseline-judge merge landed (per-class coverage):
-uv run python epai/scripts/check_parquet_completeness.py \
-    data/parquet/ghostbuster_orig.parquet --only-baseline
 ```
 
 Expect: 3 classes (`human` / `gpt35t:0000A` / `gpt35ts:0000A`), ~2994 each, every
-column full except the known quirks above, and `llm_judge_score_<m>_base` at
-100 % on all 3 classes.
+column full except the known quirks above.
 
 ## Step 1 — split
 
@@ -186,10 +180,6 @@ The pipeline's last stage already runs this. To re-check by hand:
 ```bash
 uv run python epai/scripts/check_parquet_completeness.py \
     data/parquet/ghostbuster_orig.parquet --allow-unstandardized --fail-on error
-
-# per-class coverage of just the base judge
-uv run python epai/scripts/check_parquet_completeness.py \
-    data/parquet/ghostbuster_orig.parquet --only-baseline
 ```
 
 Expect: 2 classes (`human` / `gpt35t:0000A`), ~2994 each, every column full

@@ -87,7 +87,7 @@ DOUBLE_RULE = "\\midrule\n\\midrule"
 TABLE_LABEL: dict[str, str] = {
     "fusionjudge/gpt56luna_v3": "FusionJudge (ours)",
     "judge/gpt56luna_ord2": "LogJudge (ours)",
-    "judge/gpt56luna": "Judge",
+    "judge/gpt56luna": "BaseJudge",
     "fastdetect/llama31-8b": r"Fast-DetectGPT~\citep{bao2024fastdetectgpt}",
     "binox/llama31-8b": r"Binoculars~\citep{hans_spotting_2024}",
     "detector/radar": r"RADAR~\citep{hu_radar_2023}",

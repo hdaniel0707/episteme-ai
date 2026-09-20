@@ -50,7 +50,6 @@ import yaml
 from epai.ai_detection.trainv2.core import fpr_tag, rows_at_fpr
 from epai.ai_detection.trainv2.run_zeroshot_performance import (
     CSV_FIELDS,
-    DEFAULT_FPRS,
     FAMILIES,
     compute,
 )
@@ -110,11 +109,23 @@ _EMPHASIZE = frozenset({"judge/gpt56luna", "judge/gpt56luna_ord2", "fusionjudge/
 _LEGEND_LABEL = {
     "fusionjudge/gpt56luna_v3": "FusionJudge (ours)",
     "judge/gpt56luna_ord2": "LogJudge (ours)",
-    "judge/gpt56luna": "Judge",
+    "judge/gpt56luna": "BaseJudge",
     "fastdetect/llama31-8b": "Fast-DetectGPT",
     "binox/llama31-8b": "Binoculars",
     "detector/radar": "RADAR",
 }
+
+# Style for the AT-HM bars figure (athm_bars) only -- it has no hollow-pair
+# scheme, so BaseJudge needs its own colour instead of inheriting LogJudge's
+# via the scatter's variant-suffix pairing. #4f77a5 is a steel blue, chosen
+# over a pale tint of LogJudge's own hue (too easily misread as the same
+# detector) and over a neutral grey (reads as "greyed out"/excluded) --
+# saturated enough to read as its own colour while staying in the same "cool
+# blue" family as LogJudge/FusionJudge. Only the two contributions get the
+# bold x-tick label + full-strength AT-HM outline -- BaseJudge is a baseline
+# here.
+_ATHM_BARS_COLOR = {**_COLOR_OVERRIDE, "judge/gpt56luna": "#4f77a5"}
+_ATHM_BARS_EMPHASIZE = frozenset({"judge/gpt56luna_ord2", "fusionjudge/gpt56luna_v3"})
 
 
 def _detector(family: str, version: str) -> str:
@@ -135,7 +146,7 @@ def _load_columns(path: Path) -> list[str]:
 
 def plots_from_csv(csv_path: Path, meta: dict, out_dir: Path) -> None:
     rows = pd.read_csv(csv_path).to_dict("records")
-    from epai.ai_detection.trainv2.plots import goodness_bars, zeroshot_scatter
+    from epai.ai_detection.trainv2.plots import athm_bars, goodness_bars, zeroshot_scatter
 
     out_dir.mkdir(parents=True, exist_ok=True)
     for fpr in meta["fprs"]:
@@ -157,6 +168,13 @@ def plots_from_csv(csv_path: Path, meta: dict, out_dir: Path) -> None:
             title=f"Best zero-shot detector per family — goodness "
                   f"(TPR@{fpr * 100:g}%FPR) across the MANUGRAM splits",
         )
+        athm_bars(
+            frows, fmeta,
+            [out_dir / f"best_zeroshot_bars_{tag}.png", out_dir / f"best_zeroshot_bars_{tag}.pdf"],
+            key="detector", combine=meta.get("combine", "hmean"),
+            color_override=_ATHM_BARS_COLOR, emphasize=_ATHM_BARS_EMPHASIZE,
+            label_override=_LEGEND_LABEL,
+        )
 
 
 def main() -> None:
@@ -165,10 +183,11 @@ def main() -> None:
     )
     ap.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     ap.add_argument("--splits", nargs="+", default=None, metavar="KEY")
-    ap.add_argument("--fpr", nargs="+", type=float, default=DEFAULT_FPRS,
+    ap.add_argument("--fpr", nargs="+", type=float, default=[0.01],
                     metavar="LEVEL",
-                    help=f"oracle FPR level(s); one figure set per level "
-                         f"(default: {DEFAULT_FPRS})")
+                    help="oracle FPR level(s); one figure set per level "
+                         "(default: [0.01] -- this runner's headline figure "
+                         "is 1%%-FPR only; pass --fpr 0.01 0.05 for both)")
     ap.add_argument("--combine", choices=("hmean", "gmean", "amean"), default="hmean",
                     help="goodness-bar score = this mean of Gini and oracle TPR")
     ap.add_argument("--human-label", default="human")

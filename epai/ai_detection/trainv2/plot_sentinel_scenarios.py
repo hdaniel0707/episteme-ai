@@ -1,4 +1,4 @@
-r"""One figure: 4 scenarios x 4 algorithms, for the training-based comparison.
+r"""One figure: 3 scenarios x 5 algorithms, for the training-based comparison.
 
 A companion to ``plot_sentinel_comparison.py``'s per-regime scatters (that
 script, and ``plots.py``'s main figures, are untouched -- this is a new,
@@ -12,29 +12,48 @@ TPR@1%FPR, power-warped axes, grey AT-HM contour field in the background),
 but a different mark, per the request this was built for:
   * one point per (algorithm, scenario) -- no per-corpus light points;
   * no error bars drawn (the SD is already in the CSV -- just not drawn here);
-  * colour = algorithm, marker shape = scenario;
-  * a same-colour line connects one algorithm's 4 scenario points in a fixed
-    order (In-Domain -> Near-OOD -> Far-OOD Sci -> Far-OOD GB), so the
-    degradation path from in-domain to increasingly distant OOD reads as one
-    coloured line per algorithm.
+  * colour = algorithm;
+  * a TRAINED algorithm gets one marker per scenario (shape = scenario) and a
+    same-colour line through its 3 scenario points in a fixed order
+    (In-Domain -> Near-OOD -> Far-OOD), so the degradation path from
+    in-domain to increasingly distant OOD reads as one coloured line;
+  * a ZERO-SHOT algorithm gets ONE star marker instead, not three overlapping
+    scenario shapes -- see "Fixed eval sets" below for why its reading really
+    is identical across all three scenarios, not merely similar.
 
 Algorithms (fixed; raw ``detector`` ids as ``run_sentinel_comparison.py``
 writes them):
   trained/roberta·logistic       roberta-logistic (this run's trained probe)
   trained/roberta·sentinel_mlp   roberta-sentinel (this run's trained MLP)
-  judge/gpt56luna_wlp            LogJudge (gpt-5.6-luna) -- zero-shot
+  judge/gpt56luna_ord2           LogJudge (gpt-5.6-luna) -- zero-shot
+  fusionjudge/gpt56luna_v3       FusionJudge (gpt-5.6-luna) -- zero-shot
   binox/llama31-8b               Binoculars (llama-3.1-8b) -- zero-shot,
                                   the strongest backbone in this paper's
                                   own General Results table
 
+Fixed eval sets (see ``run_sentinel_comparison.py``'s module docstring,
+"Design: a fixed evaluation set per scenario", for the full derivation):
+each corpus (MG-GB, MG-Sci) has ONE fixed grouped 70/30 split, drawn once and
+reused everywhere; only the TRAINED half's training set narrows across
+scenarios (full 70% -> 70% minus one domain -> reused for Far-OOD's cross-
+corpus score). A zero-shot pick is scored once per fixed 30% set and that
+number is looked up everywhere -- so with only two fixed eval sets total
+(plus MG-AI-Sci) and every scenario averaging over both corpus orientations,
+a zero-shot algorithm's In-Domain, Near-OOD, and Far-OOD readings are the
+exact same number, not merely close. That's why it gets a single star rather
+than three markers that would otherwise sit exactly on top of each other.
+
 Scenarios (each a filter on performance.csv's ``level == "split"`` rows, then
 a plain per-detector mean of ``auroc`` / ``tpr_at_fpr`` over the matching
 rows -- see ``run_sentinel_comparison.py``'s module docstring for exactly
-which eval targets each regime's rows cover, trained or zero-shot):
+which eval targets each regime's rows cover, trained or zero-shot). No
+``train_split`` filter is needed for any of the three: every regime already
+carries both corpus orientations (MG-GB primary and MG-Sci primary) under
+the same ``regime`` value, so a plain regime match IS the "mean of the 2"
+average the article's prose describes:
   in_domain     regime == "in_domain"
-  lodo          regime == "lodo"
-  far_ood_sci   regime == "far_ood", train_split == "mg_sci"
-  far_ood_gb    regime == "far_ood", train_split == "mg_gb"
+  near_ood      regime == "near_ood"
+  far_ood       regime == "far_ood"
 
 Writes a PNG next to the CSV (quick preview) AND a PDF into the article's
 ``figs/`` directory by default (``--figs-dir ''`` to skip the PDF), named
@@ -78,12 +97,19 @@ from epai.ai_detection.trainv2.plots import (  # noqa: E402
 ALGORITHMS = [
     "trained/roberta·logistic",
     "trained/roberta·sentinel_mlp",
-    "judge/gpt56luna_wlp",
+    "judge/gpt56luna_ord2",
+    "fusionjudge/gpt56luna_v3",
     "binox/llama31-8b",
 ]
 
-#: fixed scenario order -> the order the connecting line is drawn in.
-SCENARIOS = ["in_domain", "lodo", "far_ood_sci", "far_ood_gb"]
+
+def _is_trained(algo: str) -> bool:
+    return algo.startswith("trained/")
+
+
+#: fixed scenario order -> the order the connecting line is drawn in
+#: (trained algorithms only -- see the module docstring).
+SCENARIOS = ["in_domain", "near_ood", "far_ood"]
 #: legend text only -- plain, no parentheses, no "trained on X" framing (that
 #: framing is only true for the trained detectors; a zero-shot pick has no
 #: source corpus, it's just scored on that scenario's eval rows too). The
@@ -91,11 +117,14 @@ SCENARIOS = ["in_domain", "lodo", "far_ood_sci", "far_ood_gb"]
 #: eval targets are averaged in -- belongs in the figure caption, not here.
 SCENARIO_LABEL = {
     "in_domain": "In-Domain",
-    "lodo": "Near-OOD",
-    "far_ood_sci": "Far-OOD Sci",
-    "far_ood_gb": "Far-OOD GB",
+    "near_ood": "Near-OOD",
+    "far_ood": "Far-OOD",
 }
-SCENARIO_MARKER = {"in_domain": "o", "lodo": "^", "far_ood_sci": "s", "far_ood_gb": "D"}
+SCENARIO_MARKER = {"in_domain": "o", "near_ood": "^", "far_ood": "s"}
+#: the zero-shot marker -- one per algorithm, not one per scenario. See the
+#: module docstring's "Fixed eval sets" section for why a single marker is
+#: correct here rather than an approximation.
+ZS_MARKER = "*"
 
 #: drawn on top of every other algorithm's line/markers wherever they overlap
 #: (a higher zorder, not a legend-order change -- see :func:`_zorder`).
@@ -107,21 +136,15 @@ def _zorder(base: float, algo: str) -> float:
 
 
 def _scenario_mask(df: pd.DataFrame, scenario: str) -> pd.Series:
-    base = df["level"] == "split"
-    if scenario == "in_domain":
-        return base & (df["regime"] == "in_domain")
-    if scenario == "lodo":
-        return base & (df["regime"] == "lodo")
-    if scenario == "far_ood_sci":
-        return base & (df["regime"] == "far_ood") & (df["train_split"] == "mg_sci")
-    if scenario == "far_ood_gb":
-        return base & (df["regime"] == "far_ood") & (df["train_split"] == "mg_gb")
-    raise ValueError(f"unknown scenario {scenario!r}")
+    if scenario not in SCENARIOS:
+        raise ValueError(f"unknown scenario {scenario!r}")
+    return (df["level"] == "split") & (df["regime"] == scenario)
 
 
 def _points(df: pd.DataFrame, fpr: float) -> dict[tuple[str, str], tuple[float, float]]:
     """``(algorithm, scenario) -> (auroc_mean, tpr_at_fpr_mean)`` -- the plain
-    mean over that scenario's matching rows for that detector. No weighting,
+    mean over that scenario's matching rows for that detector (both corpus
+    orientations pooled together -- see the module docstring). No weighting,
     no error bars (those live in the CSV's ``_std`` columns, not here)."""
     sub = df[df["fpr"] == fpr]
     out: dict[tuple[str, str], tuple[float, float]] = {}
@@ -133,6 +156,16 @@ def _points(df: pd.DataFrame, fpr: float) -> dict[tuple[str, str], tuple[float, 
                 continue
             out[(algo, scen)] = (float(rows["auroc"].mean()), float(rows["tpr_at_fpr"].mean()))
     return out
+
+
+def _zs_point(points: dict, algo: str) -> tuple[float, float] | None:
+    """A zero-shot algorithm's single (identical-across-scenarios) point --
+    whichever scenario is present first, since by construction they all
+    agree exactly (see the module docstring)."""
+    for scen in SCENARIOS:
+        if (algo, scen) in points:
+            return points[(algo, scen)]
+    return None
 
 
 #: the power-warp exponent (plots._distort) -- k > 1 compresses the mostly-
@@ -203,11 +236,15 @@ def plot(df: pd.DataFrame, fpr: float, paths: list[Path],
     ax.clabel(cs, manual=manual_pos or None,
              fmt=lambda v: f"{v:.1f}", fontsize=6.5, colors="#6a6a6a", inline=True)
 
-    # One same-colour line per algorithm, through its scenario points in
-    # SCENARIOS order -- the "degradation path" from in-domain to far OOD.
-    # FRONT_ALGO draws (and so overlaps) on top of every other algorithm's
-    # line/markers, regardless of ALGORITHMS' own (legend) order.
+    # One same-colour line per TRAINED algorithm, through its scenario points
+    # in SCENARIOS order -- the "degradation path" from in-domain to far OOD.
+    # Zero-shot algorithms have only one point (see the module docstring), so
+    # no line for them. FRONT_ALGO draws (and so overlaps) on top of every
+    # other algorithm's line/markers, regardless of ALGORITHMS' own (legend)
+    # order.
     for algo in ALGORITHMS:
+        if not _is_trained(algo):
+            continue
         xs = [points[(algo, s)][0] for s in SCENARIOS if (algo, s) in points]
         ys = [points[(algo, s)][1] for s in SCENARIOS if (algo, s) in points]
         if len(xs) >= 2:
@@ -215,13 +252,22 @@ def plot(df: pd.DataFrame, fpr: float, paths: list[Path],
                     color=hue[algo], lw=1.3, alpha=0.75, zorder=_zorder(2, algo))
 
     for algo in ALGORITHMS:
-        for scen in SCENARIOS:
-            if (algo, scen) not in points:
+        if _is_trained(algo):
+            for scen in SCENARIOS:
+                if (algo, scen) not in points:
+                    continue
+                x, y = points[(algo, scen)]
+                ax.scatter([wx(x)], [wy(y)], s=90, marker=SCENARIO_MARKER[scen],
+                           facecolors=hue[algo], edgecolors="#222222", linewidths=0.9,
+                           zorder=_zorder(5, algo))
+        else:
+            p = _zs_point(points, algo)
+            if p is None:
                 continue
-            x, y = points[(algo, scen)]
-            ax.scatter([wx(x)], [wy(y)], s=90, marker=SCENARIO_MARKER[scen],
+            x, y = p
+            ax.scatter([wx(x)], [wy(y)], s=210, marker=ZS_MARKER,
                        facecolors=hue[algo], edgecolors="#222222", linewidths=0.9,
-                       zorder=_zorder(5, algo))
+                       zorder=_zorder(6, algo))
 
     ax.set_xlabel(f"AUROC\n(power warp, k={kx:g})", fontsize=9, color=_INK)
     ax.set_ylabel(f"TPR@{fpr * 100:g}%FPR\n(power warp, k={ky:g})", fontsize=9, color=_INK)
@@ -237,16 +283,22 @@ def plot(df: pd.DataFrame, fpr: float, paths: list[Path],
     ax.set_yticks([wy(t) for t in y_ticks])
     ax.set_yticklabels([f"{t:g}" for t in y_ticks])
 
-    algo_handles = [plt.Line2D([], [], marker="o", ls="-", ms=8, color=hue[a],
-                               mfc=hue[a], mec="#222222", mew=0.9,
-                               label=display_detector(a)) for a in ALGORITHMS]
+    algo_handles = [
+        plt.Line2D([], [], marker=("o" if _is_trained(a) else ZS_MARKER),
+                  ls=("-" if _is_trained(a) else ""), ms=(8 if _is_trained(a) else 12),
+                  color=hue[a], mfc=hue[a], mec="#222222", mew=0.9, label=display_detector(a))
+        for a in ALGORITHMS
+    ]
     scen_handles = [plt.Line2D([], [], marker=SCENARIO_MARKER[s], ls="", ms=8,
-                               color="#6a6a6a", label=SCENARIO_LABEL[s]) for s in SCENARIOS]
+                               color="#6a6a6a", label=f"{SCENARIO_LABEL[s]} (trained)")
+                    for s in SCENARIOS]
+    zs_handle = plt.Line2D([], [], marker=ZS_MARKER, ls="", ms=12, color="#6a6a6a",
+                           label="zero-shot (all scenarios)")
     chance_handle = plt.Line2D([], [], marker="x", ls="", color="#b5495b",
                                label=f"chance (0.5, {fpr * 100:g}%)")
     legend = ax.legend(
         handles=[*algo_handles, plt.Line2D([], [], ls="", label=""),
-                *scen_handles, chance_handle],
+                *scen_handles, zs_handle, chance_handle],
         fontsize=8, loc="upper left", bbox_to_anchor=(1.01, 0.80),
         framealpha=0.9, borderaxespad=0.0,
     )
@@ -262,7 +314,7 @@ def plot(df: pd.DataFrame, fpr: float, paths: list[Path],
 #: the article's figure directory (matches every other figs/<name>.pdf
 #: referenced there via \includegraphics{figs/<name>}, e.g. best_zeroshot_1pct).
 BASE_DIR = Path(__file__).resolve().parents[3]
-DEFAULT_FIGS_DIR = BASE_DIR / "latex" / "ICLR_AIDetect" / "figs"
+DEFAULT_FIGS_DIR = BASE_DIR / "latex" / "_ICLR_2027__AI_Detect" / "figs"
 
 
 def main() -> None:

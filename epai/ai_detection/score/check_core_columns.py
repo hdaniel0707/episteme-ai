@@ -74,6 +74,7 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from epai.ai_detection.score.core_columns import (
+    ALL_STEMS,
     ALLOW_NULL,
     CORE_STEMS,
     PRIMARY_KEY,
@@ -411,7 +412,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("--only", nargs="+", choices=CORE_STEMS, metavar="STEM")
+    ap.add_argument("--only", nargs="+", choices=ALL_STEMS, metavar="STEM")
     ap.add_argument("--fail-on", choices=["error", "warn"], default="error",
                      help="exit 1 threshold (default: error only)")
     ap.add_argument("--drop-extra", action="store_true",
