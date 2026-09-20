@@ -144,6 +144,17 @@ judge_columns_canonical:
   # prefix on purpose, it's a cross-readout combination of both
   - fusionjudge_score
 
+  # FusionJudge variants -- score_fusionjudge_variants_gpt56luna_v3.py, two
+  # more self-dual combination rules of the same two members (log-odds
+  # average, Bayes/product rule). A wider sweep (a tempered gamma family,
+  # an agreement-gated blend, and two disagreement-penalizing alternatives)
+  # was tried and dropped -- none beat the plain mean at the paper's 1%-FPR
+  # operating point; see score_fusionjudge_variants_gpt56luna_v3.py's
+  # docstring. fusionjudge_score (the mean) remains the paper's headline
+  # fusion.
+  - fusionjudge_logodds_score
+  - fusionjudge_bayes_score
+
   # Judge Reasoning
   - llm_judge_cues_human_gpt56luna_v3
   - llm_judge_cues_machine_gpt56luna_v3

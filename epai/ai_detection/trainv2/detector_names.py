@@ -30,6 +30,8 @@ DETECTOR_DISPLAY: dict[str, str] = {
     "judge/gemma4_31b_ord2": "logjudge/gemma-4-31b",
     "judge/gemma4_31b": "judge/gemma-4-31b",
     "fusionjudge/gpt56luna_v3": "fusionjudge/gpt-5.6-luna",
+    "fusionjudge/gpt56luna_v3_logodds": "fusionjudge (log-odds)/gpt-5.6-luna",
+    "fusionjudge/gpt56luna_v3_bayes": "fusionjudge (bayes)/gpt-5.6-luna",
     "binox/llama31-8b": "binoculars/llama-3.1-8b",
     "fastdetect/llama31-8b": "fastdetect/llama-3.1-8b",
     "detector/radar": "radar",

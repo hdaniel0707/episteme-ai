@@ -1,0 +1,16 @@
+# Exploratory sibling of best_zeroshot.yaml: same baselines and the two raw
+# judge readouts, plus the mean plus its two kept self-dual variants
+# (log-odds average, Bayes/product rule) on one figure/table. A wider sweep
+# was tried and dropped -- see score_fusionjudge_variants_gpt56luna_v3.py's
+# docstring; fusionjudge_score (the mean) remains the paper's headline
+# fusion. Not used by the paper's headline figure -- point
+# run_best_zeroshot_performance.py --config here at a separate --out-dir.
+columns:
+  - binoculars_score_llama31_8b            # Binoculars      -> llama31-8b
+  - fastdetect_crit_llama31_8b             # Fast-DetectGPT  -> llama31-8b
+  - detector_score_radar                   # Pretrained det. -> RADAR
+  - llm_judge_score_gpt56luna_v3           # LLM judge       -> gpt56luna (parsed)
+  - logjudge_ord2_gpt56luna_v3             # LLM judge       -> gpt56luna (ord2 / LogJudge)
+  - fusionjudge_score                      # FusionJudge     -> arithmetic mean (paper's version)
+  - fusionjudge_logodds_score              # FusionJudge     -> log-odds average
+  - fusionjudge_bayes_score                # FusionJudge     -> naive-Bayes / product rule

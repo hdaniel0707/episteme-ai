@@ -103,9 +103,13 @@ def _detector_label(c: str) -> str:
 
 
 def _fusionjudge_label(c: str) -> str:
-    """``fusionjudge_score`` -> ``gpt56luna_v3`` -- the one member pair
-    (score_fusionjudge_gpt56luna_v3.py) this family currently has."""
-    return "gpt56luna_v3"
+    """``fusionjudge_score`` -> ``gpt56luna_v3`` (the paper's plain mean); a
+    variant column ``fusionjudge_<variant>_score``
+    (score_fusionjudge_variants_gpt56luna_v3.py, ``_logodds`` or ``_bayes``)
+    -> ``gpt56luna_v3_<variant>`` -- same one member pair, a different
+    (self-dual) combination rule."""
+    body = c.removeprefix("fusionjudge_")
+    return "gpt56luna_v3" if body == "score" else f"gpt56luna_v3_{body.removesuffix('_score')}"
 
 
 #: prefix / orientation / label / default-excluded columns per family.
@@ -140,7 +144,13 @@ FAMILIES: dict[str, dict] = {
     # scale/orientation, so a plain mean is meaningful (unlike a
     # binoculars/fastdetect/judge fusion, whose raw ranges and directions
     # don't agree -- see the conversation that led here).
-    "fusionjudge": dict(prefix="fusionjudge_score", machine_is_high=False,
+    # score_fusionjudge_variants_gpt56luna_v3.py adds two more self-dual
+    # combination rules of the same two members (log-odds average, Bayes/
+    # product rule) as fusionjudge_<variant>_score -- the shared
+    # "fusionjudge_" prefix picks up all three. A wider sweep (gamma family,
+    # agreement gate, disagreement penalties) was tried and dropped; see
+    # that script's docstring.
+    "fusionjudge": dict(prefix="fusionjudge_", machine_is_high=False,
                      label=_fusionjudge_label, exclude=frozenset()),
 }
 
