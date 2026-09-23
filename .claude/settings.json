@@ -37,5 +37,10 @@
         ]
       }
     ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(.venv/bin/python:*)"
+    ]
   }
 }

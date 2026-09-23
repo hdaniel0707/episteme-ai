@@ -214,3 +214,112 @@ allow_null:
 
 # Primary key column: must be unique within each parquet.
 primary_key: uid
+
+# --- release (reviewer / public) column set ---------------------------------
+# What build_release_parquets.py keeps when it writes <stem>_release.parquet
+# next to each base parquet: only the columns the ICLR 2027 paper reports a
+# result from. The master parquets and everything above are untouched -- this
+# block is a projection of them, not a replacement for canonical_columns.
+# Written out literally (no generated suite block) on purpose: the release
+# drops fastdetect_prob_*/fastdetect_ntok_*/detector_ntok_radar, which the
+# generated suite block would otherwise re-add.
+#
+# Dropped from the master schema, because the paper never uses them: the
+# cand03/cand10 judge prompts, the ord5 `_scale` logprob windows (the paper's
+# ord5 numbers come from a separate 150-row re-capture), the logodds/bayes
+# FusionJudge variants, the gemma FusionJudge, the judge cue/reason columns,
+# and every _wlp/_slp/_sbc/_logjudge_t* experiment column.
+release:
+  # Every core stem, in this order.
+  core:
+    # meta
+    - uid
+    - id
+    - domain
+    - text
+    - text_raw
+    - generated_by
+    # embeddings (App. Embedding Analysis: "12 ... shipped with Manugram")
+    - emb_specter2
+    - emb_scincl
+    - emb_scibert
+    - emb_mpnet
+    - emb_minilm
+    - emb_e5
+    - emb_bge
+    - emb_roberta
+    - emb_styledistance
+    - emb_style_wegmann
+    - emb_luar
+    - emb_luar_crud
+    # Binoculars, 5 backbones (binoculars_score = Falcon-7B, the original pair)
+    - binoculars_score
+    - binoculars_score_falcon3_7b
+    - binoculars_score_qwen25_7b
+    - binoculars_score_mistral_v03
+    - binoculars_score_llama31_8b
+    # Fast-DetectGPT criterion, 5 backbones
+    - fastdetect_crit_falcon_7b
+    - fastdetect_crit_falcon3_7b
+    - fastdetect_crit_qwen25_7b
+    - fastdetect_crit_mistral_v03
+    - fastdetect_crit_llama31_8b
+    # RADAR
+    - detector_score_radar
+    # BaseJudge (parsed readout), 5 judge backbones
+    - llm_judge_score_gpt56luna_v3
+    - llm_judge_score_qwen3_14b_v3
+    - llm_judge_score_gptoss_120b_v3
+    - llm_judge_score_llama33_70b_v3
+    - llm_judge_score_gemma4_31b_v3
+    # LogJudge raw top-k windows (ord2) -- the inputs to Eq. logjudge_simple
+    - llm_judge_logprobs_gpt56luna_v3_words
+    - llm_judge_logprobs_gemma4_31b_v3_words
+    # LogJudge scores (ord2)
+    - logjudge_ord2_gpt56luna_v3
+    - logjudge_ord2_gemma4_31b_v3
+    # FusionJudge (gpt-5.6-luna)
+    - fusionjudge_score
+
+  # Appended after `core` on the named stem only.
+  per_stem_extra:
+    manugram_sci:
+      - doi
+      - title
+      - author_ids
+      - author_count
+      - year
+      - venue
+      - citation_count
+      - fwci
+      - language
+      - fields_of_study
+      - query
+      - also_matched_domains
+      - prompt
+    manugram_aiscientist:
+      - ai_author
+      - title
+      - year
+      - oa_id
+
+  # Both MG-Reph stems, in this order. Only the five scorers the rephrase
+  # section reports (rephrase_common.py's scorer list), plus the post-hoc
+  # rephrase checks. The 2x2 class comes from generated_by (0908R/0916R).
+  rephrase:
+    - uid
+    - id
+    - domain
+    - text
+    - text_raw
+    - generated_by
+    - source_family
+    - binoculars_score_llama31_8b
+    - fastdetect_crit_llama31_8b
+    - llm_judge_score_gpt56luna_v3
+    - llm_judge_logprobs_gpt56luna_v3_words
+    - logjudge_ord2_gpt56luna_v3
+    - fusionjudge_score
+    - rephrase_len_ratio
+    - rephrase_surface_jaccard
+    - rephrase_seqmatch_ratio

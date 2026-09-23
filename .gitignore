@@ -2,8 +2,9 @@
 *.pyc
 .venv/
 
-
 /info
+/latex
+/sample_abstracts
 /old
 /temp_debug_llama
 
@@ -30,3 +31,5 @@ build/
 !/.claude/hooks/notify.sh
 !/.claude/hooks/notify.env.example
 !/.claude/hooks/README.md
+# ICLR release: parquets (hosted separately on OSF)
+/released_data/

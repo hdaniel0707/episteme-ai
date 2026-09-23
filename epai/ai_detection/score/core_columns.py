@@ -7,7 +7,8 @@ block, derived from ``cfg/detector_suite.yaml`` membership + this file's own
 order lists, + the literal ``judge_columns_canonical`` list). A column
 legitimately specific to one corpus lives in ``per_stem_extra`` instead --
 allowed there, not required anywhere else, never flagged.
-``check_core_columns.py`` is the only consumer.
+``check_core_columns.py`` is the main consumer; ``build_release_parquets.py``
+reads the yaml's separate ``release`` block through ``CORE_CFG``.
 """
 
 from __future__ import annotations

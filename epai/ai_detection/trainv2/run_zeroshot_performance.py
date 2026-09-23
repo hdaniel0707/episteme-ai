@@ -107,9 +107,15 @@ def _fusionjudge_label(c: str) -> str:
     variant column ``fusionjudge_<variant>_score``
     (score_fusionjudge_variants_gpt56luna_v3.py, ``_logodds`` or ``_bayes``)
     -> ``gpt56luna_v3_<variant>`` -- same one member pair, a different
-    (self-dual) combination rule."""
+    (self-dual) combination rule. Another judge's plain mean,
+    ``fusionjudge_<model>_v3_score`` (score_fusionjudge_gemma4_31b_v3.py),
+    -> ``<model>_v3``."""
     body = c.removeprefix("fusionjudge_")
-    return "gpt56luna_v3" if body == "score" else f"gpt56luna_v3_{body.removesuffix('_score')}"
+    if body == "score":
+        return "gpt56luna_v3"
+    if body.endswith("_v3_score"):
+        return body.removesuffix("_score")
+    return f"gpt56luna_v3_{body.removesuffix('_score')}"
 
 
 #: prefix / orientation / label / default-excluded columns per family.

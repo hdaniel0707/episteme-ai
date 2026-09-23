@@ -331,6 +331,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Export only these id values.")
     g.add_argument("--where", nargs="+", metavar="COL=VALUE", default=None,
                    help="Keep only rows matching every condition, e.g. domain=biology.")
+    g.add_argument("--min-year", type=int, default=None,
+                   help="Keep only rows with year >= this value "
+                   "(no-op if the parquet has no year column).")
     g.add_argument("--sample", type=int, default=0,
                    help="Export a random sample of this many records (0 = all).")
     g.add_argument("--seed", type=int, default=0,
@@ -398,6 +401,14 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
+
+    if args.min_year is not None:
+        if "year" in df.columns:
+            year_num = pd.to_numeric(df["year"], errors="coerce")
+            df = df[year_num >= args.min_year]
+            print(f"  --min-year {args.min_year} kept {len(df):,} rows")
+        else:
+            print(f"NOTE: no 'year' column in this parquet; --min-year ignored")
 
     if df.empty:
         print("No rows selected. Nothing written.")

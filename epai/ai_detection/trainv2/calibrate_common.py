@@ -32,7 +32,7 @@ Two modes, both through :func:`run`:
 
 ``--corpora all`` (and a bare run) uses the four core splits, in the fixed
 left-to-right order used everywhere: ``gb_orig`` (GB-orig), ``mg_gb`` (MG-GB),
-``mg_sci`` (MG-Sci), ``mg_aisci`` (MG-AI-Sci); pooled is ``all`` (MG-All), built
+``mg_sci`` (MG-Sci), ``mg_aisci`` (MG-AI-Sci); pooled is ``all`` (All Benchmarks), built
 from ``splits.POOL_SPLITS`` (currently all four -- see ``splits.py``), always
 last. The MG-Reph family (``mg_reph`` / ``mg_reph_sci`` / ``mg_reph_gb``) and
 GB-orig-stand are registered but opt-in only -- pass either by name
@@ -173,12 +173,21 @@ def _plot_column(
     """One PNG per score column: a panel per corpus plus 'all' pooled, each with
     the human vs. machine score histogram and BOTH thresholds marked. Threshold
     values and stats come from ``csv_rows`` (read back from the CSV), the
-    histogram shape from ``raw_by_corpus``."""
+    histogram shape from ``raw_by_corpus``.
+
+    Each panel's x-axis is labelled with the column's own judge/backbone name
+    (``csv_rows``' own ``label``), not just the generic ``xlabel`` -- a
+    composite figure stacks one row per column with the name only on a
+    rotated row label outside the row's own axes (``assemble_dist_appendix.
+    py``), so a single row cropped out of the composite (as the paper's
+    Figure 4 does) would otherwise carry no indication of which judge it is.
+    """
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    xlabel = f"{csv_rows[0]['label']}  {xlabel}"
     ordered = [r for r in csv_rows if r["corpus"] != POOLED] + [
         r for r in csv_rows if r["corpus"] == POOLED
     ]
@@ -219,20 +228,21 @@ def _plot_column(
             ax.axvline(t, color=color, lw=1.6, ls=ls, label=lbl)
             ax.text(
                 t, ytop * ytxt, f" {t:.3g}", color=color,
-                fontsize=8, va="top",
+                fontsize=13, va="top",
                 ha="left" if t < lo + 0.85 * (hi - lo) else "right",
             )
         ax.set_title(
             f"{_display(r['corpus'])}  (n={r['n']})\n"
             f"AUROC {r['auroc']:.3f}   "
             f"TPR@fpr {r['tpr_at_fpr']:.2f}  |  J {r['youden_j']:.2f}",
-            fontsize=9,
+            fontsize=14,
         )
-        ax.set_xlabel(xlabel)
+        ax.set_xlabel(xlabel, fontsize=14)
         ax.set_xlim(lo, hi)
         ax.grid(True, lw=0.4, alpha=0.4)
-    axes[0].set_ylabel("density")
-    axes[0].legend(fontsize=8, loc="upper left")
+        ax.tick_params(labelsize=13)
+    axes[0].set_ylabel("density", fontsize=14)
+    axes[0].legend(fontsize=13, loc="upper left")
     fig.tight_layout()
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=150)
@@ -486,7 +496,7 @@ def _multi(
     if not entries:
         raise SystemExit("nothing to write -- no finite pooled threshold")
     pool_src = "+".join(pool_names)
-    desc = "MG-All" if pool_names == list(POOL_SPLITS) else pool_src
+    desc = "All Benchmarks" if pool_names == list(POOL_SPLITS) else pool_src
     src_desc = f"{desc} ({pool_src}), pooled ('all')"
     if generators:
         src_desc += f" [machine: {'+'.join(generators)}]"

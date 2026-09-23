@@ -954,10 +954,12 @@ def judge_generator_heatmaps(
 ) -> None:
     """One heatmap panel per split + an 'overall' panel. Judge rows are ordered
     by each judge's grand mean of ``metric`` over every cell (all splits, all
-    generators); a generator column is ordered, within its panel, by that
-    generator's mean over the judges. Each panel carries a bottom 'mean' row
-    (the generator means); the 'overall' panel's bottom cell is the grand
-    mean."""
+    generators). A generator column is placed at its same-family judge's row
+    position when one exists -- so a self-family cell (marked ``*``) sits on
+    the diagonal -- and any generator with no matching judge is appended
+    after, ordered by that generator's mean over the judges (the old rule).
+    Each panel carries a bottom 'mean' row (the generator means); the
+    'overall' panel's bottom cell is the grand mean."""
     from .splits import display as _sd
 
     label_tmpl, cmap = _METRIC_META[metric]
@@ -983,8 +985,12 @@ def judge_generator_heatmaps(
                       if r["split"] == s and r["gen_model"] == g])
             for g in gens
         }
-        gens_of[s] = sorted(gens, key=lambda g: (np.isnan(gmean_of[s][g]),
-                                                 -gmean_of[s][g]))
+        gen_of_judge = {r["judge"]: r["gen_model"] for r in rows
+                        if r["split"] == s and r["self_family"]}
+        diagonal = [gen_of_judge[j] for j in judges if j in gen_of_judge]
+        leftover = sorted(gens - set(diagonal),
+                          key=lambda g: (np.isnan(gmean_of[s][g]), -gmean_of[s][g]))
+        gens_of[s] = diagonal + leftover
 
     n_rows = len(judges) + 1  # + the 'mean' row
     ylabels = judges + ["mean"]
@@ -1037,7 +1043,7 @@ def judge_generator_heatmaps(
     fig.colorbar(im, ax=axes, shrink=0.85, aspect=30)
     fig.suptitle(
         f"{label}  —  judge × generator, oracle\n"
-        f"rows ranked by the judge's overall mean · "
+        f"rows ranked by the judge's overall mean, columns aligned to the same-family judge · "
         f"* = judge and generator are the same model family",
         fontsize=10.5, color=_INK,
     )

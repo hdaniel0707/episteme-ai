@@ -50,9 +50,31 @@ JUDGE_PREFIX = "llm_judge_score_"
 JUDGE_EXCLUDE = frozenset({"llm_judge_score_sonnet5_v3"})
 
 
+# backbone column slug -> the paper's own spelling (see iclr2027_conference.tex)
+_BACKBONE_DISPLAY = {
+    "gpt56luna": "gpt-5.6-luna",
+    "gemma4_31b": "gemma-4-31b",
+    "llama33_70b": "llama-3.3-70b",
+    "gptoss_120b": "gpt-oss-120b",
+    "qwen3_14b": "qwen3-14b",
+}
+
+
 def _judge_label(column: str) -> str:
-    """``llm_judge_score_gpt56luna_v3`` -> ``gpt56luna``."""
-    return column.removeprefix(JUDGE_PREFIX).replace("_v3", "")
+    """``llm_judge_score_gpt56luna_v3`` -> ``BaseJudge (gpt-5.6-luna)``;
+    ``llm_judge_score_gpt56luna_v3_wlp`` -> ``LogJudge (gpt-5.6-luna)`` --
+    ``wlp`` is the windowed-logprob readout, identical in formula to the
+    paper's LogJudge (``score_logprob_windows.py``'s ``t0000``/``ord2``).
+    Any other backbone or readout variant (cand03/cand10, slp, sbc,
+    logjudge_t0000/t0001) falls back to the plain slug -- those aren't one of
+    the paper's two named readouts, so they get no canonical name."""
+    slug = column.removeprefix(JUDGE_PREFIX).replace("_v3", "")
+    if slug.endswith("_wlp"):
+        backbone, family = slug[: -len("_wlp")], "LogJudge"
+    else:
+        backbone, family = slug, "BaseJudge"
+    pretty = _BACKBONE_DISPLAY.get(backbone)
+    return f"{family} ({pretty})" if pretty else slug
 
 
 if __name__ == "__main__":
@@ -66,7 +88,7 @@ if __name__ == "__main__":
         block_key="llm_judge_baseline",
         label_fn=_judge_label,
         family="judge",
-        xlabel="judge score  P(human)",
+        xlabel="P(human)",  # the column-specific label already says "judge"
         default_dataset=PARQUET_DIR / "manugram_sci.parquet",
         default_out=DEFAULT_OUT_DIR / "judge_baseline_calibrated.yaml",
         exclude_cols=JUDGE_EXCLUDE,

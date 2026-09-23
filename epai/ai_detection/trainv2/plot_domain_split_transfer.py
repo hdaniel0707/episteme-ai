@@ -61,6 +61,7 @@ import matplotlib.pyplot as plt  # noqa: E402  (after the Agg backend is chosen)
 from matplotlib.legend_handler import HandlerTuple  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
 from matplotlib.path import Path as MplPath  # noqa: E402  (avoid clashing with pathlib.Path)
+from matplotlib.transforms import blended_transform_factory  # noqa: E402
 
 from epai.ai_detection.trainv2.core import goodness  # noqa: E402
 from epai.ai_detection.trainv2.plots import _INK, _MUTED, _SURFACE  # noqa: E402
@@ -191,34 +192,44 @@ def _athm(df: pd.DataFrame, fpr: float, detector: str, train_split: str) -> floa
     return goodness(r["auroc"], r["tpr_at_fpr"], alpha=fpr)
 
 
-def plot(df: pd.DataFrame, fpr: float, paths: list[Path]) -> None:
+def plot(df: pd.DataFrame, fpr: float, paths: list[Path], height: float = 3.8) -> None:
     scenarios, _ = scenario_layout(df)
     trained_athm = [_athm(df, fpr, TRAINED_ALGO, s) for s in scenarios]
     zs_athm = {a: _athm(df, fpr, a, scenarios[0]) for a in ZS_ALGOS}
 
-    fig, ax = plt.subplots(figsize=(7.2, 3.8))
+    fig, ax = plt.subplots(figsize=(18.0, height))
     ax.set_facecolor(_SURFACE)
     for spine in ("top", "right"):
         ax.spines[spine].set_visible(False)
 
-    xs = list(range(len(scenarios)))
-    ax.plot(xs, trained_athm, "-o", color=TRAINED_COLOR, ms=8, lw=2.2, zorder=5)
+    xs = [i * 3.6 for i in range(len(scenarios))]  # spread the 4 categories out
+
+    # The zero-shot labels' x-position is independent of the category
+    # spacing above -- an axes-FRACTION (not a data x-value), via a blended
+    # transform, so retuning `xs` never again drags the labels along with it.
+    label_transform = blended_transform_factory(ax.transAxes, ax.transData)
+    LABEL_X_FRAC = 0.53
+
+    ax.plot(xs, trained_athm, "-o", color=TRAINED_COLOR, ms=24, lw=9, zorder=5)
 
     for algo in ZS_ALGOS:
         v, color = zs_athm[algo], ZS_COLOR[algo]
         weight = "bold" if ZS_BOLD[algo] else "normal"
-        ax.axhline(v, color=color, lw=1.4, ls="--", alpha=0.85, zorder=2)
-        ax.text(xs[-1] + 0.12, v, f"{COLD_MARKER} {ZS_LABEL[algo]}", color=color, fontsize=11,
+        ax.axhline(v, color=color, lw=6, ls="--", alpha=0.85, zorder=2)
+        ax.text(LABEL_X_FRAC, v, f"{COLD_MARKER} {ZS_LABEL[algo]}", color=color, fontsize=42,
                 fontweight=weight, va="center", ha="left", zorder=6,
+                transform=label_transform,
                 bbox=dict(facecolor=_SURFACE, edgecolor="none", pad=1.0))
 
     ax.set_xticks(xs)
-    ax.set_xticklabels(SCENARIO_XLABEL, fontsize=12)
-    ax.set_ylabel("AT-HM", fontsize=13, color=_INK)
+    ax.set_xticklabels(SCENARIO_XLABEL, fontsize=42)
+    ax.set_ylabel("AT-HM", fontsize=42, color=_INK)
+    ax.set_yticks([0.2, 0.4, 0.6, 0.8, 1.0])
     ax.set_ylim(0, 1.05)
-    ax.set_xlim(-0.3, len(scenarios) - 1 + 1.7)
+    ax.set_xlim(-0.9, xs[-1] + 3.4)
     ax.grid(True, axis="y", lw=0.4, alpha=0.4)
-    ax.tick_params(labelsize=11, colors=_MUTED)
+    ax.tick_params(axis="y", labelsize=42, colors=_MUTED)
+    ax.tick_params(axis="x", labelsize=42, colors=_INK)
 
     # A plain (line, marker) legend tuple draws both at FULL size on top of
     # each other (matplotlib's HandlerTuple default, ndivide=1) -- the flame
@@ -231,13 +242,13 @@ def plot(df: pd.DataFrame, fpr: float, paths: list[Path]) -> None:
     # inserting a gap between them (tried -- the line sample shrank to a
     # stub instead of moving apart from the flame); a third, invisible
     # spacer handle reserves its own blank section between them instead.
-    line_handle = Line2D([], [], color=TRAINED_COLOR, lw=2.2)
+    line_handle = Line2D([], [], color=TRAINED_COLOR, lw=12)
     spacer_handle = Line2D([], [], linestyle="none")
-    flame_handle = Line2D([], [], color=TRAINED_COLOR, marker=FLAME_MARKER, ms=13,
+    flame_handle = Line2D([], [], color=TRAINED_COLOR, marker=FLAME_MARKER, ms=36,
                          linestyle="none", markeredgewidth=0)
     ax.legend(handles=[(line_handle, spacer_handle, flame_handle)], labels=[TRAINED_LABEL],
              handler_map={tuple: HandlerTuple(ndivide=None)},
-             fontsize=11, loc="lower left", frameon=False)
+             fontsize=42, loc="lower left", frameon=False)
 
     for path in paths:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -259,6 +270,9 @@ def main() -> None:
     ap.add_argument("--figs-dir", type=Path, default=DEFAULT_FIGS_DIR,
                     help=f"where the article-ready PDF is also written (default: "
                          f"{DEFAULT_FIGS_DIR}); pass '' to skip the PDF entirely")
+    ap.add_argument("--height", type=float, default=3.8,
+                    help="figure height in inches at 7.2 in wide (default 3.8); the "
+                         "paper's avg figure uses 5.75 to match Fig. 4's panel height")
     args = ap.parse_args()
     out_dir = args.out_dir or args.csv.parent
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -281,7 +295,7 @@ def main() -> None:
         paths = [out_dir / f"{name}.png"]
         if figs_dir is not None:
             paths.append(figs_dir / f"{name}.pdf")
-        plot(df, fpr, paths)
+        plot(df, fpr, paths, height=args.height)
 
 
 if __name__ == "__main__":

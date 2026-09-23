@@ -17,7 +17,7 @@ Pass either explicitly for a targeted run: ``--splits mg_reph`` /
 ``mg_reph_sci`` / ``mg_reph_gb`` / ``gb_orig_stand`` (``split_manugram_reph.py``
 writes the MG-Reph halves).
 
-:data:`POOL_SPLITS` is what feeds the pooled ``all`` pseudo-split (MG-All) --
+:data:`POOL_SPLITS` is what feeds the pooled ``all`` pseudo-split (All Benchmarks) --
 currently all four core splits (a plain arithmetic mean / full pool over
 GB-orig, MG-GB, MG-Sci, MG-AI-Sci), kept as its own constant so a split can be
 carved out of the pool again later without touching any script.
@@ -59,7 +59,7 @@ SPLITS: dict[str, str] = {
 #: deliberately absent -- see the module docstring.
 DEFAULT: tuple[str, ...] = ("gb_orig", "mg_gb", "mg_sci", "mg_aisci")
 
-#: the splits pooled into the ``all`` pseudo-split (MG-All). Currently all of
+#: the splits pooled into the ``all`` pseudo-split (All Benchmarks). Currently all of
 #: :data:`DEFAULT` -- see the module docstring.
 POOL_SPLITS: tuple[str, ...] = DEFAULT
 
@@ -89,7 +89,7 @@ DISPLAY: dict[str, str] = {
     "mg_reph_sci": "MG-Reph-Sci",
     "mg_reph_gb": "MG-Reph-GB",
     "mg_aisci": "MG-AI-Sci",
-    "all": "MG-All",
+    "all": "All Benchmarks",
     "mean": "Mean",
 }
 

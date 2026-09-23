@@ -10,14 +10,15 @@ One figure, two rows, four columns:
             ``binoculars_score_llama31_8b``)
     cols    the four CORE splits, GB-orig -> MG-GB -> MG-Sci -> MG-AI-Sci
             (``splits.DEFAULT`` -- deliberately NOT including the pooled
-            MG-All column the baseline-calibration plots show)
+            "All Benchmarks" column the baseline-calibration plots show)
 
 Each panel is a human-vs-machine score-density histogram with the 1%-FPR
 threshold marked, in the same visual language as
 ``calibrate_common._plot_column`` (same colors, same threshold-line style) --
 this is that plot's figure, not a new design, just: two fixed columns instead
-of every column, two rows instead of one, MG-All dropped, and everything
-sized for a paper column rather than a diagnostic sweep.
+of every column, two rows instead of one, the pooled "All Benchmarks" column
+dropped, and everything sized for a paper column rather than a diagnostic
+sweep.
 
 Thresholds are fit FRESH per (pair, corpus) at ``--fpr-target`` (default 1%),
 exactly like ``calibrate_*_baseline.py --corpora`` does -- not read back from
@@ -129,7 +130,7 @@ def main() -> None:
     ap.add_argument("--corpora", nargs="+", default=None, metavar="NAME",
                     help="which splits to plot as columns, left to right "
                          "(default: the four core splits, gb_orig mg_gb "
-                         "mg_sci mg_aisci -- MG-All is never included)")
+                         "mg_sci mg_aisci -- \"All Benchmarks\" is never included)")
     ap.add_argument("--top-col", default="binoculars_score",
                     help="score column for the top row (default: "
                          "binoculars_score = falcon-7b, the original pair)")

@@ -109,7 +109,7 @@ def _assemble(name: str, rows: list[tuple[Path, str]]) -> None:
         ax.imshow(img, aspect="auto")
         ax.axis("off")
         ax.text(-0.01, 0.5, _label(raw_key), transform=ax.transAxes,
-                 fontsize=13, fontweight="bold", va="center", ha="right",
+                 fontsize=16, fontweight="bold", va="center", ha="right",
                  rotation=90)
     fig.subplots_adjust(left=0.045, right=0.998, top=0.998, bottom=0.002,
                          hspace=0.015)
