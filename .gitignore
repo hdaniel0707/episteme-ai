@@ -33,3 +33,4 @@ build/
 !/.claude/hooks/README.md
 # ICLR release: parquets (hosted separately on OSF)
 /released_data/
+/store/
