@@ -1,0 +1,22 @@
+Official Review of Submission47037 by Reviewer Lma8
+Official Reviewby Reviewer Lma8 03 Nov 2026, 02:10 (modified: 06 Nov 2026, 13:35) Everyone Revisions
+Paper Summary:
+The paper examines how to read an LLM judge's answer when using LLM-as-judge for AI-text detection. The authors argue that asking the judge to state a probability or label directly is too coarse and produces many ties at a 1% false-alarm rate. They therefore propose LogJudge, which reads the top-k log-probabilities of “human/machine” at a single answer token and computes the expected human-likeness; FusionJudge then averages this score with the stated probability. The authors also build Manugram, covering current generators, scientific abstracts, AI-Scientist abstracts, and rephrased corpora, and validate the methods on four splits and on ICLR abstracts. The main result is that, with the same judge, the log-probability readout leaves AUROC largely unchanged but substantially improves recall at low FPR; FusionJudge is strongest on average and requires no training.
+
+Presentation: 2: Generally understandable, but requires substantial effort in places.
+Informativeness: 2: I learned something interesting or useful.
+Soundness: 2: I have minor or fixable concerns about the paper’s soundness.
+Critical Strengths:
+1.1. The problem is well framed, rather than attributing the gain to a stronger judge, the authors identify a resolution bottleneck in stated probabilities near the 1% FPR and use tied values and ROC operating points to explain why LogJudge works. This observation has practical relevance for LLM-as-judge detection. 2. 3.2. Manugram doesn’t just reuse Ghostbuster, it regenerates the machine text, adds scientific abstracts and rephrased corpora, and runs domain-shift, rephrasing, and self-recognition checks. Compared with reporting AUROC only on the old Ghostbuster, this validation is broader and more credible.
+
+Critical Weaknesses:
+1.The methodological contribution is more about how to derive a detection score from the model’s output than about proposing a new detection mechanism. AUROC remains almost unchanged, the gains are concentrated at low-FPR thresholds, and FusionJudge is merely an equal-weight average, lacking calibration or a selection rule. 2.MG-AI-Sci contains only 100 human texts, so its 1% threshold is effectively determined by a single document; the AT-HM differences on this small sample should therefore not be overinterpreted. In addition, the rephrasing attack covers only one generator and a limited corpus, so the conclusions have limited generalizability.
+
+Questions For Authors:
+Is FusionJudge’s equal-weight average pre-specified, or was it selected on a validation set? Has it been compared with a simple rule that switches between LogJudge and FusionJudge according to the FPR range?
+Can the 1% threshold and small-sample AT-HM for MG-AI-Sci be accompanied by bootstrap confidence intervals or leave-one-out threshold-stability results?
+Given the log-probability jitter in Appendix V, is the AT-HM gap between FusionJudge and LogJudge robust under repeated calls or resampling?
+How can the ICLR abstract flag rate be presented to readers so that it is not mistaken for the share of LLM-written abstracts? Under the label-free setting, can a more intuitive calibration explanation or a sensitivity/upper-and-lower-bound analysis be provided?
+Flag For Ethics Review: No
+Rating: 3: Weak acceptance
+Confidence: 3: I am familiar with this topic and its relevant literature.
