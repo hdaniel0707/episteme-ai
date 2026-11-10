@@ -21,6 +21,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   `.venv/bin/python path/to/script.py` (run from the repo root; its base interpreter,
   /usr/bin/python3.12, exists in the sandbox).
 - Do not run anything with a submodule's venv (e.g. `external/Binoculars/.venv`).
+- `permissions.blockReadsOutsideWorkingDirectories` is on: every path in a Bash command
+  must be provable from the command text alone, or it stops for approval. So:
+  - Use absolute paths (`/home/daniel/projects/episteme-ai/...`). Never start with
+    `cd X;` / `cd X &&` -- the working directory is already the repo root.
+  - No paths built at run time: no `$(...)`, `$VAR`, globs-in-subshells, or paths
+    computed inside `python -c` (e.g. `os.listdir` to pick a file). Look the file up
+    first (`ls`), then use its literal path in the next command.
+  - Prefer one simple command per call over long `;`-chained one-liners; for anything
+    non-trivial in Python, write a script to the scratchpad and run it.
+  - Use the Read tool rather than `cat`/`sed -n` for plain file reads.
 - Ask first before running anything slow, GPU-bound, or that calls a paid/remote API
   (judge capture, generation, Binoculars/Fast-DetectGPT scoring, embedding).
 - Write outputs only under `../logjudge-manugram/`, `released_data/`, or your scratchpad /
@@ -33,13 +43,29 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This repo is the working codebase and paper source for a submission to **ICLR 2027**
 on AI-text detection. The paper draft — theory, framing, related work, experiment
-writeups — lives in LaTeX at `latex/_ICLR_2027__AI_Detect/` (main file
-`iclr2027_conference.tex`; bibliography `iclr2027_conference.bib`; figures in
-`figs/`). `latex/trainv2/` holds a second LaTeX source tree.
+writeups — lives in LaTeX in the `overleaf/` git submodule, which is the Overleaf
+project itself (remote `https://git.overleaf.com/...`, branch `main`). Main file
+`overleaf/iclr2027_conference.tex`; bibliography `iclr2027_conference.bib`; figures in
+`overleaf/figs/`. `0_iclr2027_conference.tex` is the untouched ICLR formatting
+template, not the paper. The old copy-pasted `latex/` folder is gone; ignore any
+`latex/_ICLR_2027__AI_Detect/...` path still mentioned in code or docstrings
+(it now means `overleaf/...`).
 
 When you need to understand the motivation, terminology, or claims behind an
 experiment or script in this repo, check the paper source first — it's the
 authoritative statement of the theory and argument the code is built to support.
+
+### Paper workflow (Overleaf submodule)
+- Overleaf is the source of truth; the user also edits there in the browser. Before
+  reading or editing the paper, run `git -C /home/daniel/projects/episteme-ai/overleaf pull`
+  so you see the current text (if it fails on auth, tell the user rather than retrying).
+- Edit files under `overleaf/` directly and commit inside the submodule
+  (`git -C .../overleaf commit`). Do NOT `git push` to Overleaf without asking — a push
+  shows up live in the shared Overleaf project.
+- Figures for the paper go in `overleaf/figs/`; they reach Overleaf only once committed
+  and pushed there.
+- After pushing, the parent repo's pointer moves: `git add overleaf` and commit here
+  (only when the user asks for a commit).
 
 ## Release for review (anonymized code + data)
 

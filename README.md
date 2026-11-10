@@ -21,6 +21,7 @@ All four draw on the shared library under `epai/utils/` and `epai/algs/`.
   - [CUDA wheels — compute server only](#cuda-wheels--compute-server-only)
   - [Environments](#environments)
   - [Updating a submodule](#updating-a-submodule)
+  - [The paper — overleaf/ submodule](#the-paper--overleaf-submodule)
   - [Claude Code notifications — optional](#claude-code-notifications--optional)
   - [Pipeline notifications — optional](#pipeline-notifications--optional)
 - [Git LFS — Store Folder](#git-lfs--store-folder)
@@ -104,6 +105,10 @@ episteme-ai/
 │   └── ghostbuster/               # Git submodule: the ghostbuster fork, own uv env
 │       └── data/                  #   gitignored; seeded by hand, written by generate.py
 │
+├── overleaf/                      # Git submodule: the ICLR 2027 paper = the Overleaf project
+│   ├── iclr2027_conference.tex    #   main paper file (+ .bib, figs/)
+│   └── 0_iclr2027_conference.tex  #   untouched ICLR template, not the paper
+│
 ├── cfg/
 │   ├── citation_impact/
 │   │   └── fetch/                 # Semantic Scholar query configs
@@ -151,7 +156,10 @@ git submodule update --init
 --recursive` after pulling on a machine that already has the repo — a stale or empty submodule is
 the usual reason a scoring command fails on the server but works on the laptop.
 
-The submodules are cloned over SSH, so the machine needs SSH access to them as well as to this one.
+The four forks are cloned over SSH, so the machine needs SSH access to them as well as to this one.
+The fifth submodule, `overleaf/` (the paper), is cloned over HTTPS from Overleaf and needs an
+Overleaf git token — see [The paper](#the-paper--overleaf-submodule). Machines that only run code
+can skip it: `git submodule update --init external/`.
 Datasets under `store/` are Git LFS pointers after a fresh clone — see
 [Git LFS — Store Folder](#git-lfs--store-folder) to pull the real files.
 
@@ -336,6 +344,28 @@ that project's `pyproject.toml` or `uv.lock`; plain code changes need nothing, t
 
 When editing a fork, commit and push **inside** `external/<fork>` first, then commit the
 moved pointer here — otherwise the pin references a commit nobody else can fetch.
+
+### The paper — `overleaf/` submodule
+
+The paper source is not copied into this repo any more: `overleaf/` is a submodule whose remote
+is the Overleaf project's own git endpoint (`https://git.overleaf.com/<project-id>`, branch
+`main`). Overleaf asks for HTTPS credentials — username `git`, password an Overleaf git
+authentication token (Overleaf → Account settings → Git integration). Edits made in the browser
+and edits made here are the same history:
+
+```bash
+git -C overleaf pull                       # pick up edits made on Overleaf — do this first
+# ... edit overleaf/*.tex, drop figures into overleaf/figs/ ...
+git -C overleaf add -A
+git -C overleaf commit -m "..."
+git -C overleaf push                       # now visible on Overleaf
+
+git add overleaf                           # record the new paper commit here
+git commit -m "Bump paper to $(git -C overleaf rev-parse --short HEAD)"
+```
+
+Pull before editing locally, and avoid editing the same section in the browser at the same time:
+Overleaf rejects a push that is behind, and the merge then has to be done here.
 
 ### Claude Code notifications — optional
 
