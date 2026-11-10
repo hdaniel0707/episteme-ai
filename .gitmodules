@@ -10,3 +10,6 @@
 [submodule "external/EditLens"]
 	path = external/EditLens
 	url = git@github.com:hdaniel0707/EditLens.git
+[submodule "overleaf"]
+	path = overleaf
+	url = https://git.overleaf.com/6a9030c2910d5195e9950c1b
