@@ -78,6 +78,9 @@ authoritative statement of the theory and argument the code is built to support.
   A revised PDF can be uploaded until then; main text may grow to 10 pages.
 - Rebuttal text and revised PDF are public and must stay anonymous (same rules as
   the release repo below).
+- API experiments (block A) live in `epai/ai_detection/rebuttal/` (`conditions.py`,
+  `capture.py`, `RUNBOOK.md`). The user runs them, and the sidecars land in
+  `data/parquet/tmp/rebuttal/<model>/`. Read the runbook before changing a condition.
 - Rebuttal analyses go into `../logjudge-manugram/` as new `outputs/<result>/` folders
   (compute -> CSV -> plot), so the anonymous repo reproduces every rebuttal number.
 - Free assets for the rebuttal, already complete on all four core master parquets:

@@ -1,0 +1,239 @@
+r"""Conditions and row subsets for the rebuttal API experiments (TODO block A in
+``reviews/review_summary.html``).
+
+A *condition* is one way of asking the judge: a system prompt, an answer kind,
+and the call settings. Every condition is called the same way
+(``capture.py``): temperature as listed, reasoning effort ``none`` on the
+OpenAI Responses API, and the top-20 log-probabilities of **every** output
+token are stored, so each run can be re-scored offline without new calls.
+
+Answer kinds:
+
+  ``label``  one answer token, as LogJudge. Score from the first position:
+             s = (1 + p_human - p_machine) / 2, where ``labels`` maps a folded
+             token to ``human`` / ``machine``.
+  ``prob``   a written probability, as BaseJudge. Score = the parsed number.
+             Its token log-probabilities also give the same-call expected value
+             (A2), computed later by the scorer.
+
+Conditions (TODO id in brackets):
+
+  base_v3      [A1 control, A2, A3]  BaseJudge v3 prompt verbatim (2 decimals),
+               but called like LogJudge: Responses API, effort none, temp 0, plain
+               text. Isolates "call settings" from "output precision".
+  base_hp4     [A1, A2]   same prompt, the one change: four decimal places.
+  base_free    [A1, A2]   same prompt, the one change: unrestricted precision
+               ("as many decimal places as your judgement supports"), no example
+               numbers. With base_hp4 it shows the result does not hinge on
+               the digit limit we chose.
+  base_v3_t1   [A4]       base_v3 at temperature 1, 3 samples per row
+               (--reps), to be averaged.
+  lj_v3        [A3]       LogJudge exactly as in the paper (v3 evidence +
+               human/machine answer block). Repeated with --reps.
+  lj_swap      [A5]       same words, machine listed first.
+  lj_alt       [A5]       other words: ``person`` / ``AI``.
+  lj_letters   [A5]       letters with the opposite position bias from ord5:
+               ``A`` = machine, ``B`` = human.
+
+Subsets (deterministic, seed 0, built from the master parquets read-only):
+
+  full                 every row of the four core splits (36,148)
+  humans_plus_third    every human row + a third of the machine rows per
+                       (split, generator); MG-AI-Sci kept whole. The human-side
+                       1%-FPR threshold is exact, and TPR is estimated on a
+                       random machine sample.
+  near                 rows near the 1%-FPR thresholds of the paper's luna
+                       LogJudge / FusionJudge (A3 stability), plus a random control
+  small                per split up to 1000 human + 1000 machine rows,
+                       stratified by domain x generator (MG-AI-Sci: all 200)
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from epai.ai_detection.score.add_llm_judge_scores import (
+    LOGPROB_ANSWER_BLOCK,
+    PROMPTS,
+    evidence_head,
+)
+
+BASE_DIR = Path(__file__).resolve().parents[3]
+PARQUET_DIR = BASE_DIR / "data" / "parquet"
+WORKSPACE = PARQUET_DIR / "tmp" / "rebuttal"  # data/ is gitignored
+
+CORE_STEMS = ["ghostbuster_orig", "manugram_gb", "manugram_sci", "manugram_aiscientist"]
+HUMAN = "human"
+SEED = 0
+
+# ---------------------------------------------------------------------------
+# Prompts
+# ---------------------------------------------------------------------------
+
+_V3 = PROMPTS["v3"]
+_TWO_DEC = ("give two decimal places. Do not settle on round values such as 0.20, "
+            "0.50 or 0.80: if your belief falls between two of them, say so (0.37, 0.62).")
+_FOUR_DEC = ("give four decimal places. Do not settle on round values such as 0.20, "
+             "0.50 or 0.80: if your belief falls between two of them, say so "
+             "(0.3712, 0.6248).")
+# No example numbers here: an example with k digits anchors the answer to k digits.
+_FREE_DEC = ("give as many decimal places as your judgement supports; there is no "
+             "limit on precision. Do not settle on round values such as 0.20, 0.50 or "
+             "0.80: if your belief falls between two values, say so.")
+assert _V3.count(_TWO_DEC) == 1, "v3 prompt changed -- update _TWO_DEC"
+
+
+def _answer_block(first: tuple[str, str], second: tuple[str, str]) -> str:
+    """A one-word answer block shaped like LOGPROB_ANSWER_BLOCK, with the two
+    (word, meaning) options in the given order."""
+    return (
+        "ANSWER\n"
+        f"Answer with exactly one word, and nothing else: `{first[0]}` if {first[1]}, "
+        f"`{second[0]}` if {second[1]}. No probability, no explanation, no punctuation.\n"
+        "Judge each document on its own. Do not assume any particular mix of human "
+        "and machine documents, and do not try to balance your answers across documents."
+    )
+
+
+_H = "the document was more likely written by a human"
+_M = "it was more likely generated by a large language model"
+_M_FIRST = "the document was more likely generated by a large language model"
+_H_SECOND = "it was more likely written by a human"
+
+_LETTERS_BLOCK = (
+    "ANSWER\n"
+    "Answer with exactly one letter, and nothing else: `A` if the document was more "
+    "likely generated by a large language model, `B` if it was more likely written by "
+    "a human. No probability, no explanation, no punctuation.\n"
+    "Judge each document on its own. Do not assume any particular mix of human and "
+    "machine documents, and do not try to balance your answers across documents."
+)
+
+
+@dataclass(frozen=True)
+class Condition:
+    name: str
+    kind: str                      # "label" | "prob"
+    system: str
+    todo: str
+    temperature: float = 0.0
+    max_output_tokens: int = 16    # Responses API minimum is 16
+    labels: dict[str, str] = field(default_factory=dict)  # folded token -> human|machine
+    default_subset: str = "humans_plus_third"
+    default_reps: int = 1
+
+
+_WORDS = {"human": HUMAN, "machine": "machine"}
+
+CONDITIONS: dict[str, Condition] = {c.name: c for c in [
+    Condition("base_v3", "prob", _V3, "A1 control / A2 / A3"),
+    Condition("base_hp4", "prob", _V3.replace(_TWO_DEC, _FOUR_DEC), "A1 / A2"),
+    Condition("base_free", "prob", _V3.replace(_TWO_DEC, _FREE_DEC), "A1 / A2",
+              max_output_tokens=32),
+    Condition("base_v3_t1", "prob", _V3, "A4", temperature=1.0,
+              default_subset="small", default_reps=3),
+    Condition("lj_v3", "label", evidence_head("v3") + "\n\n" + LOGPROB_ANSWER_BLOCK,
+              "A3", labels=_WORDS, default_subset="near", default_reps=3),
+    Condition("lj_swap", "label",
+              evidence_head("v3") + "\n\n" + _answer_block(("machine", _M_FIRST),
+                                                           ("human", _H_SECOND)),
+              "A5", labels=_WORDS, default_subset="small"),
+    Condition("lj_alt", "label",
+              evidence_head("v3") + "\n\n" + _answer_block(("person", _H), ("AI", _M)),
+              "A5", labels={"person": HUMAN, "ai": "machine"}, default_subset="small"),
+    Condition("lj_letters", "label", evidence_head("v3") + "\n\n" + _LETTERS_BLOCK,
+              "A5", labels={"b": HUMAN, "a": "machine"}, default_subset="small"),
+]}
+
+# The paper's LogJudge must be reproduced exactly by lj_v3 -- same system prompt
+# capture_judge_logprobs.py sent for llm_judge_logprobs_gpt56luna_v3_words.
+assert CONDITIONS["lj_v3"].system == evidence_head("v3") + "\n\n" + LOGPROB_ANSWER_BLOCK
+
+
+# ---------------------------------------------------------------------------
+# Subsets
+# ---------------------------------------------------------------------------
+
+_LOAD_COLS = ["uid", "generated_by", "domain", "text",
+              "logjudge_ord2_gpt56luna_v3", "fusionjudge_score"]
+
+
+def load_core() -> pd.DataFrame:
+    """The four core splits, light columns only, with a ``stem`` column."""
+    parts = []
+    for stem in CORE_STEMS:
+        df = pd.read_parquet(PARQUET_DIR / f"{stem}.parquet", columns=_LOAD_COLS)
+        df.insert(0, "stem", stem)
+        parts.append(df)
+    return pd.concat(parts, ignore_index=True)
+
+
+def _fpr_position(scores: np.ndarray, is_human: np.ndarray) -> np.ndarray:
+    """Per row: the share of the split's human rows scored at or below it (scores
+    are P(human), low = machine). A row at position 0.01 sits on the 1%-FPR
+    threshold."""
+    h = np.sort(scores[is_human])
+    return np.searchsorted(h, scores, side="right") / len(h)
+
+
+def _strat_sample(df: pd.DataFrame, n: int, rng: np.random.Generator) -> pd.Index:
+    """Up to n rows spread evenly over domain x generated_by, random within."""
+    groups = [g.index.to_numpy() for _, g in df.groupby(["domain", "generated_by"])]
+    groups = [rng.permutation(g) for g in groups]
+    chosen, depth = [], 0
+    while len(chosen) < n and any(len(g) > depth for g in groups):
+        for g in groups:
+            if len(g) > depth and len(chosen) < n:
+                chosen.append(g[depth])
+        depth += 1
+    return pd.Index(chosen)
+
+
+def build_subset(core: pd.DataFrame, name: str) -> pd.DataFrame:
+    """Rows of ``core`` in subset ``name``. Deterministic for a given name."""
+    rng = np.random.default_rng(SEED)
+    is_h = core["generated_by"].eq(HUMAN)
+    if name == "full":
+        return core
+    if name == "humans_plus_third":
+        keep = is_h | core["stem"].eq("manugram_aiscientist")  # tiny split: keep all 200
+        for _, g in core[~keep].groupby(["stem", "generated_by"]):
+            pick = rng.permutation(g.index.to_numpy())[: int(round(len(g) / 3))]
+            keep.loc[pick] = True
+        return core[keep]
+    if name == "small":
+        idx = []
+        for stem, g in core.groupby("stem", sort=False):
+            if stem == "manugram_aiscientist":
+                idx.extend(g.index)
+                continue
+            gh = g["generated_by"].eq(HUMAN)
+            idx.extend(_strat_sample(g[gh], 1000, rng))
+            idx.extend(_strat_sample(g[~gh], 1000, rng))
+        return core.loc[sorted(idx)]
+    if name == "near":
+        idx = []
+        for _, g in core.groupby("stem", sort=False):
+            gh = g["generated_by"].eq(HUMAN).to_numpy()
+            near_h = np.zeros(len(g), bool)
+            near_m = np.zeros(len(g), bool)
+            for col in ("logjudge_ord2_gpt56luna_v3", "fusionjudge_score"):
+                pos = _fpr_position(g[col].to_numpy(), gh)
+                near_h |= gh & (pos <= 0.05)          # the most machine-like 5% of humans
+                near_m |= ~gh & (pos >= 0.003) & (pos <= 0.03)
+            m_idx = g.index[near_m].to_numpy()
+            m_idx = rng.permutation(m_idx)[:400]
+            rest = g.index[~(near_h | near_m)].to_numpy()
+            ctrl = rng.permutation(rest)[:100]
+            idx.extend(g.index[near_h])
+            idx.extend(m_idx)
+            idx.extend(ctrl)
+        return core.loc[sorted(set(idx))]
+    raise KeyError(f"unknown subset {name!r}; choose from {SUBSETS}")
+
+
+SUBSETS = ("full", "humans_plus_third", "near", "small")
