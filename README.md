@@ -22,6 +22,7 @@ All four draw on the shared library under `epai/utils/` and `epai/algs/`.
   - [Environments](#environments)
   - [Updating a submodule](#updating-a-submodule)
   - [The paper — overleaf/ submodule](#the-paper--overleaf-submodule)
+  - [Reviews and rebuttal — reviews/](#reviews-and-rebuttal--reviews)
   - [Claude Code notifications — optional](#claude-code-notifications--optional)
   - [Pipeline notifications — optional](#pipeline-notifications--optional)
 - [Git LFS — Store Folder](#git-lfs--store-folder)
@@ -108,6 +109,9 @@ episteme-ai/
 ├── overleaf/                      # Git submodule: the ICLR 2027 paper = the Overleaf project
 │   ├── iclr2027_conference.tex    #   main paper file (+ .bib, figs/)
 │   └── 0_iclr2027_conference.tex  #   untouched ICLR template, not the paper
+│
+├── reviews/                       # ICLR 2027 reviews (<reviewer-id>.txt) + review_summary.html
+│                                  #   (summary, rebuttal TODO list, schedule)
 │
 ├── cfg/
 │   ├── citation_impact/
@@ -366,6 +370,15 @@ git commit -m "Bump paper to $(git -C overleaf rev-parse --short HEAD)"
 
 Pull before editing locally, and avoid editing the same section in the browser at the same time:
 Overleaf rejects a push that is behind, and the merge then has to be done here.
+
+### Reviews and rebuttal — `reviews/`
+
+The ICLR 2027 reviews are in `reviews/` as one text file per reviewer (`Lma8.txt`, `WpPs.txt`,
+`xghj.txt`). `reviews/review_summary.html` is the working document for the rebuttal: per-reviewer
+summary, a map of the shared concerns, the prioritized TODO list (A = new API runs, B = CPU analyses
+on existing parquets, C = paper text, D = OpenReview posts) and the day-by-day schedule. Open it in a
+browser; ticked checkboxes are saved in that browser only. The author–reviewer discussion closes on
+**Nov 18, 2026 (AoE)**.
 
 ### Claude Code notifications — optional
 

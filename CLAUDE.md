@@ -67,6 +67,24 @@ authoritative statement of the theory and argument the code is built to support.
 - After pushing, the parent repo's pointer moves: `git add overleaf` and commit here
   (only when the user asks for a commit).
 
+## Reviews and rebuttal (ICLR 2027, submission 47037)
+
+- `reviews/` holds the three official reviews as plain text (`Lma8.txt` weak accept 3,
+  `WpPs.txt` weak reject 2, `xghj.txt` clear reject 1) and `review_summary.html`: the
+  summary, concern map, prioritized TODO list (A = API runs, B = CPU analyses on existing
+  parquets, C = paper text, D = OpenReview posts) and the schedule. Read it before any
+  rebuttal work; the TODO IDs (A1, B5, ...) are the shared vocabulary with co-authors.
+- Author-reviewer discussion ends **Nov 18, 2026 AoE** (= Nov 19, 12:59 Budapest).
+  A revised PDF can be uploaded until then; main text may grow to 10 pages.
+- Rebuttal text and revised PDF are public and must stay anonymous (same rules as
+  the release repo below).
+- Rebuttal analyses go into `../logjudge-manugram/` as new `outputs/<result>/` folders
+  (compute -> CSV -> plot), so the anonymous repo reproduces every rebuttal number.
+- Free assets for the rebuttal, already complete on all four core master parquets:
+  luna prompt variants `cand03`/`cand10` (parsed + log-prob windows), the `ord5` windows
+  for both judges (`llm_judge_logprobs_*_v3_scale`), and `fusionjudge_{logodds,bayes}_score`.
+  New judge calls (the A-block) still need the user's go-ahead (see "Running code").
+
 ## Release for review (anonymized code + data)
 
 - `released_data/{full,lite}/` holds the reviewer parquets (`<stem>.parquet`,

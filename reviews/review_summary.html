@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ICLR 2027 Rebuttal Plan</title>
+<style>
+:root{
+  --bg:#fbfaf7; --panel:#ffffff; --ink:#1d1f23; --muted:#5d6470; --line:#e3e1db;
+  --accent:#2d5bd7; --must:#b42318; --should:#b26a00; --could:#4a6b3a;
+  --cpu:#e7f1e4; --api:#fbe9e7; --txt:#e8eefc; --chip:#f1efe9;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#15171b; --panel:#1d2026; --ink:#e7e7ea; --muted:#9aa1ad; --line:#30343c;
+    --accent:#7fa2ff; --must:#ff7a6b; --should:#f2b34b; --could:#9cc98a;
+    --cpu:#22301f; --api:#3a2422; --txt:#222b40; --chip:#262a31;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#15171b; --panel:#1d2026; --ink:#e7e7ea; --muted:#9aa1ad; --line:#30343c;
+  --accent:#7fa2ff; --must:#ff7a6b; --should:#f2b34b; --could:#9cc98a;
+  --cpu:#22301f; --api:#3a2422; --txt:#222b40; --chip:#262a31;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:1040px;margin:0 auto;padding:28px 16px 80px}
+h1{font-size:26px;margin:0 0 4px}
+h2{font-size:20px;margin:40px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+h3{font-size:16px;margin:22px 0 6px}
+p{margin:8px 0}
+small,.muted{color:var(--muted)}
+code{font:13px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--chip);padding:1px 4px;border-radius:4px}
+a{color:var(--accent)}
+nav{display:flex;flex-wrap:wrap;gap:6px 14px;margin:14px 0 0;font-size:14px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin-top:12px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px}
+.card .big{font-size:28px;font-weight:700}
+.callout{background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--must);border-radius:8px;padding:12px 14px;margin:14px 0}
+.callout.info{border-left-color:var(--accent)}
+.tablewrap{overflow-x:auto;margin:10px 0;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
+table{border-collapse:collapse;width:100%;font-size:14px}
+th,td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+th{font-weight:600;background:var(--chip);white-space:nowrap}
+tr:last-child td{border-bottom:0}
+.chip{display:inline-block;font-size:12px;padding:1px 7px;border-radius:999px;background:var(--chip);white-space:nowrap;margin:1px 2px 1px 0}
+.p-must{color:var(--must);font-weight:700}
+.p-should{color:var(--should);font-weight:700}
+.p-could{color:var(--could);font-weight:700}
+.k-cpu{background:var(--cpu)} .k-api{background:var(--api)} .k-txt{background:var(--txt)}
+.todo td:first-child{width:28px}
+.todo input{width:16px;height:16px}
+.todo tr.done td{opacity:.5}
+.todo tr.done td:nth-child(3){text-decoration:line-through}
+ul{margin:6px 0 6px 20px;padding:0}
+li{margin:3px 0}
+.rev{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:12px 0}
+.rev h3{margin-top:0}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media (max-width:720px){.two{grid-template-columns:1fr}}
+.timeline{list-style:none;margin:10px 0;padding:0}
+.timeline li{display:grid;grid-template-columns:120px 1fr;gap:10px;padding:8px 0;border-bottom:1px dashed var(--line)}
+.timeline b{white-space:nowrap}
+@media (max-width:520px){.timeline li{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<main>
+
+<h1>ICLR 2027 Submission 47037: reviews &amp; rebuttal plan</h1>
+<p class="muted">Paper: <em>Question of Confidence: A Zero-Shot AI-Text Detector and Benchmark Suite</em> (LogJudge / FusionJudge / Manugram).
+Prepared 2026-11-10 from <code>reviews/{Lma8,WpPs,xghj}.txt</code> and the local copy of <code>overleaf/iclr2027_conference.tex</code>.</p>
+<nav>
+  <a href="#glance">At a glance</a><a href="#timeline">Deadline &amp; strategy</a><a href="#reviewers">Per reviewer</a>
+  <a href="#themes">Concern map</a><a href="#todo">TODO list</a><a href="#schedule">8-day schedule</a><a href="#discuss">For co-authors</a>
+</nav>
+
+<!-- ============================================================ -->
+<h2 id="glance">At a glance</h2>
+<div class="cards">
+  <div class="card"><div class="muted">Lma8</div><div class="big">3</div>Weak accept · conf 3<br><small>Pres 2 · Info 2 · Sound 2</small></div>
+  <div class="card"><div class="muted">WpPs</div><div class="big">2</div>Weak reject · conf 3<br><small>Pres 3 · Info 3 · Sound 2</small><br><b>"Will consider raising the score"</b> if weaknesses are addressed</div>
+  <div class="card"><div class="muted">xghj</div><div class="big">1</div>Clear reject · conf 3<br><small>Pres 2 · Info 1 · Sound 1</small></div>
+</div>
+<div class="callout">
+  <b>Bottom line.</b> All three reviewers accept the core empirical observation (stated probabilities tie at the 1%-FPR threshold; the token-probability readout breaks those ties). The attacks are on
+  (1) whether the comparison <b>isolates the readout</b>: different prompt, 2-decimal output, separate call;
+  (2) <b>oracle thresholds and evaluation-set backbone selection</b>: no deployment-level FPR evidence, and the domain-shift experiment is "flat by construction";
+  (3) <b>FusionJudge's equal-weight average</b> as unmotivated; and (4) <b>robustness</b>: residual mass / top-k, repeated calls at the real threshold, MG-AI-Sci's one-document threshold.
+  Most of (2)–(4) can be answered on a CPU from data we already have. (1) needs new API runs, and both critical reviewers name it first.
+  <b>WpPs is the reviewer we can most likely move</b>; their list is concrete and they promise to reconsider. Lma8 should be kept and moved up. xghj will be hard to move, but the AC reads that thread, so it has to be answered carefully.
+</div>
+
+<!-- ============================================================ -->
+<h2 id="timeline">Deadline &amp; how ICLR rebuttals work</h2>
+<div class="callout">
+  <b>We have 8 days, not 10.</b> ICLR 2027 author–reviewer discussion: <b>Nov 5 → Nov 18, 2026 (AoE)</b>.
+  AoE Nov 18 23:59 = <b>Thu Nov 19, 12:59 Budapest time</b>. After that, reviewers and the AC discuss privately (Nov 19 → Dec 16) and we can no longer post. Decisions come on Dec 16.
+</div>
+<div class="two">
+<div>
+<h3>Rules that matter (ICLR 2027 author guide)</h3>
+<ul>
+  <li><b>Revised PDF allowed</b> until the end of discussion (Nov 18). Main text may grow to <b>10 pages</b> "to allow for new results/discussions"; appendix unlimited. A pdfdiff against the original is shown.</li>
+  <li>Reviewers/AC are <b>not required to read revisions</b>, and may ignore changes that differ substantially from the original. Always say in the comment what changed and where.</li>
+  <li>Unlimited number of comments, each with a word limit. You can reply to each reviewer several times.</li>
+  <li>Comments are <b>public</b> and must stay <b>anonymous</b>: no names, no SZTAKI/HUN-REN, no identifying links. The anonymous 4open/OSF links are fine.</li>
+  <li>Title, abstract and content may change, if the change is communicated.</li>
+</ul>
+</div>
+<div>
+<h3>"Post early" — what that means in practice</h3>
+<ul>
+  <li><b>Yes, post before all experiments are done.</b> Reviewers have only a few days to read, ask follow-ups and update scores, and many check once. A response that arrives on Nov 18 gets no dialogue.</li>
+  <li>But <b>don't post an empty placeholder</b>. An analysis of ICLR 2024/25 rebuttals found that mid-period responses tend to be the most effective. The first post should already carry substance.</li>
+  <li><b>Recommended two-wave pattern:</b>
+    <ol>
+      <li><b>Wave 1 (Nov 12–13):</b> a general comment to all, plus one reply per reviewer. Answer every question we can now: text clarifications, plus the CPU analyses from existing data (bootstrap CIs, ties, residual mass/k, non-oracle thresholds, fusion variants, prompt variants). For each API experiment, state exactly what is running and when results will be posted.</li>
+      <li><b>Wave 2 (Nov 15–16):</b> post the API results (high-precision BaseJudge, repeated calls, label order/wording), upload the revised PDF with changes highlighted, and post a short "summary of revisions" comment with a section map.</li>
+      <li><b>Nov 17–18:</b> answer follow-ups. Politely ask WpPs/Lma8 whether the concerns are resolved; don't pressure anyone.</li>
+    </ol></li>
+</ul>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="reviewers">Per reviewer</h2>
+
+<div class="rev">
+<h3>Lma8 — Weak accept (3) · the friendly one</h3>
+<div class="two">
+<div><b>Liked:</b> resolution-bottleneck framing with tie/ROC explanation; Manugram is broader than reusing Ghostbuster (regeneration, science, rephrase, self-recognition checks).</div>
+<div><b>Weaknesses:</b> contribution is a scoring readout, not a new detection mechanism; AUROC unchanged; FusionJudge is an equal-weight average with no calibration or selection rule. MG-AI-Sci threshold rests on 1 human doc. Rephrasing covers one generator only.</div>
+</div>
+<p><b>Questions to answer one by one:</b></p>
+<ol>
+  <li>Was the equal weight pre-specified or tuned? Comparison to a rule that switches LogJudge↔FusionJudge by FPR range? → <span class="chip">T-FUS</span> <span class="chip">C4</span></li>
+  <li>Bootstrap CIs / leave-one-out threshold stability for MG-AI-Sci? → <span class="chip">C5</span></li>
+  <li>Is the FusionJudge–LogJudge AT-HM gap robust to log-prob jitter (App. V) / repeated calls? → <span class="chip">C5</span> <span class="chip">A3</span></li>
+  <li>How to present the ICLR flag rate so that it is not read as an LLM-share estimate, e.g. a calibration explanation or bounds? → <span class="chip">C9</span> <span class="chip">T-ICLR</span></li>
+</ol>
+<p class="muted">Goal: keep at 3 or move up. Every question is answerable mostly from existing data.</p>
+</div>
+
+<div class="rev">
+<h3>WpPs — Weak reject (2) · the swing vote</h3>
+<div class="two">
+<div><b>Liked:</b> simple, practical, no training, uses top-k from commercial APIs; low-FPR focus and tie analysis; Manugram is a valuable resource.</div>
+<div><b>Weaknesses:</b>
+  <ol>
+    <li><b>Residual mass → ½</b> needs validation: label-absence rates, residual-mass distribution near the threshold, effect of k and of residual treatment on TPR@1%FPR.</li>
+    <li><b>Readout vs. precision/prompt confound</b>: BaseJudge outputs 2 decimals under different instructions. Raise BaseJudge's precision and rerun the same oracle protocol. Report distinct-value counts and tie-group sizes near the threshold.</li>
+    <li><b>Oracle thresholds and eval-set backbone selection</b>; the domain-shift experiment does not show that zero-shot detectors are stable when the <em>test</em> distribution changes.</li>
+  </ol></div>
+</div>
+<p><b>Explicit:</b> "If the authors can address most of them … I will consider raise my overall score." All three items map to concrete experiments; answer each with a table.</p>
+</div>
+
+<div class="rev">
+<h3>xghj — Clear reject (1) · soundness 1, informativeness 1</h3>
+<div class="two">
+<div><b>Liked:</b> low-FPR focus; tie-breaking ablation gives mechanism evidence; benchmark and the AI-polished-human analysis have potential.</div>
+<div><b>Weaknesses:</b>
+  <ol>
+    <li>P("human" token) is <b>not a calibrated P(human authorship)</b>; "recovering a finer underlying judgment" overclaims.</li>
+    <li>Readout not isolated: different instructions and different calls, so the gain may come from instruction effects, quantization or inference noise. Wants higher-precision output, <b>repeated elicitation (averaged)</b>, and <b>different label verbalizations</b>.</li>
+    <li>Fusion not motivated: two [0,1] scores are not a common probability scale. It is better called a heuristic ensemble.</li>
+    <li>No deployment-level FPR control (oracle thresholds, eval-set backbone selection). The domain-shift zero-shot curves are constant by construction.</li>
+    <li>Limited novelty (answer-token readout has precedents; fusion is an average). App. V checks agreement at 0.5, not at the low-FPR threshold.</li>
+  </ol></div>
+</div>
+<p><b>Questions:</b> (i) do gains hold with higher-precision BaseJudge or averaged repeats? (ii) FPR/TPR with independently calibrated thresholds transferred between domains? (iii) sensitivity of near-threshold decisions to label wording, label order and repeated calls?</p>
+<p class="muted">Strategy: concede the framing points (1, 3) gracefully and fix the text. Answer 2 and 4 with data. On novelty, argue that the contribution is the diagnosis plus the benchmark, not the readout primitive. The AC weighs whether the concerns were addressed, even if xghj does not move.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="themes">Concern map (who raised what)</h2>
+<div class="tablewrap"><table>
+<tr><th>#</th><th>Concern</th><th>Lma8</th><th>WpPs</th><th>xghj</th><th>Answer type</th><th>Severity</th></tr>
+<tr><td>C1</td><td>Readout not isolated: prompt, 2-decimal precision, separate call, inference noise</td><td></td><td>●</td><td>●</td><td><span class="chip k-api">API</span> <span class="chip k-cpu">CPU</span></td><td class="p-must">critical</td></tr>
+<tr><td>C2</td><td>Oracle thresholds; no deployment FPR; backbone chosen on eval splits</td><td>(●)</td><td>●</td><td>●</td><td><span class="chip k-cpu">CPU</span></td><td class="p-must">critical</td></tr>
+<tr><td>C3</td><td>Domain-shift experiment: zero-shot flat by construction</td><td></td><td>●</td><td>●</td><td><span class="chip k-cpu">CPU</span> <span class="chip k-txt">text</span></td><td class="p-must">high</td></tr>
+<tr><td>C4</td><td>FusionJudge equal weight: pre-specified? motivation? common scale?</td><td>●</td><td></td><td>●</td><td><span class="chip k-cpu">CPU</span> <span class="chip k-txt">text</span></td><td class="p-must">high</td></tr>
+<tr><td>C5</td><td>Stability: repeated calls at the real threshold; CIs; MG-AI-Sci one-doc threshold</td><td>●</td><td></td><td>●</td><td><span class="chip k-cpu">CPU</span> <span class="chip k-api">API</span></td><td class="p-must">high</td></tr>
+<tr><td>C6</td><td>Residual mass → ½, label absence, k sensitivity</td><td></td><td>●</td><td></td><td><span class="chip k-cpu">CPU</span></td><td class="p-must">high (WpPs #1)</td></tr>
+<tr><td>C7</td><td>"Calibrated P(human)" / "finer underlying judgment" overclaim</td><td></td><td></td><td>●</td><td><span class="chip k-txt">text</span></td><td class="p-should">medium</td></tr>
+<tr><td>C8</td><td>Novelty: readout precedents; average is trivial</td><td>●</td><td></td><td>●</td><td><span class="chip k-txt">text</span></td><td class="p-should">medium</td></tr>
+<tr><td>C9</td><td>ICLR flag rate could be misread as an LLM share</td><td>●</td><td></td><td></td><td><span class="chip k-cpu">CPU</span> <span class="chip k-txt">text</span></td><td class="p-should">medium</td></tr>
+<tr><td>C10</td><td>Rephrasing: one generator, limited corpus</td><td>●</td><td></td><td></td><td><span class="chip k-txt">text</span> (opt. API)</td><td class="p-could">low</td></tr>
+<tr><td>C11</td><td>Presentation "requires substantial effort" (2/3/2)</td><td>●</td><td></td><td>●</td><td><span class="chip k-txt">text</span></td><td class="p-could">low</td></tr>
+</table></div>
+
+<h3>What we already have that reviewers don't know about (no new API cost)</h3>
+<p>Checked in <code>data/parquet/</code>: all four core splits are complete, with 0 nulls.</p>
+<ul>
+  <li><b>Two more <code>gpt-5.6-luna</code> judge prompts, <code>cand03</code> (editorial reader) and <code>cand10</code> (effort allocation)</b>, with both the parsed score <em>and</em> the top-20 log-prob windows (<code>llm_judge_score_gpt56luna_cand0X</code>, <code>…_logprobs_…_words</code>, <code>logjudge_ord2_gpt56luna_cand0X</code>). These show whether the readout gain holds across three differently worded prompts (C1, xghj "label/prompt sensitivity").</li>
+  <li><b>The <code>ord5</code> (A–E letter scale) log-prob windows for both judges</b> (<code>llm_judge_logprobs_{gpt56luna,gemma4_31b}_v3_scale</code>). The paper only used them for the jitter test. They give a different label verbalization for free (C1).</li>
+  <li><b>FusionJudge variants</b> <code>fusionjudge_logodds_score</code> and <code>fusionjudge_bayes_score</code>, plus <code>fusionjudge_gemma4_31b_v3_score</code> (C4). <b>Note:</b> the yaml comment says a wider sweep (tempered γ, agreement-gated, …) "was tried and dropped". We must be honest that the mean was the first rule, and that the alternatives were checked afterwards and none beat it. Confirm the order of events before writing this.</li>
+  <li>The full top-20 windows, so k ∈ {1…20} and any residual-mass rule can be recomputed exactly (C6).</li>
+  <li>The 150-row recapture from App. V (re-evaluate at the real thresholds, C5).</li>
+</ul>
+
+<!-- ============================================================ -->
+<h2 id="todo">TODO list</h2>
+<p class="muted">Kind: <span class="chip k-cpu">CPU</span> from existing parquets, cheap · <span class="chip k-api">API</span> new judge calls: ask before running, needs budget · <span class="chip k-txt">text</span> paper/rebuttal writing.
+Priority: <span class="p-must">MUST</span> = needed to answer a critical point · <span class="p-should">SHOULD</span> · <span class="p-could">COULD</span> only if time allows. Ticks are saved in this browser only.</p>
+
+<h3>A. API experiments: decide and launch first (longest lead time)</h3>
+<div class="tablewrap"><table class="todo">
+<tr><th></th><th>ID</th><th>Task</th><th>Answers</th><th>Kind</th><th>Prio</th></tr>
+<tr data-id="A1"><td><input type="checkbox"></td><td>A1</td><td><b>High-precision BaseJudge.</b> Re-run the v3 BaseJudge with the only change being the output spec: e.g. 4 decimals, or an integer 0–1000. Report the number of distinct values, tie-group sizes at the 1%-FPR threshold, AUROC, TPR@1%FPR and AT-HM. Do it on all 4 splits if the budget allows; otherwise use the full MG-AI-Sci + GB-orig and a class-stratified ~3k subsample of MG-GB/MG-Sci, compared against LogJudge on the <em>same rows</em>. Expected outcome: the model still clusters on round values. That would be the strongest evidence that the problem is resolution, not instructions.</td><td>WpPs-2, xghj-2, xghj Q(i)</td><td><span class="chip k-api">API</span></td><td class="p-must">MUST</td></tr>
+<tr data-id="A2"><td><input type="checkbox"></td><td>A2</td><td><b>Same call, two readouts.</b> In the BaseJudge call itself, request <code>top_logprobs</code> on the answer tokens and compute the expected stated probability from the digit-token distribution (first informative digit token, or the tokens of the "0.xx" span). This removes the prompt and call difference completely. Run it together with A1, since it is the same call with logprobs on. Probe tokenization on ~20 docs first.</td><td>xghj-2 ("different calls"), C1</td><td><span class="chip k-api">API</span></td><td class="p-must">MUST</td></tr>
+<tr data-id="A3"><td><input type="checkbox"></td><td>A3</td><td><b>Repeated calls at the operating threshold.</b> R = 3–5 repeats of LogJudge (and BaseJudge) on a subset rich in near-threshold documents (e.g. all docs within the 5% lowest human-score band plus a random sample). Report decision-flip rates <em>at the 1%-FPR thresholds</em> (not at 0.5), the distribution of TPR@1%FPR / AT-HM across repeats, and whether FusionJudge − LogJudge and LogJudge − BaseJudge keep their sign. <code>check_logprob_variance.py</code> / <code>run_logprob_variance_check.py</code> already exist.</td><td>Lma8 Q3, xghj-5, xghj Q(iii)</td><td><span class="chip k-api">API</span></td><td class="p-must">MUST</td></tr>
+<tr data-id="A4"><td><input type="checkbox"></td><td>A4</td><td><b>Averaged repeated BaseJudge elicitation.</b> BaseJudge at temperature &gt; 0, N = 5 samples per doc, averaged. This also breaks ties. Does it close the gap to LogJudge, and at what cost (5 calls vs 1)? Use the same subset as A1. If it does close the gap, LogJudge is still 5× cheaper; say so.</td><td>xghj Q(i)</td><td><span class="chip k-api">API</span></td><td class="p-should">SHOULD</td></tr>
+<tr data-id="A5"><td><input type="checkbox"></td><td>A5</td><td><b>Label order and wording.</b> LogJudge with (a) swapped order in the prompt ("machine … human"), (b) other words ("AI"/"person", or "A"/"B" with the mapping randomized). Use a subset (MG-AI-Sci + a stratified 2k of the rest). Report the AT-HM spread and decision agreement near the threshold. ord5 and cand03/cand10 come for free from the CPU block.</td><td>xghj-2, xghj Q(iii)</td><td><span class="chip k-api">API</span></td><td class="p-should">SHOULD</td></tr>
+<tr data-id="A6"><td><input type="checkbox"></td><td>A6</td><td><b>Rephrasing with a 2nd generator</b> (e.g. gemma-4-31b rephrases), on a small subset.</td><td>Lma8-2</td><td><span class="chip k-api">API</span></td><td class="p-could">COULD</td></tr>
+<tr data-id="A0"><td><input type="checkbox"></td><td>A0</td><td><b>Budget and quota check before launching:</b> cost per 1k docs for luna on the Responses API; whether the gemma endpoint is up; rate limits. Decide the subset sizes so that A1–A3 finish by <b>Nov 14</b>.</td><td>—</td><td><span class="chip k-api">API</span></td><td class="p-must">MUST</td></tr>
+</table></div>
+
+<h3>B. CPU analyses on existing data: start today, done by Nov 12</h3>
+<div class="tablewrap"><table class="todo">
+<tr><th></th><th>ID</th><th>Task</th><th>Answers</th><th>Kind</th><th>Prio</th></tr>
+<tr data-id="B1"><td><input type="checkbox"></td><td>B1</td><td><b>Residual mass &amp; k.</b> Per split: distribution of P(x); rate of "human" absent from top-k and of "machine" absent; the same restricted to docs near the threshold (e.g. scores within ±1 tie-group or the lowest 5% of human scores). Recompute LogJudge with k ∈ {1,2,3,5,10,20} by truncating the stored windows, and with residual treatments: ½ (ours), renormalize (λ=1), residual → machine, residual → human. Report TPR@1%FPR / AT-HM. Paper already says P(x) ≥ 0.98 at the 5th percentile, so expect a flat table.</td><td>WpPs-1</td><td><span class="chip k-cpu">CPU</span></td><td class="p-must">MUST</td></tr>
+<tr data-id="B2"><td><input type="checkbox"></td><td>B2</td><td><b>Tie table per split and readout.</b> Number of distinct values, size of the tie group at and just above the 1%-FPR threshold, and the achievable FPR just below and above 1%. Cover BaseJudge (v3, cand03, cand10), LogJudge, FusionJudge and gemma. Extends App. readout_zoom, which is pooled only.</td><td>WpPs-2</td><td><span class="chip k-cpu">CPU</span></td><td class="p-must">MUST</td></tr>
+<tr data-id="B3"><td><input type="checkbox"></td><td>B3</td><td><b>Prompt and verbalization robustness, free.</b> parsed vs LogJudge vs Fusion for v3 / cand03 / cand10 (luna), and ord5 LogJudge for luna and gemma. Show that the readout gain (TPR↑, AUROC≈) holds for every prompt.</td><td>xghj-2, C1</td><td><span class="chip k-cpu">CPU</span></td><td class="p-must">MUST</td></tr>
+<tr data-id="B4"><td><input type="checkbox"></td><td>B4</td><td><b>Bootstrap CIs.</b> Class-stratified bootstrap (≥1000) for AUROC, TPR@1%FPR and AT-HM per split and for the four-split mean. Also a paired bootstrap for the differences Fusion−LogJudge, LogJudge−BaseJudge and Fusion−FastDetectGPT. For MG-AI-Sci: leave-one-human-out threshold stability, plus TPR at 2% and 5% FPR.</td><td>Lma8 Q2, Q3, Lma8-2</td><td><span class="chip k-cpu">CPU</span></td><td class="p-must">MUST</td></tr>
+<tr data-id="B5"><td><input type="checkbox"></td><td>B5</td><td><b>Non-oracle thresholds.</b> (a) Within split: set τ on a random 50% of the human texts and evaluate the realized FPR and TPR on the other 50%. Repeat over seeds. (b) <b>Cross-domain transfer matrix</b>: τ calibrated on the humans of domain/split X, applied to Y. Report the realized FPR and TPR for every X→Y, covering MG-GB essay/news/fiction, MG-Sci CS/math/soc and GB-orig. Show it for all zero-shot detectors. This is the experiment xghj and WpPs actually ask for. Honest note: MG-GB transfer is already known to be weak; say so.</td><td>WpPs-3, xghj-4, xghj Q(ii)</td><td><span class="chip k-cpu">CPU</span></td><td class="p-must">MUST</td></tr>
+<tr data-id="B6"><td><input type="checkbox"></td><td>B6</td><td><b>Backbone selection without leakage.</b> Leave-one-split-out: choose each method's backbone on 3 splits and evaluate on the 4th. Show the choice is (almost) never different, and report the resulting numbers. Optionally also give results with each method's <em>original</em> backbone (Falcon-7B), which is already in Table backbone-selection.</td><td>WpPs-3, xghj-4</td><td><span class="chip k-cpu">CPU</span></td><td class="p-must">MUST</td></tr>
+<tr data-id="B7"><td><input type="checkbox"></td><td>B7</td><td><b>Fusion analysis.</b> (a) Weight sweep w·LogJudge + (1−w)·BaseJudge for w ∈ [0,1]: is 0.5 near a flat optimum? (b) rank-average fusion (needs no common scale); log-odds and Bayes variants (existing columns); (c) the "explicit tie-break rule" (already 0.829); (d) Lma8's switching rule: LogJudge below ~0.3% FPR, Fusion above. Report the TPR at 0.1/0.5/1/2/5% FPR. If w is chosen by leave-one-split-out, report that too.</td><td>Lma8 Q1, xghj-3, Lma8-1</td><td><span class="chip k-cpu">CPU</span></td><td class="p-must">MUST</td></tr>
+<tr data-id="B8"><td><input type="checkbox"></td><td>B8</td><td><b>Re-score App. V at the real thresholds.</b> Decision agreement of the 150-row recapture at each detector's 1%-FPR threshold instead of 0.5. Small, but it answers xghj-5 directly until A3 lands.</td><td>xghj-5, Lma8 Q3</td><td><span class="chip k-cpu">CPU</span></td><td class="p-should">SHOULD</td></tr>
+<tr data-id="B9"><td><input type="checkbox"></td><td>B9</td><td><b>ICLR flag-rate bounds.</b> Convert the flag rate f into a prevalence <em>range</em> with the Rogan–Gladen form π = (f − FPR)/(TPR − FPR). Take FPR from the 2020 rate (≈0.6%) and TPR over the plausible range (MG-Sci 67.9–91.2%, MG-AI-Sci, rephrased-human). Show that polished-human text would inflate f, so the result is a bound, not an estimate.</td><td>Lma8 Q4</td><td><span class="chip k-cpu">CPU</span></td><td class="p-should">SHOULD</td></tr>
+<tr data-id="B10"><td><input type="checkbox"></td><td>B10</td><td><b>Calibration diagnostic.</b> Reliability diagram / ECE of LogJudge and BaseJudge P(human) per split. Purpose: be explicit that LogJudge is a <em>ranking score</em>, not a calibrated probability. Concede xghj-1 with data, not just words.</td><td>xghj-1</td><td><span class="chip k-cpu">CPU</span></td><td class="p-could">COULD</td></tr>
+<tr data-id="B11"><td><input type="checkbox"></td><td>B11</td><td><b>Zero-shot stability across test distributions.</b> AT-HM and AUROC of each zero-shot detector per test domain (9+ domains). Report the spread, and pair it with B5(b). This replaces the "flat by construction" argument with an actual test-shift result.</td><td>WpPs-3, xghj-4</td><td><span class="chip k-cpu">CPU</span></td><td class="p-should">SHOULD</td></tr>
+</table></div>
+<p class="muted">Where the code goes: put each new analysis in <code>../logjudge-manugram/</code> as its own <code>outputs/&lt;result&gt;/</code> folder (compute → CSV → plot), so that the anonymous repo reproduces the rebuttal numbers. That is a strong signal to reviewers.</p>
+
+<h3>C. Paper text (revised PDF, upload ~Nov 16, mark changes in colour)</h3>
+<div class="tablewrap"><table class="todo">
+<tr><th></th><th>ID</th><th>Task</th><th>Answers</th><th>Kind</th><th>Prio</th></tr>
+<tr data-id="C1"><td><input type="checkbox"></td><td>C1</td><td><b>Reframe the readout claim.</b> Replace "finer underlying judgment" / "two readouts of one judgment" / "estimates P(human)" with "a finer-grained detection score from the same judge under matched prompts", and state that the score is not a calibrated authorship probability. Touches the abstract, intro bullet 1, Sec. 3 (LogJudge and FusionJudge paragraphs) and the conclusion.</td><td>xghj-1, xghj-2</td><td><span class="chip k-txt">text</span></td><td class="p-must">MUST</td></tr>
+<tr data-id="C2"><td><input type="checkbox"></td><td>C2</td><td><b>FusionJudge framing.</b> Call it a score-level ensemble/heuristic. Remove "Both members estimate P(human) … needs no rescaling" as a justification. Motivate it by the tie-breaking mechanism and add B7 (weights, rank-average, switching rule) to the appendix. State honestly whether w=½ was fixed a priori.</td><td>xghj-3, Lma8 Q1</td><td><span class="chip k-txt">text</span></td><td class="p-must">MUST</td></tr>
+<tr data-id="C3"><td><input type="checkbox"></td><td>C3</td><td><b>Readout-isolation section.</b> New paragraph or table in Sec. 5 ("Why the readout matters") with A1/A2 + B3 (+A4/A5). This is the central new result. Use the extra 10th page.</td><td>WpPs-2, xghj-2</td><td><span class="chip k-txt">text</span></td><td class="p-must">MUST</td></tr>
+<tr data-id="C4"><td><input type="checkbox"></td><td>C4</td><td><b>Thresholds and domain shift.</b> Add the non-oracle and cross-domain threshold-transfer results (B5) to the main text. Rename or re-scope the domain-shift paragraph: it compares training-source sensitivity of a trained detector with zero-shot detectors, not test-distribution robustness. Soften "accuracy holds when the topic changes" in the abstract and conclusion, unless B11 supports it.</td><td>WpPs-3, xghj-4</td><td><span class="chip k-txt">text</span></td><td class="p-must">MUST</td></tr>
+<tr data-id="C5"><td><input type="checkbox"></td><td>C5</td><td><b>CIs in the main table</b> (or ± in the appendix with significance markers), the MG-AI-Sci LOO note, and the leakage-free backbone selection (B6).</td><td>Lma8, WpPs-3</td><td><span class="chip k-txt">text</span></td><td class="p-should">SHOULD</td></tr>
+<tr data-id="C6"><td><input type="checkbox"></td><td>C6</td><td><b>Novelty positioning.</b> Sharpen the related-work paragraph "Confidence readouts in LLM-as-judge": the readout primitive is known (G-Eval, P(True)); our contribution is (i) showing <em>where</em> it matters (the low-FPR regime of detection, via ties), with the mechanism; (ii) a training-free detector that is strongest on current generators; (iii) the Manugram benchmark. Don't oversell.</td><td>Lma8-1, xghj-5</td><td><span class="chip k-txt">text</span></td><td class="p-should">SHOULD</td></tr>
+<tr data-id="C7"><td><input type="checkbox"></td><td>C7</td><td><b>Residual-mass and k appendix</b> (B1), and App. V re-scored at the real thresholds (B8 → A3).</td><td>WpPs-1, xghj-5</td><td><span class="chip k-txt">text</span></td><td class="p-must">MUST</td></tr>
+<tr data-id="C8"><td><input type="checkbox"></td><td>C8</td><td><b>ICLR paragraph.</b> Present the result as a flag rate relative to the 2020 baseline, add the prevalence bounds (B9), and say explicitly that it is not an LLM-share estimate. Consider moving the paragraph to the appendix if space is needed.</td><td>Lma8 Q4</td><td><span class="chip k-txt">text</span></td><td class="p-should">SHOULD</td></tr>
+<tr data-id="C9"><td><input type="checkbox"></td><td>C9</td><td><b>Limitations</b>: oracle thresholds (with a pointer to B5), the single rephrasing generator, the small MG-AI-Sci, and the dependence on API logprob availability and stability.</td><td>Lma8-2</td><td><span class="chip k-txt">text</span></td><td class="p-should">SHOULD</td></tr>
+<tr data-id="C10"><td><input type="checkbox"></td><td>C10</td><td><b>Presentation pass</b>: define BaseJudge before first use, and add a short "experimental protocol" box (oracle threshold, four-split mean, orientation).</td><td>Pres. 2/2</td><td><span class="chip k-txt">text</span></td><td class="p-could">COULD</td></tr>
+</table></div>
+
+<h3>D. OpenReview responses</h3>
+<div class="tablewrap"><table class="todo">
+<tr><th></th><th>ID</th><th>Task</th><th>Prio</th></tr>
+<tr data-id="D1"><td><input type="checkbox"></td><td>D1</td><td><b>General comment to all reviewers</b> (wave 1): thanks, the 3–4 shared concerns, the new experiments (done and in progress), and when the revised PDF will arrive.</td><td class="p-must">MUST</td></tr>
+<tr data-id="D2"><td><input type="checkbox"></td><td>D2</td><td><b>Per-reviewer replies</b> (wave 1). Quote each weakness or question and answer it with a small markdown table where possible. WpPs first, then Lma8, then xghj.</td><td class="p-must">MUST</td></tr>
+<tr data-id="D3"><td><input type="checkbox"></td><td>D3</td><td><b>Wave 2 follow-ups</b> with the API results, plus a "summary of revisions" comment listing each change → section/appendix.</td><td class="p-must">MUST</td></tr>
+<tr data-id="D4"><td><input type="checkbox"></td><td>D4</td><td><b>Anonymity check</b> on every post and on the revised PDF: no names, no affiliation, no endpoint URLs; the "institutional inference endpoint" wording stays.</td><td class="p-must">MUST</td></tr>
+<tr data-id="D5"><td><input type="checkbox"></td><td>D5</td><td>Keep a copy of the original reviews and scores (done: <code>reviews/*.txt</code>). Re-save them after the discussion ends.</td><td class="p-could">COULD</td></tr>
+</table></div>
+
+<!-- ============================================================ -->
+<h2 id="schedule">Proposed schedule (8 days)</h2>
+<ul class="timeline">
+  <li><b>Tue Nov 10</b><span>Co-author meeting: agree on the framing concessions (C1, C2), approve the API budget (A0), assign owners. Launch the A1/A2 probe on ~20 docs, then the full runs.</span></li>
+  <li><b>Wed Nov 11</b><span>CPU block B1–B7. API A1/A2/A3 running.</span></li>
+  <li><b>Thu Nov 12</b><span>Finish B1–B8. Draft the general comment and the three replies (D1, D2).</span></li>
+  <li><b>Fri Nov 13</b><span><b>Post wave 1.</b> Collect A1–A3 results; start A4/A5 if the budget allows.</span></li>
+  <li><b>Sat–Sun Nov 14–15</b><span>Write the paper text (C1–C9); figures and tables for the new results.</span></li>
+  <li><b>Mon Nov 16</b><span><b>Upload the revised PDF</b> and post wave 2 (D3).</span></li>
+  <li><b>Tue–Wed Nov 17–18</b><span>Answer follow-ups. Final polite check-in with WpPs/Lma8. Hard stop Nov 18 AoE (Thu Nov 19, 12:59 Budapest time).</span></li>
+</ul>
+
+<!-- ============================================================ -->
+<h2 id="discuss">Decisions for the co-author discussion</h2>
+<ol>
+  <li><b>API budget and scope</b> for A1–A5: full splits or stratified subsets? A1 + A2 + A3 is the minimum, since both critical reviewers lead with it.</li>
+  <li><b>Framing concessions</b>: are we fine dropping "estimates P(human)" and "underlying judgment" wording, and calling FusionJudge a heuristic ensemble? (Recommended: yes. It costs nothing empirically and removes xghj's two easiest points.)</li>
+  <li><b>Fusion history</b>: was w = ½ fixed before seeing results? The answer to Lma8 Q1 must be accurate.</li>
+  <li><b>Domain-shift claim</b>: keep "accuracy holds when the topic changes" only if B5/B11 support it. Otherwise soften it in the abstract.</li>
+  <li><b>Page budget</b>: what goes into the 10th page? Proposal: the readout-isolation table (C3) and the threshold-transfer summary (C4).</li>
+  <li><b>ICLR application</b>: keep it in the main text with bounds, or move it to the appendix to free space?</li>
+  <li><b>Owners</b> for the A, B, C and D blocks.</li>
+</ol>
+
+<p class="muted" style="margin-top:36px">Sources: <a href="https://iclr.cc/Conferences/2027/Dates">ICLR 2027 dates</a> ·
+<a href="https://www.iclr.cc/Conferences/2027/AuthorGuidelines">ICLR 2027 author guidelines</a> ·
+<a href="https://arxiv.org/html/2509.25701v2">What Drives Paper Acceptance? (analysis of ICLR 2024/25 rebuttals)</a>.
+Note: the AC guideline page lists an older discussion window (Oct 29–Nov 11); the official dates page and the CFP both say Nov 5–18.</p>
+</main>
+<script>
+(function(){
+  var KEY="iclr27-rebuttal-todos";
+  var state={};
+  try{state=JSON.parse(localStorage.getItem(KEY)||"{}")||{};}catch(e){state={};}
+  document.querySelectorAll("tr[data-id]").forEach(function(tr){
+    var id=tr.getAttribute("data-id"), cb=tr.querySelector("input[type=checkbox]");
+    if(!cb) return;
+    if(state[id]){cb.checked=true;tr.classList.add("done");}
+    cb.addEventListener("change",function(){
+      tr.classList.toggle("done",cb.checked);
+      state[id]=cb.checked;
+      try{localStorage.setItem(KEY,JSON.stringify(state));}catch(e){}
+    });
+  });
+})();
+</script>
+</body>
+</html>
