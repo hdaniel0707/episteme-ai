@@ -136,11 +136,14 @@ about 18k calls each, roughly 4 h per condition. They can run in parallel with t
 
 The luna jobs write separate sidecars, so two or three can run at once in separate
 terminals or `tmux` windows. Keep the total `--workers` within the account's rate limit.
-`Ctrl-C` writes what has been captured, and the same command resumes later.
+`Ctrl-C` writes what has been captured, and the same command resumes later. Inside a
+`run_*.sh` script it also stops the script (exit 130), so the next step does not start.
 
 ## After capture
 
 The scorer (`score.py`, block B, CPU only) reads the sidecars, joins them with the master
-parquets on `uid`, and computes AUROC / TPR@1%FPR / AT-HM, tie tables and the A2
+parquets on `stem` + `uid` (never `uid` alone: the 2992 human texts shared by
+`ghostbuster_orig` and `manugram_gb` carry the same uid in both, and 1292 of them differ
+in quotes/whitespace), and computes AUROC / TPR@1%FPR / AT-HM, tie tables and the A2
 expected-value readout. All comparisons use the same rows for every detector.
 It is written after the probe settles the token rule.

@@ -74,6 +74,9 @@ authoritative statement of the theory and argument the code is built to support.
   summary, concern map, prioritized TODO list (A = API runs, B = CPU analyses on existing
   parquets, C = paper text, D = OpenReview posts) and the schedule. Read it before any
   rebuttal work; the TODO IDs (A1, B5, ...) are the shared vocabulary with co-authors.
+  Its "Status & handoff" section is the session log. It records what is running (on
+  gpu100), the findings so far, the decisions taken and the next steps. Update it at the
+  end of every rebuttal session.
 - Author-reviewer discussion ends **Nov 18, 2026 AoE** (= Nov 19, 12:59 Budapest).
   A revised PDF can be uploaded until then; main text may grow to 10 pages.
 - Rebuttal text and revised PDF are public and must stay anonymous (same rules as

@@ -1,7 +1,9 @@
 r"""Run one rebuttal condition (``conditions.py``) on one row subset, and store
 every answer with the top-20 log-probabilities of every output token.
 
-One sidecar per (model, condition, subset), keyed by ``(uid, rep)``:
+One sidecar per (model, condition, subset), keyed by ``(stem, uid, rep)`` (the
+2992 human texts shared by ghostbuster_orig and manugram_gb have the same uid in
+both, with slightly different text, so uid alone is not a row key):
 
     data/parquet/tmp/rebuttal/<model>/<condition>__<subset>.parquet
 
@@ -244,9 +246,10 @@ def main() -> None:
 
     # --- what still needs sending ---------------------------------------------
     done = _load_done(path)
-    ok = set(zip(done.loc[done["answer"].notna(), "uid"], done.loc[done["answer"].notna(), "rep"]))
+    good = done[done["answer"].notna()]
+    ok = set(zip(good["stem"], good["uid"], good["rep"]))
     todo = [(r.uid, r.stem, rep, r.text) for r in rows.itertuples() for rep in range(reps)
-            if (r.uid, rep) not in ok]
+            if (r.stem, r.uid, rep) not in ok]
     n_in = sum(len(t[3]) + len(cond.system) for t in todo) / CHARS_PER_TOKEN
     print(f"\n  calls: {len(rows) * reps} total, {len(rows) * reps - len(todo)} done, "
           f"{len(todo)} to send")
@@ -262,7 +265,7 @@ def main() -> None:
     client = _build_client(spec.provider, spec.model)
     call = _call_openai if spec.provider == "openai" else _call_genai4science
     keep = done[done["answer"].notna()].to_dict("records")
-    new: dict[tuple[str, int], dict] = {}
+    new: dict[tuple[str, str, int], dict] = {}
     lock = threading.Lock()
 
     def _save():
@@ -294,6 +297,7 @@ def main() -> None:
 
     pool = ThreadPoolExecutor(max_workers=max(1, args.workers))
     n = n_fail = 0
+    interrupted = False
     n_before = len(rows) * reps - len(todo)
     print(f"  started {time.strftime('%Y-%m-%d %H:%M:%S')}  "
           f"(bar: calls this session; done/total incl. earlier sessions on the right)")
@@ -304,7 +308,7 @@ def main() -> None:
         for fut in bar:
             res = fut.result()
             with lock:
-                new[(res["uid"], res["rep"])] = res
+                new[(res["stem"], res["uid"], res["rep"])] = res
             n += 1
             n_fail += res["error"] is not None
             bar.set_postfix_str(f"done {n_before + n}/{len(rows) * reps}  failed {n_fail}",
@@ -313,6 +317,7 @@ def main() -> None:
                 _save()
     except KeyboardInterrupt:
         print("\ninterrupted -- writing what was captured")
+        interrupted = True
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
     _save()
@@ -326,6 +331,9 @@ def main() -> None:
     print(f"  served model version(s): {dict(versions)}")
     if len(versions) > 1:
         print("  WARNING  more than one model version served this run")
+    if interrupted:
+        # non-zero so that the run_*.sh scripts stop instead of starting the next step
+        raise SystemExit(130)
     for msg, c in fails.most_common(5):
         print(f"  {c:>5}x FAIL {msg[:120]}")
     if fails:
