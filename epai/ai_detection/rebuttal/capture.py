@@ -277,8 +277,13 @@ def main() -> None:
         for attempt in range(args.retries + 1):
             try:
                 ans, toks, version = call(client, spec.model, cond, text)
+                score = quick_score(cond, ans, toks)
+                if score is None:
+                    # a "prob" answer with no number in [0, 1]: a failed row, not a
+                    # result -- retried like an API error
+                    raise ValueError(f"no probability in answer {ans!r:.60}")
                 return {"uid": uid, "stem": stem, "rep": rep, "answer": ans,
-                        "score": quick_score(cond, ans, toks), "tokens": toks,
+                        "score": score, "tokens": toks,
                         "model_version": version, "error": None}
             except Exception as exc:  # noqa: BLE001
                 last = f"{type(exc).__name__}: {exc}"
@@ -288,14 +293,22 @@ def main() -> None:
                 "tokens": None, "model_version": None, "error": last[:300]}
 
     pool = ThreadPoolExecutor(max_workers=max(1, args.workers))
-    n = 0
+    n = n_fail = 0
+    n_before = len(rows) * reps - len(todo)
+    print(f"  started {time.strftime('%Y-%m-%d %H:%M:%S')}  "
+          f"(bar: calls this session; done/total incl. earlier sessions on the right)")
     try:
         futs = [pool.submit(_one, t) for t in todo]
-        for fut in tqdm(as_completed(futs), total=len(futs), desc=cond.name, unit="call"):
+        bar = tqdm(as_completed(futs), total=len(futs), desc=cond.name, unit="call",
+                   mininterval=5, dynamic_ncols=True)
+        for fut in bar:
             res = fut.result()
             with lock:
                 new[(res["uid"], res["rep"])] = res
             n += 1
+            n_fail += res["error"] is not None
+            bar.set_postfix_str(f"done {n_before + n}/{len(rows) * reps}  failed {n_fail}",
+                                refresh=False)
             if n % args.save_every == 0:
                 _save()
     except KeyboardInterrupt:
@@ -317,6 +330,7 @@ def main() -> None:
         print(f"  {c:>5}x FAIL {msg[:120]}")
     if fails:
         print("  re-run the same command to retry the failed rows")
+        raise SystemExit(3)  # the run_*.sh scripts retry on this exit code
 
 
 if __name__ == "__main__":

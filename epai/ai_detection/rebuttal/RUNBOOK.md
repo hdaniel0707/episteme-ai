@@ -61,7 +61,36 @@ are passed to every call: `--workers 4` for rate limits, `--dry-run` for counts 
 script logs to `data/parquet/tmp/rebuttal/logs/`. A script stops at the first run that
 crashes; a re-run skips everything already captured.
 
-## Order and size (gpt-5.6-luna; multiply by your per-token price)
+## Cost and progress
+
+Price (OpenAI model page, 2026-11-10): gpt-5.6-luna $0.20 / M input, $1.20 / M output
+tokens. Log-probabilities cost nothing extra. Prompt caching is not counted, because the
+system prompts (~750–850 tokens) are below the 1024-token caching minimum. Estimates use
+4.2 characters per token, so allow ±30%.
+
+| script | runs | input tokens | ≈ cost |
+|---|---|---|---|
+| `run_main.sh` | base_hp4, base_free, base_v3 on **all 36,148 rows**; lj_v3 and base_v3 near ×3 | ~178 M | **~$36** |
+| `run_extra.sh` | lj_swap, lj_alt, lj_letters, base_v3_t1 ×3 | ~53 M | ~$11 |
+| `run_gemma.sh` | gemma, institutional endpoint | — | $0 |
+
+Because the cost is this low, `run_main.sh` runs A1/A2 on `full` instead of
+`humans_plus_third`. The new numbers then cover exactly the rows of the paper's tables, with
+no subsampling caveat.
+
+Failures: each call is retried 3 times within seconds (`capture.py`). A BaseJudge answer
+with no number in it counts as a failure. Rows that still fail make `capture.py` exit with
+code 3. The scripts (`_common.sh`) then re-send only those rows, in up to 3 more passes
+after 1, 5 and 15 minutes. That covers a gemma endpoint outage of up to ~20 minutes. If
+rows still fail after that, the script moves on to the next step, and re-running the
+script later retries them. A crash (any other exit code) stops the script.
+
+Progress: each run shows a bar (calls this session, rate, ETA, and done/total including
+earlier sessions). Each script prints `[step k/N]` headers. From any other terminal,
+`bash epai/ai_detection/rebuttal/status.sh` prints done/total/failed for every planned run,
+read from the sidecars, which are checkpointed every 200 calls.
+
+## Order and size (the table below predates the switch to `full` for steps 1–2)
 
 | step | command (after `.venv/bin/python -m epai.ai_detection.rebuttal.capture`) | calls | input tokens |
 |---|---|---|---|
