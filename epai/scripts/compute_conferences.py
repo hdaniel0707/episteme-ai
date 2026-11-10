@@ -1,36 +1,34 @@
-"""Plot the conferences parquet: per-year mean judge score and score-distribution
-histograms, and report duplicates.
+"""Compute the conference-abstract results as CSVs (no plotting).
 
 Reads the parquet built by ``build_conferences_parquet.py`` and scored by
 ``run_conferences_judge_pipeline.py``, optionally filters rows to one or more
-``conference_id`` values, then:
+``conference_id`` values, and writes to ``results/conferences/<tag>/``:
 
-  - plots the number of abstracts per year (bar chart) to
-    ``results/conferences/<tag>/year_abstract_counts.png``.
-  - plots the mean score per year for all 3 judge-score columns
-    (``llm_judge_score_gpt56luna_v3``, ``logjudge_ord2_gpt56luna_v3``,
-    ``fusionjudge_score``) on one chart, to
-    ``results/conferences/<tag>/year_mean_scores.png``. Each line carries a
-    shaded +/-1 SEM band (standard error of the mean, per year) in its own
-    color, behind the mean.
-  - for each of the 3 score columns, plots the score distribution per year as
-    overlaid step histograms (light -> dark blue, one step per year) to
-    ``results/conferences/<tag>/year_distribution_<column>.png``. Each
-    column's score is P(human) in [0, 1].
-  - for each of the 3 score columns, plots a finer-grained distribution
-    comparing only the earliest and latest year (2020 vs. 2025) to
-    ``results/conferences/<tag>/year_distribution_first_vs_last_<column>.png``.
-  - reports duplicate rows: exact (title, abstract) matches (rows with a null
-    title or abstract are excluded from this check, since every null is not a
-    real duplicate of every other null)
+  - ``filter_counts.csv``: per year, how many rows each admission rule dropped
+    and how many were kept (see FILTER below).
+  - ``calibration.csv``: per detector, the 1%-FPR threshold set on the MG-Sci
+    human abstracts (the paper's oracle rule, ``cd_core.roc_point_at_fpr``),
+    with the FPR it achieves on those human abstracts and the TPR on the MG-Sci
+    machine abstracts, plus the next score value above the threshold and the
+    FPR it would give (why a tied readout stops below 1%).
+  - ``year_flag_rates.csv``: per (year, detector), the share of kept abstracts
+    at or below that threshold (flagged as machine) with a Wilson 95% CI, plus
+    the mean (+/- SEM) and median score. Every score is P(human) in [0, 1].
+  - ``year_score_hist.csv``: per (year, detector), score counts and densities
+    over 50 equal bins on [0, 1].
 
-Every plot and the duplicate check run on the filtered rows only.
+FILTER. OpenAlex lists placeholders under ICLR ("International audience",
+"status: Published online", dataset/slides records). Rows are kept only if they
+pass the same row-local admission rules as the MG-Sci human abstracts
+(``science_data.rules.check_record`` on ``abst_standardized``: 80-400 words,
+title of 3+ words, not truncated, not boilerplate, English), with the
+metadata-only rules switched off (year, citation count, FWCI, OpenAlex language
+label: not in this parquet), then deduplicated on the normalised abstract,
+keeping the earliest year. Rows the judge did not score are dropped last.
 
-    .venv/bin/python epai/scripts/plot_conferences.py --conference ICLR
+    .venv/bin/python epai/scripts/compute_conferences.py --conference ICLR
 
-    .venv/bin/python epai/scripts/plot_conferences.py --conference ICLR ICML
-
-    .venv/bin/python epai/scripts/plot_conferences.py
+    .venv/bin/python epai/scripts/compute_conferences.py
 """
 
 from __future__ import annotations
@@ -38,55 +36,34 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from epai.ai_detection.trainv2.calibrate_common import GEN_COL
+from epai.ai_detection.trainv2.splits import resolve as resolve_splits
+from epai.science_data.rules import FilterConfig, check_record, normalise_abstract
+from epai.utils.cd_core import roc_point_at_fpr
 from epai.utils.parquet_utils import load_parquet
 
 DEFAULT_PARQUET = Path("data/parquet/conferences.parquet")
+PARQUET_DIR = Path("data/parquet")
 RESULTS_DIR = Path("results/conferences")
+CALIBRATION_SPLIT = "mg_sci"
+FPR = 0.01
+HUMAN_LABEL = "human"
+N_BINS = 50
 
-GRID_COLOR = "#e5e4e0"
-
-# (column, short label used in plot title / filename), in the fixed
-# categorical order (dataviz skill: slots 1/2/3 -- blue/orange/aqua), never
-# reordered or cycled across plots.
+# (column, canonical detector name); all three are P(human), so LOW = machine.
 SCORE_COLUMNS = [
-    ("llm_judge_score_gpt56luna_v3", "LLM judge (parsed)"),
-    ("logjudge_ord2_gpt56luna_v3", "LLM judge (ord2)"),
-    ("fusionjudge_score", "Fusion judge"),
+    ("llm_judge_score_gpt56luna_v3", "BaseJudge"),
+    ("logjudge_ord2_gpt56luna_v3", "LogJudge"),
+    ("fusionjudge_score", "FusionJudge"),
 ]
 
-# Canonical name/color per judge, used on the mean-scores chart only (the
-# paper's own convention -- see trainv2/run_best_zeroshot_performance.py's
-# _ATHM_BARS_COLOR: BaseJudge gets its own steel blue rather than sharing
-# LogJudge's blue, since here -- like that figure -- all three appear as
-# persistent series rather than a hollow/filled "ours" pairing).
-CANONICAL_NAME = {
-    "llm_judge_score_gpt56luna_v3": "BaseJudge",
-    "logjudge_ord2_gpt56luna_v3": "LogJudge",
-    "fusionjudge_score": "FusionJudge",
-}
-SERIES_COLOR = {
-    "llm_judge_score_gpt56luna_v3": "#4f77a5",  # BaseJudge
-    "logjudge_ord2_gpt56luna_v3": "#1d6fe0",  # LogJudge
-    "fusionjudge_score": "#4a3aa7",  # FusionJudge
-}
-
-# dataviz skill: sequential magnitude gets one hue, blue, light -> dark
-# (validated ramp, steps 100-700). Used here to encode year as an ordinal
-# position rather than a magnitude.
-BLUE_RAMP = [
-    "#cde2fb", "#b7d3f6", "#9ec5f4", "#86b6ef", "#6da7ec", "#5598e7",
-    "#3987e5", "#2a78d6", "#256abf", "#1c5cab", "#184f95", "#104281", "#0d366b",
-]
-
-
-def year_ramp(n: int) -> list[str]:
-    """``n`` evenly spaced colors from :data:`BLUE_RAMP`, light -> dark."""
-    idx = np.linspace(0, len(BLUE_RAMP) - 1, n).round().astype(int)
-    return [BLUE_RAMP[i] for i in idx]
+# MG-Sci's rules minus the ones that need metadata this parquet does not carry.
+FILTER_CFG = FilterConfig(
+    year_max=9999, require_citation_count=False, require_fwci=False, require_language=""
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -102,6 +79,72 @@ def parse_args() -> argparse.Namespace:
         help="filter to one or more conference_id values (default: all)",
     )
     return parser.parse_args()
+
+
+def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    """Wilson score interval for a binomial proportion ``k / n``."""
+    p = k / n
+    centre = (p + z**2 / (2 * n)) / (1 + z**2 / n)
+    half = z * np.sqrt(p * (1 - p) / n + z**2 / (4 * n**2)) / (1 + z**2 / n)
+    return centre - half, centre + half
+
+
+def apply_filter(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Admission rules + dedup + scored; returns (kept rows, per-year counts)."""
+    df = df.copy()
+    df["drop_reason"] = [
+        check_record(
+            {"paper_id": r.id, "title": r.title, "abstract": r.abst_standardized, "year": r.conference_year},
+            FILTER_CFG,
+        )
+        for r in df.itertuples()
+    ]
+    admitted = df["drop_reason"].isna()
+    df.loc[admitted, "_key"] = df.loc[admitted, "abst_standardized"].map(normalise_abstract)
+    order = df.loc[admitted].sort_values("conference_year", kind="stable").index
+    dup = df.loc[order, "_key"].duplicated()
+    df.loc[dup[dup].index, "drop_reason"] = "duplicate_abstract"
+    unscored = df["drop_reason"].isna() & df[[c for c, _ in SCORE_COLUMNS]].isna().any(axis=1)
+    df.loc[unscored, "drop_reason"] = "unscored"
+
+    counts = (
+        df.assign(drop_reason=df["drop_reason"].fillna("kept"))
+        .groupby(["conference_year", "drop_reason"]).size()
+        .unstack(fill_value=0)
+    )
+    counts.insert(0, "total", counts.sum(axis=1))
+    return df[df["drop_reason"].isna()].drop(columns=["drop_reason", "_key"]), counts
+
+
+def calibrate() -> pd.DataFrame:
+    """1%-FPR threshold per detector on the MG-Sci human abstracts."""
+    cols = [c for c, _ in SCORE_COLUMNS]
+    ref = pd.concat(
+        [pd.read_parquet(p, columns=[GEN_COL, *cols]) for _, p in resolve_splits([CALIBRATION_SPLIT], PARQUET_DIR)],
+        ignore_index=True,
+    )
+    rows = []
+    for col, name in SCORE_COLUMNS:
+        sub = ref[[col, GEN_COL]].dropna()
+        s = sub[col].to_numpy(dtype=float)
+        is_machine = (sub[GEN_COL].astype(str) != HUMAN_LABEL).to_numpy()
+        tpr, thr = roc_point_at_fpr(is_machine.astype(int), -s, FPR)
+        thr = -thr  # machine iff P(human) <= thr
+        # the next score value above the threshold: when it is shared by enough
+        # human abstracts, taking it would overshoot the FPR budget (ties).
+        nxt = float(s[s > thr].min())
+        rows.append({
+            "detector": name, "column": col, "calibration_split": CALIBRATION_SPLIT, "fpr_target": FPR,
+            "threshold": thr,
+            "n_human": int((~is_machine).sum()), "n_machine": int(is_machine.sum()),
+            "fpr_human": float((s[~is_machine] <= thr).mean()),
+            "tpr_machine": float(tpr),
+            "n_distinct": int(np.unique(s).size),
+            "next_value": nxt,
+            "n_human_at_next": int(((s == nxt) & ~is_machine).sum()),
+            "fpr_human_at_next": float((s[~is_machine] <= nxt).mean()),
+        })
+    return pd.DataFrame(rows)
 
 
 def main() -> None:
@@ -121,141 +164,48 @@ def main() -> None:
     else:
         tag = "all"
 
-    print(f"{len(df)} rows after filtering (conference={tag})")
-
-    # ------------------------------------------------------------- duplicates --
-    content = df.dropna(subset=["title", "abstract"])
-    is_dup = content.duplicated(subset=["title", "abstract"], keep=False)
-    n_dup_rows = int(is_dup.sum())
-    n_dup_groups = int(content.loc[is_dup].duplicated(subset=["title", "abstract"]).sum())
-    print(
-        f"{n_dup_rows} rows share a (title, abstract) with another row, "
-        f"across {n_dup_groups} duplicate group(s) "
-        f"({len(df) - len(content)} rows excluded: null title/abstract)"
-    )
-
-    # ----------------------------------------------------------------- plot --
     out_dir = RESULTS_DIR / tag
     out_dir.mkdir(parents=True, exist_ok=True)
-    years = sorted(df["conference_year"].dropna().unique())
-    x = [str(y) for y in years]
 
-    # -------------------------------------------------------------- counts --
-    counts = df["conference_year"].value_counts().reindex(years, fill_value=0)
+    kept, counts = apply_filter(df)
+    print(f"{len(df)} rows (conference={tag}); {len(kept)} kept after filter + dedup + scored")
+    print(counts.to_string())
+    counts.reset_index().to_csv(out_dir / "filter_counts.csv", index=False)
+    print(f"Saved → {out_dir / 'filter_counts.csv'}")
 
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.bar(x, counts.values, color=SERIES_COLOR["llm_judge_score_gpt56luna_v3"], width=0.6)
-    for xi, c in zip(x, counts.values):
-        ax.text(xi, c, f"{c}", ha="center", va="bottom", fontsize=9)
+    calib = calibrate()
+    print(calib.to_string(index=False))
+    calib.to_csv(out_dir / "calibration.csv", index=False)
+    print(f"Saved → {out_dir / 'calibration.csv'}")
 
-    ax.set_xlabel("Year")
-    ax.set_ylabel("Abstracts")
-    ax.set_title(f"Abstracts per year — {tag}")
-    ax.spines[["top", "right"]].set_visible(False)
-    ax.yaxis.grid(True, color=GRID_COLOR, linewidth=0.8)
-    ax.set_axisbelow(True)
-    fig.tight_layout()
+    years = sorted(kept["conference_year"].unique())
+    edges = np.linspace(0, 1, N_BINS + 1)
+    rate_rows, hist_rows = [], []
+    for c in calib.itertuples():
+        for y in years:
+            s = kept.loc[kept["conference_year"] == y, c.column].to_numpy(dtype=float)
+            n, k = len(s), int((s <= c.threshold).sum())
+            lo, hi = wilson(k, n)
+            rate_rows.append({
+                "conference_year": y, "detector": c.detector, "column": c.column, "n": n,
+                "threshold": c.threshold, "n_flagged": k, "flag_rate": k / n,
+                "flag_rate_ci_lo": lo, "flag_rate_ci_hi": hi,
+                "mean": s.mean(), "sem": s.std(ddof=1) / np.sqrt(n), "median": np.median(s),
+            })
+            count, _ = np.histogram(s, bins=edges)
+            density = count / (n * np.diff(edges))
+            hist_rows += [
+                {"conference_year": y, "detector": c.detector, "bin_lo": a, "bin_hi": b, "count": int(m), "density": d}
+                for a, b, m, d in zip(edges[:-1], edges[1:], count, density)
+            ]
 
-    out_path = out_dir / "year_abstract_counts.png"
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
-    print(f"Saved plot → {out_path}")
-
-    # -------------------------------------------------------------- means --
-    fig, ax = plt.subplots(figsize=(8, 5))
-    for col, label in SCORE_COLUMNS:
-        if col not in df.columns:
-            print(f"(skip {col}: column not in parquet)")
-            continue
-        color = SERIES_COLOR[col]
-        g = df.dropna(subset=[col]).groupby("conference_year")[col]
-        means = g.mean().reindex(years)
-        sem = (g.std().reindex(years) / np.sqrt(g.count().reindex(years)))
-        ax.fill_between(x, (means - sem).values, (means + sem).values, color=color, alpha=0.25, linewidth=0)
-        ax.plot(x, means.values, color=color, marker="o", linewidth=2, label=CANONICAL_NAME[col])
-
-    ax.set_xlabel("Year")
-    ax.set_ylabel("Score  P(human)")
-    ax.set_ylim(0, 1)
-    ax.set_title(f"Mean judge score per year (±1 SEM) — {tag}")
-    ax.spines[["top", "right"]].set_visible(False)
-    ax.yaxis.grid(True, color=GRID_COLOR, linewidth=0.8)
-    ax.set_axisbelow(True)
-    ax.legend(frameon=False, loc="lower left")
-    fig.tight_layout()
-
-    out_path = out_dir / "year_mean_scores.png"
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
-    print(f"Saved plot → {out_path}")
-
-    # -------------------------------------------------------- distributions --
-    edges = np.linspace(0, 1, 41)
-    mids = (edges[:-1] + edges[1:]) / 2
-    colors = year_ramp(len(years))
-
-    for col, label in SCORE_COLUMNS:
-        if col not in df.columns:
-            continue
-        scored = df.dropna(subset=[col])
-
-        fig, ax = plt.subplots(figsize=(8, 5))
-        for y, color in zip(years, colors):
-            vals = scored.loc[scored["conference_year"] == y, col].to_numpy(dtype=float)
-            if vals.size == 0:
-                continue
-            density = np.histogram(vals, bins=edges, density=True)[0]
-            ax.step(mids, density, where="mid", color=color, linewidth=1.8, label=str(y))
-
-        ax.set_xlabel("Score  P(human)")
-        ax.set_ylabel("Density")
-        ax.set_xlim(0, 1)
-        ax.set_title(f"{label} — score distribution by year — {tag}")
-        ax.spines[["top", "right"]].set_visible(False)
-        ax.yaxis.grid(True, color=GRID_COLOR, linewidth=0.8)
-        ax.set_axisbelow(True)
-        ax.legend(title="Year", frameon=False, loc="upper left")
-        fig.tight_layout()
-
-        out_path = out_dir / f"year_distribution_{col}.png"
-        fig.savefig(out_path, dpi=150)
-        plt.close(fig)
-        print(f"Saved plot → {out_path}")
-
-    # ----------------------------------------------- first vs. last, finer --
-    first_year, last_year = years[0], years[-1]
-    fine_edges = np.linspace(0, 1, 101)
-    fine_mids = (fine_edges[:-1] + fine_edges[1:]) / 2
-    first_color, last_color = "#008300", "#eb6834"  # slot 6 green, slot 2 orange
-
-    for col, label in SCORE_COLUMNS:
-        if col not in df.columns:
-            continue
-        scored = df.dropna(subset=[col])
-
-        fig, ax = plt.subplots(figsize=(8, 5))
-        for y, color in ((first_year, first_color), (last_year, last_color)):
-            vals = scored.loc[scored["conference_year"] == y, col].to_numpy(dtype=float)
-            if vals.size == 0:
-                continue
-            density = np.histogram(vals, bins=fine_edges, density=True)[0]
-            ax.fill_between(fine_mids, density, step="mid", color=color, alpha=0.45, linewidth=0)
-            ax.step(fine_mids, density, where="mid", color=color, linewidth=1.5, label=str(y))
-
-        ax.set_xlabel("Score  P(human)")
-        ax.set_ylabel("Density")
-        ax.set_xlim(0, 1)
-        ax.set_title(f"{label} — {first_year} vs. {last_year} score distribution — {tag}")
-        ax.spines[["top", "right"]].set_visible(False)
-        ax.yaxis.grid(True, color=GRID_COLOR, linewidth=0.8)
-        ax.set_axisbelow(True)
-        ax.legend(title="Year", frameon=False, loc="upper right")
-        fig.tight_layout()
-
-        out_path = out_dir / f"year_distribution_first_vs_last_{col}.png"
-        fig.savefig(out_path, dpi=150)
-        plt.close(fig)
-        print(f"Saved plot → {out_path}")
+    rates = pd.DataFrame(rate_rows)
+    print(rates[["conference_year", "detector", "n", "flag_rate", "flag_rate_ci_lo", "flag_rate_ci_hi", "mean"]]
+          .to_string(index=False))
+    rates.to_csv(out_dir / "year_flag_rates.csv", index=False)
+    print(f"Saved → {out_dir / 'year_flag_rates.csv'}")
+    pd.DataFrame(hist_rows).to_csv(out_dir / "year_score_hist.csv", index=False)
+    print(f"Saved → {out_dir / 'year_score_hist.csv'}")
 
 
 if __name__ == "__main__":
