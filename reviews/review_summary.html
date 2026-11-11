@@ -81,8 +81,11 @@ Prepared 2026-11-10 from <code>reviews/{Lma8,WpPs,xghj}.txt</code> and the local
 <!-- ============================================================ -->
 <h2 id="handoff">Status &amp; handoff <small class="muted">(last updated 2026-11-10, end of session 1)</small></h2>
 
+<div class="callout info">
+  <b>Session 2 (2026-11-11): read <code>reviews/rebuttal_status.html</code> first.</b> It has the current status per reviewer point, which A-block results are in the paper (A2, A3, A3b, A5; A1/A4 matched), the reruns of A1/A4 with the paper's BaseJudge call running on gpu100 (R1–R4), the CPU analyses already computed but not yet written (B2, B4–B7), and the next steps. The section below is the session-1 log.
+</div>
 <div class="callout status">
-  <b>Where we are.</b> The API experiments (TODO block A) were launched on 2026-11-10 on the server <code>gpu100</code> and are running unattended.
+  <b>Where we are (session 1).</b> The API experiments (TODO block A) were launched on 2026-11-10 on the server <code>gpu100</code> and are running unattended.
   Nothing has been scored yet, and the CPU block (B) has not started. The deadline is <b>Nov 18 AoE (Thu Nov 19, 12:59 Budapest)</b>, and wave 1 of the replies should go out on <b>Nov 12–13</b>.
 </div>
 
@@ -143,6 +146,7 @@ If the summary or <code>status.sh</code> still shows failed rows, re-run the scr
 <h3>Next steps when resuming</h3>
 <ol>
   <li>Copy the results here (rsync above). Run <code>status.sh</code> on the server first: any failed rows → re-run that script.</li>
+  <li><b>2026-11-11:</b> the 2,992-row gap in luna <code>base_hp4</code>/<code>base_free</code> full and in all three gemma runs (the shared-uid bug fixed in <code>c8bbe53</code>) is being filled by re-running <code>run_main.sh</code> / <code>run_gemma.sh</code>. <b>Written, smoke-tested on synthetic sidecars only:</b> <code>check.py</code> (QC), <code>evaluate.py</code> (A1/A2, A3, A4, A5 → CSVs + <code>summary.txt</code>), <code>plot.py</code> (figures), <code>readouts.py</code> (shared). Commands are in the RUNBOOK, section "After capture". This replaces the planned <code>score.py</code> below.</li>
   <li><b>Write <code>epai/ai_detection/rebuttal/score.py</code></b> (CPU). Join the sidecars with the master parquets on <code>uid</code>. Per split and pooled, compute AUROC, TPR@1%FPR and AT-HM, the number of distinct values, and the tie-group sizes at the threshold.
     <ul>
       <li><b>A2, luna:</b> at the digit-chunk position, E = Σ p(t)·float("0."+t) over the top-20 digit tokens, renormalized. Report the captured mass.</li>
