@@ -80,15 +80,25 @@ def check_run(model: str, cond_name: str, subset: str, reps: int, expected: pd.D
         rec["warn"].append(f"{len(extra)} rows not in the planned subset (ignored by evaluate)")
 
     df = df[ok]
-    no_tok = int(sum(t is None or len(t) == 0 for t in df["tokens"]))
-    if no_tok:
-        rec["fail"].append(f"{no_tok} answered rows without token windows")
-    df = df[[t is not None and len(t) > 0 for t in df["tokens"]]]
+    paper_call = cond.call == "paper"   # the paper's BaseJudge call: no logprobs by design
+    if not paper_call:
+        no_tok = int(sum(t is None or len(t) == 0 for t in df["tokens"]))
+        if no_tok:
+            rec["fail"].append(f"{no_tok} answered rows without token windows")
+        df = df[[t is not None and len(t) > 0 for t in df["tokens"]]]
+    else:
+        u = df[["input_tokens", "output_tokens", "reasoning_tokens"]].apply(
+            pd.to_numeric, errors="coerce")
+        rec["info"].append(f"tokens per call (median): input {u['input_tokens'].median():.0f}, "
+                           f"output {u['output_tokens'].median():.0f}, reasoning "
+                           f"{u['reasoning_tokens'].median():.0f} (mean "
+                           f"{u['reasoning_tokens'].mean():.0f}, zero on "
+                           f"{(u['reasoning_tokens'] == 0).mean():.1%} of calls)")
     df = add_readouts(df, cond_name)
 
     # luna returns fewer than the requested 20 alternatives (often 1-2), so this
     # is reported, not flagged
-    win = np.array([len(t[0]["top"]) for t in df["tokens"]])
+    win = np.array([len(t[0]["top"]) for t in df["tokens"] if len(t)])
     if len(win):
         rec["info"].append(f"top-window length at answer position 0: median "
                            f"{np.median(win):.0f}, min {win.min()}, max {win.max()}")
@@ -117,13 +127,14 @@ def check_run(model: str, cond_name: str, subset: str, reps: int, expected: pd.D
         if want_dec is not None and dec.get(want_dec, 0) / max(len(df), 1) < 0.95:
             rec["warn"].append(f"only {dec.get(want_dec, 0) / len(df):.1%} of answers have "
                                f"{want_dec} decimals")
-        rec["info"].append(f"distinct written values: {df['parsed'].nunique()}  "
-                           f"distinct A2 values: {df['ev'].round(9).nunique()}")
+        rec["info"].append(f"distinct written values: {df['parsed'].nunique()}"
+                           + ("" if paper_call else
+                              f"  distinct A2 values: {df['ev'].round(9).nunique()}"))
         m = df["mass"].dropna()
-        if len(m):
+        if len(m) and not paper_call:
             rec["info"].append(f"A2 captured digit mass at 1st position: median {m.median():.3f}, "
                                f"5th pct {m.quantile(0.05):.3f}, < 0.5 on {(m < 0.5).mean():.1%}")
-        if df["ev"].isna().any():
+        if df["ev"].isna().any() and not paper_call:
             rec["warn"].append(f"{int(df['ev'].isna().sum())} rows without an A2 value")
     else:
         if df["lj"].isna().any():
@@ -144,7 +155,7 @@ def check_run(model: str, cond_name: str, subset: str, reps: int, expected: pd.D
         if wide.shape[1] > 1:
             same = (wide.nunique(axis=1) == 1).mean()
             rec["info"].append(f"identical {col} across all {wide.shape[1]} reps: {same:.1%} "
-                               f"(T={cond.temperature})")
+                               f"(T={'default' if cond.call == 'paper' else cond.temperature})")
     return rec
 
 

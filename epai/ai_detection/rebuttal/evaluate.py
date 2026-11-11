@@ -25,6 +25,11 @@ A3     Lma8 Q3, xghj-5, xghj Q(iii): are decisions at the REAL 1%-FPR thresholds
        (the rows away from the threshold keep their score), and the full split is
        re-evaluated per repeat. Flip rates use the reference run's 1%-FPR threshold.
          a3_metrics.csv  a3_signs.csv  a3_flips.csv  a3_drift.csv
+A3b    Lma8 Q3: the paper's FusionJudge over repeated captures. base_default (the
+       paper's BaseJudge call, default settings) x3 and lj_v3 x3 on the near rows,
+       paired by repeat; capture "ref" = the paper's stored columns. Same
+       replacement scheme as A3.
+         a3b_metrics.csv
 A4     xghj Q(i): does averaging repeated BaseJudge samples at T=1 close the gap?
          a4_metrics.csv
 A5     xghj-2, xghj Q(iii): does LogJudge depend on the label words or their order?
@@ -392,6 +397,50 @@ def section_a3(master, ws, out) -> None:
                           f"{r.median_abs_diff:.4f}" for _, r in a.iterrows()))
 
 
+def section_a3b(master, ws, out) -> None:
+    print("\n" + "=" * 100 + "\nA3b  The paper's FusionJudge over repeated captures "
+          "(Lma8 Q3)\n" + "=" * 100)
+    lj = load_run(ws, "gpt56luna", "lj_v3", "near")
+    bd = load_run(ws, "gpt56luna", "base_default", "near")
+    if lj is None or bd is None:
+        return
+    ljw, bdw = wide(lj, "lj"), wide(bd, "parsed")
+    reps = sorted(set(ljw.columns) & set(bdw.columns))
+    p = PAPER["gpt56luna"]
+    full = master[["y", p["base"], p["lj"], p["fusion"]]].rename(
+        columns={p["base"]: "base", p["lj"]: "lj", p["fusion"]: "stored_fusion"}).dropna()
+    near_idx = ljw.index.intersection(bdw.index).intersection(full.index)
+    full["fusion"] = _mean(full["base"], full["lj"])
+    gap = (full["fusion"] - full["stored_fusion"]).abs().max()
+    print(f"  near rows with both repeats: {len(near_idx)}; reps {reps}; "
+          f"max |recomputed - stored FusionJudge| = {gap:.2e}")
+    vecs = {"ref": full.copy()}
+    for r in reps:
+        v = full.copy()
+        v.loc[near_idx, "lj"] = ljw.loc[near_idx, r]
+        v.loc[near_idx, "base"] = bdw.loc[near_idx, r]
+        v["fusion"] = _mean(v["base"], v["lj"])
+        vecs[str(r)] = v
+    rows = []
+    for rep, v in vecs.items():
+        rows += metric_rows(v, ["base", "lj", "fusion"], experiment="A3b", rep=rep)
+    _write(out, "a3b_metrics", rows)
+    m = pd.DataFrame(rows)
+    m["label"] = m["readout"].map({"base": "BaseJudge (paper call)", "lj": "LogJudge",
+                                   "fusion": "FusionJudge (paper)"})
+    mean = m[m["split"] == "mean"].pivot_table(index="rep", columns="readout", values="athm")
+    mean["fusion_minus_lj"] = mean["fusion"] - mean["lj"]
+    mean["lj_minus_base"] = mean["lj"] - mean["base"]
+    with pd.option_context("display.float_format", "{:.4f}".format):
+        print("\n  four-split mean AT-HM per capture (ref = the paper's stored scores):")
+        print(mean.to_string())
+        print("\n  over all captures (mean, std):")
+        print(mean.agg(["mean", "std", "min", "max"]).to_string())
+        print("\n  per split, all captures (mean, std):")
+        print(m.groupby(["label", "split"])[["auroc", "tpr", "athm"]]
+              .agg(["mean", "std"]).to_string())
+
+
 def section_a4(master, ws, out) -> None:
     print("\n" + "=" * 100 + "\nA4  Averaged repeated BaseJudge at T=1 (xghj Q(i))\n" + "=" * 100)
     t1 = load_run(ws, "gpt56luna", "base_v3_t1", "small")
@@ -482,7 +531,7 @@ def main() -> None:
     ap.add_argument("--workspace", type=Path, default=WORKSPACE,
                     help="folder holding <model>/<condition>__<subset>.parquet")
     ap.add_argument("--out", type=Path, default=None, help="default: <workspace>/eval")
-    ap.add_argument("--only", nargs="+", choices=["a1", "a3", "a4", "a5"], default=None)
+    ap.add_argument("--only", nargs="+", choices=["a1", "a3", "a3b", "a4", "a5"], default=None)
     args = ap.parse_args()
     out = args.out or args.workspace / "eval"
     out.mkdir(parents=True, exist_ok=True)
@@ -490,7 +539,8 @@ def main() -> None:
     master = load_master()
     buf = io.StringIO()
     with redirect_stdout(buf):
-        for name, fn in (("a1", section_a1), ("a3", section_a3), ("a4", section_a4),
+        for name, fn in (("a1", section_a1), ("a3", section_a3), ("a3b", section_a3b),
+                         ("a4", section_a4),
                          ("a5", section_a5)):
             if args.only is None or name in args.only:
                 fn(master, args.workspace, out)

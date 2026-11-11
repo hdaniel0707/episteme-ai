@@ -28,6 +28,12 @@ Conditions (TODO id in brackets):
                the digit limit we chose.
   base_v3_t1   [A4]       base_v3 at temperature 1, 3 samples per row
                (--reps), to be averaged.
+  base_default [A3b]      the paper's BaseJudge exactly as it was produced
+               (call="paper"): same v3 prompt, Chat Completions with the
+               JudgeVerdict structured answer, no temperature and no reasoning
+               effort sent (the endpoint's defaults). No log-probabilities. On
+               ``near`` x 3, paired with lj_v3's repeats, so the paper's
+               FusionJudge can be recomputed per capture.
   lj_v3        [A3]       LogJudge exactly as in the paper (v3 evidence +
                human/machine answer block). Repeated with --reps.
   lj_swap      [A5]       same words, machine listed first.
@@ -125,6 +131,10 @@ class Condition:
     labels: dict[str, str] = field(default_factory=dict)  # folded token -> human|machine
     default_subset: str = "humans_plus_third"
     default_reps: int = 1
+    # "matched": LogJudge's call (Responses API, effort none, logprobs on).
+    # "paper": the paper's BaseJudge call (add_llm_judge_scores._score_openai):
+    # Chat Completions + JudgeVerdict, endpoint defaults, no logprobs. luna only.
+    call: str = "matched"
 
 
 _WORDS = {"human": HUMAN, "machine": "machine"}
@@ -147,6 +157,8 @@ CONDITIONS: dict[str, Condition] = {c.name: c for c in [
               "A5", labels={"person": HUMAN, "ai": "machine"}, default_subset="small"),
     Condition("lj_letters", "label", evidence_head("v3") + "\n\n" + _LETTERS_BLOCK,
               "A5", labels={"b": HUMAN, "a": "machine"}, default_subset="small"),
+    Condition("base_default", "prob", _V3, "A3b", default_subset="near", default_reps=3,
+              call="paper"),
 ]}
 
 # The paper's LogJudge must be reproduced exactly by lj_v3 -- same system prompt

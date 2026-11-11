@@ -38,6 +38,7 @@ effort the original BaseJudge run actually used, and correct the appendix text e
 | `lj_alt` | A5 | other words: `person` / `AI` | small × 1 |
 | `lj_letters` | A5 | letters, `A` = machine / `B` = human (opposite of ord5's A = human) | small × 1 |
 | `base_v3_t1` | A4 | `base_v3` at temperature 1, 3 samples to average | small × 3 |
+| `base_default` | A3b | the paper's BaseJudge call itself (Chat Completions + `JudgeVerdict`, endpoint defaults, no logprobs), repeated | near × 3 |
 
 Subsets: `humans_plus_third` = every human row + ⅓ of the machine rows per
 (split, generator), with MG-AI-Sci kept whole (18,172 rows). The human-side 1%-FPR threshold
@@ -131,6 +132,29 @@ exact figure.
 **gemma-4-31b (free, institutional endpoint, 4 concurrent calls, ~3 s/call):** the same
 steps with `--model gemma4-31b --workers 4`. Do steps 1–2 on `humans_plus_third`. That is
 about 18k calls each, roughly 4 h per condition. They can run in parallel with the luna jobs.
+
+## A3b: the paper's FusionJudge over repeated captures (`run_default.sh`)
+
+A3 repeated LogJudge, but the paper's FusionJudge also needs the paper's BaseJudge, which
+was captured once with the endpoint's default settings. `base_default` repeats exactly that
+call (`capture._call_openai_paper`, a copy of `add_llm_judge_scores._score_openai`: same v3
+prompt, `chat.completions.parse` with `JudgeVerdict`, `max_completion_tokens=16384`, no
+temperature, no reasoning effort) 3× on the same `near` rows as `lj_v3`. Each row also stores
+the API usage (`input_tokens`, `output_tokens`, `reasoning_tokens`) and the raw JSON answer,
+which settles how much the default settings reason. The value is clipped to [0, 1] as the
+paper's run did. There are no log-probabilities, so `tokens` is empty and no A2 readout exists.
+
+```bash
+.venv/bin/python -m epai.ai_detection.rebuttal.capture --model gpt56luna --condition base_default --dry-run
+.venv/bin/python -m epai.ai_detection.rebuttal.capture --model gpt56luna --condition base_default --probe 12
+bash epai/ai_detection/rebuttal/run_default.sh        # inside tmux; 7,011 calls
+```
+
+The probe prints each answer with its usage and the projected cost of the full run (input
+~10.6 M tokens ≈ $2; output depends on the reasoning tokens). After capture,
+`evaluate.py` section A3b (`--only a3b`) pairs `base_default` rep r with `lj_v3` rep r on the
+near rows, keeps the paper's scores elsewhere, and reports BaseJudge, LogJudge and the
+paper's FusionJudge per capture, with mean ± std over the four captures (`a3b_metrics.csv`).
 
 ## Running many jobs
 

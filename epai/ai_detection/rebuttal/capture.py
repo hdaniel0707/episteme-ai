@@ -10,13 +10,18 @@ both, with slightly different text, so uid alone is not a row key):
 with columns uid, stem, rep, answer (raw text), score (quick score: the parsed
 number for ``prob`` conditions, (1 + p_h - p_m)/2 at position 0 for ``label``
 ones), tokens (list<struct{token, logprob, top: list<struct{token, logprob}>}>),
-error. The master parquets are only read. Re-running the same command resumes:
+error, and for the paper-call condition the API's token usage (input_tokens,
+output_tokens, reasoning_tokens) and the raw JSON answer (raw_answer). The master parquets are only read. Re-running the same command resumes:
 rows with an answer are skipped, and failed rows are retried.
 
 Call settings, identical for every condition (so that only the prompt differs):
   gpt56luna   OpenAI Responses API, reasoning effort none, temperature from the
               condition, top_logprobs=20, include message.output_text.logprobs
   gemma4-31b  GenAI4Science chat completions, logprobs=True, top_logprobs=20
+except a condition with call="paper" (base_default): the paper's BaseJudge call,
+copied from add_llm_judge_scores._score_openai -- Chat Completions .parse with the
+JudgeVerdict schema, max_completion_tokens=OPENAI_MAX_TOKENS, no temperature, no
+reasoning effort, no logprobs (tokens is stored empty).
 
 Order of use (see RUNBOOK.md):
     .venv/bin/python -m epai.ai_detection.rebuttal.capture --list
@@ -56,13 +61,17 @@ from epai.ai_detection.rebuttal.conditions import (
 from epai.ai_detection.score.add_llm_judge_scores import (
     BACKOFF_BASE,
     MODELS,
+    OPENAI_MAX_TOKENS,
     RETRIES,
     USER_TEMPLATE,
+    JudgeVerdict,
 )
 
 TOP_N = 20
 JUDGES = ("gpt56luna", "gemma4-31b")
 CHARS_PER_TOKEN = 4.2  # measured on these corpora; for the cost estimate only
+PRICE_IN, PRICE_OUT = 0.20, 1.20  # gpt-5.6-luna, $ per M tokens (OpenAI page, 2026-11-10)
+USAGE_COLS = ("input_tokens", "output_tokens", "reasoning_tokens")
 
 
 # ---------------------------------------------------------------------------
@@ -90,8 +99,36 @@ def _call_openai(client, model_id: str, cond: Condition, text: str):
             toks = [{"token": t.token, "logprob": float(t.logprob),
                      "top": [{"token": a.token, "logprob": float(a.logprob)}
                              for a in (t.top_logprobs or [])]} for t in lps]
-            return part.text, toks, getattr(resp, "model", None)
+            return part.text, toks, getattr(resp, "model", None), None
     raise ValueError("no output_text part in the Responses object")
+
+
+def _call_openai_paper(client, model_id: str, cond: Condition, text: str):
+    """The paper's BaseJudge call, as add_llm_judge_scores._score_openai made it
+    (keep the two in step): no temperature, no reasoning effort, the JudgeVerdict
+    schema. Returns the raw JSON answer, no token windows, and the usage."""
+    resp = client.chat.completions.parse(
+        model=model_id,
+        messages=[
+            {"role": "system", "content": cond.system},
+            {"role": "user", "content": USER_TEMPLATE.format(text=text)},
+        ],
+        response_format=JudgeVerdict,
+        max_completion_tokens=OPENAI_MAX_TOKENS,
+    )
+    msg = resp.choices[0].message
+    if msg.parsed is None:
+        raise ValueError("model returned no parsable verdict")
+    # clipped to [0, 1] as add_llm_judge_scores.judge_row did; written positionally
+    # (never "1e-05") so that readouts.parse_prob reads back the same value
+    v = float(np.clip(float(msg.parsed.human_probability), 0.0, 1.0))
+    u = resp.usage
+    det = getattr(u, "completion_tokens_details", None)
+    extra = {"input_tokens": getattr(u, "prompt_tokens", None),
+             "output_tokens": getattr(u, "completion_tokens", None),
+             "reasoning_tokens": getattr(det, "reasoning_tokens", None),
+             "raw_answer": msg.content}
+    return np.format_float_positional(v, trim="-"), [], getattr(resp, "model", None), extra
 
 
 def _call_genai4science(client, model_id: str, cond: Condition, text: str):
@@ -112,7 +149,16 @@ def _call_genai4science(client, model_id: str, cond: Condition, text: str):
     toks = [{"token": t.token, "logprob": float(t.logprob),
              "top": [{"token": a.token, "logprob": float(a.logprob)}
                      for a in (t.top_logprobs or [])]} for t in content]
-    return ch.message.content or "", toks, getattr(resp, "model", None)
+    return ch.message.content or "", toks, getattr(resp, "model", None), None
+
+
+def _caller(provider: str, cond: Condition):
+    if cond.call == "paper":
+        if provider != "openai":
+            raise SystemExit(f"condition {cond.name} reproduces the paper's OpenAI call; "
+                             "use --model gpt56luna")
+        return _call_openai_paper
+    return _call_openai if provider == "openai" else _call_genai4science
 
 
 def _build_client(provider: str, model_id: str):
@@ -164,16 +210,30 @@ def _load_done(path) -> pd.DataFrame:
     if path.is_file():
         return pd.read_parquet(path)
     return pd.DataFrame(columns=["uid", "stem", "rep", "answer", "score", "tokens",
-                                 "model_version", "error"])
+                                 "model_version", "error", *USAGE_COLS, "raw_answer"])
 
 
 def _print_probe(cond: Condition, uid: str, label: str, answer: str, toks: list[dict],
-                 version: str | None):
+                 version: str | None, usage: dict | None = None):
     print(f"\n  {uid}  [{label}]  served by {version}  answer={answer!r}  "
           f"quick score={quick_score(cond, answer, toks)}")
+    if usage:
+        print("    usage: " + "  ".join(f"{k}={v}" for k, v in usage.items()
+                                     if k in USAGE_COLS) + f"  raw={usage.get('raw_answer')!r}")
     for i, t in enumerate(toks):
         top = "  ".join(f"{a['token']!r}:{math.exp(a['logprob']):.3f}" for a in t["top"][:6])
         print(f"    pos {i}: {t['token']!r}  |  {top}")
+
+
+def _print_usage(used: list[dict], n_calls: int) -> None:
+    """Mean tokens per call and the projected cost of n_calls (paper-call runs only)."""
+    if not used:
+        return
+    m = {k: float(np.mean([u[k] or 0 for u in used])) for k in USAGE_COLS}
+    per_call = (m["input_tokens"] * PRICE_IN + m["output_tokens"] * PRICE_OUT) / 1e6
+    print(f"\n  usage over {len(used)} calls, mean per call: input {m['input_tokens']:.0f}, "
+          f"output {m['output_tokens']:.0f} (of which reasoning {m['reasoning_tokens']:.0f})")
+    print(f"  => ${per_call:.5f} per call, ~${per_call * n_calls:.2f} for {n_calls} calls")
 
 
 def main() -> None:
@@ -199,7 +259,8 @@ def main() -> None:
 
     if args.list:
         for c in CONDITIONS.values():
-            print(f"{c.name:12} {c.kind:5} T={c.temperature:<3} [{c.todo}]  "
+            t = "default" if c.call == "paper" else c.temperature
+            print(f"{c.name:12} {c.kind:5} T={t:<3} [{c.todo}]  "
                   f"default subset={c.default_subset} reps={c.default_reps}")
         print("subsets:", ", ".join(SUBSETS))
         return
@@ -219,7 +280,9 @@ def main() -> None:
     rows = rows[rows["text"].astype(str).str.strip().str.len() > 0]
 
     print(f"model {args.model} ({spec.model})  condition {cond.name} [{cond.todo}]  "
-          f"subset {subset}  reps {reps}  temperature {cond.temperature}")
+          f"subset {subset}  reps {reps}  "
+          + ("call: the paper's BaseJudge (endpoint defaults)" if cond.call == "paper"
+             else f"temperature {cond.temperature}"))
     by = rows.groupby("stem", sort=False)["generated_by"]
     for stem, g in by:
         print(f"  {stem:22} {len(g):6} rows  ({int(g.eq(HUMAN).sum())} human)")
@@ -232,16 +295,20 @@ def main() -> None:
         k = args.probe // 2
         sample = pd.concat([h.iloc[rng.permutation(len(h))[:k]],
                             m.iloc[rng.permutation(len(m))[: args.probe - k]]])
+        call = _caller(spec.provider, cond)
         client = _build_client(spec.provider, spec.model)
-        call = _call_openai if spec.provider == "openai" else _call_genai4science
         print(f"\nPROBE  {len(sample)} calls\n--- system prompt tail ---\n"
               f"{cond.system[-500:]}\n---")
+        used = []
         for _, r in sample.iterrows():
             try:
-                ans, toks, version = call(client, spec.model, cond, r["text"])
-                _print_probe(cond, r["uid"], r["generated_by"], ans, toks, version)
+                ans, toks, version, usage = call(client, spec.model, cond, r["text"])
+                _print_probe(cond, r["uid"], r["generated_by"], ans, toks, version, usage)
+                if usage:
+                    used.append(usage)
             except Exception as exc:  # noqa: BLE001
                 print(f"\n  {r['uid']}  FAIL {type(exc).__name__}: {exc}")
+        _print_usage(used, reps * len(rows))
         return
 
     # --- what still needs sending ---------------------------------------------
@@ -253,8 +320,12 @@ def main() -> None:
     n_in = sum(len(t[3]) + len(cond.system) for t in todo) / CHARS_PER_TOKEN
     print(f"\n  calls: {len(rows) * reps} total, {len(rows) * reps - len(todo)} done, "
           f"{len(todo)} to send")
-    print(f"  estimated input tokens to send: {n_in / 1e6:.1f} M  "
-          f"(output: <= {cond.max_output_tokens} tokens/call)")
+    if cond.call == "paper":
+        print(f"  estimated input tokens to send: {n_in / 1e6:.1f} M  (output incl. "
+              f"reasoning: unknown -- run --probe 12 first, it prints the cost per call)")
+    else:
+        print(f"  estimated input tokens to send: {n_in / 1e6:.1f} M  "
+              f"(output: <= {cond.max_output_tokens} tokens/call)")
     print(f"  sidecar: {path}")
     if args.dry_run or not todo:
         return
@@ -262,8 +333,8 @@ def main() -> None:
         if input("Billed API calls. Proceed? type 'yes': ").strip().lower() != "yes":
             raise SystemExit("aborted -- no calls made")
 
+    call = _caller(spec.provider, cond)
     client = _build_client(spec.provider, spec.model)
-    call = _call_openai if spec.provider == "openai" else _call_genai4science
     keep = done[done["answer"].notna()].to_dict("records")
     new: dict[tuple[str, str, int], dict] = {}
     lock = threading.Lock()
@@ -279,7 +350,7 @@ def main() -> None:
         last = None
         for attempt in range(args.retries + 1):
             try:
-                ans, toks, version = call(client, spec.model, cond, text)
+                ans, toks, version, usage = call(client, spec.model, cond, text)
                 score = quick_score(cond, ans, toks)
                 if score is None:
                     # a "prob" answer with no number in [0, 1]: a failed row, not a
@@ -287,7 +358,7 @@ def main() -> None:
                     raise ValueError(f"no probability in answer {ans!r:.60}")
                 return {"uid": uid, "stem": stem, "rep": rep, "answer": ans,
                         "score": score, "tokens": toks,
-                        "model_version": version, "error": None}
+                        "model_version": version, "error": None, **(usage or {})}
             except Exception as exc:  # noqa: BLE001
                 last = f"{type(exc).__name__}: {exc}"
                 if attempt < args.retries:
@@ -329,6 +400,7 @@ def main() -> None:
     print(f"\n  captured {len(res) - sum(fails.values())}/{len(res)}  "
           f"distinct quick scores: {len(set(scores))}")
     print(f"  served model version(s): {dict(versions)}")
+    _print_usage([r for r in res if r.get("output_tokens") is not None], len(rows) * reps)
     if len(versions) > 1:
         print("  WARNING  more than one model version served this run")
     if interrupted:

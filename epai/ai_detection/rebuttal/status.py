@@ -28,6 +28,7 @@ PLAN = [
     ("gemma", "gemma4-31b", "base_hp4", "humans_plus_third", 1),
     ("gemma", "gemma4-31b", "base_free", "humans_plus_third", 1),
     ("gemma", "gemma4-31b", "base_v3", "humans_plus_third", 1),
+    ("default", "gpt56luna", "base_default", "near", 3),
 ]
 
 
