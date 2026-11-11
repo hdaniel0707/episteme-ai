@@ -139,11 +139,29 @@ terminals or `tmux` windows. Keep the total `--workers` within the account's rat
 `Ctrl-C` writes what has been captured, and the same command resumes later. Inside a
 `run_*.sh` script it also stops the script (exit 130), so the next step does not start.
 
-## After capture
+## After capture: check → evaluate → plot (CPU only, no calls)
 
-The scorer (`score.py`, block B, CPU only) reads the sidecars, joins them with the master
-parquets on `stem` + `uid` (never `uid` alone: the 2992 human texts shared by
-`ghostbuster_orig` and `manugram_gb` carry the same uid in both, and 1292 of them differ
-in quotes/whitespace), and computes AUROC / TPR@1%FPR / AT-HM, tie tables and the A2
-expected-value readout. All comparisons use the same rows for every detector.
-It is written after the probe settles the token rule.
+```bash
+.venv/bin/python -m epai.ai_detection.rebuttal.check -v     # FAIL = re-run that run_*.sh first
+.venv/bin/python -m epai.ai_detection.rebuttal.evaluate     # CSVs + summary.txt
+.venv/bin/python -m epai.ai_detection.rebuttal.plot         # PNG + PDF in eval/figs/
+```
+
+Everything goes to `data/parquet/tmp/rebuttal/eval/` (`--workspace` / `--out` to change).
+Run it on gpu100, or here after the rsync.
+
+- `check.py`: per planned run (`status.PLAN`), checks that every expected (stem, uid, rep)
+  has an answer and token windows, that there are no duplicate keys, that the answers parse
+  and match the quick score, the decimals written, the label fold and label mass, and the
+  served model versions. It exits 1 on any FAIL.
+- `evaluate.py` recomputes every score from the answers and token windows (`readouts.py`).
+  It joins on `stem` + `uid` (never `uid` alone: the 2992 human texts shared by
+  `ghostbuster_orig` and `manugram_gb` carry the same uid in both, and 1292 of them differ
+  in quotes/whitespace). The metrics are the paper's: oracle TPR@1%FPR, AUROC, AT-HM, the
+  four-split mean, and the `tie_table` statistics. Every comparison uses identical rows.
+  The sections are A1/A2, A3, A4 and A5, and the module docstring maps each one to the
+  reviewer question it answers. A2 = the expected written number under the same call's
+  digit-token distribution, conditioned on the greedy prefix.
+- A3 re-evaluates the **full** split once per repeat, with only the near-threshold rows'
+  scores replaced, so TPR/AT-HM are measured at the real operating point. The flip rates use
+  the reference run's 1%-FPR threshold (paper LogJudge; base_v3 full for BaseJudge).
