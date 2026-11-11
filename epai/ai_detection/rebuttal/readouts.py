@@ -38,8 +38,10 @@ SPLIT_NAMES = {"ghostbuster_orig": "GB-orig", "manugram_gb": "MG-GB",
                "manugram_sci": "MG-Sci", "manugram_aiscientist": "MG-AI-Sci"}
 
 # a written probability: "0.18", ".18", "1", "0", "1.0"
-_NUM = re.compile(r"(?<![\w.])(?:[01](?:\.\d+)?|\.\d+)")
-_BARE = re.compile(r"^\s*(?:[01](?:\.\d+)?|\.\d+)\s*$")
+_NUM = re.compile(r"(?<![\w.])(?:[01](?:\.[0-9]+)?|\.[0-9]+)")
+_BARE = re.compile(r"^\s*(?:[01](?:\.[0-9]+)?|\.[0-9]+)\s*$")
+# ASCII digits only: str.isdigit() also accepts e.g. subscript "₄", which int() rejects
+_DIGITS = re.compile(r"[0-9]+")
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +99,7 @@ def expected_value(tokens) -> tuple[float | None, float | None]:
                 if not t.startswith(head):
                     continue
                 digits = t[len(head):]
-                if not digits.isdigit():
+                if not _DIGITS.fullmatch(digits):
                     continue
                 p = math.exp(alt["logprob"])
                 num += p * int(digits) / 10 ** (off + len(digits))
@@ -108,7 +110,7 @@ def expected_value(tokens) -> tuple[float | None, float | None]:
                 ev += num / den
             else:                                 # nothing usable: keep the greedy digits
                 frac = text[max(s, d + 1):min(e, b)]
-                ev += int(frac) / 10 ** (off + len(frac)) if frac.isdigit() else 0.0
+                ev += int(frac) / 10 ** (off + len(frac)) if _DIGITS.fullmatch(frac) else 0.0
         s = e
         if s >= b:
             break
