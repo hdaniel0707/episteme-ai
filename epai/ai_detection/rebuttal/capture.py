@@ -18,10 +18,13 @@ Call settings, identical for every condition (so that only the prompt differs):
   gpt56luna   OpenAI Responses API, reasoning effort none, temperature from the
               condition, top_logprobs=20, include message.output_text.logprobs
   gemma4-31b  GenAI4Science chat completions, logprobs=True, top_logprobs=20
-except a condition with call="paper" (base_default): the paper's BaseJudge call,
-copied from add_llm_judge_scores._score_openai -- Chat Completions .parse with the
-JudgeVerdict schema, max_completion_tokens=OPENAI_MAX_TOKENS, no temperature, no
-reasoning effort, no logprobs (tokens is stored empty).
+except a condition with call="paper" (base_default*): the paper's BaseJudge call,
+copied from add_llm_judge_scores -- luna: _score_openai (Chat Completions .parse with
+the JudgeVerdict schema, max_completion_tokens=OPENAI_MAX_TOKENS); gemma:
+_score_genai4science (.parse with JudgeVerdict, falling back to a plain completion
+parsed by parse_judge_probability). No temperature, no reasoning effort, no
+logprobs (tokens is stored empty). ``answer`` is the number as the model wrote it
+in the JSON (so "0.1870" keeps its digits), ``raw_answer`` the full reply.
 
 Order of use (see RUNBOOK.md):
     .venv/bin/python -m epai.ai_detection.rebuttal.capture --list
@@ -60,11 +63,13 @@ from epai.ai_detection.rebuttal.conditions import (
 )
 from epai.ai_detection.score.add_llm_judge_scores import (
     BACKOFF_BASE,
+    GENAI4SCIENCE_MAX_TOKENS,
     MODELS,
     OPENAI_MAX_TOKENS,
     RETRIES,
     USER_TEMPLATE,
     JudgeVerdict,
+    parse_judge_probability,
 )
 
 TOP_N = 20
@@ -119,16 +124,61 @@ def _call_openai_paper(client, model_id: str, cond: Condition, text: str):
     msg = resp.choices[0].message
     if msg.parsed is None:
         raise ValueError("model returned no parsable verdict")
-    # clipped to [0, 1] as add_llm_judge_scores.judge_row did; written positionally
-    # (never "1e-05") so that readouts.parse_prob reads back the same value
-    v = float(np.clip(float(msg.parsed.human_probability), 0.0, 1.0))
-    u = resp.usage
+    return (_as_written(float(msg.parsed.human_probability), msg.content), [],
+            getattr(resp, "model", None), _usage(resp, msg.content))
+
+
+def _call_genai4science_paper(client, model_id: str, cond: Condition, text: str):
+    """The paper's gemma BaseJudge call, as add_llm_judge_scores._score_genai4science
+    made it (keep the two in step): structured JudgeVerdict first, a plain
+    completion parsed by parse_judge_probability if the server does not honour it."""
+    from epai.utils.env_utils import qwen3_thinking_off
+    messages = qwen3_thinking_off(model_id, [
+        {"role": "system", "content": cond.system},
+        {"role": "user", "content": USER_TEMPLATE.format(text=text)},
+    ])
+    try:
+        resp = client.chat.completions.parse(
+            model=model_id, messages=messages, response_format=JudgeVerdict,
+            max_tokens=GENAI4SCIENCE_MAX_TOKENS,
+        )
+        msg = resp.choices[0].message
+        if msg.parsed is not None:
+            return (_as_written(float(msg.parsed.human_probability), msg.content), [],
+                    getattr(resp, "model", None), _usage(resp, msg.content))
+    except Exception:  # noqa: BLE001 -- the paper's run fell back silently too
+        pass
+    resp = client.chat.completions.create(
+        model=model_id, messages=messages, max_tokens=GENAI4SCIENCE_MAX_TOKENS,
+    )
+    content = resp.choices[0].message.content or ""
+    return (_as_written(parse_judge_probability(content), content), [],
+            getattr(resp, "model", None), _usage(resp, content))
+
+
+_JSON_NUM = re.compile(r'"human_probability"\s*:\s*"?([0-9]*\.?[0-9]+)"?')
+
+
+def _as_written(v: float, content: str | None) -> str:
+    """The verdict as an answer string: clipped to [0, 1] as
+    add_llm_judge_scores.judge_row did, and spelled as the model wrote it in the
+    JSON when that spelling is a plain decimal of the same value ("0.1870" keeps its
+    trailing digit); otherwise written positionally (never "1e-05"), so that
+    readouts.parse_prob reads back the same value either way."""
+    v = float(np.clip(v, 0.0, 1.0))
+    m = _JSON_NUM.search(content or "")
+    if m and float(m.group(1)) == v:
+        return m.group(1)
+    return np.format_float_positional(v, trim="-")
+
+
+def _usage(resp, content: str | None) -> dict:
+    u = getattr(resp, "usage", None)
     det = getattr(u, "completion_tokens_details", None)
-    extra = {"input_tokens": getattr(u, "prompt_tokens", None),
-             "output_tokens": getattr(u, "completion_tokens", None),
-             "reasoning_tokens": getattr(det, "reasoning_tokens", None),
-             "raw_answer": msg.content}
-    return np.format_float_positional(v, trim="-"), [], getattr(resp, "model", None), extra
+    return {"input_tokens": getattr(u, "prompt_tokens", None),
+            "output_tokens": getattr(u, "completion_tokens", None),
+            "reasoning_tokens": getattr(det, "reasoning_tokens", None),
+            "raw_answer": content}
 
 
 def _call_genai4science(client, model_id: str, cond: Condition, text: str):
@@ -154,10 +204,7 @@ def _call_genai4science(client, model_id: str, cond: Condition, text: str):
 
 def _caller(provider: str, cond: Condition):
     if cond.call == "paper":
-        if provider != "openai":
-            raise SystemExit(f"condition {cond.name} reproduces the paper's OpenAI call; "
-                             "use --model gpt56luna")
-        return _call_openai_paper
+        return _call_openai_paper if provider == "openai" else _call_genai4science_paper
     return _call_openai if provider == "openai" else _call_genai4science
 
 
@@ -225,15 +272,16 @@ def _print_probe(cond: Condition, uid: str, label: str, answer: str, toks: list[
         print(f"    pos {i}: {t['token']!r}  |  {top}")
 
 
-def _print_usage(used: list[dict], n_calls: int) -> None:
+def _print_usage(used: list[dict], n_calls: int, priced: bool = True) -> None:
     """Mean tokens per call and the projected cost of n_calls (paper-call runs only)."""
     if not used:
         return
-    m = {k: float(np.mean([u[k] or 0 for u in used])) for k in USAGE_COLS}
+    m = {k: float(np.mean([u.get(k) or 0 for u in used])) for k in USAGE_COLS}
     per_call = (m["input_tokens"] * PRICE_IN + m["output_tokens"] * PRICE_OUT) / 1e6
     print(f"\n  usage over {len(used)} calls, mean per call: input {m['input_tokens']:.0f}, "
           f"output {m['output_tokens']:.0f} (of which reasoning {m['reasoning_tokens']:.0f})")
-    print(f"  => ${per_call:.5f} per call, ~${per_call * n_calls:.2f} for {n_calls} calls")
+    if priced:
+        print(f"  => ${per_call:.5f} per call, ~${per_call * n_calls:.2f} for {n_calls} calls")
 
 
 def main() -> None:
@@ -308,7 +356,7 @@ def main() -> None:
                     used.append(usage)
             except Exception as exc:  # noqa: BLE001
                 print(f"\n  {r['uid']}  FAIL {type(exc).__name__}: {exc}")
-        _print_usage(used, reps * len(rows))
+        _print_usage(used, reps * len(rows), priced=spec.provider == "openai")
         return
 
     # --- what still needs sending ---------------------------------------------
@@ -400,7 +448,8 @@ def main() -> None:
     print(f"\n  captured {len(res) - sum(fails.values())}/{len(res)}  "
           f"distinct quick scores: {len(set(scores))}")
     print(f"  served model version(s): {dict(versions)}")
-    _print_usage([r for r in res if r.get("output_tokens") is not None], len(rows) * reps)
+    _print_usage([r for r in res if r.get("output_tokens") is not None], len(rows) * reps,
+                 priced=spec.provider == "openai")
     if len(versions) > 1:
         print("  WARNING  more than one model version served this run")
     if interrupted:

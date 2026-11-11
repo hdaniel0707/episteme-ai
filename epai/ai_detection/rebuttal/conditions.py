@@ -33,7 +33,13 @@ Conditions (TODO id in brackets):
                JudgeVerdict structured answer, no temperature and no reasoning
                effort sent (the endpoint's defaults). No log-probabilities. On
                ``near`` x 3, paired with lj_v3's repeats, so the paper's
-               FusionJudge can be recomputed per capture.
+               FusionJudge can be recomputed per capture. Also on ``small`` x 3
+               (--subset small --reps 3) for A4 with the paper's call: averaging
+               repeated default-settings answers.
+  base_default_hp4  [A1 default]  base_default with the four-decimal prompt of base_hp4.
+  base_default_free [A1 default]  base_default with the no-limit prompt of base_free.
+               These two rerun A1's precision question with the paper's BaseJudge
+               call (luna on ``full``, gemma on ``humans_plus_third``).
   lj_v3        [A3]       LogJudge exactly as in the paper (v3 evidence +
                human/machine answer block). Repeated with --reps.
   lj_swap      [A5]       same words, machine listed first.
@@ -132,8 +138,9 @@ class Condition:
     default_subset: str = "humans_plus_third"
     default_reps: int = 1
     # "matched": LogJudge's call (Responses API, effort none, logprobs on).
-    # "paper": the paper's BaseJudge call (add_llm_judge_scores._score_openai):
-    # Chat Completions + JudgeVerdict, endpoint defaults, no logprobs. luna only.
+    # "paper": the paper's BaseJudge call (add_llm_judge_scores._score_openai for
+    # luna, ._score_genai4science for gemma): JudgeVerdict structured answer,
+    # endpoint defaults (no temperature, no reasoning effort), no logprobs.
     call: str = "matched"
 
 
@@ -157,8 +164,12 @@ CONDITIONS: dict[str, Condition] = {c.name: c for c in [
               "A5", labels={"person": HUMAN, "ai": "machine"}, default_subset="small"),
     Condition("lj_letters", "label", evidence_head("v3") + "\n\n" + _LETTERS_BLOCK,
               "A5", labels={"b": HUMAN, "a": "machine"}, default_subset="small"),
-    Condition("base_default", "prob", _V3, "A3b", default_subset="near", default_reps=3,
-              call="paper"),
+    Condition("base_default", "prob", _V3, "A3b / A4 default", default_subset="near",
+              default_reps=3, call="paper"),
+    Condition("base_default_hp4", "prob", _V3.replace(_TWO_DEC, _FOUR_DEC), "A1 default",
+              default_subset="full", call="paper"),
+    Condition("base_default_free", "prob", _V3.replace(_TWO_DEC, _FREE_DEC), "A1 default",
+              default_subset="full", call="paper"),
 ]}
 
 # The paper's LogJudge must be reproduced exactly by lj_v3 -- same system prompt

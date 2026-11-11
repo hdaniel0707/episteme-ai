@@ -31,6 +31,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from epai.ai_detection.rebuttal.capture import _as_written
 from epai.ai_detection.rebuttal.conditions import CONDITIONS, WORKSPACE, build_subset, load_core
 from epai.ai_detection.rebuttal.readouts import (
     MIN_ANSWER_MASS,
@@ -41,7 +42,8 @@ from epai.ai_detection.rebuttal.readouts import (
 )
 from epai.ai_detection.rebuttal.status import PLAN
 
-EXPECTED_DECIMALS = {"base_v3": 2, "base_v3_t1": 2, "base_hp4": 4}
+EXPECTED_DECIMALS = {"base_v3": 2, "base_v3_t1": 2, "base_hp4": 4,
+                     "base_default": 2, "base_default_hp4": 4}
 
 
 def check_run(model: str, cond_name: str, subset: str, reps: int, expected: pd.DataFrame,
@@ -87,6 +89,11 @@ def check_run(model: str, cond_name: str, subset: str, reps: int, expected: pd.D
             rec["fail"].append(f"{no_tok} answered rows without token windows")
         df = df[[t is not None and len(t) > 0 for t in df["tokens"]]]
     else:
+        # rows captured before capture._as_written existed stored "0.4" for a written
+        # 0.40: re-spell every answer from the raw JSON so decimals count the same way
+        if "raw_answer" in df:
+            df = df.assign(answer=[_as_written(float(v), raw) for v, raw in
+                                   zip(df["score"], df["raw_answer"])])
         u = df[["input_tokens", "output_tokens", "reasoning_tokens"]].apply(
             pd.to_numeric, errors="coerce")
         rec["info"].append(f"tokens per call (median): input {u['input_tokens'].median():.0f}, "

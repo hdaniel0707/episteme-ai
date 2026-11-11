@@ -17,6 +17,8 @@ A1/A2  WpPs-2, xghj-2, xghj Q(i): is the LogJudge gain the readout, or BaseJudge
        prompt called like LogJudge (base_v3), 4 decimals (base_hp4), free
        precision (base_free), and A2 (expected written number, same call) vs
        LogJudge and FusionJudge. luna on ``full``, gemma on ``humans_plus_third``.
+       Plus the precision question with the paper's own call (base_default_hp4,
+       base_default_free; no A2, that call has no logprobs).
          a1_metrics.csv  a1_written_values.csv  a1_decimals.csv
          a1_ev_mass.csv  a1_roc.csv
 A3     Lma8 Q3, xghj-5, xghj Q(iii): are decisions at the REAL 1%-FPR thresholds
@@ -30,7 +32,9 @@ A3b    Lma8 Q3: the paper's FusionJudge over repeated captures. base_default (th
        paired by repeat; capture "ref" = the paper's stored columns. Same
        replacement scheme as A3.
          a3b_metrics.csv
-A4     xghj Q(i): does averaging repeated BaseJudge samples at T=1 close the gap?
+A4     xghj Q(i): does averaging repeated BaseJudge samples close the gap? The
+       matched call at T=1 (base_v3_t1 x3), and the paper's call (base_default on
+       small x3, plus the paper's stored answer as a 4th sample).
          a4_metrics.csv
 A5     xghj-2, xghj Q(iii): does LogJudge depend on the label words or their order?
          a5_metrics.csv  a5_agreement.csv
@@ -101,7 +105,14 @@ LABELS = {
     "lj": "LogJudge",
     "base": "BaseJudge (matched call)",
     "fusion": "FusionJudge (matched)",
+    "base_default_hp4": "BaseJudge, paper call, 4 dec.",
+    "base_default_free": "BaseJudge, paper call, free precision",
+    "def_x1": "BaseJudge paper call, 1 new sample",
+    "def_x2": "BaseJudge paper call, mean of 2 new",
+    "def_x3": "BaseJudge paper call, mean of 3 new",
+    "def_x4": "BaseJudge paper call, mean of 3 new + paper",
 }
+PAPER_CALL = ("base_default_hp4", "base_default_free")   # no logprobs: no A2 readout
 
 
 def _mean(*cols: pd.Series) -> pd.Series:
@@ -227,13 +238,15 @@ def section_a1(master, ws, out) -> None:
         print(f"\n--- {model}, subset {subset} ---")
         frame = pd.DataFrame(paper_cols(master, model)).join(master["y"])
         runs = {}
-        for cond in ("base_v3", "base_hp4", "base_free"):
+        for cond in ("base_v3", "base_hp4", "base_free", *PAPER_CALL):
             r = load_run(ws, model, cond, subset)
             if r is None:
                 continue
             runs[cond] = r
             r = r.set_index(KEY)
-            frame = frame.join(r["parsed"].rename(cond)).join(r["ev"].rename(cond + "_ev"))
+            frame = frame.join(r["parsed"].rename(cond))
+            if cond not in PAPER_CALL:
+                frame = frame.join(r["ev"].rename(cond + "_ev"))
             for split, g in r.groupby("stem"):
                 vc = g["answer"].str.strip().value_counts()   # as written: "0.10" != "0.1"
                 values += [{"model": model, "readout": cond, "split": SPLIT_NAMES[split],
@@ -246,18 +259,21 @@ def section_a1(master, ws, out) -> None:
             decs += [{"model": model, "readout": cond, "what": "last_digit", "key": k,
                       "share": s} for k, s in last.items()]
             m = r["mass"].dropna()
+            if cond in PAPER_CALL:
+                continue
             masses.append({"model": model, "readout": cond, "n": len(m),
                            **{f"q{int(q * 100):02d}": m.quantile(q)
                               for q in (0.05, 0.25, 0.5, 0.75, 0.95)},
                            "share_below_0.5": (m < 0.5).mean(), "mean": m.mean()})
         if not runs:
             continue
+        # identical rows: those every run has answered (metric_rows drops the rest)
         frame = frame.loc[frame.index.isin(next(iter(runs.values())).set_index(KEY).index)]
         if "base_v3" in runs:
             frame["fusion_v3"] = _mean(frame["base_v3"], frame["paper_lj"])
-        readouts = [k for k in ("paper_base", "base_v3", "base_hp4", "base_free", "base_v3_ev",
-                                "base_hp4_ev", "base_free_ev", "paper_lj", "paper_fusion",
-                                "fusion_v3") if k in frame]
+        readouts = [k for k in ("paper_base", *PAPER_CALL, "base_v3", "base_hp4", "base_free",
+                                "base_v3_ev", "base_hp4_ev", "base_free_ev", "paper_lj",
+                                "paper_fusion", "fusion_v3") if k in frame]
         rows = metric_rows(frame, readouts, experiment="A1A2", model=model, subset=subset)
         metrics += rows
         print_table(rows)
@@ -454,11 +470,28 @@ def section_a4(master, ws, out) -> None:
     bf = load_run(ws, "gpt56luna", "base_v3", "full")
     if bf is not None:
         frame = frame.join(bf.set_index(KEY)["parsed"].rename("base_v3"))
+    # the paper's call, repeated: new samples alone, then with the paper's answer
+    bd = load_run(ws, "gpt56luna", "base_default", "small")
+    dk = []
+    if bd is not None:
+        wd = wide(bd, "parsed")
+        dreps = sorted(wd.columns)
+        wd = wd.reindex(frame.index)
+        for k in range(1, len(dreps) + 1):
+            frame[f"def_x{k}"] = wd[dreps[:k]].mean(axis=1, skipna=False)
+            dk.append(f"def_x{k}")
+        if len(dreps) == 3:
+            frame["def_x4"] = pd.concat([wd[dreps], frame["paper_base"]], axis=1).mean(
+                axis=1, skipna=False)
+            dk.append("def_x4")
+        print(f"  paper-call repeats: {len(dreps)} reps; identical across them on "
+              f"{(wd[dreps].nunique(axis=1) == 1).mean():.1%} of rows")
     readouts = [c for c in ("paper_base", "base_v3", *[f"t1_x{k}" for k in
-                range(1, len(reps) + 1)], "paper_lj", "paper_fusion") if c in frame]
+                range(1, len(reps) + 1)], *dk, "paper_lj", "paper_fusion") if c in frame]
     rows = metric_rows(frame, readouts, experiment="A4", model="gpt56luna", subset="small")
     for r in rows:
-        r["calls"] = int(r["readout"][-1]) if r["readout"].startswith("t1_x") else 1
+        r["calls"] = (int(r["readout"][-1]) if r["readout"].startswith(("t1_x", "def_x"))
+                      else 1)
     print_table(rows)
     _write(out, "a4_metrics", rows)
 

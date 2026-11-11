@@ -38,7 +38,9 @@ effort the original BaseJudge run actually used, and correct the appendix text e
 | `lj_alt` | A5 | other words: `person` / `AI` | small × 1 |
 | `lj_letters` | A5 | letters, `A` = machine / `B` = human (opposite of ord5's A = human) | small × 1 |
 | `base_v3_t1` | A4 | `base_v3` at temperature 1, 3 samples to average | small × 3 |
-| `base_default` | A3b | the paper's BaseJudge call itself (Chat Completions + `JudgeVerdict`, endpoint defaults, no logprobs), repeated | near × 3 |
+| `base_default` | A3b, A4 default | the paper's BaseJudge call itself (Chat Completions + `JudgeVerdict`, endpoint defaults, no logprobs), repeated | near × 3; small × 3 |
+| `base_default_hp4` | A1 default | `base_default` with the four-decimal prompt | full (gemma: humans_plus_third) × 1 |
+| `base_default_free` | A1 default | `base_default` with the no-limit prompt | full (gemma: humans_plus_third) × 1 |
 
 Subsets: `humans_plus_third` = every human row + ⅓ of the machine rows per
 (split, generator), with MG-AI-Sci kept whole (18,172 rows). The human-side 1%-FPR threshold
@@ -155,6 +157,25 @@ The probe prints each answer with its usage and the projected cost of the full r
 `evaluate.py` section A3b (`--only a3b`) pairs `base_default` rep r with `lj_v3` rep r on the
 near rows, keeps the paper's scores elsewhere, and reports BaseJudge, LogJudge and the
 paper's FusionJudge per capture, with mean ± std over the four captures (`a3b_metrics.csv`).
+
+## Reruns with the paper's BaseJudge call (`run_default_extra.sh`, `run_gemma_default.sh`)
+
+A1's precision runs and A4's averaging used the matched call (LogJudge's settings), which
+is a weaker BaseJudge than the paper's (TPR@1%FPR 0.058 vs 0.503). These reruns ask the
+same questions of the paper's own call; A2 and the A1 matched control stay matched on
+purpose. On gemma the call is `_score_genai4science`'s (structured first, plain-text
+fallback). `answer` keeps the number as written in the JSON, so the four-decimal filler
+analysis still works.
+
+| run | condition | subset × reps | calls | cost |
+|---|---|---|---|---|
+| R1 | `base_default_hp4` (luna) | full × 1 | 36,148 | ~$12 |
+| R2 | `base_default_free` (luna) | full × 1 | 36,148 | ~$12 |
+| R3 | `base_default` (luna) | small × 3 | 18,600 | ~$6 |
+| R4 | `base_default_hp4`, `base_default_free` (gemma) | humans_plus_third × 1 | 2 × 18,172 | $0, ~8 h |
+
+`evaluate.py` picks them up automatically: A1 gets the paper-call precision rows, A4 the
+averages of 1–3 new paper-call answers and of those 3 plus the paper's stored answer.
 
 ## Running many jobs
 
