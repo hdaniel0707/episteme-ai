@@ -386,7 +386,9 @@ MODELS: dict[str, JudgeModel] = {
         column="gemma4_31b",
         note="GenAI4Science open-weight endpoint. A third open-weight family "
              "(Google) beside gpt-oss:120b and llama3.3:70b, a mid rung. Dense "
-             "instruct model, no reasoning mode — chosen over qwen3.8:27b, "
+             "instruct model with an optional thinking mode, off by default and "
+             "never switched on here (on at this endpoint only via "
+             "chat_template_kwargs.enable_thinking) — chosen over qwen3.8:27b, "
              "whose <think> pass the SZTAKI deployment would not disable "
              "(~14s/call vs ~3s here). Holds a dedicated GPU and serves the "
              "perf endpoint's 4 concurrent calls in parallel.",

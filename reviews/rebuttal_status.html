@@ -61,44 +61,40 @@ li{margin:3px 0}
 <main>
 
 <h1>Rebuttal status: where we are</h1>
-<p class="muted">ICLR 2027 submission 47037. Written at the end of session 2 (2026-11-11, evening). Read this first next session; the plan, concern map and TODO IDs are in <code>reviews/review_summary.html</code>.</p>
+<p class="muted">ICLR 2027 submission 47037. Updated at the end of session 3 (2026-11-12, evening). Read this first next session; the plan, concern map and TODO IDs are in <code>reviews/review_summary.html</code>.</p>
 <nav>
   <a href="#next"><b>Start here</b></a><a href="#running">Running on gpu100</a><a href="#reviewers">Per reviewer</a>
-  <a href="#a">A: API</a><a href="#b">B: CPU</a><a href="#c">C: paper text</a><a href="#d">D: OpenReview</a>
+  <a href="#a">A: API</a><a href="#a1a4">A1/A4 results</a><a href="#b">B: CPU</a><a href="#c">C: paper text</a><a href="#d">D: OpenReview</a>
   <a href="#numbers">Key numbers</a><a href="#decisions">Decisions</a><a href="#where">Where things are</a>
 </nav>
 
 <div class="cards">
   <div class="card"><div class="muted">Deadline</div><div class="big">Nov 18 AoE</div>= Thu Nov 19, 12:59 Budapest</div>
-  <div class="card"><div class="muted">Wave 1 replies due</div><div class="big">Nov 12–13</div>not drafted yet beyond WpPs W1</div>
-  <div class="card"><div class="muted">API block</div><div class="big">5 / 7</div>written into the paper; A1 + A4 wait for reruns</div>
+  <div class="card"><div class="muted">Wave 1 replies due</div><div class="big">Nov 12–13</div>not drafted yet beyond WpPs W1: now urgent</div>
+  <div class="card"><div class="muted">API block</div><div class="big">all back</div>framing agreed ("same test-time compute"); paper text pushed (8866bf2) + gemma-thinking edits pending</div>
   <div class="card"><div class="muted">CPU block</div><div class="big">6 computed</div>only B1 is in the paper; B2, B4–B7 to review &amp; write</div>
 </div>
 
 <!-- ============================================================ -->
 <h2 id="next">Start here next session</h2>
 <ol class="steps">
-  <li><b>Check the reruns on gpu100</b> (<code>bash epai/ai_detection/rebuttal/status.sh</code>), rsync the whole folder back (command below), then
-    <code>.venv/bin/python -m epai.ai_detection.rebuttal.check -v</code> and <code>…evaluate</code> (full run; writes <code>eval/</code>). Read A1 and A4 in <code>eval/summary.txt</code>.</li>
-  <li><b>Write A1 + A4 with the paper-call numbers</b> into the "Matching the BaseJudge call" paragraph and appendix (decide which version leads the answer to xghj Q(i); the matched numbers stay as the controlled comparison).</li>
-  <li><b>Draft wave 1 (D1 general comment + D2 per reviewer)</b> in <code>reviews/rebuttal_draft.txt</code>. Everything marked done below can go in now; A1/A4 can say "paper-call reruns running, results in wave 2" if they are not back. Order: WpPs, Lma8, xghj.</li>
-  <li><b>Review the already-computed CPU analyses</b> (B5 thresholds, B4 CIs, B7 fusion rules, B6 backbone LOSO, B2 ties) in <code>../logjudge-manugram/outputs/</code>, decide framing, and write them into the paper. B5 is the most important open point (WpPs-3, xghj-4, xghj Q(ii)).</li>
+  <li><b>Paper draft</b>: pushed to Overleaf by the user (<code>8866bf2</code>, 2026-11-12 13:46). The later gemma-thinking edits (main-text clause, appendix pilot sentences and heading, API-settings sentence) are <b>uncommitted</b> in <code>overleaf/</code>: review, commit, push. Contents: main paragraph "Same test-time compute" (<code>sec:results_matched_call</code>), appendix "Test-Time Compute: Call Settings, Precision, and Repeated Calls" (<code>apx:matched_call</code>, new <code>tab:paper-call</code>, extended <code>tab:repeated-sampling</code>, new <code>fig:compute-scatter</code> with <code>figs/auroc_tpr_bj_{decimals,ensemble}.pdf</code>), API-settings sentences, gemma "thinking off" wording. <b>Check the Overleaf build and the page count</b> (main paragraph grew by ~120 words; main text limit 10 pages).</li>
+  <li><b>Gemma thinking run (A7)</b>: if the full 2-decimal run on gpu100 has finished (<code>status.sh</code>, row <code>gemma_think · base_think</code> = 6200), rsync, <code>evaluate</code>, and swap the pilot numbers in the appendix (AUROC 0.875 vs 0.897, LogJudge 0.917, 800 texts) for the full-run numbers; TPR can then be reported too. If it did not finish, the pilot text stands as is.</li>
+  <li><b>Draft wave 1 (D1 + D2)</b> in <code>reviews/rebuttal_draft.txt</code>, order WpPs, Lma8, xghj. <b>Overdue</b> (Nov 12–13). xghj Q(i) answer: "yes" first, with the numbers, then the same-test-time-compute reading (see <a href="#a1a4">A1/A4 results</a>).</li>
+  <li><b>Review the already-computed CPU analyses</b> (B5 thresholds, B4 CIs, B7 fusion rules, B6 backbone LOSO, B2 ties) in <code>../logjudge-manugram/outputs/</code> and write them up. B5 is the most important open point (WpPs-3, xghj-4, xghj Q(ii)).</li>
   <li>Then the framing text (C1, C2, C4) and the remaining smaller items.</li>
 </ol>
 
 <!-- ============================================================ -->
-<h2 id="running">Running on gpu100 (launched 2026-11-11 evening)</h2>
-<p>All four reruns ask A1/A4's questions of the <b>paper's own BaseJudge call</b> (default settings, structured answer); the earlier A1/A4 runs used the matched call (LogJudge's settings), which is a much weaker BaseJudge (TPR@1%FPR 0.058 vs 0.503).</p>
+<h2 id="running">Running on gpu100 (launched 2026-11-12, afternoon)</h2>
 <div class="tablewrap"><table>
-<tr><th>run</th><th>tmux</th><th>condition · subset × reps</th><th>answers</th><th>cost</th></tr>
-<tr><td>R3</td><td><code>default2</code> (step 1/3)</td><td><code>base_default</code> · small × 3 (18,600 calls)</td><td>A4 averaging with the paper's call</td><td>~$6</td></tr>
-<tr><td>R1</td><td><code>default2</code> (step 2/3)</td><td><code>base_default_hp4</code> · full (36,148)</td><td>A1, 4 decimals</td><td>~$16</td></tr>
-<tr><td>R2</td><td><code>default2</code> (step 3/3)</td><td><code>base_default_free</code> · full (36,148)</td><td>A1, no limit</td><td>~$15</td></tr>
-<tr><td>R4</td><td><code>gemmadef</code></td><td>gemma <code>base_default_hp4</code> + <code>_free</code> · humans_plus_third</td><td>A1 on gemma</td><td>$0, ~8 h</td></tr>
+<tr><th>run</th><th>how</th><th>condition · subset</th><th>answers</th><th>status</th></tr>
+<tr><td>A7</td><td><code>capture --model gemma4-31b --condition base_think --subset small --workers 4</code> (chained after the pilot)</td><td><code>base_think</code>: the paper's gemma BaseJudge with its thinking mode <b>on</b>, 2 decimals · small (6,200)</td><td>does reasoning lift gemma's stated probability? (pilot: no)</td><td><span class="s s-wait">pilot 800 done; full run possibly still going (~9 h, free)</span></td></tr>
 </table></div>
-<p class="muted">If <code>status.sh</code> shows failed rows, re-run the same script (resumable). Probes already looked right: 4 decimals written as is (luna again shows a filler "…37/…47" pattern), gemma JSON parsed, luna reasons on ~10/12 calls with the 4-decimal prompt.</p>
+<p class="muted">Thinking is switched on by <code>chat_template_kwargs.enable_thinking</code>, the only switch the GenAI4Science endpoint honours (<code>probe_gemma_thinking.py</code>). The 4-decimal thinking run (<code>base_think_hp4</code>) was dropped: no more gemma experiments. If the full run is stopped, the pilot text in the paper stands. Run the rsync <b>on the laptop</b>, not on gpu100:</p>
 <pre>rsync -av hdaniel@gpu100:projects/episteme-ai/data/parquet/tmp/rebuttal/ /home/daniel/projects/episteme-ai/data/parquet/tmp/rebuttal/</pre>
-<p class="muted">Paste it as <b>one line</b> (last time a line break turned it into a listing only). <code>evaluate.py</code> picks the new runs up automatically: A1 gets "BaseJudge, paper call, 4 dec. / free precision" rows, A4 gets "paper call, 1/2/3 new samples" and "3 new + paper".</p>
+<p class="muted">Done and evaluated: R1–R4 (paper-call reruns, 2026-11-11) and L1 (LogJudge ×3 on small, 2026-11-12); 19 runs, 0 FAIL. <code>check</code> reports <code>base_think</code> as FAIL until 6,200 rows exist (expected for the pilot).</p>
+<div class="callout risk"><b>Not possible: LogJudge with reasoning (L2).</b> A 12-call probe of LogJudge with the paper BaseJudge's settings (no reasoning effort sent, logprobs requested) failed on every call: <code>400 logprobs are not supported with reasoning models</code>. On luna, LogJudge requires effort <code>none</code>. This is an API constraint, usable in the rebuttal: the reasoning/no-reasoning asymmetry between the two judges is forced, not chosen.</div>
 
 <!-- ============================================================ -->
 <h2 id="reviewers">Per reviewer: what is answered</h2>
@@ -107,7 +103,7 @@ li{margin:3px 0}
 <div class="tablewrap"><table>
 <tr><th>point</th><th>status</th><th>where / what</th></tr>
 <tr><td>W1 residual mass, label absence, k</td><td><span class="s s-done">in paper</span></td><td>"Residual mass" paragraph + App. "Window Size and Residual Mass" (B1). Reply text READY in the draft.</td></tr>
-<tr><td>W2 readout vs precision/prompt; distinct values, tie groups</td><td><span class="s s-wait">mostly</span></td><td>"Matching the BaseJudge call" + App. (A1/A2, matched). Paper-call precision rows (R1/R2) pending. Per-split tie table B2 computed, not written.</td></tr>
+<tr><td>W2 readout vs precision/prompt; distinct values, tie groups</td><td><span class="s s-done">in paper (8866bf2)</span></td><td>"Same test-time compute" + App. "Test-Time Compute" (matched call, paper call at 2/4 dec./no limit, ties). Per-split tie table B2 computed, not written.</td></tr>
 <tr><td>W3 oracle thresholds, backbone on eval splits, domain shift</td><td><span class="s s-todo">computed, not written</span></td><td>B5 (<code>threshold_transfer</code>: within-split, cross-domain, LODO) and B6 (<code>backbone_loso</code>) exist; C4 text to do.</td></tr>
 </table></div>
 
@@ -125,11 +121,11 @@ li{margin:3px 0}
 <div class="tablewrap"><table>
 <tr><th>point</th><th>status</th><th>where / what</th></tr>
 <tr><td>W1 not a calibrated P(human); "finer underlying judgment" overclaims</td><td><span class="s s-todo">open</span></td><td>C1 reframing (agreed in principle: concede). B10 calibration diagnostic optional.</td></tr>
-<tr><td>W2 readout not isolated (instructions, calls, precision, repeated elicitation, label verbalization)</td><td><span class="s s-wait">mostly</span></td><td>A2 same call ✓, A1 precision ✓ (matched; paper-call pending), A4 averaging ✓ (matched; paper-call pending), A5 labels ✓.</td></tr>
+<tr><td>W2 readout not isolated (instructions, calls, precision, repeated elicitation, label verbalization)</td><td><span class="s s-wait">mostly</span></td><td>A2 same call ✓, A5 labels ✓. A1 precision and A4 averaging: matched and paper-call in the paper (8866bf2), framing "same test-time compute". Note: "paper call" vs "matched call" changes interface, reasoning, temperature and structured answer at once; describe the matched call as "LogJudge's call settings", never "the same call without reasoning".</td></tr>
 <tr><td>W3 fusion not motivated; not a common scale</td><td><span class="s s-todo">open</span></td><td>C2: call it a heuristic score ensemble; add B7.</td></tr>
 <tr><td>W4 no deployment FPR control; domain-shift flat by construction</td><td><span class="s s-todo">computed, not written</span></td><td>B5, B11, C4.</td></tr>
 <tr><td>W5 novelty; App. V checks agreement at 0.5</td><td><span class="s s-wait">half</span></td><td>App. V part done (A3: repeats at the real threshold). Novelty positioning C6 open.</td></tr>
-<tr><td>Q(i) higher precision or averaged repeats</td><td><span class="s s-wait">waiting</span></td><td>A1 + A4 with the paper's call (R1–R4 running).</td></tr>
+<tr><td>Q(i) higher precision or averaged repeats</td><td><span class="s s-wait">drafted in paper; reply to write</span></td><td>Answer is "yes" for luna: with reasoning, 4 decimals (one call, all texts) or 2+ averaged calls (small) reach LogJudge; at equal compute (no reasoning) it collapses; at equal call budget FusionJudge is best or tied; gemma with thinking on gains nothing. Say "yes" first in the reply. See <a href="#a1a4">A1/A4 results</a>.</td></tr>
 <tr><td>Q(ii) independently calibrated, transferred thresholds</td><td><span class="s s-todo">computed, not written</span></td><td>B5.</td></tr>
 <tr><td>Q(iii) near-threshold sensitivity to wording, order, repeated calls</td><td><span class="s s-done">in paper</span></td><td>A5 (labels) + A3/A3b (repeats).</td></tr>
 </table></div>
@@ -138,15 +134,49 @@ li{margin:3px 0}
 <h2 id="a">A: API experiments</h2>
 <div class="tablewrap"><table>
 <tr><th>ID</th><th>experiment</th><th>status</th><th>in the paper</th></tr>
-<tr><td>A1</td><td>BaseJudge at 4 decimals / no limit</td><td><span class="s s-wait">matched written; paper-call running</span></td><td>main "Matching the BaseJudge call" + App. "Matching the BaseJudge Call" (table + figure <code>figs/matched_call</code>)</td></tr>
+<tr><td>A1</td><td>BaseJudge at 4 decimals / no limit</td><td><span class="s s-done">matched + paper call in paper</span></td><td>main "Matching the BaseJudge call" + App. "Matching the BaseJudge Call" (table + figure <code>figs/matched_call</code>)</td></tr>
 <tr><td>A2</td><td>same call, digit-token readout</td><td><span class="s s-done">done</span></td><td>same paragraph/appendix. Matched on purpose (only that call has logprobs).</td></tr>
 <tr><td>A3</td><td>LogJudge repeated ×3 at the real threshold</td><td><span class="s s-done">done</span></td><td>main "Stable across repeated calls" + App. "Logprob Capture Reproducibility" (<code>tab:repeat-stability</code>)</td></tr>
 <tr><td>A3b</td><td>paper BaseJudge repeated ×3 → paper FusionJudge ±</td><td><span class="s s-done">done</span></td><td>same; all three detectors in the table</td></tr>
-<tr><td>A4</td><td>averaging repeated BaseJudge samples</td><td><span class="s s-wait">matched written; paper-call running (R3)</span></td><td>one sentence in the matched-call paragraph + App. paragraph and <code>tab:repeated-sampling</code></td></tr>
+<tr><td>A4</td><td>averaging repeated BaseJudge samples</td><td><span class="s s-done">paper call + LogJudge repeats + matched T=1 in paper</span></td><td>one sentence in the matched-call paragraph + App. paragraph and <code>tab:repeated-sampling</code></td></tr>
 <tr><td>A5</td><td>label order and wording</td><td><span class="s s-done">done</span></td><td>main "Label order and wording" (after "Residual mass") + App. "Label Order and Wording"</td></tr>
 <tr><td>A6</td><td>rephrasing with a 2nd generator</td><td><span class="s s-todo">not planned</span></td><td>limitation only</td></tr>
+<tr><td>L1</td><td>LogJudge repeated ×3 on small (A4 at equal calls)</td><td><span class="s s-done">done</span></td><td>in <code>tab:repeated-sampling</code></td></tr>
+<tr><td>L2</td><td>LogJudge with reasoning (paper BaseJudge's settings)</td><td><span class="s s-done">impossible (API refuses logprobs)</span></td><td>one sentence in App. "Judge Prompts and API Settings"</td></tr>
+<tr><td>A7</td><td>gemma BaseJudge with thinking on, 2 dec.</td><td><span class="s s-done">pilot done</span> (full run optional)</td><td>main-text clause + App. pilot sentences (uncommitted): AUROC 0.875 vs 0.897 off, LogJudge 0.917; no more distinct values</td></tr>
 </table></div>
-<div class="callout risk"><b>Watch when A4 comes back:</b> the paper's BaseJudge is noisy between calls (only 13% of texts get the same value in 3 repeats), so averaging its calls may get close to LogJudge (LogJudge 0.683 vs paper BaseJudge 0.505 TPR@1%FPR on the small set). If so, the framing becomes "N reasoning calls to approach what LogJudge reads from one call". Report what comes out; xghj asked exactly this.</div>
+
+<h3 id="a1a4">A1/A4 results with the paper's BaseJudge call (2026-11-12, in the paper: 8866bf2)</h3>
+<p>gpt-5.6-luna, TPR@1%FPR / AT-HM, four-split mean. All figures in <code>data/parquet/tmp/rebuttal/eval/figs/</code>; <code>overview.png</code> has every version on one page (one block per subset; compare only within a block).</p>
+<div class="tablewrap"><table class="num">
+<tr><th>A1: all 36,148 texts, 1 call each</th><th>TPR</th><th>AT-HM</th><th>AUROC</th></tr>
+<tr><td>BaseJudge, paper call, 2 dec. (paper)</td><td>0.503</td><td>0.653</td><td>0.974</td></tr>
+<tr><td>paper call, 4 dec.</td><td>0.651</td><td>0.775</td><td>0.982</td></tr>
+<tr><td>paper call, 4 dec. rounded back to 2</td><td>0.591</td><td>0.730</td><td>0.982</td></tr>
+<tr><td>paper call, no limit</td><td>0.654</td><td>0.775</td><td>0.979</td></tr>
+<tr><td>LogJudge (paper)</td><td>0.648</td><td>0.767</td><td>0.975</td></tr>
+<tr><td>FusionJudge (paper)</td><td>0.761</td><td>0.848</td><td>0.981</td></tr>
+<tr><td>FusionJudge from the 4-dec. BaseJudge</td><td>0.740</td><td>0.837</td><td>0.984</td></tr>
+</table></div>
+<div class="tablewrap"><table class="num">
+<tr><th>A4: small subset, 6,200 texts</th><th>calls</th><th>TPR</th><th>AT-HM</th></tr>
+<tr><td>BaseJudge paper call, 1 new</td><td>1</td><td>0.477</td><td>0.629</td></tr>
+<tr><td>mean of 2 new</td><td>2</td><td>0.722</td><td>0.824</td></tr>
+<tr><td>mean of 3 new</td><td>3</td><td>0.739</td><td>0.837</td></tr>
+<tr><td>mean of 3 new + paper</td><td>4</td><td>0.783</td><td>0.865</td></tr>
+<tr><td>LogJudge (paper)</td><td>1</td><td>0.683</td><td>0.792</td></tr>
+<tr><td>FusionJudge (paper)</td><td>2</td><td>0.766</td><td>0.852</td></tr>
+<tr><td>LogJudge, 1 new / mean of 2 / 3 new / 3 + paper</td><td>1 / 2 / 3 / 4</td><td colspan="2">0.662 / 0.696 / 0.700 / 0.705</td></tr>
+<tr><td>FusionJudge 1+1 new / 2+2 / 3+3 / 3+3 + paper</td><td>2 / 4 / 6 / 8</td><td colspan="2">0.741 / 0.786 / 0.754 / 0.783 (3+3 dip = MG-AI-Sci, one-text threshold)</td></tr>
+</table></div>
+<p><b>Equal call budget:</b> 2 calls: FusionJudge 0.766 (paper's; 0.741 new) &gt; BaseJudge 0.722 &gt; LogJudge 0.696. 4 calls: FusionJudge 2+2 0.786 ≈ BaseJudge 0.782 (tie). Averaging helps BaseJudge +0.26, LogJudge +0.04 (1 → 3 calls). Never print the 4-call BaseJudge next to the 2-call FusionJudge without the budget.</p>
+<ul>
+  <li><b>What it means:</b> with the paper's call (which reasons), BaseJudge's weakness at 1% FPR is mostly coarse values and ties: more decimals or averaging fixes it. About 60% of the 4-decimal gain survives rounding back to 2 decimals, so the 4-decimal prompt changes the answer itself (more reasoning: on 62% of calls vs ~46%), not only its digits. The 4th digit is still mostly filler (61% end in "7"); it breaks ties (human tie group 29 → 1.5).</li>
+  <li><b>Per split</b> (4 dec. vs LogJudge): LogJudge ahead on GB-orig (0.805/0.786), MG-GB (0.547/0.475), MG-AI-Sci (0.56/0.48); BaseJudge far ahead on MG-Sci (0.865/0.679), where the paper's BaseJudge already led. MG-AI-Sci has 100 humans: its threshold is one text.</li>
+  <li><b>Gemma</b> (no reasoning; humans_plus_third): 4 dec. 0.424, no limit 0.505 vs LogJudge 0.512 and A2 0.50–0.52: LogJudge ≈ the best BaseJudge variant.</li>
+  <li><b>What still holds:</b> LogJudge gets this in one call without reasoning (BaseJudge 4-dec.: ~59 reasoning tokens on average); the matched call shows BaseJudge without reasoning is far behind; fusion adds ~0.09 over either part and stays best per call; gemma agrees.</li>
+  <li><b>Framing (agreed 2026-11-12): same test-time compute.</b> Abstract, intro, main figure and main results unchanged. (1) The main comparison is conservative: BaseJudge already reasons, LogJudge does not (effort none is required for logprobs). (2) At equal compute (matched call) the stated probability collapses (0.058) and the readout carries the signal. (3) More decimals help luna only with reasoning (more reasoning: 63% vs 49% of calls); gemma with thinking off stays ≤ LogJudge, and switching thinking on does not improve it. (4) Averaging is extra budget: at equal calls FusionJudge is best or tied; the ensemble part is not emphasized in the main text (one sentence).</li>
+</ul>
 
 <!-- ============================================================ -->
 <h2 id="b">B: CPU analyses on existing data</h2>
@@ -172,7 +202,7 @@ li{margin:3px 0}
 <tr><th>ID</th><th>task</th><th>status</th></tr>
 <tr><td>C1</td><td>reframe "finer underlying judgment" / "estimates P(human)"; heading "two readouts of one judgment"</td><td><span class="s s-todo">open</span></td></tr>
 <tr><td>C2</td><td>FusionJudge as heuristic score ensemble; drop "common scale" justification; B7 to appendix; w=½ history</td><td><span class="s s-todo">open · confirm w=½ history first</span></td></tr>
-<tr><td>C3</td><td>readout-isolation section</td><td><span class="s s-done">done</span> (A1/A2/A4 matched; update with R1–R3)</td></tr>
+<tr><td>C3</td><td>readout-isolation section</td><td><span class="s s-done">in paper (8866bf2)</span>: "Same test-time compute" + App. "Test-Time Compute"</td></tr>
 <tr><td>C4</td><td>thresholds and domain shift (B5); re-scope "flat by construction"; soften abstract if needed</td><td><span class="s s-todo">open</span></td></tr>
 <tr><td>C5</td><td>CIs, MG-AI-Sci LOO, leakage-free backbone (B4, B6)</td><td><span class="s s-todo">open</span></td></tr>
 <tr><td>C6</td><td>novelty positioning</td><td><span class="s s-todo">open</span></td></tr>
@@ -208,7 +238,25 @@ li{margin:3px 0}
 </table></div>
 
 <!-- ============================================================ -->
-<h2 id="decisions">Findings and decisions from session 2</h2>
+<h2 id="decisions">Findings and decisions</h2>
+<h3>Session 3 (2026-11-12)</h3>
+<ul>
+  <li><b>R1–R4 done</b>, 0 FAIL. Paper-call BaseJudge reaches LogJudge (see <a href="#a1a4">A1/A4 results</a>). Framing <b>not decided yet</b>; may need co-authors.</li>
+  <li>Only R1/R2 (luna precision) cover all 36,148 texts; R3 is on <code>small</code> (6,200), R4 on <code>humans_plus_third</code> (18,172). Never put numbers from different subsets side by side.</li>
+  <li><b>LogJudge with reasoning is impossible on luna</b> (400 "logprobs are not supported with reasoning models"). L2 dropped.</li>
+  <li>L1 started: LogJudge ×3 on the R3 rows, so A4 compares k calls with k calls.</li>
+  <li>The paper-call vs matched-call gap changes four things at once (interface: Chat Completions vs Responses; reasoning default vs none; temperature default vs 0; JSON schema vs plain text). Not separated; optional test if a reviewer asks: paper call with only <code>reasoning_effort="none"</code> added (~$6 on small).</li>
+  <li>No tools are involved in any call (no <code>tools</code> parameter; 16-token limit; the label is the first token).</li>
+  <li>Code: <code>evaluate.py</code> gained "4 dec. rounded to 2" and FusionJudge-from-paper-call rows, and the A4 LogJudge/FusionJudge k-call rows; matched-call labels now say "matched call". <code>plot.py</code> gained <code>overview</code>; <code>a4_averaging</code> now plots against API calls per text. Commit <code>9210d2a</code>.</li>
+  <li><b>L1 done</b>: LogJudge ×3 identical on 8.6% of texts; averaging helps it +0.04 vs BaseJudge +0.26. At equal call budget FusionJudge is best (2 calls) or tied (4 calls).</li>
+  <li><b>Framing agreed</b>: "same test-time compute" (see <a href="#a1a4">A1/A4 results</a>); the user does not want the abstract or main claims changed. The C1 concession is limited to the reply (the written number is not a calibrated probability); no paper text change for C1.</li>
+  <li><b>Gemma has a thinking mode</b> (optional, off by default). The paper said "no reasoning mode" in two places (and the code registry note in <code>add_llm_judge_scores.py</code>): reworded everywhere to "thinking mode off (the default)". Only <code>chat_template_kwargs.enable_thinking</code> switches it on at our endpoint. Pilot with thinking on (800 texts): AUROC 0.875 vs 0.897 off, LogJudge 0.917, no more distinct values. No more gemma experiments (user's decision); the 4-decimal thinking run was dropped.</li>
+  <li>Reasoning in the paper-call BaseJudge (luna, same 6,200 texts): 2 dec. 49% of calls / mean 47 reasoning tokens; 4 dec. 63% / 63; no limit 57% / 55. In dollars all ≈ the same per call (input dominates): argue compute, never price.</li>
+  <li>Abstract "about 30,000 texts" is Manugram (30,160); the evaluation uses 36,148 = Manugram + GB-orig (5,988). Write it out once in the rebuttal.</li>
+  <li>Figures: <code>fig_basejudge_versions.py</code> draws Figure-3-style scatters (<code>auroc_tpr_bj_{matched,decimals,ensemble}</code>) with the release repo's own function; decimals + ensemble copied to <code>overleaf/figs/</code> under new names. Code commits <code>cac8878</code>, <code>be07b9a</code>, <code>d994bb3</code> (A7 conditions, <code>--pilot N</code>).</li>
+  <li>Overleaf pull from this machine needs the user (auth); ask them to pull before editing.</li>
+</ul>
+<h3>Session 2 (2026-11-11)</h3>
 <ul>
   <li><b>The paper's BaseJudge used the endpoint's default settings</b> (Chat Completions, structured answer, no temperature/effort sent). The probe showed luna <b>reasons adaptively</b> under them (~4/12 calls at 2 decimals, ~10/12 at 4 decimals). The paper says "default settings", never "no reasoning".</li>
   <li>Framing: LogJudge wins, and wins by more when BaseJudge is called like LogJudge. <b>Do not present FusionJudge built from the matched BaseJudge</b> (it is worse than LogJudge; not our proposition).</li>
@@ -223,8 +271,9 @@ li{margin:3px 0}
 <h2 id="where">Where things are</h2>
 <ul>
   <li><b>Paper:</b> <code>overleaf/</code> (pushed; Overleaf has the user's latest tweak <code>1b31d29</code>). New labels: <code>sec:results_matched_call</code>, <code>sec:results_stability</code>, <code>sec:results_labels</code>, <code>apx:matched_call</code>, <code>apx:label_wording</code>, tables <code>tab:matched-call</code>, <code>tab:repeated-sampling</code>, <code>tab:repeat-stability</code>, <code>tab:label-wording</code>, figure <code>figs/matched_call.pdf</code>. Not compiled locally (no LaTeX here): check the build on Overleaf.</li>
-  <li><b>API code:</b> <code>epai/ai_detection/rebuttal/</code> (committed <code>1b004a2</code>): <code>conditions.py</code> (new <code>base_default</code>, <code>base_default_hp4</code>, <code>base_default_free</code>, <code>call="paper"</code>), <code>capture.py</code>, <code>check.py</code>, <code>evaluate.py</code> (new section <code>a3b</code>), <code>run_default.sh</code>, <code>run_default_extra.sh</code>, <code>run_gemma_default.sh</code>, <code>RUNBOOK.md</code>, <code>paper_fig_matched_call.py</code> (paper figure).</li>
-  <li><b>Results:</b> <code>data/parquet/tmp/rebuttal/&lt;model&gt;/</code>; evaluation in <code>…/eval/</code> (A3b was evaluated to the scratchpad only; a full <code>evaluate</code> after the rsync rewrites everything).</li>
+  <li><b>Paper:</b> rebuttal text pushed in <code>8866bf2</code>; gemma-thinking edits uncommitted; <code>iclr2027_conference.tex</code> + <code>figs/auroc_tpr_bj_decimals.pdf</code>, <code>figs/auroc_tpr_bj_ensemble.pdf</code>; review with <code>git -C overleaf diff</code>.</li>
+  <li><b>API code:</b> <code>epai/ai_detection/rebuttal/</code> (latest commit <code>d994bb3</code>; also <code>probe_gemma_thinking.py</code>, <code>fig_basejudge_versions.py</code>, <code>run_gemma_think.sh</code>): <code>conditions.py</code>, <code>capture.py</code>, <code>check.py</code>, <code>evaluate.py</code>, <code>plot.py</code>, <code>status.py</code>, run scripts (<code>run_default.sh</code>, <code>run_default_extra.sh</code>, <code>run_gemma_default.sh</code>, <code>run_lj_extra.sh</code>), <code>RUNBOOK.md</code>, <code>paper_fig_matched_call.py</code> (paper figure; not rerun since R1–R4, it would overwrite <code>overleaf/figs/matched_call.*</code>).</li>
+  <li><b>Results:</b> <code>data/parquet/tmp/rebuttal/&lt;model&gt;/</code>; evaluation in <code>…/eval/</code> (<code>summary.txt</code>, CSVs, <code>figs/</code> incl. <code>overview.png</code>), current as of R1–R4.</li>
   <li><b>CPU analyses:</b> <code>../logjudge-manugram/outputs/{tie_table,bootstrap_ci,threshold_transfer,backbone_loso,fusion_rules,residual_mass}/</code>.</li>
   <li><b>Not yet in the release repo:</b> the A-block numbers and the matched-call figure come from the rebuttal sidecars; if the rebuttal promises reproducibility for them, they must be added to <code>../logjudge-manugram</code>.</li>
   <li><b>Drafts:</b> <code>reviews/rebuttal_draft.txt</code> (wave-1 skeleton), <code>reviews/B1_residual_mass_summary.txt</code>. Both untracked in git.</li>

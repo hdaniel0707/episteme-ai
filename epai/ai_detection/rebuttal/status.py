@@ -35,8 +35,9 @@ PLAN = [
     ("gemma_def", "gemma4-31b", "base_default_hp4", "humans_plus_third", 1),
     ("gemma_def", "gemma4-31b", "base_default_free", "humans_plus_third", 1),
     ("lj_extra", "gpt56luna", "lj_v3", "small", 3),
+    # A7: only the 2-decimal run (pilot of 800, possibly completed to 6,200); the
+    # 4-decimal thinking run was dropped (2026-11-12)
     ("gemma_think", "gemma4-31b", "base_think", "small", 1),
-    ("gemma_think", "gemma4-31b", "base_think_hp4", "small", 1),
 ]
 
 
