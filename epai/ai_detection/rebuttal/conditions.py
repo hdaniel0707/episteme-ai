@@ -44,11 +44,6 @@ Conditions (TODO id in brackets):
                human/machine answer block). Repeated with --reps. Also on
                ``small`` x 3 (--subset small --reps 3) for A4: averaging repeated
                LogJudge calls on the same rows as base_default's repeats.
-  lj_default   [A1 LJ default]  lj_v3's prompt and logprobs, but with the paper
-               BaseJudge's call settings (call="default_lp"): Responses API with no
-               reasoning effort and no temperature sent (the endpoint's defaults, so
-               luna may reason), the reasoning-sized output limit. Asks whether
-               LogJudge also gains from reasoning. Luna only, ``full``.
   lj_swap      [A5]       same words, machine listed first.
   lj_alt       [A5]       other words: ``person`` / ``AI``.
   lj_letters   [A5]       letters with the opposite position bias from ord5:
@@ -77,7 +72,6 @@ import pandas as pd
 
 from epai.ai_detection.score.add_llm_judge_scores import (
     LOGPROB_ANSWER_BLOCK,
-    OPENAI_MAX_TOKENS,
     PROMPTS,
     evidence_head,
 )
@@ -149,8 +143,6 @@ class Condition:
     # "paper": the paper's BaseJudge call (add_llm_judge_scores._score_openai for
     # luna, ._score_genai4science for gemma): JudgeVerdict structured answer,
     # endpoint defaults (no temperature, no reasoning effort), no logprobs.
-    # "default_lp": LogJudge's Responses call with logprobs, but endpoint defaults
-    # (no temperature, no reasoning effort), as the paper's BaseJudge (luna only).
     call: str = "matched"
 
 
@@ -180,9 +172,6 @@ CONDITIONS: dict[str, Condition] = {c.name: c for c in [
               default_subset="full", call="paper"),
     Condition("base_default_free", "prob", _V3.replace(_TWO_DEC, _FREE_DEC), "A1 default",
               default_subset="full", call="paper"),
-    Condition("lj_default", "label", evidence_head("v3") + "\n\n" + LOGPROB_ANSWER_BLOCK,
-              "A1 LJ default", labels=_WORDS, default_subset="full", call="default_lp",
-              max_output_tokens=OPENAI_MAX_TOKENS),
 ]}
 
 # The paper's LogJudge must be reproduced exactly by lj_v3 -- same system prompt

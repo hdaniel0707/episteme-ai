@@ -110,8 +110,6 @@ LABELS = {
     "def_hp4_r2": "BaseJudge, paper call, 4 dec. rounded to 2",
     "fusion_def_hp4": "FusionJudge, paper call 4-dec. BaseJudge",
     "fusion_def_free": "FusionJudge, paper call free-precision BaseJudge",
-    "lj_default": "LogJudge, paper-call settings (may reason)",
-    "fusion_lj_default": "FusionJudge, both with paper-call settings",
     "lj_x1": "LogJudge, 1 new call",
     "lj_x2": "LogJudge, mean of 2 new",
     "lj_x3": "LogJudge, mean of 3 new",
@@ -292,21 +290,10 @@ def section_a1(master, ws, out) -> None:
             frame["fusion_def_hp4"] = _mean(frame["base_default_hp4"], frame["paper_lj"])
         if "base_default_free" in frame:
             frame["fusion_def_free"] = _mean(frame["base_default_free"], frame["paper_lj"])
-        # LogJudge with the paper BaseJudge's call settings (endpoint defaults, may reason);
-        # only once complete, since metric_rows keeps the rows every readout has
-        ljd = load_run(ws, model, "lj_default", subset) if model == "gpt56luna" else None
-        if ljd is not None:
-            ljd = ljd.set_index(KEY)["lj"].reindex(frame.index)
-            if ljd.isna().any():
-                print(f"  (lj_default incomplete: {int(ljd.isna().sum())} rows missing -- skipped)")
-            else:
-                frame["lj_default"] = ljd
-                frame["fusion_lj_default"] = _mean(frame["paper_base"], ljd)
         readouts = [k for k in ("paper_base", *PAPER_CALL, "def_hp4_r2", "base_v3", "base_hp4",
                                 "base_free", "base_v3_ev", "base_hp4_ev", "base_free_ev",
-                                "paper_lj", "lj_default", "paper_fusion", "fusion_def_hp4",
-                                "fusion_def_free", "fusion_lj_default", "fusion_v3")
-                    if k in frame]
+                                "paper_lj", "paper_fusion", "fusion_def_hp4",
+                                "fusion_def_free", "fusion_v3") if k in frame]
         rows = metric_rows(frame, readouts, experiment="A1A2", model=model, subset=subset)
         metrics += rows
         print_table(rows)

@@ -85,15 +85,14 @@ USAGE_COLS = ("input_tokens", "output_tokens", "reasoning_tokens")
 
 
 def _call_openai(client, model_id: str, cond: Condition, text: str):
-    # call="default_lp": no reasoning effort and no temperature sent (the endpoint's
-    # defaults, as the paper's BaseJudge); the token usage is stored to show the reasoning
-    settings = ({} if cond.call == "default_lp"
-                else {"reasoning": {"effort": "none"}, "temperature": cond.temperature})
+    # effort none is required: the endpoint refuses logprobs on any call that may
+    # reason ("logprobs are not supported with reasoning models", probe 2026-11-12)
     resp = client.responses.create(
         model=model_id, instructions=cond.system,
         input=USER_TEMPLATE.format(text=text),
         include=["message.output_text.logprobs"], top_logprobs=TOP_N,
-        max_output_tokens=cond.max_output_tokens, **settings,
+        reasoning={"effort": "none"}, temperature=cond.temperature,
+        max_output_tokens=cond.max_output_tokens,
     )
     for item in getattr(resp, "output", []) or []:
         if getattr(item, "type", None) != "message":
@@ -107,18 +106,8 @@ def _call_openai(client, model_id: str, cond: Condition, text: str):
             toks = [{"token": t.token, "logprob": float(t.logprob),
                      "top": [{"token": a.token, "logprob": float(a.logprob)}
                              for a in (t.top_logprobs or [])]} for t in lps]
-            usage = _usage_responses(resp, part.text) if cond.call == "default_lp" else None
-            return part.text, toks, getattr(resp, "model", None), usage
+            return part.text, toks, getattr(resp, "model", None), None
     raise ValueError("no output_text part in the Responses object")
-
-
-def _usage_responses(resp, content: str | None) -> dict:
-    u = getattr(resp, "usage", None)
-    det = getattr(u, "output_tokens_details", None)
-    return {"input_tokens": getattr(u, "input_tokens", None),
-            "output_tokens": getattr(u, "output_tokens", None),
-            "reasoning_tokens": getattr(det, "reasoning_tokens", None),
-            "raw_answer": content}
 
 
 def _call_openai_paper(client, model_id: str, cond: Condition, text: str):
@@ -216,8 +205,6 @@ def _call_genai4science(client, model_id: str, cond: Condition, text: str):
 
 
 def _caller(provider: str, cond: Condition):
-    if cond.call == "default_lp" and provider != "openai":
-        raise SystemExit(f"{cond.name} is luna-only (call='default_lp')")
     if cond.call == "paper":
         return _call_openai_paper if provider == "openai" else _call_genai4science_paper
     return _call_openai if provider == "openai" else _call_genai4science
@@ -345,8 +332,7 @@ def main() -> None:
     print(f"model {args.model} ({spec.model})  condition {cond.name} [{cond.todo}]  "
           f"subset {subset}  reps {reps}  "
           + ("call: the paper's BaseJudge (endpoint defaults)" if cond.call == "paper"
-             else "call: Responses + logprobs, endpoint defaults (may reason)"
-             if cond.call == "default_lp" else f"temperature {cond.temperature}"))
+             else f"temperature {cond.temperature}"))
     by = rows.groupby("stem", sort=False)["generated_by"]
     for stem, g in by:
         print(f"  {stem:22} {len(g):6} rows  ({int(g.eq(HUMAN).sum())} human)")

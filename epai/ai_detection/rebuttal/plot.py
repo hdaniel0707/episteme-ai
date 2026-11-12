@@ -198,10 +198,9 @@ A1_ORDER = ["BaseJudge (paper call)", "BaseJudge, paper call, 4 dec.",
             "BaseJudge, matched call, 2 dec.", "BaseJudge, matched call, 4 dec.",
             "BaseJudge, matched call, free precision", "A2: E[number], 2 dec.",
             "A2: E[number], 4 dec.", "A2: E[number], free", "LogJudge (paper)",
-            "LogJudge, paper-call settings (may reason)",
             "FusionJudge (paper)", "FusionJudge, paper call 4-dec. BaseJudge",
             "FusionJudge, paper call free-precision BaseJudge",
-            "FusionJudge, both with paper-call settings", "FusionJudge, matched BaseJudge"]
+            "FusionJudge, matched BaseJudge"]
 A4_ORDER = ["BaseJudge (paper call)", "BaseJudge paper call, 1 new sample",
             "BaseJudge paper call, mean of 2 new", "BaseJudge paper call, mean of 3 new",
             "BaseJudge paper call, mean of 3 new + paper", "BaseJudge, matched call, 2 dec.",

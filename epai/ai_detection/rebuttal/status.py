@@ -35,7 +35,6 @@ PLAN = [
     ("gemma_def", "gemma4-31b", "base_default_hp4", "humans_plus_third", 1),
     ("gemma_def", "gemma4-31b", "base_default_free", "humans_plus_third", 1),
     ("lj_extra", "gpt56luna", "lj_v3", "small", 3),
-    ("lj_extra", "gpt56luna", "lj_default", "full", 1),
 ]
 
 
