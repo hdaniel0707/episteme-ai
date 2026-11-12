@@ -88,12 +88,13 @@ def check_run(model: str, cond_name: str, subset: str, reps: int, expected: pd.D
         if no_tok:
             rec["fail"].append(f"{no_tok} answered rows without token windows")
         df = df[[t is not None and len(t) > 0 for t in df["tokens"]]]
-    else:
+    if paper_call:
         # rows captured before capture._as_written existed stored "0.4" for a written
         # 0.40: re-spell every answer from the raw JSON so decimals count the same way
         if "raw_answer" in df:
             df = df.assign(answer=[_as_written(float(v), raw) for v, raw in
                                    zip(df["score"], df["raw_answer"])])
+    if cond.call != "matched":   # endpoint defaults: report how much the model reasoned
         u = df[["input_tokens", "output_tokens", "reasoning_tokens"]].apply(
             pd.to_numeric, errors="coerce")
         rec["info"].append(f"tokens per call (median): input {u['input_tokens'].median():.0f}, "
@@ -162,7 +163,7 @@ def check_run(model: str, cond_name: str, subset: str, reps: int, expected: pd.D
         if wide.shape[1] > 1:
             same = (wide.nunique(axis=1) == 1).mean()
             rec["info"].append(f"identical {col} across all {wide.shape[1]} reps: {same:.1%} "
-                               f"(T={'default' if cond.call == 'paper' else cond.temperature})")
+                               f"(T={'default' if cond.call != 'matched' else cond.temperature})")
     return rec
 
 

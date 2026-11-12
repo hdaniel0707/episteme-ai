@@ -88,8 +88,8 @@ KEY = ["stem", "uid"]
 LABELS = {
     "paper_base": "BaseJudge (paper call)",
     "base_v3": "BaseJudge, matched call, 2 dec.",
-    "base_hp4": "BaseJudge, 4 dec.",
-    "base_free": "BaseJudge, free precision",
+    "base_hp4": "BaseJudge, matched call, 4 dec.",
+    "base_free": "BaseJudge, matched call, free precision",
     "base_v3_ev": "A2: E[number], 2 dec.",
     "base_hp4_ev": "A2: E[number], 4 dec.",
     "base_free_ev": "A2: E[number], free",
@@ -107,6 +107,19 @@ LABELS = {
     "fusion": "FusionJudge (matched)",
     "base_default_hp4": "BaseJudge, paper call, 4 dec.",
     "base_default_free": "BaseJudge, paper call, free precision",
+    "def_hp4_r2": "BaseJudge, paper call, 4 dec. rounded to 2",
+    "fusion_def_hp4": "FusionJudge, paper call 4-dec. BaseJudge",
+    "fusion_def_free": "FusionJudge, paper call free-precision BaseJudge",
+    "lj_default": "LogJudge, paper-call settings (may reason)",
+    "fusion_lj_default": "FusionJudge, both with paper-call settings",
+    "lj_x1": "LogJudge, 1 new call",
+    "lj_x2": "LogJudge, mean of 2 new",
+    "lj_x3": "LogJudge, mean of 3 new",
+    "lj_x4": "LogJudge, mean of 3 new + paper",
+    "fus_x1": "FusionJudge, 1+1 new calls",
+    "fus_x2": "FusionJudge, means of 2+2 new",
+    "fus_x3": "FusionJudge, means of 3+3 new",
+    "fus_x4": "FusionJudge, means of 3+3 new + paper",
     "def_x1": "BaseJudge paper call, 1 new sample",
     "def_x2": "BaseJudge paper call, mean of 2 new",
     "def_x3": "BaseJudge paper call, mean of 3 new",
@@ -271,9 +284,29 @@ def section_a1(master, ws, out) -> None:
         frame = frame.loc[frame.index.isin(next(iter(runs.values())).set_index(KEY).index)]
         if "base_v3" in runs:
             frame["fusion_v3"] = _mean(frame["base_v3"], frame["paper_lj"])
-        readouts = [k for k in ("paper_base", *PAPER_CALL, "base_v3", "base_hp4", "base_free",
-                                "base_v3_ev", "base_hp4_ev", "base_free_ev", "paper_lj",
-                                "paper_fusion", "fusion_v3") if k in frame]
+        # paper call: how much of the 4-dec. gain survives rounding back to the paper's
+        # 2 decimals (= the prompt changed the answer, not just added digits), and the
+        # paper's fusion rule built from the higher-precision BaseJudge
+        if "base_default_hp4" in frame:
+            frame["def_hp4_r2"] = frame["base_default_hp4"].round(2)
+            frame["fusion_def_hp4"] = _mean(frame["base_default_hp4"], frame["paper_lj"])
+        if "base_default_free" in frame:
+            frame["fusion_def_free"] = _mean(frame["base_default_free"], frame["paper_lj"])
+        # LogJudge with the paper BaseJudge's call settings (endpoint defaults, may reason);
+        # only once complete, since metric_rows keeps the rows every readout has
+        ljd = load_run(ws, model, "lj_default", subset) if model == "gpt56luna" else None
+        if ljd is not None:
+            ljd = ljd.set_index(KEY)["lj"].reindex(frame.index)
+            if ljd.isna().any():
+                print(f"  (lj_default incomplete: {int(ljd.isna().sum())} rows missing -- skipped)")
+            else:
+                frame["lj_default"] = ljd
+                frame["fusion_lj_default"] = _mean(frame["paper_base"], ljd)
+        readouts = [k for k in ("paper_base", *PAPER_CALL, "def_hp4_r2", "base_v3", "base_hp4",
+                                "base_free", "base_v3_ev", "base_hp4_ev", "base_free_ev",
+                                "paper_lj", "lj_default", "paper_fusion", "fusion_def_hp4",
+                                "fusion_def_free", "fusion_lj_default", "fusion_v3")
+                    if k in frame]
         rows = metric_rows(frame, readouts, experiment="A1A2", model=model, subset=subset)
         metrics += rows
         print_table(rows)
@@ -486,12 +519,35 @@ def section_a4(master, ws, out) -> None:
             dk.append("def_x4")
         print(f"  paper-call repeats: {len(dreps)} reps; identical across them on "
               f"{(wd[dreps].nunique(axis=1) == 1).mean():.1%} of rows")
+    # LogJudge repeated on the same rows (its paper call, T=0), and FusionJudge from
+    # k BaseJudge + k LogJudge calls (2k calls)
+    lv = load_run(ws, "gpt56luna", "lj_v3", "small")
+    if lv is not None:
+        wl = wide(lv, "lj").reindex(frame.index)
+        lreps = sorted(wl.columns)
+        if wl.isna().any().any():
+            print(f"  (lj_v3 small incomplete: {int(wl.isna().sum().sum())} missing -- skipped)")
+        else:
+            for k in range(1, len(lreps) + 1):
+                frame[f"lj_x{k}"] = wl[lreps[:k]].mean(axis=1)
+                dk.append(f"lj_x{k}")
+            if len(lreps) == 3:
+                frame["lj_x4"] = pd.concat([wl[lreps], frame["paper_lj"]], axis=1).mean(axis=1)
+                dk.append("lj_x4")
+            for k in range(1, 5):
+                if f"def_x{k}" in frame and f"lj_x{k}" in frame:
+                    frame[f"fus_x{k}"] = _mean(frame[f"def_x{k}"], frame[f"lj_x{k}"])
+                    dk.append(f"fus_x{k}")
+            print(f"  LogJudge repeats: {len(lreps)} reps; identical across them on "
+                  f"{(wl[lreps].nunique(axis=1) == 1).mean():.1%} of rows")
     readouts = [c for c in ("paper_base", "base_v3", *[f"t1_x{k}" for k in
                 range(1, len(reps) + 1)], *dk, "paper_lj", "paper_fusion") if c in frame]
     rows = metric_rows(frame, readouts, experiment="A4", model="gpt56luna", subset="small")
-    for r in rows:
-        r["calls"] = (int(r["readout"][-1]) if r["readout"].startswith(("t1_x", "def_x"))
-                      else 1)
+    for r in rows:   # API calls per text behind each readout
+        ro = r["readout"]
+        r["calls"] = (int(ro[-1]) if ro.startswith(("t1_x", "def_x", "lj_x"))
+                      else 2 * int(ro[-1]) if ro.startswith("fus_x")
+                      else 2 if ro == "paper_fusion" else 1)
     print_table(rows)
     _write(out, "a4_metrics", rows)
 

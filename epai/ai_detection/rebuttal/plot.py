@@ -5,6 +5,9 @@ r"""Figures for the rebuttal API experiments, from ``evaluate.py``'s CSVs only.
 Writes PNG + PDF to ``<eval dir>/figs/``. A figure whose CSV is missing is
 skipped. Palette and plain style follow the release repo's ``plotting/_plots.py``.
 
+  overview                  every BaseJudge / LogJudge / FusionJudge version in one
+                            figure: luna A1 (full), luna A4 (small), gemma A1
+                            (humans_plus_third); one block per subset
   a1_readouts_<model>       AUROC / TPR@1%FPR / AT-HM per readout (dots = splits,
                             bar = four-split mean): A1 + A2 at a glance
   a1_resolution_<model>     distinct values among human texts, and the size of the
@@ -14,7 +17,8 @@ skipped. Palette and plain style follow the release repo's ``plotting/_plots.py`
                             straight segments
   a3_stability              AT-HM per repeat, and decision flip rates at the real
                             1%-FPR threshold near it vs. away from it
-  a4_averaging              T=1 BaseJudge averaged over 1-3 calls vs. LogJudge (1 call)
+  a4_averaging              BaseJudge / LogJudge / FusionJudge averaged over repeated
+                            calls, against the API calls per text
   a5_labels                 LogJudge under other label words / order
 """
 
@@ -80,11 +84,22 @@ def dotplot(df: pd.DataFrame, order: list[str], panels: list[tuple[str, str]], p
     labels = [l for l in order if l in set(df["label"])]
     if not labels:
         return
-    ypos = {l: len(labels) - 1 - i for i, l in enumerate(labels)}
     fig, axes = plt.subplots(1, len(panels), figsize=(3.0 * len(panels) + 2.2,
                                                       0.32 * len(labels) + 1.4),
                              sharey=True, squeeze=False)
-    for ax, (col, xlabel) in zip(axes[0], panels):
+    _dotrow(axes[0], df, labels, panels, logx)
+    h, l = axes[0][0].get_legend_handles_labels()
+    fig.legend(h, l, loc="upper center", ncol=len(l), bbox_to_anchor=(0.6, 1.0),
+               fontsize=8, handletextpad=0.2, columnspacing=1.0)
+    fig.suptitle(title, x=0.01, ha="left", y=1.06, fontsize=10)
+    _save(fig, path, name)
+
+
+def _dotrow(axes, df: pd.DataFrame, labels: list[str], panels: list[tuple[str, str]],
+            logx: bool = False) -> None:
+    """One row of dot panels (shared y = ``labels``)."""
+    ypos = {l: len(labels) - 1 - i for i, l in enumerate(labels)}
+    for ax, (col, xlabel) in zip(axes, panels):
         _style(ax)
         for i in _groups(labels):
             ax.axhline(ypos[labels[i]] - 0.5, color=MUTED, lw=0.5, alpha=0.5)
@@ -102,13 +117,8 @@ def dotplot(df: pd.DataFrame, order: list[str], panels: list[tuple[str, str]], p
         if logx:
             ax.set_xscale("symlog", linthresh=1) if (df[col] == 0).any() else ax.set_xscale("log")
         ax.set_xlabel(xlabel)
-    axes[0][0].set_yticks(list(ypos.values()), list(ypos.keys()))
-    axes[0][0].set_ylim(-0.6, len(labels) - 0.4)
-    h, l = axes[0][0].get_legend_handles_labels()
-    fig.legend(h, l, loc="upper center", ncol=len(l), bbox_to_anchor=(0.6, 1.0),
-               fontsize=8, handletextpad=0.2, columnspacing=1.0)
-    fig.suptitle(title, x=0.01, ha="left", y=1.06, fontsize=10)
-    _save(fig, path, name)
+    axes[0].set_yticks(list(ypos.values()), list(ypos.keys()))
+    axes[0].set_ylim(-0.6, len(labels) - 0.4)
 
 
 # ---------------------------------------------------------------------------
@@ -118,10 +128,7 @@ def fig_a1(d: Path, figs: Path) -> None:
     m = _read(d, "a1_metrics")
     if m is None:
         return
-    order = ["BaseJudge (paper call)", "BaseJudge, matched call, 2 dec.", "BaseJudge, 4 dec.",
-             "BaseJudge, free precision", "A2: E[number], 2 dec.", "A2: E[number], 4 dec.",
-             "A2: E[number], free", "LogJudge (paper)", "FusionJudge (paper)",
-             "FusionJudge, matched BaseJudge"]
+    order = A1_ORDER
     for model, g in m.groupby("model"):
         name = MODEL_NAME.get(model, model)
         dotplot(g, order, METRICS, figs, f"a1_readouts_{model}",
@@ -158,8 +165,9 @@ def fig_a1(d: Path, figs: Path) -> None:
 
     r = _read(d, "a1_roc")
     if r is not None:
-        show = ["BaseJudge (paper call)", "BaseJudge, 4 dec.", "BaseJudge, free precision",
-                "A2: E[number], 4 dec.", "LogJudge (paper)", "FusionJudge (paper)"]
+        show = ["BaseJudge (paper call)", "BaseJudge, paper call, 4 dec.",
+                "BaseJudge, paper call, free precision", "BaseJudge, matched call, 4 dec.",
+                "LogJudge (paper)", "FusionJudge (paper)", "A2: E[number], 4 dec."]
         for model, g in r.groupby("model"):
             splits = [s for s in SPLITS if s in set(g["split"])]
             fig, axes = plt.subplots(1, len(splits), figsize=(3.0 * len(splits), 3.0),
@@ -171,7 +179,7 @@ def fig_a1(d: Path, figs: Path) -> None:
                     if c.empty:
                         continue
                     ax.plot(100 * c["fpr"], c["tpr"], color=PALETTE[i], lw=1.4, label=lab,
-                            drawstyle="default")
+                            ls=":" if "matched" in lab or lab.startswith("A2") else "-")
                 ax.axvline(1, color=MUTED, ls="--", lw=0.8)
                 ax.set_xlim(0, 5)
                 ax.set_xlabel("FPR (%)")
@@ -183,6 +191,64 @@ def fig_a1(d: Path, figs: Path) -> None:
                          f"segment is one tie group, flagged all at once", x=0.01, ha="left",
                          y=1.2)
             _save(fig, figs, f"a1_roc_{model}")
+
+
+A1_ORDER = ["BaseJudge (paper call)", "BaseJudge, paper call, 4 dec.",
+            "BaseJudge, paper call, 4 dec. rounded to 2", "BaseJudge, paper call, free precision",
+            "BaseJudge, matched call, 2 dec.", "BaseJudge, matched call, 4 dec.",
+            "BaseJudge, matched call, free precision", "A2: E[number], 2 dec.",
+            "A2: E[number], 4 dec.", "A2: E[number], free", "LogJudge (paper)",
+            "LogJudge, paper-call settings (may reason)",
+            "FusionJudge (paper)", "FusionJudge, paper call 4-dec. BaseJudge",
+            "FusionJudge, paper call free-precision BaseJudge",
+            "FusionJudge, both with paper-call settings", "FusionJudge, matched BaseJudge"]
+A4_ORDER = ["BaseJudge (paper call)", "BaseJudge paper call, 1 new sample",
+            "BaseJudge paper call, mean of 2 new", "BaseJudge paper call, mean of 3 new",
+            "BaseJudge paper call, mean of 3 new + paper", "BaseJudge, matched call, 2 dec.",
+            "BaseJudge T=1, 1 sample", "BaseJudge T=1, mean of 2", "BaseJudge T=1, mean of 3",
+            "LogJudge (paper)", "LogJudge, 1 new call", "LogJudge, mean of 2 new",
+            "LogJudge, mean of 3 new", "LogJudge, mean of 3 new + paper",
+            "FusionJudge (paper)", "FusionJudge, 1+1 new calls", "FusionJudge, means of 2+2 new",
+            "FusionJudge, means of 3+3 new", "FusionJudge, means of 3+3 new + paper"]
+
+
+def fig_overview(d: Path, figs: Path) -> None:
+    """All versions, one block per (model, subset): metrics are only comparable
+    within a block (same rows), never across blocks."""
+    a1, a4 = _read(d, "a1_metrics"), _read(d, "a4_metrics")
+    blocks = []
+    if a1 is not None:
+        for model, subset in (("gpt56luna", "full"), ("gemma4-31b", "humans_plus_third")):
+            g = a1[a1["model"] == model]
+            if not g.empty:
+                n = int(g[g["split"] != "mean"].groupby("label")["n"].sum().max())
+                blocks.append((g, A1_ORDER, f"{MODEL_NAME[model]} · A1/A2 precision and "
+                                            f"readout · subset {subset} ({n:,} texts)"))
+    if a4 is not None:
+        n = int(a4[a4["split"] != "mean"].groupby("label")["n"].sum().max())
+        blocks.append((a4, A4_ORDER, f"gpt-5.6-luna · A4 repeated calls · subset small "
+                                     f"({n:,} texts)"))
+    blocks = [(g, [l for l in o if l in set(g["label"])], t) for g, o, t in blocks]
+    blocks.sort(key=lambda b: b[2].startswith("gemma"))      # luna blocks first
+    if not blocks:
+        return
+    heights = [len(l) + 1.2 for _, l, _ in blocks]
+    fig, axes = plt.subplots(len(blocks), len(METRICS), squeeze=False,
+                             figsize=(3.0 * len(METRICS) + 3.4, 0.3 * sum(heights) + 1.2),
+                             gridspec_kw={"height_ratios": heights})
+    for row, (g, labels, title) in zip(axes, blocks):
+        _dotrow(row, g, labels, METRICS)
+        row[0].set_title(title, loc="left", fontsize=9.5, fontweight="bold", x=-0.9)
+        for ax in row[1:]:
+            ax.set_yticks(row[0].get_yticks(), [""] * len(row[0].get_yticks()))
+            ax.set_ylim(row[0].get_ylim())
+    h, l = axes[0][0].get_legend_handles_labels()
+    fig.legend(h, l, loc="upper center", ncol=len(l), bbox_to_anchor=(0.6, 1.0),
+               fontsize=8, handletextpad=0.2, columnspacing=1.0)
+    fig.suptitle("All BaseJudge / LogJudge / FusionJudge versions. Dots = splits, black "
+                 "tick = four-split mean; compare only within a block (same rows)",
+                 x=0.01, ha="left", y=1.02, fontsize=10)
+    _save(fig, figs, "overview")
 
 
 def fig_a3(d: Path, figs: Path) -> None:
@@ -228,31 +294,46 @@ def fig_a3(d: Path, figs: Path) -> None:
 
 
 def fig_a4(d: Path, figs: Path) -> None:
+    """Score averaged over k repeated calls, against the API calls per text it took.
+    FusionJudge from k BaseJudge + k LogJudge calls sits at 2k. The last point of the
+    paper-call curves adds the paper's stored answer to the 3 new ones."""
     m = _read(d, "a4_metrics")
     if m is None:
         return
     mean = m[m["split"] == "mean"].set_index("label")
-    t1 = mean[mean["readout"].str.startswith("t1_x")].copy()
-    t1["calls"] = t1["readout"].str[-1].astype(int)
-    t1 = t1.sort_values("calls")
-    refs = [(l, PALETTE[i + 1]) for i, l in enumerate(
-        ["BaseJudge, matched call, 2 dec.", "LogJudge (paper)", "FusionJudge (paper)"])
-        if l in mean.index]
-    fig, axes = plt.subplots(1, 2, figsize=(8.5, 2.9))
+    if "calls" not in mean:
+        return
+    curves = [("t1_x", "BaseJudge matched call T=1, mean of k", PALETTE[0], "o"),
+              ("def_x", "BaseJudge paper call, mean of k", PALETTE[5], "s"),
+              ("lj_x", "LogJudge, mean of k", PALETTE[2], "D"),
+              ("fus_x", "FusionJudge, means of k + k", PALETTE[3], "^")]
+    singles = [("BaseJudge, matched call, 2 dec.", PALETTE[1]),
+               ("BaseJudge (paper call)", PALETTE[5]),
+               ("LogJudge (paper)", PALETTE[2]), ("FusionJudge (paper)", PALETTE[3])]
+    fig, axes = plt.subplots(1, 2, figsize=(9.0, 3.1))
+    xmax = 1
     for ax, (col, lab) in zip(axes, [("tpr", "four-split mean TPR @ 1% FPR"),
                                      ("athm", "four-split mean AT-HM")]):
         _style(ax)
-        ax.plot(t1["calls"], t1[col], marker="o", color=PALETTE[0], lw=1.6,
-                label="BaseJudge T=1, mean of k calls")
-        for l, c in refs:
-            ax.axhline(mean.loc[l, col], color=c, ls="--", lw=1.2, label=f"{l} (1 call)")
-        ax.set_xticks(t1["calls"])
-        ax.set_xlabel("calls per document (k)")
+        for prefix, name, c, mk in curves:
+            g = mean[mean["readout"].str.startswith(prefix)].sort_values("calls")
+            if g.empty:
+                continue
+            xmax = max(xmax, int(g["calls"].max()))
+            ax.plot(g["calls"], g[col], marker=mk, color=c, lw=1.6, ms=5, label=name)
+        for l, c in singles:
+            if l in mean.index:
+                ax.scatter(mean.loc[l, "calls"], mean.loc[l, col], s=70, facecolor="none",
+                           edgecolor=c, linewidth=1.6, zorder=4,
+                           label=f"{l} (stored, {int(mean.loc[l, 'calls'])} call"
+                                 f"{'s' if mean.loc[l, 'calls'] > 1 else ''})")
+        ax.set_xticks(range(1, xmax + 1))
+        ax.set_xlabel("API calls per text")
         ax.set_ylabel(lab)
     h, l = axes[0].get_legend_handles_labels()
-    fig.legend(h, l, loc="upper center", ncol=2, bbox_to_anchor=(0.5, 1.13), fontsize=8)
-    fig.suptitle("A4 (gpt-5.6-luna, small subset): averaging sampled BaseJudge answers",
-                 x=0.01, ha="left", y=1.2)
+    fig.legend(h, l, loc="upper center", ncol=2, bbox_to_anchor=(0.5, 1.22), fontsize=8)
+    fig.suptitle("A4 (gpt-5.6-luna, small subset): averaging repeated calls, by the calls it "
+                 "takes", x=0.01, ha="left", y=1.3)
     _save(fig, figs, "a4_averaging")
 
 
@@ -276,7 +357,7 @@ def main() -> None:
     figs = args.out / "figs"
     figs.mkdir(parents=True, exist_ok=True)
     print(f"figures -> {figs}")
-    for fn in (fig_a1, fig_a3, fig_a4, fig_a5):
+    for fn in (fig_overview, fig_a1, fig_a3, fig_a4, fig_a5):
         fn(args.out, figs)
 
 

@@ -177,6 +177,30 @@ analysis still works.
 `evaluate.py` picks them up automatically: A1 gets the paper-call precision rows, A4 the
 averages of 1–3 new paper-call answers and of those 3 plus the paper's stored answer.
 
+## LogJudge counterparts (`run_lj_extra.sh`)
+
+R1–R3 showed that the paper-call BaseJudge reaches LogJudge with 4 decimals or 2 averaged
+calls. Two LogJudge runs make those comparisons symmetric:
+
+| run | condition | subset × reps | calls | cost |
+|---|---|---|---|---|
+| L1 | `lj_v3` (the paper's LogJudge call, T=0, effort none) | small × 3 | 18,600 | ~$5 |
+| L2 | `lj_default`: LogJudge prompt + logprobs, endpoint defaults (no effort, no temperature sent: may reason) | full × 1 | 36,148 | ~$10–15 |
+
+L1 sits on the same rows as R3, so A4 compares k calls with k calls; FusionJudge from k
+BaseJudge + k LogJudge calls is plotted at 2k calls. L2 asks whether LogJudge also gains
+from reasoning. It may not be possible: probe it first, and if the probe FAILs or shows
+no logprobs, the endpoint gives no logprobs with reasoning (drop step 2 of the script).
+After reasoning, the label token is probably near-certain, which would make LogJudge coarse.
+
+```bash
+.venv/bin/python -m epai.ai_detection.rebuttal.capture --model gpt56luna --condition lj_default --probe 12
+bash epai/ai_detection/rebuttal/run_lj_extra.sh      # inside tmux
+```
+
+`evaluate.py` adds them only once complete: A1 gets "LogJudge, paper-call settings" and
+"FusionJudge, both with paper-call settings"; A4 the LogJudge and FusionJudge k-call rows.
+
 ## Running many jobs
 
 The luna jobs write separate sidecars, so two or three can run at once in separate

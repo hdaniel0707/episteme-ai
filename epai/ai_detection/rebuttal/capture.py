@@ -85,12 +85,15 @@ USAGE_COLS = ("input_tokens", "output_tokens", "reasoning_tokens")
 
 
 def _call_openai(client, model_id: str, cond: Condition, text: str):
+    # call="default_lp": no reasoning effort and no temperature sent (the endpoint's
+    # defaults, as the paper's BaseJudge); the token usage is stored to show the reasoning
+    settings = ({} if cond.call == "default_lp"
+                else {"reasoning": {"effort": "none"}, "temperature": cond.temperature})
     resp = client.responses.create(
         model=model_id, instructions=cond.system,
         input=USER_TEMPLATE.format(text=text),
         include=["message.output_text.logprobs"], top_logprobs=TOP_N,
-        reasoning={"effort": "none"}, temperature=cond.temperature,
-        max_output_tokens=cond.max_output_tokens,
+        max_output_tokens=cond.max_output_tokens, **settings,
     )
     for item in getattr(resp, "output", []) or []:
         if getattr(item, "type", None) != "message":
@@ -104,8 +107,18 @@ def _call_openai(client, model_id: str, cond: Condition, text: str):
             toks = [{"token": t.token, "logprob": float(t.logprob),
                      "top": [{"token": a.token, "logprob": float(a.logprob)}
                              for a in (t.top_logprobs or [])]} for t in lps]
-            return part.text, toks, getattr(resp, "model", None), None
+            usage = _usage_responses(resp, part.text) if cond.call == "default_lp" else None
+            return part.text, toks, getattr(resp, "model", None), usage
     raise ValueError("no output_text part in the Responses object")
+
+
+def _usage_responses(resp, content: str | None) -> dict:
+    u = getattr(resp, "usage", None)
+    det = getattr(u, "output_tokens_details", None)
+    return {"input_tokens": getattr(u, "input_tokens", None),
+            "output_tokens": getattr(u, "output_tokens", None),
+            "reasoning_tokens": getattr(det, "reasoning_tokens", None),
+            "raw_answer": content}
 
 
 def _call_openai_paper(client, model_id: str, cond: Condition, text: str):
@@ -203,6 +216,8 @@ def _call_genai4science(client, model_id: str, cond: Condition, text: str):
 
 
 def _caller(provider: str, cond: Condition):
+    if cond.call == "default_lp" and provider != "openai":
+        raise SystemExit(f"{cond.name} is luna-only (call='default_lp')")
     if cond.call == "paper":
         return _call_openai_paper if provider == "openai" else _call_genai4science_paper
     return _call_openai if provider == "openai" else _call_genai4science
@@ -307,7 +322,7 @@ def main() -> None:
 
     if args.list:
         for c in CONDITIONS.values():
-            t = "default" if c.call == "paper" else c.temperature
+            t = "default" if c.call != "matched" else c.temperature
             print(f"{c.name:12} {c.kind:5} T={t:<3} [{c.todo}]  "
                   f"default subset={c.default_subset} reps={c.default_reps}")
         print("subsets:", ", ".join(SUBSETS))
@@ -330,7 +345,8 @@ def main() -> None:
     print(f"model {args.model} ({spec.model})  condition {cond.name} [{cond.todo}]  "
           f"subset {subset}  reps {reps}  "
           + ("call: the paper's BaseJudge (endpoint defaults)" if cond.call == "paper"
-             else f"temperature {cond.temperature}"))
+             else "call: Responses + logprobs, endpoint defaults (may reason)"
+             if cond.call == "default_lp" else f"temperature {cond.temperature}"))
     by = rows.groupby("stem", sort=False)["generated_by"]
     for stem, g in by:
         print(f"  {stem:22} {len(g):6} rows  ({int(g.eq(HUMAN).sum())} human)")
@@ -368,7 +384,7 @@ def main() -> None:
     n_in = sum(len(t[3]) + len(cond.system) for t in todo) / CHARS_PER_TOKEN
     print(f"\n  calls: {len(rows) * reps} total, {len(rows) * reps - len(todo)} done, "
           f"{len(todo)} to send")
-    if cond.call == "paper":
+    if cond.call != "matched":
         print(f"  estimated input tokens to send: {n_in / 1e6:.1f} M  (output incl. "
               f"reasoning: unknown -- run --probe 12 first, it prints the cost per call)")
     else:
