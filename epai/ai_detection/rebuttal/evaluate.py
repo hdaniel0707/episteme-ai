@@ -568,6 +568,9 @@ def section_a7(master, ws, out) -> None:
             frame[fus] = _mean(frame[cond], frame["paper_lj"])
     readouts = [c for c in ("paper_base", "base_think", "base_think_hp4", "paper_lj",
                             "paper_fusion", "fusion_think", "fusion_think_hp4") if c in frame]
+    if len(frame) < 6200:
+        print(f"  PARTIAL: {len(frame)} of 6,200 rows (pilot?) -- with ~100 human texts per "
+              f"split the 1%-FPR threshold rests on ~1 text: read AUROC and ties, not TPR")
     rows = metric_rows(frame, readouts, experiment="A7", model="gemma4-31b", subset="small")
     print_table(rows)
     _write(out, "a7_metrics", rows)

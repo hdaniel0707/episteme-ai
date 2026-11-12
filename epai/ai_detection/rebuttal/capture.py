@@ -55,9 +55,11 @@ from tqdm import tqdm
 from epai.ai_detection.rebuttal.conditions import (
     CONDITIONS,
     HUMAN,
+    SEED,
     SUBSETS,
     WORKSPACE,
     Condition,
+    _strat_sample,
     build_subset,
     load_core,
 )
@@ -309,6 +311,10 @@ def main() -> None:
                     help="repeats per row (default: the condition's default_reps)")
     ap.add_argument("--only", nargs="+", default=None, metavar="STEM",
                     help="restrict to these core splits")
+    ap.add_argument("--pilot", type=int, default=0, metavar="N",
+                    help="only N human + N machine rows per split, drawn from the subset "
+                         "over domain x generator; writes to the subset's own sidecar, so "
+                         "a later full run reuses these calls")
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--retries", type=int, default=RETRIES)
     ap.add_argument("--save-every", type=int, default=200)
@@ -339,10 +345,18 @@ def main() -> None:
     if args.only:
         rows = rows[rows["stem"].isin(args.only)]
     rows = rows[rows["text"].astype(str).str.strip().str.len() > 0]
+    if args.pilot:
+        rng = np.random.default_rng(SEED + 1)
+        keep = []
+        for _, g in rows.groupby([rows["stem"], rows["generated_by"].eq(HUMAN)], sort=True):
+            keep.extend(_strat_sample(g, args.pilot, rng))
+        rows = rows.loc[sorted(keep)]
+        print(f"PILOT: {args.pilot} human + {args.pilot} machine rows per split")
 
     print(f"model {args.model} ({spec.model})  condition {cond.name} [{cond.todo}]  "
           f"subset {subset}  reps {reps}  "
-          + ("call: the paper's BaseJudge (endpoint defaults)" if cond.call == "paper"
+          + ("call: the paper's BaseJudge (endpoint defaults)"
+             + (" + THINKING ON" if cond.think else "") if cond.call == "paper"
              else f"temperature {cond.temperature}"))
     by = rows.groupby("stem", sort=False)["generated_by"]
     for stem, g in by:
