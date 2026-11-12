@@ -40,6 +40,12 @@ Conditions (TODO id in brackets):
   base_default_free [A1 default]  base_default with the no-limit prompt of base_free.
                These two rerun A1's precision question with the paper's BaseJudge
                call (luna on ``full``, gemma on ``humans_plus_third``).
+  base_think / base_think_hp4  [A7]  gemma4-31b only: base_default / base_default_hp4
+               with gemma's optional thinking mode switched on
+               (chat_template_kwargs.enable_thinking; the only switch the
+               GenAI4Science endpoint honours, probe 2026-11-12). Tests whether
+               reasoning lets gemma's stated probability catch up, as it does for
+               luna. On ``small`` (6,200 texts): thinking calls take ~13 s.
   lj_v3        [A3]       LogJudge exactly as in the paper (v3 evidence +
                human/machine answer block). Repeated with --reps. Also on
                ``small`` x 3 (--subset small --reps 3) for A4: averaging repeated
@@ -144,6 +150,8 @@ class Condition:
     # luna, ._score_genai4science for gemma): JudgeVerdict structured answer,
     # endpoint defaults (no temperature, no reasoning effort), no logprobs.
     call: str = "matched"
+    # gemma4-31b with call="paper" only: switch the optional thinking mode on
+    think: bool = False
 
 
 _WORDS = {"human": HUMAN, "machine": "machine"}
@@ -172,6 +180,10 @@ CONDITIONS: dict[str, Condition] = {c.name: c for c in [
               default_subset="full", call="paper"),
     Condition("base_default_free", "prob", _V3.replace(_TWO_DEC, _FREE_DEC), "A1 default",
               default_subset="full", call="paper"),
+    Condition("base_think", "prob", _V3, "A7 gemma thinking", default_subset="small",
+              call="paper", think=True),
+    Condition("base_think_hp4", "prob", _V3.replace(_TWO_DEC, _FOUR_DEC), "A7 gemma thinking",
+              default_subset="small", call="paper", think=True),
 ]}
 
 # The paper's LogJudge must be reproduced exactly by lj_v3 -- same system prompt

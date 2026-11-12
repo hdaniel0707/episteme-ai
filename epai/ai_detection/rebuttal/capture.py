@@ -76,7 +76,7 @@ TOP_N = 20
 JUDGES = ("gpt56luna", "gemma4-31b")
 CHARS_PER_TOKEN = 4.2  # measured on these corpora; for the cost estimate only
 PRICE_IN, PRICE_OUT = 0.20, 1.20  # gpt-5.6-luna, $ per M tokens (OpenAI page, 2026-11-10)
-USAGE_COLS = ("input_tokens", "output_tokens", "reasoning_tokens")
+USAGE_COLS = ("input_tokens", "output_tokens", "reasoning_tokens", "reasoning_chars")
 
 
 # ---------------------------------------------------------------------------
@@ -139,23 +139,28 @@ def _call_genai4science_paper(client, model_id: str, cond: Condition, text: str)
         {"role": "system", "content": cond.system},
         {"role": "user", "content": USER_TEMPLATE.format(text=text)},
     ])
+    # cond.think: gemma's optional thinking mode on; the only switch this endpoint
+    # honours (probe_gemma_thinking.py). The trace comes back in reasoning_content.
+    think = ({"extra_body": {"chat_template_kwargs": {"enable_thinking": True}}}
+             if cond.think else {})
     try:
         resp = client.chat.completions.parse(
             model=model_id, messages=messages, response_format=JudgeVerdict,
-            max_tokens=GENAI4SCIENCE_MAX_TOKENS,
+            max_tokens=GENAI4SCIENCE_MAX_TOKENS, **think,
         )
         msg = resp.choices[0].message
         if msg.parsed is not None:
             return (_as_written(float(msg.parsed.human_probability), msg.content), [],
-                    getattr(resp, "model", None), _usage(resp, msg.content))
+                    getattr(resp, "model", None), _usage(resp, msg.content, msg))
     except Exception:  # noqa: BLE001 -- the paper's run fell back silently too
         pass
     resp = client.chat.completions.create(
-        model=model_id, messages=messages, max_tokens=GENAI4SCIENCE_MAX_TOKENS,
+        model=model_id, messages=messages, max_tokens=GENAI4SCIENCE_MAX_TOKENS, **think,
     )
-    content = resp.choices[0].message.content or ""
+    msg = resp.choices[0].message
+    content = msg.content or ""
     return (_as_written(parse_judge_probability(content), content), [],
-            getattr(resp, "model", None), _usage(resp, content))
+            getattr(resp, "model", None), _usage(resp, content, msg))
 
 
 _JSON_NUM = re.compile(r'"human_probability"\s*:\s*"?([0-9]*\.?[0-9]+)"?')
@@ -174,13 +179,17 @@ def _as_written(v: float, content: str | None) -> str:
     return np.format_float_positional(v, trim="-")
 
 
-def _usage(resp, content: str | None) -> dict:
+def _usage(resp, content: str | None, msg=None) -> dict:
     u = getattr(resp, "usage", None)
     det = getattr(u, "completion_tokens_details", None)
-    return {"input_tokens": getattr(u, "prompt_tokens", None),
-            "output_tokens": getattr(u, "completion_tokens", None),
-            "reasoning_tokens": getattr(det, "reasoning_tokens", None),
-            "raw_answer": content}
+    out = {"input_tokens": getattr(u, "prompt_tokens", None),
+           "output_tokens": getattr(u, "completion_tokens", None),
+           "reasoning_tokens": getattr(det, "reasoning_tokens", None),
+           "raw_answer": content}
+    if msg is not None:   # gemma thinking: the endpoint reports no reasoning-token count
+        rc = (msg.model_dump().get("reasoning_content") or "")
+        out["reasoning_chars"] = len(rc)
+    return out
 
 
 def _call_genai4science(client, model_id: str, cond: Condition, text: str):
@@ -205,6 +214,8 @@ def _call_genai4science(client, model_id: str, cond: Condition, text: str):
 
 
 def _caller(provider: str, cond: Condition):
+    if cond.think and provider != "genai4science":
+        raise SystemExit(f"{cond.name} switches gemma's thinking mode on: gemma4-31b only")
     if cond.call == "paper":
         return _call_openai_paper if provider == "openai" else _call_genai4science_paper
     return _call_openai if provider == "openai" else _call_genai4science

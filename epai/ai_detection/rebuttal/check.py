@@ -43,7 +43,8 @@ from epai.ai_detection.rebuttal.readouts import (
 from epai.ai_detection.rebuttal.status import PLAN
 
 EXPECTED_DECIMALS = {"base_v3": 2, "base_v3_t1": 2, "base_hp4": 4,
-                     "base_default": 2, "base_default_hp4": 4}
+                     "base_default": 2, "base_default_hp4": 4,
+                     "base_think": 2, "base_think_hp4": 4}
 
 
 def check_run(model: str, cond_name: str, subset: str, reps: int, expected: pd.DataFrame,
@@ -102,6 +103,12 @@ def check_run(model: str, cond_name: str, subset: str, reps: int, expected: pd.D
                            f"{u['reasoning_tokens'].median():.0f} (mean "
                            f"{u['reasoning_tokens'].mean():.0f}, zero on "
                            f"{(u['reasoning_tokens'] == 0).mean():.1%} of calls)")
+        if "reasoning_chars" in df:
+            rc = pd.to_numeric(df["reasoning_chars"], errors="coerce")
+            rec["info"].append(f"reasoning trace (chars): median {rc.median():.0f}, "
+                               f"empty on {(rc.fillna(0) == 0).mean():.1%} of calls")
+            if cond.think and (rc.fillna(0) == 0).mean() > 0.05:
+                rec["warn"].append("thinking switched on, but > 5% of calls have no trace")
     df = add_readouts(df, cond_name)
 
     # luna returns fewer than the requested 20 alternatives (often 1-2), so this

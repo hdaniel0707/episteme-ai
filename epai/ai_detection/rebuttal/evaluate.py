@@ -110,6 +110,10 @@ LABELS = {
     "def_hp4_r2": "BaseJudge, paper call, 4 dec. rounded to 2",
     "fusion_def_hp4": "FusionJudge, paper call 4-dec. BaseJudge",
     "fusion_def_free": "FusionJudge, paper call free-precision BaseJudge",
+    "base_think": "BaseJudge, thinking on, 2 dec.",
+    "base_think_hp4": "BaseJudge, thinking on, 4 dec.",
+    "fusion_think": "FusionJudge, thinking-on BaseJudge",
+    "fusion_think_hp4": "FusionJudge, thinking-on 4-dec. BaseJudge",
     "lj_x1": "LogJudge, 1 new call",
     "lj_x2": "LogJudge, mean of 2 new",
     "lj_x3": "LogJudge, mean of 3 new",
@@ -539,6 +543,36 @@ def section_a4(master, ws, out) -> None:
     _write(out, "a4_metrics", rows)
 
 
+def section_a7(master, ws, out) -> None:
+    """gemma4-31b with its optional thinking mode on (paper call, 2 and 4 decimals),
+    against the paper's gemma BaseJudge / LogJudge / FusionJudge on the same rows."""
+    print("\n" + "=" * 100 + "\nA7  gemma4-31b BaseJudge with thinking on "
+          "(does reasoning close the gap, as for luna?)\n" + "=" * 100)
+    frame = pd.DataFrame(paper_cols(master, "gemma4-31b")).join(master["y"])
+    have = []
+    for cond in ("base_think", "base_think_hp4"):
+        r = load_run(ws, "gemma4-31b", cond, "small")
+        if r is None:
+            continue
+        frame = frame.join(r.set_index(KEY)["parsed"].rename(cond), how="inner")
+        have.append(cond)
+        if "reasoning_chars" in r:
+            rc = pd.to_numeric(r["reasoning_chars"], errors="coerce")
+            print(f"  {cond}: reasoning trace median {rc.median():.0f} chars, "
+                  f"empty on {(rc.fillna(0) == 0).mean():.1%}; output tokens median "
+                  f"{pd.to_numeric(r['output_tokens'], errors='coerce').median():.0f}")
+    if not have:
+        return
+    for cond, fus in (("base_think", "fusion_think"), ("base_think_hp4", "fusion_think_hp4")):
+        if cond in frame:
+            frame[fus] = _mean(frame[cond], frame["paper_lj"])
+    readouts = [c for c in ("paper_base", "base_think", "base_think_hp4", "paper_lj",
+                            "paper_fusion", "fusion_think", "fusion_think_hp4") if c in frame]
+    rows = metric_rows(frame, readouts, experiment="A7", model="gemma4-31b", subset="small")
+    print_table(rows)
+    _write(out, "a7_metrics", rows)
+
+
 def section_a5(master, ws, out) -> None:
     print("\n" + "=" * 100 + "\nA5  Label words and order (xghj-2, xghj Q(iii))\n" + "=" * 100)
     frame = pd.DataFrame(paper_cols(master, "gpt56luna")).join(master["y"])
@@ -607,7 +641,8 @@ def main() -> None:
     ap.add_argument("--workspace", type=Path, default=WORKSPACE,
                     help="folder holding <model>/<condition>__<subset>.parquet")
     ap.add_argument("--out", type=Path, default=None, help="default: <workspace>/eval")
-    ap.add_argument("--only", nargs="+", choices=["a1", "a3", "a3b", "a4", "a5"], default=None)
+    ap.add_argument("--only", nargs="+", choices=["a1", "a3", "a3b", "a4", "a5", "a7"],
+                    default=None)
     args = ap.parse_args()
     out = args.out or args.workspace / "eval"
     out.mkdir(parents=True, exist_ok=True)
@@ -617,7 +652,7 @@ def main() -> None:
     with redirect_stdout(buf):
         for name, fn in (("a1", section_a1), ("a3", section_a3), ("a3b", section_a3b),
                          ("a4", section_a4),
-                         ("a5", section_a5)):
+                         ("a5", section_a5), ("a7", section_a7)):
             if args.only is None or name in args.only:
                 fn(master, args.workspace, out)
     print(buf.getvalue())
