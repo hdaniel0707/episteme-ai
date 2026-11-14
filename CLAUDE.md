@@ -69,14 +69,22 @@ authoritative statement of the theory and argument the code is built to support.
 
 ## Reviews and rebuttal (ICLR 2027, submission 47037)
 
-- `reviews/` holds the three official reviews as plain text (`Lma8.txt` weak accept 3,
-  `WpPs.txt` weak reject 2, `xghj.txt` clear reject 1) and `review_summary.html`: the
-  summary, concern map, prioritized TODO list (A = API runs, B = CPU analyses on existing
-  parquets, C = paper text, D = OpenReview posts) and the schedule. Read it before any
-  rebuttal work; the TODO IDs (A1, B5, ...) are the shared vocabulary with co-authors.
-  Its "Status & handoff" section is the session log. It records what is running (on
-  gpu100), the findings so far, the decisions taken and the next steps. Update it at the
-  end of every rebuttal session.
+- `overleaf/reviews/` (inside the Overleaf submodule, shared with co-authors) holds the
+  three official reviews as plain text (`Lma8.txt` weak accept 3, `WpPs.txt` weak
+  reject 2, `xghj.txt` clear reject 1), the rebuttal draft `rebuttal_draft.txt`
+  (general comment + replies in the order Lma8, WpPs, xghj), and `decisions.md`, the
+  settled decisions, reply style rules and known open items. Read `decisions.md` before
+  any rebuttal or paper-check work, and do not undo what it settles. `decisions.md` is
+  local only: it is listed in the submodule's `info/exclude` and must never be
+  committed or pushed to Overleaf. Edit the other files there and commit inside the
+  submodule (same rules as the paper: pull first, ask before push). Keep them free of
+  hostnames, endpoint names and `/home/...` paths.
+- `reviews/rebuttal_status.html` (parent repo, internal only, never copy it to Overleaf)
+  is the session log: experiments, key numbers, decisions per session and next steps,
+  with the TODO IDs (A = API runs, B = CPU analyses, C = paper text, D = OpenReview
+  posts) used with co-authors. Older session entries contain superseded decisions;
+  `overleaf/reviews/decisions.md` wins where they differ. Update the log at the end of
+  every rebuttal session.
 - Author-reviewer discussion ends **Nov 18, 2026 AoE** (= Nov 19, 12:59 Budapest).
   A revised PDF can be uploaded until then; main text may grow to 10 pages.
 - Rebuttal text and revised PDF are public and must stay anonymous (same rules as

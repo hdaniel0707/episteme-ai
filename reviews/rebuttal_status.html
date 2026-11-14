@@ -61,7 +61,7 @@ li{margin:3px 0}
 <main>
 
 <h1>Rebuttal status: where we are</h1>
-<p class="muted">ICLR 2027 submission 47037. Updated at the end of session 3 (2026-11-12, evening). Read this first next session; the plan, concern map and TODO IDs are in <code>reviews/review_summary.html</code>.</p>
+<p class="muted">ICLR 2027 submission 47037. Updated at the end of session 4 (2026-11-12, night): API block closed, CPU block written into the paper (all pushed, Overleaf = <code>4a0e880</code>). Read this first next session; the plan, concern map and TODO IDs are in <code>reviews/review_summary.html</code>.</p>
 <nav>
   <a href="#next"><b>Start here</b></a><a href="#running">Running on gpu100</a><a href="#reviewers">Per reviewer</a>
   <a href="#a">A: API</a><a href="#a1a4">A1/A4 results</a><a href="#b">B: CPU</a><a href="#c">C: paper text</a><a href="#d">D: OpenReview</a>
@@ -70,28 +70,38 @@ li{margin:3px 0}
 
 <div class="cards">
   <div class="card"><div class="muted">Deadline</div><div class="big">Nov 18 AoE</div>= Thu Nov 19, 12:59 Budapest</div>
-  <div class="card"><div class="muted">Wave 1 replies due</div><div class="big">Nov 12–13</div>not drafted yet beyond WpPs W1: now urgent</div>
-  <div class="card"><div class="muted">API block</div><div class="big">all back</div>framing agreed ("same test-time compute"); paper text pushed (8866bf2) + gemma-thinking edits pending</div>
-  <div class="card"><div class="muted">CPU block</div><div class="big">6 computed</div>only B1 is in the paper; B2, B4–B7 to review &amp; write</div>
+  <div class="card"><div class="muted">Wave 1 replies due</div><div class="big">Nov 12–13</div>user's plan: finish the paper modifications first, write all replies at the very end</div>
+  <div class="card"><div class="muted">API block</div><div class="big">closed</div>framing agreed ("same test-time compute"); all text on Overleaf (8866bf2, bb98c2d); gemma thinking stays a pilot</div>
+  <div class="card"><div class="muted">CPU block</div><div class="big">done</div>B1, B4, B5, B6, B7, B9, B11 in the paper; B2 → reply only; B3, B10 optional</div>
 </div>
 
 <!-- ============================================================ -->
 <h2 id="next">Start here next session</h2>
+<p class="muted">User's plan (end of session 4): <b>first the remaining paper modifications, then, at the very end, formulate all the OpenReview answers</b>. Pull Overleaf first (<code>! git -C /home/daniel/projects/episteme-ai/overleaf pull</code>), the user also edits there.</p>
 <ol class="steps">
-  <li><b>Paper draft</b>: pushed to Overleaf by the user (<code>8866bf2</code>, 2026-11-12 13:46). The later gemma-thinking edits (main-text clause, appendix pilot sentences and heading, API-settings sentence) are <b>uncommitted</b> in <code>overleaf/</code>: review, commit, push. Contents: main paragraph "Same test-time compute" (<code>sec:results_matched_call</code>), appendix "Test-Time Compute: Call Settings, Precision, and Repeated Calls" (<code>apx:matched_call</code>, new <code>tab:paper-call</code>, extended <code>tab:repeated-sampling</code>, new <code>fig:compute-scatter</code> with <code>figs/auroc_tpr_bj_{decimals,ensemble}.pdf</code>), API-settings sentences, gemma "thinking off" wording. <b>Check the Overleaf build and the page count</b> (main paragraph grew by ~120 words; main text limit 10 pages).</li>
-  <li><b>Gemma thinking run (A7)</b>: if the full 2-decimal run on gpu100 has finished (<code>status.sh</code>, row <code>gemma_think · base_think</code> = 6200), rsync, <code>evaluate</code>, and swap the pilot numbers in the appendix (AUROC 0.875 vs 0.897, LogJudge 0.917, 800 texts) for the full-run numbers; TPR can then be reported too. If it did not finish, the pilot text stands as is.</li>
-  <li><b>Draft wave 1 (D1 + D2)</b> in <code>reviews/rebuttal_draft.txt</code>, order WpPs, Lma8, xghj. <b>Overdue</b> (Nov 12–13). xghj Q(i) answer: "yes" first, with the numbers, then the same-test-time-compute reading (see <a href="#a1a4">A1/A4 results</a>).</li>
-  <li><b>Review the already-computed CPU analyses</b> (B5 thresholds, B4 CIs, B7 fusion rules, B6 backbone LOSO, B2 ties) in <code>../logjudge-manugram/outputs/</code> and write them up. B5 is the most important open point (WpPs-3, xghj-4, xghj Q(ii)).</li>
-  <li>Then the framing text (C1, C2, C4) and the remaining smaller items.</li>
+  <li><b>Remaining paper modifications</b> (C block, see <a href="#c">C: paper text</a>):
+    <ul>
+      <li><b>C9 limitations</b>: oracle thresholds are the comparison measure (calibrated check in App.), thresholds do not transfer across genres for the judges (B5 cross-genre: essays 10–23% FPR; <i>not</i> in the paper yet, decide whether one limitation clause is enough), one rephrasing generator, small MG-AI-Sci, log-prob availability, fusion gain is luna-only (gemma: none), label wording on rounded endpoints.</li>
+      <li><b>C6 novelty positioning</b> (xghj-5: answer-token readout has precedents): related-work / intro sentence.</li>
+      <li><b>C1</b>: decided in session 3 to concede only in the reply ("the written number is not a calibrated probability"); re-check whether any paper sentence still says "estimates P(human)" / "finer underlying judgment" in a way xghj attacks.</li>
+      <li><b>C10 presentation pass</b> + <b>page count</b> (main text ≤ 10 pages; session 4 added ≈ 12–15 lines to the main text: Calibrated thresholds ¶, domain-shift ¶ rewrite, B4/B6/B7/B9 sentences). Possible cuts if over: the "between MG-Sci domains" sentence of the Calibrated-thresholds ¶ (→ appendix).</li>
+      <li>Optional: B3 prompt variants (xghj-2), B10 calibration diagnostic (xghj-1). Probably skip.</li>
+    </ul></li>
+  <li><b>Release repo</b> (<code>../logjudge-manugram</code>, 25 uncommitted paths): all rebuttal analyses (residual_mass, threshold_transfer, backbone_loso, bootstrap_ci incl. the 2 new pairs, fusion_rules, tie_table, domain_shift_calibrated) + README row are <b>uncommitted</b>. Commit after an anonymity check of the commit itself; the anonymous mirror must be updated before the revised PDF points to it.</li>
+  <li><b>Main repo</b>: <code>epai/ai_detection/trainv2/run_domain_split_transfer_calibrated.py</code> + <code>plot_domain_split_transfer_calibrated.py</code> untracked; overleaf pointer moved; commit when the user asks.</li>
+  <li><b>Coverage check done (end of session 4)</b>: every weakness and question of WpPs, Lma8 and xghj is now answered in the paper text (all pushed, Overleaf = <code>a33e1e1</code>); only the replies remain (B2 tie table and xghj Q(i) live in the replies). Paper-text items left: <b>C10 presentation pass + page count</b> (user on Overleaf) and <b>the reproducibility statement</b> (main text, "Reproducibility", ~l. 790): it says every Manugram table/figure is recomputed from the released data, which is no longer true for the A-block tables (rebuttal sidecars) and the new "Other Judge Prompts" table (cand columns not in the release parquets). <b>Qualified (option 2, user)</b>: the sentence now names App. Test-Time Compute, Label Order and Wording, Logprob Capture Reproducibility, and Other Judge Prompts as "not yet part of the released data". Optional later (option 1): port the A-block sidecars and the cand03/cand10 columns to the release repo, then drop that clause.</li>
+  <li><b>Page limit</b>: main text was ≈10 lines over; <code>cdc73db</code> shortens four results paragraphs by ≈229 words (≈14–15 lines): domain shift 325→196, calibrated thresholds 129→74, metrics 302→288, same test-time compute 256→225 (RADAR note moved to App. Domain Shift). User to confirm the page count on Overleaf; C10 then green.</li>
+  <li><b>Replies drafted (end of session 4)</b>: <code>reviews/rebuttal_draft.txt</code> (copy-ready Markdown, 1.6–3.3k chars each) and <code>reviews/rebuttal_coauthors.html</code> (summary for co-authors + rendered replies + 5 decisions: reply wording, cross-genre thresholds undisclosed, release repo, posting time Nov 13–15, AI statement). Rebuild the HTML after editing the draft: scratchpad <code>build_coauthor_page.py</code> (copy it into the repo if needed).</li>
+  <li><b>At the very end: all answers</b> (D1 general comment + D2 per reviewer, WpPs → Lma8 → xghj) in <code>reviews/rebuttal_draft.txt</code>, from the per-reviewer tables below and the <a href="#s4">session-4 reply notes</a>. Then D3 (summary of revisions + revised PDF, Nov 16) and D4 (anonymity check).</li>
 </ol>
 
 <!-- ============================================================ -->
 <h2 id="running">Running on gpu100 (launched 2026-11-12, afternoon)</h2>
 <div class="tablewrap"><table>
 <tr><th>run</th><th>how</th><th>condition · subset</th><th>answers</th><th>status</th></tr>
-<tr><td>A7</td><td><code>capture --model gemma4-31b --condition base_think --subset small --workers 4</code> (chained after the pilot)</td><td><code>base_think</code>: the paper's gemma BaseJudge with its thinking mode <b>on</b>, 2 decimals · small (6,200)</td><td>does reasoning lift gemma's stated probability? (pilot: no)</td><td><span class="s s-wait">pilot 800 done; full run possibly still going (~9 h, free)</span></td></tr>
+<tr><td>A7</td><td><code>capture --model gemma4-31b --condition base_think --subset small --workers 4</code> (chained after the pilot)</td><td><code>base_think</code>: the paper's gemma BaseJudge with its thinking mode <b>on</b>, 2 decimals · small (6,200)</td><td>does reasoning lift gemma's stated probability? (pilot: no)</td><td><span class="s s-done">pilot 800 done; full run dropped (session 4)</span></td></tr>
 </table></div>
-<p class="muted">Thinking is switched on by <code>chat_template_kwargs.enable_thinking</code>, the only switch the GenAI4Science endpoint honours (<code>probe_gemma_thinking.py</code>). The 4-decimal thinking run (<code>base_think_hp4</code>) was dropped: no more gemma experiments. If the full run is stopped, the pilot text in the paper stands. Run the rsync <b>on the laptop</b>, not on gpu100:</p>
+<p class="muted">Thinking is switched on by <code>chat_template_kwargs.enable_thinking</code>, the only switch the GenAI4Science endpoint honours (<code>probe_gemma_thinking.py</code>). The 4-decimal thinking run (<code>base_think_hp4</code>) and the full 6,200-text run were both dropped: no more gemma experiments; the pilot text in the paper stands. Nothing is needed from gpu100 any more. (For reference, rsync runs <b>on the laptop</b>:)</p>
 <pre>rsync -av hdaniel@gpu100:projects/episteme-ai/data/parquet/tmp/rebuttal/ /home/daniel/projects/episteme-ai/data/parquet/tmp/rebuttal/</pre>
 <p class="muted">Done and evaluated: R1–R4 (paper-call reruns, 2026-11-11) and L1 (LogJudge ×3 on small, 2026-11-12); 19 runs, 0 FAIL. <code>check</code> reports <code>base_think</code> as FAIL until 6,200 rows exist (expected for the pilot).</p>
 <div class="callout risk"><b>Not possible: LogJudge with reasoning (L2).</b> A 12-call probe of LogJudge with the paper BaseJudge's settings (no reasoning effort sent, logprobs requested) failed on every call: <code>400 logprobs are not supported with reasoning models</code>. On luna, LogJudge requires effort <code>none</code>. This is an API constraint, usable in the rebuttal: the reasoning/no-reasoning asymmetry between the two judges is forced, not chosen.</div>
@@ -104,29 +114,29 @@ li{margin:3px 0}
 <tr><th>point</th><th>status</th><th>where / what</th></tr>
 <tr><td>W1 residual mass, label absence, k</td><td><span class="s s-done">in paper</span></td><td>"Residual mass" paragraph + App. "Window Size and Residual Mass" (B1). Reply text READY in the draft.</td></tr>
 <tr><td>W2 readout vs precision/prompt; distinct values, tie groups</td><td><span class="s s-done">in paper (8866bf2)</span></td><td>"Same test-time compute" + App. "Test-Time Compute" (matched call, paper call at 2/4 dec./no limit, ties). Per-split tie table B2 computed, not written.</td></tr>
-<tr><td>W3 oracle thresholds, backbone on eval splits, domain shift</td><td><span class="s s-todo">computed, not written</span></td><td>B5 (<code>threshold_transfer</code>: within-split, cross-domain, LODO) and B6 (<code>backbone_loso</code>) exist; C4 text to do.</td></tr>
+<tr><td>W3 oracle thresholds, backbone on eval splits, domain shift</td><td><span class="s s-done">in paper (B5, B6, calibrated domain shift); reply to write</span></td><td>B5 (<code>threshold_transfer</code>: within-split, cross-domain, LODO) and B6 (<code>backbone_loso</code>) exist; C4 text to do.</td></tr>
 </table></div>
 
 <h3>Lma8: weak accept (3). Keep and move up.</h3>
 <div class="tablewrap"><table>
 <tr><th>point</th><th>status</th><th>where / what</th></tr>
-<tr><td>Q1 fusion weight pre-specified? switching rule?</td><td><span class="s s-todo">computed, not written</span></td><td>B7 <code>fusion_rules</code> (weight sweep, LOSO weight, rank avg, log-odds, …). Must confirm with co-authors whether w=½ was fixed a priori (yaml says other rules were tried and dropped).</td></tr>
-<tr><td>Q2 bootstrap CIs, MG-AI-Sci LOO</td><td><span class="s s-todo">computed, not written</span></td><td>B4 <code>bootstrap_ci</code> (ci, paired_diff, aisci_loo).</td></tr>
+<tr><td>Q1 fusion weight pre-specified? switching rule?</td><td><span class="s s-done">in paper (B7); reply to write</span></td><td>B7 <code>fusion_rules</code> (weight sweep, LOSO weight, rank avg, log-odds, …). Must confirm with co-authors whether w=½ was fixed a priori (yaml says other rules were tried and dropped).</td></tr>
+<tr><td>Q2 bootstrap CIs, MG-AI-Sci LOO</td><td><span class="s s-done">in paper (B4); reply to write</span></td><td>B4 <code>bootstrap_ci</code> (ci, paired_diff, aisci_loo).</td></tr>
 <tr><td>Q3 Fusion–LogJudge gap under jitter / repeated calls</td><td><span class="s s-done">in paper</span></td><td>"Stable across repeated calls" + App. "Logprob Capture Reproducibility": Fusion−LogJudge +0.082 ± 0.008, positive in all 4 captures.</td></tr>
-<tr><td>Q4 ICLR flag rate ≠ LLM share</td><td><span class="s s-todo">open</span></td><td>B9 bounds + C8 text.</td></tr>
-<tr><td>Weakness: one rephrasing generator</td><td><span class="s s-todo">text only</span></td><td>Limitations (C9); A6 not planned.</td></tr>
+<tr><td>Q4 ICLR flag rate ≠ LLM share</td><td><span class="s s-done">in paper (B9); reply to write</span></td><td>B9 bounds + C8 text.</td></tr>
+<tr><td>Weakness: one rephrasing generator</td><td><span class="s s-done">in limitations; reply to write</span></td><td>Limitations (C9); A6 not planned.</td></tr>
 </table></div>
 
 <h3>xghj: clear reject (1). Answer carefully; the AC reads it.</h3>
 <div class="tablewrap"><table>
 <tr><th>point</th><th>status</th><th>where / what</th></tr>
-<tr><td>W1 not a calibrated P(human); "finer underlying judgment" overclaims</td><td><span class="s s-todo">open</span></td><td>C1 reframing (agreed in principle: concede). B10 calibration diagnostic optional.</td></tr>
-<tr><td>W2 readout not isolated (instructions, calls, precision, repeated elicitation, label verbalization)</td><td><span class="s s-wait">mostly</span></td><td>A2 same call ✓, A5 labels ✓. A1 precision and A4 averaging: matched and paper-call in the paper (8866bf2), framing "same test-time compute". Note: "paper call" vs "matched call" changes interface, reasoning, temperature and structured answer at once; describe the matched call as "LogJudge's call settings", never "the same call without reasoning".</td></tr>
-<tr><td>W3 fusion not motivated; not a common scale</td><td><span class="s s-todo">open</span></td><td>C2: call it a heuristic score ensemble; add B7.</td></tr>
-<tr><td>W4 no deployment FPR control; domain-shift flat by construction</td><td><span class="s s-todo">computed, not written</span></td><td>B5, B11, C4.</td></tr>
-<tr><td>W5 novelty; App. V checks agreement at 0.5</td><td><span class="s s-wait">half</span></td><td>App. V part done (A3: repeats at the real threshold). Novelty positioning C6 open.</td></tr>
+<tr><td>W1 not a calibrated P(human); "finer underlying judgment" overclaims</td><td><span class="s s-done">in paper (C1); reply to write</span></td><td>C1 reframing (agreed in principle: concede). B10 calibration diagnostic optional.</td></tr>
+<tr><td>W2 readout not isolated (instructions, calls, precision, repeated elicitation, label verbalization)</td><td><span class="s s-done">in paper (A1–A5, B3); reply to write</span></td><td>A2 same call ✓, A5 labels ✓. A1 precision and A4 averaging: matched and paper-call in the paper (8866bf2), framing "same test-time compute". Note: "paper call" vs "matched call" changes interface, reasoning, temperature and structured answer at once; describe the matched call as "LogJudge's call settings", never "the same call without reasoning".</td></tr>
+<tr><td>W3 fusion not motivated; not a common scale</td><td><span class="s s-done">in paper (C2 + B7); reply to write</span></td><td>C2: call it a heuristic score ensemble; add B7.</td></tr>
+<tr><td>W4 no deployment FPR control; domain-shift flat by construction</td><td><span class="s s-done">in paper (B5, calibrated domain shift)</span></td><td>B5, B11, C4.</td></tr>
+<tr><td>W5 novelty; App. V checks agreement at 0.5</td><td><span class="s s-done">in paper (A3 + C6); reply to write</span></td><td>App. V part done (A3: repeats at the real threshold). Novelty positioning C6 open.</td></tr>
 <tr><td>Q(i) higher precision or averaged repeats</td><td><span class="s s-wait">drafted in paper; reply to write</span></td><td>Answer is "yes" for luna: with reasoning, 4 decimals (one call, all texts) or 2+ averaged calls (small) reach LogJudge; at equal compute (no reasoning) it collapses; at equal call budget FusionJudge is best or tied; gemma with thinking on gains nothing. Say "yes" first in the reply. See <a href="#a1a4">A1/A4 results</a>.</td></tr>
-<tr><td>Q(ii) independently calibrated, transferred thresholds</td><td><span class="s s-todo">computed, not written</span></td><td>B5.</td></tr>
+<tr><td>Q(ii) independently calibrated, transferred thresholds</td><td><span class="s s-done">in paper (B5); reply to write</span></td><td>B5.</td></tr>
 <tr><td>Q(iii) near-threshold sensitivity to wording, order, repeated calls</td><td><span class="s s-done">in paper</span></td><td>A5 (labels) + A3/A3b (repeats).</td></tr>
 </table></div>
 
@@ -140,10 +150,10 @@ li{margin:3px 0}
 <tr><td>A3b</td><td>paper BaseJudge repeated ×3 → paper FusionJudge ±</td><td><span class="s s-done">done</span></td><td>same; all three detectors in the table</td></tr>
 <tr><td>A4</td><td>averaging repeated BaseJudge samples</td><td><span class="s s-done">paper call + LogJudge repeats + matched T=1 in paper</span></td><td>one sentence in the matched-call paragraph + App. paragraph and <code>tab:repeated-sampling</code></td></tr>
 <tr><td>A5</td><td>label order and wording</td><td><span class="s s-done">done</span></td><td>main "Label order and wording" (after "Residual mass") + App. "Label Order and Wording"</td></tr>
-<tr><td>A6</td><td>rephrasing with a 2nd generator</td><td><span class="s s-todo">not planned</span></td><td>limitation only</td></tr>
+<tr><td>A6</td><td>rephrasing with a 2nd generator</td><td><span class="s s-done">dropped: limitation only</span></td><td>limitation only</td></tr>
 <tr><td>L1</td><td>LogJudge repeated ×3 on small (A4 at equal calls)</td><td><span class="s s-done">done</span></td><td>in <code>tab:repeated-sampling</code></td></tr>
 <tr><td>L2</td><td>LogJudge with reasoning (paper BaseJudge's settings)</td><td><span class="s s-done">impossible (API refuses logprobs)</span></td><td>one sentence in App. "Judge Prompts and API Settings"</td></tr>
-<tr><td>A7</td><td>gemma BaseJudge with thinking on, 2 dec.</td><td><span class="s s-done">pilot done</span> (full run optional)</td><td>main-text clause + App. pilot sentences (uncommitted): AUROC 0.875 vs 0.897 off, LogJudge 0.917; no more distinct values</td></tr>
+<tr><td>A7</td><td>gemma BaseJudge with thinking on, 2 dec.</td><td><span class="s s-done">pilot done</span> (full run dropped)</td><td>main-text clause + App. pilot sentences (<code>bb98c2d</code>): AUROC 0.875 vs 0.897 off, LogJudge 0.917; no more distinct values</td></tr>
 </table></div>
 
 <h3 id="a1a4">A1/A4 results with the paper's BaseJudge call (2026-11-12, in the paper: 8866bf2)</h3>
@@ -184,31 +194,31 @@ li{margin:3px 0}
 <div class="tablewrap"><table>
 <tr><th>ID</th><th>analysis</th><th>status</th><th>output folder</th><th>answers</th></tr>
 <tr><td>B1</td><td>residual mass &amp; k</td><td><span class="s s-done">in paper</span></td><td><code>residual_mass</code></td><td>WpPs-1</td></tr>
-<tr><td>B2</td><td>tie table per split and readout</td><td><span class="s s-todo">computed</span></td><td><code>tie_table</code></td><td>WpPs-2</td></tr>
-<tr><td>B3</td><td>prompt variants cand03/cand10 + <code>ord5</code> LogJudge</td><td><span class="s s-todo">open</span></td><td>—</td><td>xghj-2; <code>ord5</code> could also soften the A5 wording result</td></tr>
-<tr><td>B4</td><td>bootstrap CIs, paired diffs, MG-AI-Sci LOO</td><td><span class="s s-todo">computed</span></td><td><code>bootstrap_ci</code></td><td>Lma8 Q2/Q3</td></tr>
-<tr><td>B5</td><td>non-oracle thresholds: within split, cross-domain, LODO</td><td><span class="s s-risk">computed · highest priority</span></td><td><code>threshold_transfer</code></td><td>WpPs-3, xghj-4, xghj Q(ii)</td></tr>
-<tr><td>B6</td><td>backbone chosen leave-one-split-out</td><td><span class="s s-todo">computed</span></td><td><code>backbone_loso</code></td><td>WpPs-3, xghj-4</td></tr>
-<tr><td>B7</td><td>fusion weight sweep + alternative rules</td><td><span class="s s-todo">computed</span></td><td><code>fusion_rules</code></td><td>Lma8 Q1, xghj-3</td></tr>
+<tr><td>B2</td><td>tie table per split and readout</td><td><span class="s s-wait">computed; reply only (WpPs-2)</span></td><td><code>tie_table</code></td><td>WpPs-2</td></tr>
+<tr><td>B3</td><td>prompt variants cand03/cand10 + <code>ord5</code> LogJudge</td><td><span class="s s-done">in paper (<code>a33e1e1</code>): cand03/cand10 only; ord5 not used</span></td><td>—</td><td>xghj-2; <code>ord5</code> could also soften the A5 wording result</td></tr>
+<tr><td>B4</td><td>bootstrap CIs, paired diffs, MG-AI-Sci LOO</td><td><span class="s s-done">in paper</span></td><td><code>bootstrap_ci</code></td><td>Lma8 Q2/Q3</td></tr>
+<tr><td>B5</td><td>non-oracle thresholds: within split, cross-domain, LODO</td><td><span class="s s-done">in paper</span></td><td><code>threshold_transfer</code></td><td>WpPs-3, xghj-4, xghj Q(ii)</td></tr>
+<tr><td>B6</td><td>backbone chosen leave-one-split-out</td><td><span class="s s-done">in paper (<code>0e9af39</code>)</span></td><td><code>backbone_loso</code></td><td>WpPs-3, xghj-4</td></tr>
+<tr><td>B7</td><td>fusion weight sweep + alternative rules</td><td><span class="s s-done">in paper (<code>6454060</code>)</span></td><td><code>fusion_rules</code></td><td>Lma8 Q1, xghj-3</td></tr>
 <tr><td>B8</td><td>App. V at the real threshold</td><td><span class="s s-done">superseded by A3</span></td><td>—</td><td>xghj-5</td></tr>
-<tr><td>B9</td><td>ICLR flag-rate prevalence bounds</td><td><span class="s s-todo">open</span></td><td>—</td><td>Lma8 Q4</td></tr>
-<tr><td>B10</td><td>calibration diagnostic (reliability / ECE)</td><td><span class="s s-todo">open · optional</span></td><td>—</td><td>xghj-1</td></tr>
-<tr><td>B11</td><td>zero-shot stability across test domains</td><td><span class="s s-todo">open (check if LODO in B5 covers it)</span></td><td>—</td><td>WpPs-3, xghj-4</td></tr>
+<tr><td>B9</td><td>ICLR flag-rate prevalence bounds</td><td><span class="s s-done">in paper (<code>a202e62</code>)</span></td><td>—</td><td>Lma8 Q4</td></tr>
+<tr><td>B10</td><td>calibration diagnostic (reliability / ECE)</td><td><span class="s s-done">dropped (user): paper no longer claims calibration</span></td><td>—</td><td>xghj-1</td></tr>
+<tr><td>B11</td><td>zero-shot stability across test domains</td><td><span class="s s-done">in paper (calibrated domain shift)</span></td><td><code>domain_shift_calibrated</code> (release repo)</td><td>WpPs-3, xghj-4</td></tr>
 </table></div>
 
 <!-- ============================================================ -->
 <h2 id="c">C: paper text</h2>
 <div class="tablewrap"><table>
 <tr><th>ID</th><th>task</th><th>status</th></tr>
-<tr><td>C1</td><td>reframe "finer underlying judgment" / "estimates P(human)"; heading "two readouts of one judgment"</td><td><span class="s s-todo">open</span></td></tr>
-<tr><td>C2</td><td>FusionJudge as heuristic score ensemble; drop "common scale" justification; B7 to appendix; w=½ history</td><td><span class="s s-todo">open · confirm w=½ history first</span></td></tr>
+<tr><td>C1</td><td>reframe "finer underlying judgment" / "estimates P(human)"; heading "two readouts of one judgment"</td><td><span class="s s-done">done (<code>3c0a9d9</code>): "detection score, not a calibrated probability" at l. 370/417/498; thesis sentences kept</span></td></tr>
+<tr><td>C2</td><td>FusionJudge as heuristic score ensemble; drop "common scale" justification; B7 to appendix; w=½ history</td><td><span class="s s-done">done: "heuristic score ensemble", w=½ fixed a priori</span></td></tr>
 <tr><td>C3</td><td>readout-isolation section</td><td><span class="s s-done">in paper (8866bf2)</span>: "Same test-time compute" + App. "Test-Time Compute"</td></tr>
-<tr><td>C4</td><td>thresholds and domain shift (B5); re-scope "flat by construction"; soften abstract if needed</td><td><span class="s s-todo">open</span></td></tr>
-<tr><td>C5</td><td>CIs, MG-AI-Sci LOO, leakage-free backbone (B4, B6)</td><td><span class="s s-todo">open</span></td></tr>
-<tr><td>C6</td><td>novelty positioning</td><td><span class="s s-todo">open</span></td></tr>
+<tr><td>C4</td><td>thresholds and domain shift (B5); re-scope "flat by construction"; soften abstract if needed</td><td><span class="s s-done">done (abstract unchanged)</span></td></tr>
+<tr><td>C5</td><td>CIs, MG-AI-Sci LOO, leakage-free backbone (B4, B6)</td><td><span class="s s-done">done (session 4)</span></td></tr>
+<tr><td>C6</td><td>novelty positioning</td><td><span class="s s-done">done: related-work sentence on what is new</span></td></tr>
 <tr><td>C7</td><td>residual mass appendix; App. V at the real threshold</td><td><span class="s s-done">done</span></td></tr>
-<tr><td>C8</td><td>ICLR paragraph with bounds</td><td><span class="s s-todo">open</span></td></tr>
-<tr><td>C9</td><td>limitations (oracle thresholds, one rephrasing generator, small MG-AI-Sci, logprob availability; label wording on rounded endpoints)</td><td><span class="s s-todo">open</span></td></tr>
+<tr><td>C8</td><td>ICLR paragraph with bounds</td><td><span class="s s-done">done</span></td></tr>
+<tr><td>C9</td><td>limitations (oracle thresholds, one rephrasing generator, small MG-AI-Sci, logprob availability; label wording on rounded endpoints)</td><td><span class="s s-done">done: existing paragraph + "rephrasing, performed by a single model" (Lma8); no other additions (user)</span></td></tr>
 <tr><td>C10</td><td>presentation pass</td><td><span class="s s-todo">open</span></td></tr>
 <tr><td>—</td><td>API-settings fix: BaseJudge = endpoint default settings (appendix + method); "only" dropped from the readout claim</td><td><span class="s s-done">done</span></td></tr>
 </table></div>
@@ -217,8 +227,8 @@ li{margin:3px 0}
 <h2 id="d">D: OpenReview posts</h2>
 <div class="tablewrap"><table>
 <tr><th>ID</th><th>task</th><th>status</th></tr>
-<tr><td>D1</td><td>general comment (wave 1)</td><td><span class="s s-todo">skeleton in <code>reviews/rebuttal_draft.txt</code></span></td></tr>
-<tr><td>D2</td><td>per-reviewer replies (wave 1): WpPs → Lma8 → xghj</td><td><span class="s s-todo">only WpPs W1 READY</span></td></tr>
+<tr><td>D1</td><td>general comment (wave 1)</td><td><span class="s s-wait">final draft (session 5, <code>reviews/rebuttal_draft.txt</code>); co-author review</span></td></tr>
+<tr><td>D2</td><td>per-reviewer replies (wave 1): Lma8 → WpPs → xghj</td><td><span class="s s-wait">final draft, all three (session 5); co-author review; then post</span></td></tr>
 <tr><td>D3</td><td>wave 2 + revised PDF + summary of revisions</td><td><span class="s s-todo">Nov 16</span></td></tr>
 <tr><td>D4</td><td>anonymity check of every post and the PDF</td><td><span class="s s-todo">before each post</span></td></tr>
 </table></div>
@@ -239,6 +249,40 @@ li{margin:3px 0}
 
 <!-- ============================================================ -->
 <h2 id="decisions">Findings and decisions</h2>
+<h3 id="s5">Session 5 (2026-11-14): replies finalized, paper wording fixes</h3>
+<ul>
+  <li><b>Replies</b> (<code>reviews/rebuttal_draft.txt</code> = <code>overleaf/rebuttal_draft.txt</code>, byte-identical): order now General → Lma8 → WpPs → xghj; Lma8 W1/W2 before the Qs; no semicolons; xghj retoned (credit their suggestions, "We agree" kept). Closings differ per reviewer (WpPs offers further analyses, xghj/Lma8 offer clarification, general none).</li>
+  <li><b>Supersedes session-4 notes</b>: (1) <b>rank average</b> ranks within the evaluated split (transductive): appendix row marked *, "shown for reference only", removed from all replies and from the main text; per-document rules 0.829–0.848. (2) <b>"heuristic" dropped everywhere</b>: "score ensemble" in paper and replies. (3) <b>MG-AI-Sci leave-one-out</b> "98/100 unchanged" is true by construction; paper (Metrics ¶, App. MG-AI-Sci) and Lma8 Q2 now say the threshold rests on one text and LOO raises TPR 0.56 → ≤ 0.72. (4) Backbone LOSO phrased as "14 of 16 picks match ours, the two that differ (Fast-DetectGPT, BaseJudge, both MG-Sci) lower those baselines".</li>
+  <li><b>Paper edits</b>: App. Q residual rules as values v_r (neutral/human/renormalized/machine) + worked example (residual_mass plot labels changed in the release repo, <b>figure not regenerated</b>); P(human) defined once in Sec. 3 as an orientation label, example caption and App. Pr(y=0|x) fixed, example figure now ends "flagged as machine"; intro/conclusion "finer answer/verdict" → finer resolution / finer score; calibrated-thresholds ¶ post hoc framing (Hans et al.); switching rule justified (only range where LogJudge leads on the four-split mean); gemma thinking described as a pilot in the main text.</li>
+  <li><b>Domain shift, careful</b>: "at an equal FPR of 1%, FusionJudge 0.92 / LogJudge 0.75 / Fast-DetectGPT 0.60 / Binoculars 0.52" are <b>oracle ROC readings</b> (scenario-independent for zero-shot), not calibrated results. Never quote them as transferred-threshold results. Calibrated Mid/Far-OOD: FusionJudge FPR 0.1–0.2% TPR 0.56, LogJudge 0.6–0.9% / 0.58–0.64, Fast-DetectGPT 1.1–1.2% / 0.61 (higher calibrated recall than FusionJudge), Binoculars ≈7%, RoBERTa 6.5–17%. Our claim under shift = FPR control.</li>
+  <li><b>Open</b>: overleaf push (≈31 local commits); rebuild <code>reviews/rebuttal_coauthors.html</code> from the new draft (builder script was in an old scratchpad); regenerate <code>figs/residual_mass</code> with the new legend; LogJudge MG-AI-Sci TPR bootstrap upper bound: paper 0.85 vs <code>ci.csv</code> 0.84 (rounding?).</li>
+</ul>
+<h3 id="s4">Session 4: notes for the replies</h3>
+<ul>
+  <li><b>WpPs-2</b>: ties → B2 table (<code>outputs/tie_table/</code>) in the reply only. <b>WpPs-3 / xghj-4 / xghj Q(ii)</b>: oracle is the standard comparison; calibrated thresholds as an extra check give the same results (within split TPR within 0.011, between MG-Sci domains FusionJudge 0.915 vs 0.918); domain shift with source-calibrated thresholds: RoBERTa flags 6.5–20% of humans under Mid/Far-OOD, judges stay ≤ 1%; "flat by construction" retired. Cross-genre (news ↔ essays) transfer fails for the judges: mention only if needed, framed as "calibrate on the target genre". Backbone LOSO: 14/16 picks agree, ours unchanged, only two baselines drop.</li>
+  <li><b>Lma8 Q1</b>: w=½ fixed a priori; any w in [0.05, 0.95] gives 0.838–0.849; LOSO w never beats ½; switching rule = average at 1% by construction. <b>Lma8 Q2</b>: MG-AI-Sci LOO changes TPR in 2/100 cases, bootstrap CIs wide, four-split gaps hold (FusionJudge over everything, LogJudge over BaseJudge); do not claim LogJudge &gt; Fast-DetectGPT significance (CI [−0.016, 0.186]). <b>Lma8 Q4</b>: Rogan–Gladen scenarios, 2025 roughly 9–19%, assumption: 2020 false-alarm rate still holds.</li>
+  <li><b>xghj-3</b>: concede "heuristic score ensemble" (method reworded); robust to weight and rule; rank average (no common scale) 0.861.</li>
+  <li><b>User preferences (session 4)</b>: positive framing ("extra check, same results"); report only TPR@1%FPR and AT-HM in the paper (no 0.1%/5% FPR numbers); main text points to "Appendix X", not to appendix tables; no wording that sounds like a guarantee when it is an assumption; show drafts before larger text changes.</li>
+</ul>
+<h3>Session 4 (2026-11-12, late evening)</h3>
+<ul>
+  <li><b>B5 + B11 in the paper</b> (overleaf <code>caa7e6a</code>, fix <code>c7302ad</code>, <code>a6767f4</code>; push <code>a6767f4</code> pending). Framing (user): the oracle threshold is the standard comparison and enough for us; calibrated thresholds are an extra check with the same results. New main paragraph "Calibrated thresholds" (<code>sec:results_calibrated</code>), new appendix "Calibrated Thresholds" (<code>apx:calibrated_thresholds</code>, <code>tab:calibrated-within</code>, <code>tab:calibrated-shift</code>).</li>
+  <li>Within split (half of the humans calibrate): realized FPR ≈ 1%, TPR within 0.011 of oracle on the three large splits; MG-AI-Sci (50 cal. humans) cannot resolve 1%. Between MG-Sci domains: FusionJudge 0.915 vs 0.918 at 1.6% FPR. Across genres (news ↔ essays) thresholds do not transfer for the judges (essay FPR 10–23%): <b>not in the paper</b>; mention in the xghj Q(ii) reply only if needed.</li>
+  <li><b>New experiment: domain shift with source-calibrated thresholds</b> (<code>epai/ai_detection/trainv2/run_domain_split_transfer_calibrated.py</code> + <code>plot_domain_split_transfer_calibrated.py</code>; 80/20 source split, every detector calibrated on the same source humans). Under Mid/Far-OOD RoBERTa flags 6.5–20% of humans, Binoculars ~7%; LogJudge/FusionJudge 0.1–0.9% at TPR 0.56–0.64; Fast-DetectGPT 1.1% at 0.61. ROC figure replaces Fig. 6 in the main text (<code>fig:domain-shift-calibrated</code>); old Fig. 6 moved to the appendix. Grey zone = &gt;3% of humans flagged (user's choice).</li>
+  <li><b>Ported</b> to the release repo as result <code>domain_shift_calibrated</code> (compute + plotting module, registered as a trained result; README row). Release rerun = paper numbers exactly (24/24 rows, ΔFPR = ΔTPR = 0); figure identical. Not committed in the release repo yet.</li>
+  <li><b>API block closed.</b> User pushed everything to Overleaf (<code>8866bf2</code>, <code>bb98c2d</code>); local submodule in sync.</li>
+  <li><b>A7 full run dropped</b> (user's decision). The paper presents gemma thinking as an 800-text pilot (AUROC only, TPR not reported); checked: no wording promises a full run. Optional, not applied: add "in a pilot" to the main-text clause (l. 613).</li>
+  <li><b>B6 in the paper</b> (<code>0e9af39</code>): one main-text sentence in "Baselines and backbones", appendix paragraph + <code>tab:backbone-loso</code>. 14 of 16 leave-one-split-out picks agree; our detectors unchanged (FusionJudge 0.848, LogJudge 0.767); only Fast-DetectGPT (0.636→0.555) and BaseJudge (0.653→0.460) drop, both when MG-Sci is held out.</li>
+</ul>
+<h3>Session 4, B4</h3>
+<ul>
+  <li><b>Paper-text finishing (session 4, late)</b>: C1 (<code>3c0a9d9</code>: "detection score, not a calibrated probability" at l. 370/417/498, thesis sentences kept), C6 (<code>23cd700</code>: related-work sentence on what is new; "truncated top-<i>k</i>", never "one or two"), C9 (<code>bb08db9</code>: only "rephrasing, performed by a single model", the one point a reviewer raised; no other limitation additions), B10 dropped, B3 (<code>a33e1e1</code>): two other judge prompts (cand03 "editorial reader", cand10 "effort allocation", chosen as most different from ours by embedding among 10 drafts); LogJudge − BaseJudge = +0.11 AT-HM with every prompt, FusionJudge strongest each time (0.848 / 0.680 / 0.807). User: do <b>not</b> say our prompt is the best one. Data from <code>data/parquet/old/*</code> masters (cand columns are not in the release parquets: if reproducibility is promised, add them to the release yaml). Script: scratchpad <code>b3_prompts.py</code>.</li>
+  <li><b>B9 + C8 in the paper</b> (<code>a202e62</code>): Rogan–Gladen π = (f − FPR)/(TPR − FPR) (new bib <code>rogan_gladen_1978</code>); appendix paragraph + <code>tab:iclr-share</code> (all six years; 2020/21 ≈ 0 as sanity check); main ICLR sentence. Framed as <b>scenarios, not bounds</b> (user, after discussion): all assume the 2020 false-alarm rate still holds for human abstracts. FusionJudge 2025: 9.1% perfect recall (TPR 1, FPR 1%, Wilson low), 11.6% estimate (TPR 91.2%, FPR 0.6% = ICLR 2020), 15.2–19.0% upper (TPR 77.3% hardest generator = luna, 62% MG-AI-Sci). LogJudge 2025: 8.2 / 14.3 / 22–25%. Scripts: scratchpad <code>b9_tpr_inputs.py</code>, <code>b9_bounds.py</code> (not in the release repo; ICLR data is not released).</li>
+  <li><b>B7 + C2 in the paper</b> (<code>6454060</code>). <b>w=½ was fixed a priori</b> (user, 2026-11-12). Method: "We fixed the equal weight in advance… heuristic score ensemble, not a calibrated probability"; the "same P(human) scale" justification is gone. Appendix subsection "Fusion Weight and Combination Rule" (<code>apx:fusion_rules</code>, under "Same Judge, Two Readouts"). Luna: any w in [0.05, 0.95] gives AT-HM 0.838–0.849; LOSO w never beats ½; rank average 0.861 (no common scale). Gemma: fusion adds nothing over LogJudge. Switch rule differs only below 0.3% FPR.</li>
+  <li><b>B4 in the paper</b>: Metrics sentence (main text) + appendix "Bootstrap Confidence Intervals" (<code>apx:bootstrap</code>, <code>tab:bootstrap-mean</code>, <code>tab:bootstrap-diff</code>). User: main text names only the gaps that hold. Holding (four-split AT-HM): FusionJudge over LogJudge +0.081 [0.032, 0.125], BaseJudge, Fast-DetectGPT, Binoculars, RADAR; LogJudge over BaseJudge +0.114 [0.031, 0.174]. <b>Not significant</b>: LogJudge − Fast-DetectGPT +0.131 [−0.016, 0.186] (in the appendix table only).</li>
+  <li>MG-AI-Sci: leave-one-human-out changes TPR@1%FPR in 2/100 cases (only upward); bootstrap CI at 1% very wide (LogJudge [0, 0.85]); at 5% FPR LogJudge 0.82 [0.67, 0.92] vs Fast-DetectGPT 0.45.</li>
+  <li>Release repo: <code>bootstrap_ci</code> gained pairs FusionJudge−Binoculars and FusionJudge−RADAR (existing numbers verified identical after rerun).</li>
+</ul>
 <h3>Session 3 (2026-11-12)</h3>
 <ul>
   <li><b>R1–R4 done</b>, 0 FAIL. Paper-call BaseJudge reaches LogJudge (see <a href="#a1a4">A1/A4 results</a>). Framing <b>not decided yet</b>; may need co-authors.</li>
@@ -271,7 +315,7 @@ li{margin:3px 0}
 <h2 id="where">Where things are</h2>
 <ul>
   <li><b>Paper:</b> <code>overleaf/</code> (pushed; Overleaf has the user's latest tweak <code>1b31d29</code>). New labels: <code>sec:results_matched_call</code>, <code>sec:results_stability</code>, <code>sec:results_labels</code>, <code>apx:matched_call</code>, <code>apx:label_wording</code>, tables <code>tab:matched-call</code>, <code>tab:repeated-sampling</code>, <code>tab:repeat-stability</code>, <code>tab:label-wording</code>, figure <code>figs/matched_call.pdf</code>. Not compiled locally (no LaTeX here): check the build on Overleaf.</li>
-  <li><b>Paper:</b> rebuttal text pushed in <code>8866bf2</code>; gemma-thinking edits uncommitted; <code>iclr2027_conference.tex</code> + <code>figs/auroc_tpr_bj_decimals.pdf</code>, <code>figs/auroc_tpr_bj_ensemble.pdf</code>; review with <code>git -C overleaf diff</code>.</li>
+  <li><b>Paper:</b> everything pushed; Overleaf = local = <code>4a0e880</code>. Session-4 commits: <code>caa7e6a</code> (B5 + calibrated domain shift), <code>c7302ad</code>/<code>a6767f4</code> (fixes), <code>0e9af39</code>/<code>2a8d43b</code> (B6), <code>02fd3ae</code> (B4), <code>8f5f5d5</code> (appendix ≤ 26 sections), <code>6454060</code>/<code>fe40842</code> (B7, C2), <code>756889f</code>/<code>d9cb5bd</code> (no 0.1%/5% FPR), <code>2739185</code> (table widths), <code>a202e62</code>/<code>4a0e880</code> (B9). New labels: <code>fig:domain-shift-calibrated</code>, <code>sec:results_calibrated</code>, <code>apx:statistical_checks</code> (<code>apx:bootstrap</code>, <code>apx:calibrated_thresholds</code>), <code>apx:readouts</code> (<code>apx:fusion_rules</code>), tables <code>tab:calibrated-within</code>, <code>tab:calibrated-shift</code>, <code>tab:backbone-loso</code>, <code>tab:bootstrap-mean</code>, <code>tab:bootstrap-diff</code>, <code>tab:fusion-weight</code>, <code>tab:fusion-rules</code>, <code>tab:iclr-share</code>; bib <code>rogan_gladen_1978</code>; figure <code>figs/domain_shift_calibrated_roc.pdf</code>. Appendix has 25 sections (max 26).</li>
   <li><b>API code:</b> <code>epai/ai_detection/rebuttal/</code> (latest commit <code>d994bb3</code>; also <code>probe_gemma_thinking.py</code>, <code>fig_basejudge_versions.py</code>, <code>run_gemma_think.sh</code>): <code>conditions.py</code>, <code>capture.py</code>, <code>check.py</code>, <code>evaluate.py</code>, <code>plot.py</code>, <code>status.py</code>, run scripts (<code>run_default.sh</code>, <code>run_default_extra.sh</code>, <code>run_gemma_default.sh</code>, <code>run_lj_extra.sh</code>), <code>RUNBOOK.md</code>, <code>paper_fig_matched_call.py</code> (paper figure; not rerun since R1–R4, it would overwrite <code>overleaf/figs/matched_call.*</code>).</li>
   <li><b>Results:</b> <code>data/parquet/tmp/rebuttal/&lt;model&gt;/</code>; evaluation in <code>…/eval/</code> (<code>summary.txt</code>, CSVs, <code>figs/</code> incl. <code>overview.png</code>), current as of R1–R4.</li>
   <li><b>CPU analyses:</b> <code>../logjudge-manugram/outputs/{tie_table,bootstrap_ci,threshold_transfer,backbone_loso,fusion_rules,residual_mass}/</code>.</li>
